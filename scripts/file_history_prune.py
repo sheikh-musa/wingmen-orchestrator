@@ -32,7 +32,18 @@ FH_DIR = pathlib.Path(os.environ.get("CLAUDE_FILE_HISTORY_DIR",
 PRUNE_OVER = int(os.environ.get("FH_PRUNE_OVER_GB", "3")) * GB   # only prune a session this big+
 KEEP = int(os.environ.get("FH_KEEP_VERSIONS", "2"))             # newest N versions kept per file
 ALERT_OVER = int(os.environ.get("FH_ALERT_OVER_GB", "8")) * GB   # a session this big pages early
-MIN_FREE = int(os.environ.get("FH_MIN_FREE_GB", "12")) * GB      # disk-free floor that pages
+# Two-tier disk-free floor (orch-console, bus #73314 — the old single MIN_FREE=12GB fired
+# on this Mini's normal 9-11GB baseline, alert-fatigue noise that buried a real event):
+WARN_FREE = int(os.environ.get("FH_WARN_FREE_GB", "7")) * GB    # local-log-only early signal
+HARD_FREE = int(os.environ.get("FH_HARD_FREE_GB", "6")) * GB    # real floor breach, logged
+# 2026-10-22 pager-routing retune (bus #73441 — same shape as disk_autoremediate.py PR#466):
+# a HARD_FREE breach is the SAME already-diagnosed-structural condition (capacity+I/O load,
+# external-drive fix escalated to Musa, bus #73426/#73430) that PR#466 already stopped
+# paging P1 for on the autoremediate side. Paging P1 here too, every tick, for the identical
+# no-new-action condition was the same perpetual-noise pattern one tier down. EMERGENCY_FREE
+# is the genuine near-[Errno 28] line that still pages loud; HARD_FREE..EMERGENCY_FREE is the
+# managed band: logged (bus row, P3/non-waking), never silent, just not console-waking.
+EMERGENCY_FREE = int(os.environ.get("FH_EMERGENCY_FREE_GB", "4")) * GB  # always page LOUD
 
 
 def _ver_num(path: str) -> int:
@@ -45,13 +56,32 @@ def _ver_num(path: str) -> int:
 
 
 def plan_prune(sessions, *, prune_over_bytes, keep, alert_over_bytes,
-               disk_free_bytes=None, min_free_bytes=None):
+               disk_free_bytes=None, warn_free_bytes=None, hard_free_bytes=None,
+               emergency_free_bytes=None):
     """PURE decision. sessions: [{'session', 'total', 'versions':[{'path','hash','size','mtime'}]}].
-    Returns {'delete':[paths], 'freed':bytes, 'alerts':[str]}. Prunes ONLY sessions at/over
-    prune_over_bytes; within those, keeps the newest `keep` versions per file-hash (newest by
-    mtime, then @vN) and marks the rest to delete. Alerts on a session at/over alert_over_bytes
-    or disk free below min_free_bytes."""
-    delete, freed, alerts = [], 0, []
+    Returns {'delete':[paths], 'freed':bytes, 'alerts':[str], 'warnings':[str], 'managed':[str]}.
+    Prunes ONLY sessions at/over prune_over_bytes; within those, keeps the newest `keep`
+    versions per file-hash (newest by mtime, then @vN) and marks the rest to delete.
+
+    Two-tier disk-free signal (orch-console, bus #73314 — "crying wolf at healthy 9-11GB"):
+    this Mini's NORMAL baseline free space is 9-11GB, but the single old MIN_FREE threshold
+    was 12GB — so the disk-free alert fired on effectively every run at a perfectly healthy
+    level, and ~20 pages a session got marked read without being looked at: the exact noise
+    that would bury a REAL low-disk event. A hard_free_bytes breach now fires only below
+    hard_free_bytes (genuine near-crash risk, default 6GB); `warnings` (logged locally,
+    never bus-paged) fires below warn_free_bytes but at/above hard_free_bytes (default 7GB —
+    an early local signal for whoever's tailing the log, without manufacturing operator noise).
+
+    Managed-band pager-routing (bus #73441, same shape as disk_autoremediate.py PR#466): when
+    `emergency_free_bytes` is given, a hard_free_bytes breach that is still AT/ABOVE
+    emergency_free_bytes is an already-diagnosed-structural condition with no new action — it
+    goes to `managed` (bus-logged, non-waking) instead of `alerts` (bus-paged, loud). Only
+    below emergency_free_bytes does it stay in `alerts`. Omitting emergency_free_bytes (None)
+    preserves the old all-loud behavior at hard_free_bytes — existing callers are unaffected.
+    `alerts` also still carries a session at/over alert_over_bytes (a lane is genuinely
+    snapshotting a large growing file — see alert_body()'s verify-not-assert guard); that
+    signal is a distinct finding, never downgraded by the disk-free band."""
+    delete, freed, alerts, warnings, managed = [], 0, [], [], []
     for s in sessions:
         total = s.get("total", 0)
         if total >= alert_over_bytes:
@@ -67,10 +97,19 @@ def plan_prune(sessions, *, prune_over_bytes, keep, alert_over_bytes,
             for v in vs_sorted[keep:]:
                 delete.append(v["path"])
                 freed += v["size"]
-    if disk_free_bytes is not None and min_free_bytes is not None and disk_free_bytes < min_free_bytes:
-        alerts.append(f"disk free {disk_free_bytes // GB}GB < min {min_free_bytes // GB}GB "
-                      f"— pruning file-history + escalate (disk-wedge risk)")
-    return {"delete": delete, "freed": freed, "alerts": alerts}
+    if disk_free_bytes is not None and hard_free_bytes is not None and disk_free_bytes < hard_free_bytes:
+        msg = (f"disk free {disk_free_bytes // GB}GB < hard floor {hard_free_bytes // GB}GB "
+               f"— pruning file-history (disk-wedge risk)")
+        if emergency_free_bytes is not None and disk_free_bytes >= emergency_free_bytes:
+            managed.append(msg + " — managed band, already-diagnosed structural, no new action")
+        else:
+            alerts.append(msg + " + escalate (near-crash)")
+    elif (disk_free_bytes is not None and warn_free_bytes is not None
+          and disk_free_bytes < warn_free_bytes):
+        warnings.append(f"disk free {disk_free_bytes // GB}GB < warn floor {warn_free_bytes // GB}GB "
+                        f"— pruning file-history as a precaution (not yet near-crash, no page)")
+    return {"delete": delete, "freed": freed, "alerts": alerts, "warnings": warnings,
+            "managed": managed}
 
 
 def scan(fh_dir: pathlib.Path = FH_DIR):
@@ -137,11 +176,51 @@ def _disk_free(path="/System/Volumes/Data"):
         return None
 
 
-def _alert(msgs):
-    """Fail-loud alert. Prints a LOUD banner to stderr (lands in the launchd log). The bus/
-    operator page is best-effort (and this monitor runs BEFORE a wedge, so the bus is alive);
-    a delivery failure must not crash the prune."""
-    banner = "🔴 FILE-HISTORY DISK-WEDGE RISK\n  " + "\n  ".join(msgs)
+def alert_body(msgs) -> str:
+    """PURE: build the bus-page body from the alert messages plan_prune produced.
+
+    VERIFY-NOT-ASSERT (cc-fleet-health, 2026-10-21, bus #73188): this used to UNCONDITIONALLY
+    claim "a lane is snapshotting a large growing file" every time _alert() fired, even on the
+    generic low-disk-free alert — which has NO per-session evidence of file-history bloat
+    (across this monitor's entire run history the per-session bloat alert has never once fired;
+    total file-history size has never approached its own prune/alert thresholds). That unverified
+    claim, repeated on every low-disk page, is what got mistaken for a recurring file-history-
+    specific root cause (it was actually just general disk pressure from elsewhere). This now
+    only names file-history as the driver when a message here actually says so (a session really
+    did cross alert_over_bytes); otherwise it says file-history is NOT implicated and points at
+    general disk pressure instead."""
+    bloat_implicated = any("snapshotting a large growing file" in m for m in msgs)
+    if bloat_implicated:
+        tldr = ("TL;DR: ~/.claude/file-history is ballooning (a lane snapshotting a large "
+                "growing file) — disk-wedge risk. Pruned old snapshots; details:")
+    else:
+        tldr = ("TL;DR: disk is low for reasons UNRELATED to file-history (file-history itself "
+                "is small and under its prune threshold) — pruning it anyway as cheap "
+                "precaution, but it is NOT the driver; look elsewhere for the real consumer. "
+                "Details:")
+    return tldr + "\n  " + "\n  ".join(msgs)
+
+
+def _alert(msgs, *, loud=True):
+    """loud=True: P1 blocker bus row, console wakes (genuine near-crash or a session actually
+    bloated). loud=False: LOG-FILE ONLY (bus #73447 — a follow-up to #73441/PR#467) — no bus
+    row at all. orch-console clarified the console's reconcile-doorbell rings on ANY new
+    unread row regardless of priority, so even a P3 bus row in the managed band was still
+    indefinite console churn, just lower-stakes than P1. The managed band (a real hard-floor
+    breach, already diagnosed structural with no new action) now stays ENTIRELY local: the
+    stderr banner (which lands in the launchd log) is the full record, never silent, just
+    never a bus row. The bus/operator page for the loud path is best-effort (this monitor
+    runs BEFORE a wedge, so the bus is alive); a delivery failure must not crash the prune."""
+    if not loud:
+        banner = ("⚪ file-history prune: managed band, no new action (log-only, no bus row)\n  "
+                   + "\n  ".join(msgs))
+        print(banner, file=sys.stderr, flush=True)
+        return
+    header = "🔴 FILE-HISTORY DISK-WEDGE RISK"
+    mtype, priority = "blocker", "P1"
+    subject = "file-history disk-wedge risk — pruned + flagging"
+    body = alert_body(msgs)
+    banner = header + "\n  " + "\n  ".join(msgs)
     print(banner, file=sys.stderr, flush=True)
     try:
         import psycopg2
@@ -150,11 +229,9 @@ def _alert(msgs):
             c = psycopg2.connect(dsn)
             cur = c.cursor()
             cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-            body = ("TL;DR: ~/.claude/file-history is ballooning (a lane snapshotting a large growing "
-                    "file) — disk-wedge risk. Pruned old snapshots; details:\n  " + "\n  ".join(msgs))
             cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-                           VALUES ('cc-fleet-health','orch-console','blocker','P1',
-                           'file-history disk-wedge risk — pruned + flagging',%s)""", (body,))
+                           VALUES ('cc-fleet-health','orch-console',%s,%s,%s,%s)""",
+                        (mtype, priority, subject, body))
             c.commit()
     except Exception as e:  # noqa: BLE001 — page is best-effort; the stderr banner already fired
         print(f"[file-history-prune] WARN bus-page failed ({e}); stderr banner stands", file=sys.stderr)
@@ -166,15 +243,22 @@ def main(argv=None) -> int:
     sessions = scan()
     free = _disk_free()
     plan = plan_prune(sessions, prune_over_bytes=PRUNE_OVER, keep=KEEP,
-                      alert_over_bytes=ALERT_OVER, disk_free_bytes=free, min_free_bytes=MIN_FREE)
+                      alert_over_bytes=ALERT_OVER, disk_free_bytes=free,
+                      warn_free_bytes=WARN_FREE, hard_free_bytes=HARD_FREE,
+                      emergency_free_bytes=EMERGENCY_FREE)
     deleted, freed = apply_prune(plan["delete"], dry_run=not apply)
     total_fh = sum(s["total"] for s in sessions)
     mode = "APPLIED" if apply else "DRY-RUN"
     print(f"[file-history-prune {mode}] sessions={len(sessions)} total={total_fh // GB}GB "
           f"free={(free // GB) if free else '?'}GB pruned={deleted} freed={freed // GB}GB "
-          f"alerts={len(plan['alerts'])}", flush=True)
+          f"alerts={len(plan['alerts'])} warnings={len(plan['warnings'])} "
+          f"managed={len(plan['managed'])}", flush=True)
+    for w in plan["warnings"]:
+        print(f"[file-history-prune WARN] {w}", flush=True)
     if plan["alerts"] and apply:
-        _alert(plan["alerts"])
+        _alert(plan["alerts"], loud=True)
+    if plan["managed"] and apply:
+        _alert(plan["managed"], loud=False)
     return 0
 
 

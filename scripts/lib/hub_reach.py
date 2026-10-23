@@ -101,6 +101,17 @@ def is_reach_host_current(target_host: "str | None", holder_host: "str | None") 
     return ct is not None and ch is not None and ct == ch
 
 
+def ssh_target_for_host(host: "str | None") -> "str | None":
+    """GENERIC ssh destination for ANY fleet host string (bus #74293 FIX 2) — not hub-specific
+    like hub_reach_for_holder. Reuses the SAME gzb alias set (_canon) so a worker lane hosted on
+    gzb (e.g. cosem-port, via agent_status.host) resolves to the identical 'gzb' ssh-config alias
+    the hub's own cross-host reach already uses — one alias table, never a second hardcoded gzb
+    spelling. None for local/unknown/unset (fail-safe: never guess at an unrecognized host as a
+    remote target — a caller should treat None as 'dispatch locally, or this host is unreachable
+    cross-host', never as 'assume remote anyway')."""
+    return "gzb" if _canon(host) == "gzbai" else None
+
+
 def read_holder_host(conn) -> "str | None":
     """Thin reader: current orch_lease.holder_host, or None. Caller owns the conn.
     Fail-safe: any read miss -> None (unknown), which the callers treat as fail-closed."""

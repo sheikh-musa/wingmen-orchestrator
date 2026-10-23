@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.glm-peak-pause-resume</string>
+  <!-- cc-fleet-health standing GLM-peak automation (Musa op#30538/op#30543/op#30563,
+       orch-console #67477/#67479/#67504/#67507, 2026-10-15). Every ~10 min runs
+       glm_peak_pause_resume.py --apply via the wrapper: at GLM peak (06:00-10:00Z), a
+       currently-GLM lane flagged fleet_lanes.glm_peak_urgent=true flips to the Musa pool
+       and keeps working; an unflagged one pauses (0 pool burn). At off-peak, reverses
+       exactly what was recorded for today (urgent lanes back to GLM, paused lanes
+       resumed). Periodic-check-vs-window: idempotent per UTC calendar day, a missed
+       single firing is caught on the next one. No secrets here: the wrapper sources
+       .env; the Musa/Syed tokens come from ~/.wingmen/keys. -->
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/run_glm_peak_pause_resume.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>600</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/glm-peak-pause-resume.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/glm-peak-pause-resume.err.log</string>
+</dict>
+</plist>

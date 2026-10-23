@@ -209,6 +209,82 @@ def test_main_catches_and_redacts_a_literal_dsn_in_the_tool_use_input(tmp_path):
     assert json.loads(after_lines[1])["toolUseResult"]["output"] == "SELECT 1"
 
 
+# ---- bus #68892: redaction-verification -- a hit must never be claimed "redacted on
+# disk" unless something actually changed on disk; a real incident showed the hook
+# paging correctly while the raw value sat unredacted, with the old message claiming
+# success regardless. ------------------------------------------------------------------
+
+def test_main_reports_honest_failure_when_redaction_never_lands(tmp_path):
+    import subprocess
+
+    # A hit the scan finds via input_text, but transcript_path's own content has NO
+    # matching line in its redact window -- redact_recent_lines legitimately returns
+    # False every attempt, and there is no persisted-output path, so nothing anywhere
+    # can be redacted. This is the exact shape of a hit that pages but can't be fixed.
+    # Built via concatenation, not a contiguous literal, same fixture family used
+    # elsewhere in this file (postgres DSN, TEST-NET-3 host).
+    fake_dsn = "postgres://orchuser:" + "Zq9mPlKx2Rz" + "@203.0.113.77:5432/orchdb"
+    transcript = tmp_path / "session.jsonl"
+    with open(transcript, "w") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "echo unrelated"}}
+        ]}}) + "\n")
+        f.write(json.dumps({"type": "tool_result", "toolUseResult": {"output": "unrelated output, no secret here"}}) + "\n")
+    original_transcript_text = transcript.read_text()
+
+    cmd = "psql " + json.dumps(fake_dsn)  # the hit: only in input_text, never written to transcript
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": cmd},
+        "tool_response": "unrelated output, no secret here",
+        "transcript_path": str(transcript),
+    })
+    env = dict(__import__("os").environ, SECRETS_SCANNER_DEMO="1")
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True, env=env)
+    assert r.returncode == 0
+    assert "NO ON-DISK REDACTION ACTUALLY LANDED" in r.stderr
+    assert "it has been redacted on disk" not in r.stderr  # the old, now-forbidden false claim
+    assert transcript.read_text() == original_transcript_text  # genuinely untouched, matching the honest message
+
+
+def test_main_retries_before_giving_up_and_succeeds_on_a_later_attempt(monkeypatch):
+    # Simulates the hypothesized race (the transcript line isn't on disk yet on the
+    # first read): redact_recent_lines fails twice then succeeds on the 3rd call for
+    # the SAME hit. The honest-success path must still fire (and paging must still
+    # happen) -- a transient miss that self-resolves within the retry budget is not a
+    # backstop failure.
+    import io
+
+    calls = {"n": 0}
+
+    def flaky_redact(path, cls, pattern, max_lines=3):
+        calls["n"] += 1
+        return calls["n"] >= 3  # False, False, True
+
+    monkeypatch.setattr(scanner, "redact_recent_lines", flaky_redact)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)  # don't actually wait in tests
+    monkeypatch.setenv("SECRETS_SCANNER_DEMO", "1")
+
+    marker = "fake-" + "abcdefghijklmnopqrstuvwxyz123456"  # recognized fixture, never pages
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo " + marker},
+        "tool_response": "Bearer " + marker,
+        "transcript_path": "/dev/null",  # content irrelevant -- redact_recent_lines is mocked
+    })
+    monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+
+    captured_stderr = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", captured_stderr)
+
+    scanner.main()
+
+    assert calls["n"] == 3, "must retry up to 3 attempts, stopping as soon as one succeeds"
+    out = captured_stderr.getvalue()
+    assert "it has been redacted on disk" in out
+    assert "NO ON-DISK REDACTION ACTUALLY LANDED" not in out
+
+
 def test_redact_recent_lines_only_touches_the_window(tmp_path):
     p = tmp_path / "t.jsonl"
     lines = [
@@ -961,3 +1037,212 @@ def test_scan_persisted_output_still_finds_a_hit_within_the_byte_cap(tmp_path):
     p.write_text(inline_dsn + "\n" + ("y" * (scanner.MAX_SCAN_BYTES * 3)))
     hits = scanner.scan_persisted_output(str(p))
     assert hits and any(h[0] == "postgres-dsn" for h in hits)
+
+
+# ---- bus #74596/#74623: redact_recent_lines silently missed the real span twice in
+# one session. Root cause: window_start = max(0, len(lines) - max_lines) is computed
+# against the file's line count AT HOOK-INVOCATION TIME, not against the specific
+# line the hook was actually called about. In a busy session, bookkeeping lines
+# (attachment/api-request-blob/permission-mode/etc.) get appended by the harness
+# AFTER the real content line but BEFORE (or during) the hook's own read -- pushing
+# the real line further than max_lines=3 back by the time redact_recent_lines reads
+# the file. The fix must widen the search when a VERIFY pass still finds the pattern
+# present beyond the initial narrow window, rather than silently trusting a fixed-size
+# window that this exact shape of interleaving defeats. Uses the sanctioned
+# FIXTURE_TELEGRAM_BOT_ID shape, built from parts (not one contiguous literal) so this
+# file's own source never trips the live Edit/Write secrets guard.
+
+def _fixture_token() -> str:
+    return scanner.FIXTURE_TELEGRAM_BOT_ID + ":AA" + "FakeTokenShapeForTestingOnly123456"
+
+
+def test_redact_recent_lines_catches_a_match_pushed_beyond_the_default_window(tmp_path):
+    p = tmp_path / "busy.jsonl"
+    secret_line = {"type": "user", "message": {"content": [
+        {"type": "tool_result", "content": "token=" + _fixture_token()}]}}
+    # the real content line, THEN several bookkeeping lines the harness appends
+    # after it in a busy session (attachment-shaped, content-free so they never
+    # match the pattern themselves) -- the exact shape observed in the real
+    # incident (bus #74596), pushing the real line 5 lines back by the time the
+    # hook reads the file.
+    bookkeeping = [{"type": "attachment", "n": i} for i in range(5)]
+    lines = [secret_line] + bookkeeping
+    with open(p, "w") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+
+    # default max_lines=3 is narrower than the 6-line file with the match at index 0 --
+    # this is RED on the pre-fix code (window_start = 6-3 = 3, the match at index 0 is
+    # never even looked at) and must be GREEN after the fix (a verify pass finds the
+    # pattern still present and widens the retry).
+    changed = scanner.redact_recent_lines(str(p), "telegram-bot-token",
+                                          scanner.SECRET_PATTERNS["telegram-bot-token"], max_lines=3)
+    assert changed is True
+    after_text = p.read_text()
+    assert _fixture_token() not in after_text
+    assert "REDACTED" in after_text
+
+
+def test_redact_recent_lines_still_leaves_a_genuinely_clean_file_untouched(tmp_path):
+    # the widen-on-verify-failure retry must not perturb a file with no match at all --
+    # changed stays False, bytes stay identical.
+    p = tmp_path / "clean.jsonl"
+    lines = [{"type": "attachment", "n": i} for i in range(6)]
+    with open(p, "w") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+    before = p.read_text()
+    changed = scanner.redact_recent_lines(str(p), "telegram-bot-token",
+                                          scanner.SECRET_PATTERNS["telegram-bot-token"], max_lines=3)
+    assert changed is False
+    assert p.read_text() == before
+
+
+def test_redact_recent_lines_widen_retry_is_bounded_not_a_full_file_scan(tmp_path):
+    # a match far beyond the widened verify ceiling must NOT be found/touched -- the
+    # retry is a bounded safety margin, never a full-file rescan (perf/safety on a
+    # multi-GB transcript).
+    p = tmp_path / "huge.jsonl"
+    far_back = {"type": "user", "message": {"content": [
+        {"type": "tool_result", "content": "token=" + _fixture_token()}]}}
+    filler = [{"type": "attachment", "n": i} for i in range(500)]
+    lines = [far_back] + filler
+    with open(p, "w") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+    changed = scanner.redact_recent_lines(str(p), "telegram-bot-token",
+                                          scanner.SECRET_PATTERNS["telegram-bot-token"], max_lines=3)
+    assert changed is False  # out of reach of the bounded widen ceiling -- not a miss, a documented limit
+    assert _fixture_token() in p.read_text()  # untouched, not silently claimed clean
+
+
+# ---- bus #74676: secret-READING CLI commands that print a value with no fixed shape
+# (firebase functions:secrets:access, gcloud secrets versions access) -- the real
+# incident, cc-cosem-adcda-1 ran `firebase functions:secrets:access
+# SCHEDULE_PDF_S2S_SECRET --project ...` unredirected and the raw plaintext secret value
+# printed straight into the transcript. SECRET_PATTERNS never fired because an arbitrary
+# vaulted secret has no regex-matchable shape. Detected by COMMAND instead of value
+# shape: when tool_input names one of these commands, the captured (non-empty) stdout
+# itself becomes a one-off literal redaction pattern.
+
+def _fixture_secret_value() -> str:
+    # built from parts, never a contiguous literal, so this file's own source never
+    # trips the live Edit/Write secrets guard -- an opaque value with NO shape any
+    # existing SECRET_PATTERNS class would ever match (the whole point of this test).
+    return "fake-" + "Qx7mPz2Lk9VtRbN4sWcYhJd6Fg8TuA1E"
+
+
+def test_firebase_secrets_access_output_is_flagged_despite_no_known_shape(tmp_path):
+    import subprocess
+    import os
+
+    value = _fixture_secret_value()
+    transcript = tmp_path / "session.jsonl"
+    with open(transcript, "w") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash",
+             "input": {"command": "firebase functions:secrets:access SCHEDULE_PDF_S2S_SECRET --project cosem-adcda-cb6d9"}}
+        ]}}) + "\n")
+        f.write(json.dumps({"type": "tool_result", "toolUseResult": {"stdout": value, "stderr": ""}}) + "\n")
+
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": "firebase functions:secrets:access SCHEDULE_PDF_S2S_SECRET --project cosem-adcda-cb6d9"},
+        "tool_response": {"stdout": value, "stderr": ""},
+        "transcript_path": str(transcript),
+    })
+    env = dict(os.environ, SECRETS_SCANNER_DEMO="1")
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True, env=env)
+    assert "secret-shaped content" in r.stderr or "secret-cli-read" in r.stderr
+
+    after = transcript.read_text()
+    assert value not in after
+    assert "REDACTED" in after
+
+
+def test_gcloud_secrets_versions_access_output_is_flagged(tmp_path):
+    import subprocess
+    import os
+
+    value = _fixture_secret_value()
+    transcript = tmp_path / "session.jsonl"
+    with open(transcript, "w") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash",
+             "input": {"command": "gcloud secrets versions access 1 --secret=my-secret"}}
+        ]}}) + "\n")
+        f.write(json.dumps({"type": "tool_result", "toolUseResult": {"stdout": value, "stderr": ""}}) + "\n")
+
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": "gcloud secrets versions access 1 --secret=my-secret"},
+        "tool_response": {"stdout": value, "stderr": ""},
+        "transcript_path": str(transcript),
+    })
+    env = dict(os.environ, SECRETS_SCANNER_DEMO="1")
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True, env=env)
+    after = transcript.read_text()
+    assert value not in after
+    assert "REDACTED" in after
+
+
+def test_unrelated_command_with_the_same_output_is_not_flagged(tmp_path):
+    # proves detection is by COMMAND, not by the output's content/shape -- the exact
+    # same opaque value, printed by an unrelated command, is never touched.
+    import subprocess
+
+    value = _fixture_secret_value()
+    transcript = tmp_path / "session.jsonl"
+    with open(transcript, "w") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "echo some-opaque-string"}}
+        ]}}) + "\n")
+        f.write(json.dumps({"type": "tool_result", "toolUseResult": {"stdout": value, "stderr": ""}}) + "\n")
+    before = transcript.read_text()
+
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo some-opaque-string"},
+        "tool_response": {"stdout": value, "stderr": ""},
+        "transcript_path": str(transcript),
+    })
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True)
+    assert r.returncode == 0
+    assert transcript.read_text() == before
+
+
+def test_secret_reading_command_with_empty_output_is_not_flagged(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": "firebase functions:secrets:access FOO --project bar"},
+        "tool_response": {"stdout": "", "stderr": "permission denied"},
+        "transcript_path": str(transcript),
+    })
+    import subprocess
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True)
+    assert r.returncode == 0  # no hit -- nothing to redact, nothing to page
+
+
+def test_secret_reading_command_hit_unit_level():
+    # direct unit test of the pure detection helper, no subprocess.
+    value = _fixture_secret_value()
+    hit = scanner._secret_reading_command_hit(
+        "firebase functions:secrets:access FOO --project bar", {"stdout": value, "stderr": ""})
+    assert hit is not None
+    cls, match, pattern = hit
+    assert cls == "secret-cli-read"
+    assert pattern.search(value)
+
+
+def test_secret_reading_command_hit_requires_the_command_pattern():
+    value = _fixture_secret_value()
+    assert scanner._secret_reading_command_hit("echo hello", {"stdout": value, "stderr": ""}) is None
+
+
+def test_secret_reading_command_hit_requires_non_empty_output():
+    assert scanner._secret_reading_command_hit(
+        "firebase functions:secrets:access FOO --project bar", {"stdout": "  \n", "stderr": ""}) is None
+    assert scanner._secret_reading_command_hit(
+        "firebase functions:secrets:access FOO --project bar", "") is None

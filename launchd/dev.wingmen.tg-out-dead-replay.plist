@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- held_commitment #314 / fable-audit-substrate-20261006: tg_out 'dead' rows
+	     (MAX_ATTEMPTS exhausted) used to just accumulate — nothing consumed them
+	     (352 rows, +11/week). Daily is plenty at that rate; gives each dead row one
+	     more delivery attempt, then purges it with an attributable bus note on a
+	     second failure (nervous_system/tg_out.py: replay_once_then_purge). -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/sheikhmusa</string>
+		<key>PATH</key>
+		<string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>Label</key>
+	<string>dev.wingmen.tg-out-dead-replay</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+		<string>-m</string>
+		<string>nervous_system.tg_out</string>
+		<string>replay-dead</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/sheikhmusa/wingmen/orchestrator/logs/tg-out-dead-replay.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/sheikhmusa/wingmen/orchestrator/logs/tg-out-dead-replay.log</string>
+	<key>StartInterval</key>
+	<integer>86400</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/sheikhmusa/wingmen/orchestrator</string>
+</dict>
+</plist>

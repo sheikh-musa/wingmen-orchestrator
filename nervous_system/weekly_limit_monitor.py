@@ -141,12 +141,13 @@ def _op13183_page(p: dict, dry: bool) -> None:
 POOLS = {
     "Musa": ("file", str(Path.home() / ".wingmen" / "keys" / "musa-oauth-token")),
     "Syed": ("file", str(Path.home() / ".wingmen" / "keys" / "syed-oauth-token")),
-    # musa2 (op#12617): a SEPARATE weekly pool from Musa-1 — verified by an
+    # irsyad (op#12617; renamed from "musa2" 2026-10-21, Musa op#32599 — IRSYAD-ONLY,
+    # never the general musa pool): a SEPARATE weekly pool from Musa-1 — verified by an
     # INDEPENDENT unified-7d utilization AND a DIFFERENT reset epoch on a live probe
     # (Musa-1 44%/reset 08-19 08:00 vs musa2 8%/reset 08-18 21:00, 2026-08-13). It is
-    # a genuine offload valve: work run on musa2 does NOT draw down Musa-1's weekly
+    # a genuine offload valve: work run on this pool does NOT draw down Musa-1's weekly
     # pool. Pinned to its own stable key file (fp e1dfa48eec85), same op#12030 rule.
-    "musa2": ("file", str(Path.home() / ".wingmen" / "keys" / "musa2-oauth-token")),
+    "irsyad": ("file", str(Path.home() / ".wingmen" / "keys" / "irsyad-oauth-token")),
 }
 
 
@@ -567,7 +568,7 @@ def _pace_operator_body(p: dict, pace) -> str:
         runway = f"{pace.runway_days:.1f} days (resets in {pace.days_to_reset:.1f})"
     else:
         runway = "n/a yet"
-    # Prefer another pool with headroom as the offload; musa2 is a real valve.
+    # Prefer another pool with headroom as the offload; irsyad is a real valve.
     return (
         f"⚠️ Pace warning — the {p['pool']} Claude pool is on track to run out "
         f"before its weekly reset.\n\n"
@@ -575,7 +576,7 @@ def _pace_operator_body(p: dict, pace) -> str:
         f"{proj} by week-end (runway {runway}). {'; '.join(pace.reasons)}.\n"
         f"WHY: this is the EARLY pace signal (op#12617) — it fires before the 75/90% "
         f"absolute alarm so you can shift work now rather than stall at 100%.\n"
-        f"WHAT TO DO: move heavy lanes to a pool with headroom (Syed / musa2 are "
+        f"WHAT TO DO: move heavy lanes to a pool with headroom (Syed / irsyad are "
         f"separate weekly pools), and/or flip lanes to Sonnet (separate limit). If "
         f"you're fine pacing until reset, nothing needed.")
 
@@ -593,7 +594,7 @@ def _pace_body(p: dict, pace) -> str:
         f"pace={pace_r} (1.0=on budget), projected end-of-week={proj}, "
         f"runway={runway} vs {pace.days_to_reset:.1f}d to reset.\n"
         f"REASONS: {'; '.join(pace.reasons)}.\n"
-        f"WHAT TO DO: offload heavy lanes to a pool with headroom (Syed / musa2 are "
+        f"WHAT TO DO: offload heavy lanes to a pool with headroom (Syed / irsyad are "
         f"SEPARATE weekly pools — a genuine valve), flip lanes to Sonnet, or pace "
         f"until the {_fmt_reset(p.get('reset7d'))} reset.\n"
         f"(source: unified-7d-utilization + trailing-24h burn from pool_usage_history)")

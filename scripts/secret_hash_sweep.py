@@ -70,7 +70,19 @@ _PUBLIC_KEY_RE = re.compile(
     # bus #56377: a *_MODEL value (e.g. NAZIM_MODEL=claude-fable-5-1) is a public model
     # id, never a credential; *_ROLE/*_SESSION/*_PATH/*_DIR name a config string or
     # filesystem location, same trust class as the _BIN/_IPS entries above.
-    r'_MODEL$|_ROLE$|_SESSION$|_PATH$|_DIR$)',
+    r'_MODEL$|_ROLE$|_SESSION$|_PATH$|_DIR$|'
+    # orch-console #67453 (bus#67397 ledger review): Firebase's own documented web-client
+    # config — apiKey/authDomain/projectId/storageBucket/messagingSenderId/appId/
+    # measurementId — is meant to ship in the client bundle; enforcement lives in Firebase
+    # security rules, not in hiding these. Found live: VITE_FIREBASE_API_KEY (23 chars, well
+    # under a real credential's length but over _CREDENTIAL_KEY_RE's _KEY$ floor) got swept
+    # and redacted as a secret on cosem-adcda-wt-urgent. Suffix-anchored, framework-prefix-
+    # agnostic (matches VITE_FIREBASE_*, NEXT_PUBLIC_FIREBASE_*, REACT_APP_FIREBASE_*, bare
+    # FIREBASE_*) — deliberately NOT a blanket `^VITE_`/`^REACT_APP_` allowlist, which would
+    # also silence a genuine secret someone mistakenly put under that prefix.
+    r'(?:^|_)FIREBASE_API_KEY$|(?:^|_)FIREBASE_AUTH_DOMAIN$|(?:^|_)FIREBASE_PROJECT_ID$|'
+    r'(?:^|_)FIREBASE_STORAGE_BUCKET$|(?:^|_)FIREBASE_MESSAGING_SENDER_ID$|'
+    r'(?:^|_)FIREBASE_APP_ID$|(?:^|_)FIREBASE_MEASUREMENT_ID$)',
     re.I)
 
 # orch-console #56377: a known-credential key name is the ONLY thing that justifies the

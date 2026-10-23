@@ -135,6 +135,62 @@ def should_backstop_wake(
     return is_wake_eligible_recipient(to_agent, priority, requires_response)
 
 
+def _fleet_lane_desired_state(agent_id: str) -> str | None:
+    """fleet_lanes.desired_state for `agent_id`, matched by lane OR base_agent_id — the
+    same match shape as wake_backstop_sweep._desired_state_of, kept separate here so this
+    module has no import-time dependency on wake_backstop_sweep. Returns None on no-DSN
+    or no matching row. RAISES (does not swallow) on an ambiguous multi-row match or any
+    DB error — the caller (is_wake_suppressed_by_pause) is responsible for the fail-open
+    contract, this helper just reports what it found."""
+    if not _DSN:
+        return None
+    with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT desired_state FROM fleet_lanes "
+                    "WHERE lane=%s OR base_agent_id=%s", (agent_id, agent_id))
+        vals = [r[0] for r in cur.fetchall()]
+    if len(vals) > 1:
+        raise ValueError(f"ambiguous desired_state for {agent_id}: {vals}")
+    return vals[0] if vals else None
+
+
+def is_wake_suppressed_by_pause(
+    to_agent: str | None, priority: str, desired_state_of=None,
+) -> bool:
+    """Quiet switch (Nazim-approved spec, bus#66792 / gate #66802, held_commitment #440).
+
+    The zero-GLM-pilot hold sets fleet_lanes.desired_state='paused' on specific lanes
+    (e.g. adcda-1/adcda-2), but the realtime auto-wake path never consulted desired_state
+    at all — an ordinary P2 bus doorbell still typed the wake keystroke into a paused
+    lane, defeating the pause. This is the decision the call site (agent_messages_
+    realtime._route_single_message) consults BEFORE invoking wake_agent; it gates ONLY
+    the keystroke, never message delivery (the agent_messages row has already landed by
+    the time this runs — that INSERT path is untouched).
+
+    True (skip the wake) iff the lane's desired_state is exactly 'paused' AND priority is
+    not P0. P0 is an UNCONDITIONAL override — a genuine safety/degrade-class page must
+    never be silenced by a pause, and P0 is the existing priority column's own encoding
+    of that (no new column invented).
+
+    FAIL-OPEN (never fail-closed into a silent permanent non-wake): if the desired_state
+    read errors, times out, or the lane has no fleet_lanes row at all, this returns False
+    (not suppressed — wake proceeds normally). A DB read hiccup must never look like an
+    operator-intended pause.
+    """
+    if not to_agent:
+        return False
+    if priority == "P0":
+        return False
+    lookup = desired_state_of or _fleet_lane_desired_state
+    try:
+        state = lookup(to_agent)
+    except Exception as e:  # noqa: BLE001 — fail-open; a read hiccup must never suppress a wake
+        logging.getLogger("wingmen.agent_wake").warning(
+            "quiet-switch: desired_state read failed for %s; failing OPEN (waking normally): %s",
+            to_agent, e)
+        return False
+    return state == "paused"
+
+
 def _base_family(agent_id: str) -> str:
     """cc-ihsanos-1 -> cc-ihsanos; cai -> cai."""
     return _SUBTAG_RE.sub("", agent_id)

@@ -27,6 +27,26 @@ loudly if that's far from the intended 09:00 slot — so a future host-TZ
 change or launchd misconfiguration shows up in the log the same day instead
 of waiting for the operator to notice a digest at the wrong hour.
 
+CAPPED REBUILD (op#30088 part 1, held_commitment #438, HARD GATE #66732):
+this launchd job was disabled+booted-out because the prior render_digest()
+fully enumerated every open ask (one line per row, no limit) — with the
+ledger at 191 open operator asks that would have been a 191-line Telegram
+dump, not a digest. The fix: render_digest() now shows at most TOP_N
+(5) items under "WAITING ON YOU" (oldest-first, already the query's own
+order) and NEVER enumerates the "other open / in progress" bucket at
+all — that bucket is a judged COUNT line only, with a pointer ("ask
+cc-fleet-health for the full list") for anything beyond the cap. Same
+cap applies to the client-ask section for defense-in-depth, even though
+it stays default-OFF (DIGEST_CLIENT_ASKS_ENABLED) until the irsyad
+backlog is triaged. Chasing OWNERS of overdue asks is deliberately NOT
+duplicated here — scripts/priority_sla_watchdog.py's CLIENT-ASKS-CHASE
+already re-nudges delegated_to owners for overdue chase_by rows with its
+own dedup/backoff; this digest is Musa-facing only and must never grow a
+second, uncoordinated chase mechanism. Per HARD GATE #66732, the launchd
+plist stays disabled until Nazim has SEEN the cap logic + a live sample +
+after-counts and signs off — re-enabling is a separate, explicit step,
+never automatic on this file landing.
+
 Usage:
   asks_daily_digest.py [--dry-run] [--force]
     --dry-run   print the digest, send nothing, stamp nothing (safe to run any time)
@@ -49,6 +69,7 @@ from dotenv import load_dotenv
 ORCH = Path(os.path.expanduser("~/wingmen/orchestrator"))
 STATE_FILE = ORCH / "logs" / "asks_daily_digest_state.json"
 UAE_TZ = ZoneInfo("Asia/Dubai")
+TOP_N = 5  # HARD GATE #66732: never enumerate past this — count+pointer beyond it
 
 load_dotenv(ORCH / ".env")
 
@@ -149,6 +170,16 @@ def _age_str(ts, now: "datetime | None" = None) -> str:
     return f"{hours / 24:.1f}d"
 
 
+def _cap_line(shown: int, total: int, noun: str) -> "str | None":
+    """HARD GATE #66732: the ONE place remainder-counting happens, so every
+    capped bucket reports it the same way. Returns None when there's no
+    remainder to report (nothing hidden, no line needed)."""
+    remainder = total - shown
+    if remainder <= 0:
+        return None
+    return f"  …and {remainder} more {noun} (ask cc-fleet-health for the full list)"
+
+
 def render_digest(rows: list, captured: "dict | None" = None,
                    client_rows: "list | None" = None,
                    client_captured: "dict | None" = None) -> str:
@@ -157,12 +188,20 @@ def render_digest(rows: list, captured: "dict | None" = None,
     ONLY text ever shown here, never the raw `ask` column (bus #45557
     condition 3 — a captured row's raw text must never leak into the digest).
 
+    CAPPED (op#30088 part 1, HARD GATE #66732): at most TOP_N items are ever
+    printed per bucket. "WAITING ON YOU" shows up to TOP_N (oldest-first,
+    the caller's own query order) plus a remainder line; everything NOT
+    waiting-on-operator is a single judged COUNT line — it is NEVER
+    enumerated, full stop, regardless of how many rows there are. This is
+    the one invariant the hard gate exists to enforce, so test it, don't
+    just trust it.
+
     `client_rows`/`client_captured` (migration 085, bus #47110 item 3b): the
     separate CLIENT ASKS section, kept visually distinct from Musa's own
     operator-surface asks above (ask_surface scoping must stay legible to the
     reader, not just to the query) — each shows AGE since the client asked
     and flags a committed_date given more than 3 days out (Musa op#23946:
-    "no far-out dates")."""
+    "no far-out dates"). Capped the same way as the operator section."""
     captured = captured or {"count": 0, "oldest": None}
     client_rows = client_rows or []
     client_captured = client_captured or {"count": 0, "oldest": None}
@@ -177,13 +216,15 @@ def render_digest(rows: list, captured: "dict | None" = None,
         if waiting:
             lines.append("")
             lines.append("WAITING ON YOU:")
-            for r in waiting:
+            shown = waiting[:TOP_N]
+            for r in shown:
                 lines.append(f"  #{r['id']} ({r.get('delegated_to') or '?'}): {r['triage_summary']}")
+            cap_line = _cap_line(len(shown), len(waiting), "waiting on you")
+            if cap_line:
+                lines.append(cap_line)
         if others:
             lines.append("")
-            lines.append("Open / in progress:")
-            for r in others:
-                lines.append(f"  #{r['id']} ({r.get('delegated_to') or 'unassigned'}): {r['triage_summary']}")
+            lines.append(f"Open / in progress: {len(others)} (not shown — ask cc-fleet-health for the full list)")
         if captured["count"]:
             age_suffix = f", oldest {_age_str(captured['oldest'], now)}" if captured["oldest"] else ""
             lines.append("")
@@ -192,7 +233,8 @@ def render_digest(rows: list, captured: "dict | None" = None,
         if lines:
             lines.append("")
         lines.append(f"CLIENT ASKS — {len(client_rows)} open (migration 085 / op#23944):")
-        for r in client_rows:
+        shown_client = client_rows[:TOP_N]
+        for r in shown_client:
             age = _age_str(r.get("created_at"), now)
             committed = r.get("committed_date")
             created_at = r.get("created_at")
@@ -202,6 +244,9 @@ def render_digest(rows: list, captured: "dict | None" = None,
             flag = " ⚠️ FAR-OUT DATE (op#23946)" if far_out else ""
             lines.append(f"  #{r['id']} ({r.get('delegated_to') or '?'}, age {age}, {date_str})"
                          f"{flag}: {r['triage_summary']}")
+        cap_line = _cap_line(len(shown_client), len(client_rows), "client ask(s)")
+        if cap_line:
+            lines.append(cap_line)
         if client_captured["count"]:
             oldest = client_captured["oldest"]
             age = f", oldest {_age_str(oldest, now)}" if oldest else ""

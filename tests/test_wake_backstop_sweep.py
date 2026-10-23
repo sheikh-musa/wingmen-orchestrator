@@ -158,10 +158,13 @@ from datetime import datetime, timedelta, timezone  # noqa: E402
 _NOW = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
 
 
-def _row_ts(to_agent, id=1, age_s=0, priority="P2", is_test=False, rr=False, mt="update"):
-    """7-tuple incl created_at (age_s seconds before _NOW), for the age cap."""
+def _row_ts(to_agent, id=1, age_s=0, priority="P2", is_test=False, rr=False, mt="update",
+            from_agent="cc-someone-else"):
+    """8-tuple incl created_at (age_s seconds before _NOW) and from_agent, for the age cap
+    and the self-notice exclusion. from_agent defaults to a non-self value so existing
+    callers are unaffected."""
     ca = _NOW - timedelta(seconds=age_s)
-    return (id, to_agent, mt, rr, priority, is_test, ca)
+    return (id, to_agent, mt, rr, priority, is_test, ca, from_agent)
 
 
 def _collector():
@@ -400,19 +403,21 @@ def test_desired_state_lookup_error_fails_closed_escalates_not_quiesced_amendC()
 
 def test_dead_foreign_quiesced_once_escalated_once_second_sweep_noop_amendD():
     # (5) the whole point: a row past cap to an agent gone on EVERY host (no matching hb) and
-    # not wanted-up -> quiesce (CAS) + ONE escalation naming the agent, ids and evidence; a 2nd
-    # sweep over the same (now-marked) rows does nothing (skipped_at is the once-guard).
+    # not wanted-up (and NOT explicitly desired_state='down' — see the silent-down test below)
+    # -> quiesce (CAS) + ONE escalation naming the agent, ids and evidence; a 2nd sweep over the
+    # same (now-marked) rows does nothing (skipped_at is the once-guard).
     marked, pages, mark, page = _cas_collector()
     rows = [_row_ts("cc-cosem-platform", 501, age_s=_PAST_CAP),
             _row_ts("cc-cosem-platform", 502, age_s=_PAST_CAP)]
     kw = dict(wake=lambda a, **k: {"woke": False, "why": "no live session"},
               now_dt=_NOW, cap_age_s=390, gone_window_s=7200,
               matching_hbs=lambda a: [],           # gone on every host
-              desired_state_of=lambda a: "down",   # not wanted-up
+              desired_state_of=lambda a: None,     # not wanted-up, not explicitly parked down
               base_of=lambda a: None, mark=mark, escalate=page, escalated_seen=set())
     res1 = wbs.sweep_once(rows=rows, **kw)
     assert set(marked) == {501, 502}               # both rows quiesced
     assert res1["dead_foreign"] == ["cc-cosem-platform"]
+    assert res1["quiesced_silent"] == []            # NOT the silent-down class
     assert len(pages) == 1                          # ONE page for the dead agent, not per-row
     subj, body = pages[0]
     assert "cc-cosem-platform" in subj
@@ -422,6 +427,30 @@ def test_dead_foreign_quiesced_once_escalated_once_second_sweep_noop_amendD():
     res2 = wbs.sweep_once(rows=rows, **kw)
     assert set(marked) == {501, 502}               # unchanged
     assert len(pages) == 1                          # NOT re-escalated
+
+
+def test_dead_foreign_desired_state_down_is_quiesced_silently_held_commitment_430():
+    # (Nazim #66506/op#27235, held_commitment #430) desired_state='down' means the operator
+    # INTENTIONALLY parked the lane (e.g. second-brain's nightly-regen handoff target) — the
+    # dead-foreign quiesce still fires (stop re-poking a gone agent) but must NOT escalate: a
+    # deliberately-down lane re-firing nightly is a false page, not a finding. Without this
+    # branch the escalation would repeat every sweep for a state that is not a surprise.
+    marked, pages, mark, page = _cas_collector()
+    rows = [_row_ts("cc-second-brain", 601, age_s=_PAST_CAP)]
+    kw = dict(wake=lambda a, **k: {"woke": False, "why": "no live session"},
+              now_dt=_NOW, cap_age_s=390, gone_window_s=7200,
+              matching_hbs=lambda a: [],            # gone on every host
+              desired_state_of=lambda a: "down",    # INTENTIONALLY parked
+              base_of=lambda a: None, mark=mark, escalate=page, escalated_seen=set())
+    res1 = wbs.sweep_once(rows=rows, **kw)
+    assert marked == [601]                          # still quiesced — stop re-poking it
+    assert res1["dead_foreign"] == ["cc-second-brain"]
+    assert res1["quiesced_silent"] == ["cc-second-brain"]
+    assert pages == []                              # but NEVER escalated — silent by policy
+    # 2nd sweep over the SAME (now-marked) row: CAS no-op, still silent
+    res2 = wbs.sweep_once(rows=rows, **kw)
+    assert marked == [601]
+    assert pages == []
 
 
 def test_dead_foreign_matches_base_exactly_not_by_prefix():
@@ -737,6 +766,34 @@ def test_stuck_page_ignores_ineligible_recipients():
     assert pages == [] and r["stuck_paged"] == []
 
 
+def test_stuck_page_excludes_own_selfnotice_rows_72904():
+    # orch-console #72904 (2nd occurrence): the sweep's OWN "[idle-unread]" nudge row
+    # (from_agent='cc-fleet-health') is itself a directed-unread row to the agent it nudged.
+    # idle_unread_sweep already excludes it from ITS OWN nudge/warn counting (the #60531
+    # self-feed-killer), but that exclusion is local to idle_unread_sweep — the STUCK-PAGE
+    # pass here has a completely separate fetch with no such filter, so it paged ABOUT a row
+    # that cc-fleet-health itself sent. A self-notice must never trigger a stuck-page.
+    marked, pages, mark, page = _cas_collector()
+    stuck = [_row_ts("cc-cosem-exams", 72875, age_s=5500, from_agent="cc-fleet-health")]
+    r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(),
+                       this_host="Sheikhs-Mini", pane_state=lambda a: "idle", pane_active=lambda a: False,
+                       mark=mark, escalate=page, escalated_seen=set())
+    assert pages == [] and r["stuck_paged"] == []
+
+
+def test_stuck_page_still_pages_a_genuine_non_self_row_72904_regression():
+    # regression guard: the self-notice exclusion must not swallow a REAL stuck row from
+    # someone else — same shape as test_stuck_row_to_alive_agent_paged_once_with_pane_state_43063.
+    marked, pages, mark, page = _cas_collector()
+    stuck = [_row_ts("cc-quality", 201, age_s=2000, from_agent="orch-console")]
+    r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(),
+                       this_host="Sheikhs-Mini", pane_state=lambda a: "idle", pane_active=lambda a: False,
+                       mark=mark, escalate=page, escalated_seen=set())
+    assert len(pages) == 1 and r["stuck_paged"] == ["cc-quality"]
+
+
 def test_stuck_page_upper_age_bound_row_older_than_max_never_paged_43073():
     # Nazim #43073: the in-memory once-guard resets on restart, so an UPPER bound stops a restart
     # re-paging very old rows. A row 25h old (past the 24h default max) is NEVER stuck-paged.
@@ -886,3 +943,179 @@ def test_h_pending_row_not_cleared_when_wake_still_fails():
                    agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
                    mark=lambda ids: [], escalate=lambda s, b: None, escalated_seen=set())
     assert woke_cleared == []         # still pending: retried next pass
+
+
+# ---- quiet switch, SWEEP side (bus#66792/#66802, gate #67032, held_commitment #440) ----
+# PR#401 gated the REALTIME doorbell on agent_wake.is_wake_suppressed_by_pause but left this
+# separate KeepAlive sweep untouched: it re-woke ANY eligible cc-* target on every grace cycle
+# regardless of fleet_lanes.desired_state, defeating the pause. These tests lock that the sweep
+# now runs every wake target through the SAME canonical predicate (never a forked policy) right
+# before the wake loop, with the identical P0-override / fail-open invariants as realtime.
+
+def test_paused_lane_with_fresh_p2_row_is_not_woken_by_sweep():
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True}
+    rows = [_row("cc-cosem-adcda-1", 1, priority="P2")]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, desired_state_of=lambda a: "paused")
+    assert calls == []                                  # the wake keystroke never fires
+    assert res["woke"] == [] and res["targets"] == []
+    assert res["paused_suppressed"] == ["cc-cosem-adcda-1"]
+
+
+def test_paused_lane_with_fresh_p0_row_still_woken_by_sweep():
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True}
+    rows = [_row("cc-cosem-adcda-1", 2, priority="P0")]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, desired_state_of=lambda a: "paused")
+    assert calls == ["cc-cosem-adcda-1"]                 # P0 is an unconditional override
+    assert res["woke"] == ["cc-cosem-adcda-1"]
+    assert res["paused_suppressed"] == []
+
+
+def test_paused_lane_p0_overrides_even_alongside_an_unread_p2_to_the_same_agent():
+    # a paused lane with BOTH a P2 and a P0 fresh row -> still woken (any P0 present overrides).
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True}
+    rows = [_row("cc-cosem-adcda-1", 10, priority="P2"), _row("cc-cosem-adcda-1", 11, priority="P0")]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, desired_state_of=lambda a: "paused")
+    assert calls == ["cc-cosem-adcda-1"]
+    assert res["paused_suppressed"] == []
+
+
+def test_desired_state_lookup_error_fails_open_sweep_still_wakes():
+    # (3) a fleet_lanes read error/timeout must fail OPEN here too — a DB hiccup must never
+    # silently turn into a permanent, unexplained non-wake. is_wake_suppressed_by_pause owns
+    # this contract; the sweep supplies only the (failing) lookup.
+    def boom(agent):
+        raise RuntimeError("db unavailable")
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True}
+    rows = [_row("cc-quality", 3, priority="P2")]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, desired_state_of=boom)
+    assert calls == ["cc-quality"]
+    assert res["paused_suppressed"] == []
+
+
+def test_lane_not_found_fails_open_sweep_still_wakes():
+    # no fleet_lanes row at all (agent not registered as a lane) -> not suppressed.
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True}
+    rows = [_row("cc-brand-new", 4, priority="P2")]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, desired_state_of=lambda a: None)
+    assert calls == ["cc-brand-new"]
+    assert res["paused_suppressed"] == []
+
+
+def test_up_lane_wakes_normally_through_the_same_sweep_veto():
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True}
+    rows = [_row("cc-quality", 5, priority="P2")]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, desired_state_of=lambda a: "up")
+    assert calls == ["cc-quality"]
+    assert res["paused_suppressed"] == []
+
+
+def test_paused_wake_veto_does_not_disturb_quiesce_logic_for_other_agents():
+    # a paused-but-fresh row to one agent, alongside a capped-and-dead row to ANOTHER agent in
+    # the same pass: the pause veto must only ever touch the wake decision, never the
+    # independent capped/quiesce classification below it.
+    marked, pages, mark, page = _collector()
+    rows = [_row_ts("cc-cosem-adcda-1", 20, age_s=0, priority="P2"),
+            _row_ts("cc-cosem-platform", 21, age_s=10_000, priority="P2")]
+    res = wbs.sweep_once(rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
+                         now_dt=_NOW, cap_age_s=390, mark=mark, escalate=page,
+                         matching_hbs=lambda a: [], desired_state_of=lambda a: (
+                             "paused" if a == "cc-cosem-adcda-1" else "down"),
+                         base_of=lambda a: None, escalated_seen=set())
+    assert res["paused_suppressed"] == ["cc-cosem-adcda-1"]   # the fresh paused row: wake vetoed
+    assert res["dead_foreign"] == ["cc-cosem-platform"]       # the capped row: quiesce unaffected
+    assert marked == [21]
+
+
+# ── _escalate_operator console-dead redirect (audit-20261006 item 4, bus#54648) ──────────
+# A dead-foreign/readdress/lookup-failed page normally goes to orch-console. If orch-console
+# itself has no fresh heartbeat, that page must re-address to the hub (cc-orchestrator) as
+# P1+requires_response instead of relaying into a void -- the exact failure this closes.
+
+class _CaptureCursor:
+    def __init__(self, store):
+        self.store = store
+
+    def execute(self, sql, params=None):
+        self.store.append((sql, params))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _CaptureConn:
+    def __init__(self, store):
+        self.store = store
+
+    def cursor(self):
+        return _CaptureCursor(self.store)
+
+    def commit(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_escalate_operator_goes_to_console_when_console_alive(monkeypatch):
+    store = []
+    monkeypatch.setattr(wbs, "_DSN", "postgres://fake")
+    monkeypatch.setattr(wbs.psycopg, "connect", lambda *a, **k: _CaptureConn(store))
+    wbs._escalate_operator("subj", "body", console_alive=lambda: True)
+    insert = [s for s, p in store if "INSERT INTO agent_messages" in s][0]
+    params = [p for s, p in store if "INSERT INTO agent_messages" in s][0]
+    assert params[0] == "orch-console"
+    assert params[1] == "P2"
+    assert params[4] is False
+
+
+def test_escalate_operator_redirects_to_hub_when_console_dead(monkeypatch):
+    store = []
+    monkeypatch.setattr(wbs, "_DSN", "postgres://fake")
+    monkeypatch.setattr(wbs.psycopg, "connect", lambda *a, **k: _CaptureConn(store))
+    wbs._escalate_operator("subj", "body", console_alive=lambda: False)
+    params = [p for s, p in store if "INSERT INTO agent_messages" in s][0]
+    assert params[0] == wbs.HUB_AGENT
+    assert params[1] == "P1"
+    assert params[4] is True
+    assert "audit-20261006" in params[3]
+    assert "body" in params[3]   # original body text preserved, not dropped
+
+
+def test_escalate_operator_default_console_alive_check_failure_treated_as_dead(monkeypatch):
+    # _default_console_alive is the real (lazy-imported) check; an exception inside it must
+    # never crash the page, and must fail toward the hub redirect (never toward "alive").
+    store = []
+    monkeypatch.setattr(wbs, "_DSN", "postgres://fake")
+    monkeypatch.setattr(wbs.psycopg, "connect", lambda *a, **k: _CaptureConn(store))
+
+    def boom():
+        raise RuntimeError("console_alive import blew up")
+
+    monkeypatch.setattr(wbs, "_default_console_alive", boom)
+    wbs._escalate_operator("subj", "body")
+    params = [p for s, p in store if "INSERT INTO agent_messages" in s][0]
+    assert params[0] == wbs.HUB_AGENT

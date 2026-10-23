@@ -57,7 +57,7 @@ def test_group_pointer_wins_over_fleet_default(orch):
     lane in that family — while OTHER families still get the fleet default."""
     orch_dir, make_key, ptr = orch
     fleet = make_key("musa-oauth-token", "MUSA")
-    grp = make_key("musa2-oauth-token", "MUSA2")
+    grp = make_key("irsyad-oauth-token", "IRSYAD")
     ptr(".lane_default_token", fleet)
     ptr(".group_default_token.irsyad", grp)
     # in-family lanes -> group pin
@@ -99,7 +99,7 @@ def test_singleton_own_pointer_is_honored(orch):
     orch_dir, make_key, ptr = orch
     fleet = make_key("musa-oauth-token", "MUSA")
     cai_tok = make_key("syed-oauth-token", "SYED")
-    fh_tok = make_key("musa2-oauth-token", "MUSA2")
+    fh_tok = make_key("irsyad-oauth-token", "IRSYAD")
     ptr(".lane_default_token", fleet)
     ptr(".cai_default_token", cai_tok)
     ptr(".fleet-health_default_token", fh_tok)
@@ -286,7 +286,7 @@ def test_cli_shim_matches_python_api(orch):
     same path resolve_lane_token_path returns (bash gets the same answer)."""
     orch_dir, make_key, ptr = orch
     fleet = make_key("musa-oauth-token", "MUSA")
-    grp = make_key("musa2-oauth-token", "MUSA2")
+    grp = make_key("irsyad-oauth-token", "IRSYAD")
     ptr(".lane_default_token", fleet)
     ptr(".group_default_token.irsyad", grp)
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(R.__file__))))

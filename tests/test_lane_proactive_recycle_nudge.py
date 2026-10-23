@@ -168,7 +168,7 @@ class _WireConn:
 
 def _wire(monkeypatch, *, lanes, gauge_pct, enabled, dry, lease_ok=True, saved=None):
     """Wire run() with fakes. gauge_pct maps base -> pct (int) to feed resolve_lane_pct."""
-    monkeypatch.setattr(slr, "discover_lanes", lambda conn: lanes)
+    monkeypatch.setattr(slr, "discover_lanes", lambda conn, **kw: lanes)
     # feed the reading path: _gauge returns tokens for the pct, _pane blind, resolve = known/pct
     monkeypatch.setattr(dm, "_pane", lambda s: (None, None))
 
@@ -196,7 +196,7 @@ def test_run_nudges_a_bloated_worker_when_armed(monkeypatch):
     params = cur.inserts[0]
     assert params[0] == "cc-irsyad-coord"              # to_agent = base
     assert pn.SUBJECT_PREFIX in params[1]              # proactive subject
-    assert "cc-irsyad-coord" in saved                  # episode persisted (armed + holder)
+    assert slr.state_key_for("cc-irsyad-coord", "irsyad-coord") in saved  # episode persisted (armed + holder)
 
 
 def test_run_is_inert_when_not_enabled(monkeypatch):
@@ -264,6 +264,28 @@ def test_run_nudges_the_instance_id_not_the_bare_base(monkeypatch):
     pn.run(conn, dry=False)
     assert len(cur.inserts) == 1
     assert cur.inserts[0][0] == "cc-cosem-adcda-2"     # instance id, NOT bare cc-cosem-adcda
+
+
+def test_multi_sibling_same_base_episode_is_not_erased_by_a_later_sibling(monkeypatch):
+    """Repro (bus #73009/#73011): once discover_lanes(per_instance=True) returns 2 rows for one
+    base, a bare-base state key let whichever sibling is processed LAST in the pass overwrite
+    (or pop) the FIRST sibling's just-started nudge episode, within the SAME sweep. x-1 crosses
+    the proactive bar and starts an episode; x-3 (same base, processed right after it) reads
+    comfortably below bar -> 'ok' pops state[base], erasing x-1's brand-new episode before it was
+    ever saved."""
+    cur = _WireCur()
+    conn = _WireConn(cur)
+    lanes = [
+        {"lane": "cc-x-1", "base_agent_id": "cc-x", "tmux_session": "x-1"},
+        {"lane": "cc-x-3", "base_agent_id": "cc-x", "tmux_session": "x-3"},
+    ]
+    saved = {}
+    _wire(monkeypatch, lanes=lanes, gauge_pct={}, enabled=True, dry=False, saved=saved)
+    monkeypatch.setattr(dm, "_pane", lambda s: (BAR + 5, None) if s == "x-1" else (BAR - 20, None))
+    pn.run(conn, dry=False)
+    key1 = slr.state_key_for("cc-x", "x-1")
+    assert key1 in saved, (
+        "x-1's nudge episode must survive x-3 (same base) being processed after it")
 
 
 def test_run_skips_nudge_on_stale_high_gauge(monkeypatch):

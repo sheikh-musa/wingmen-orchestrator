@@ -126,9 +126,12 @@ def proactive_nudge_message(lane: str, pct, bar: int = PROACTIVE_PCT, nudge_n: i
     body = (
         f"{lead}\n\n"
         f"WHAT: write a fresh handoff of YOUR OWN open loops (you know them; I can't safely enumerate "
-        f"or commit your in-flight state for you), THEN run `scripts/self_recycle.sh` — it is "
-        f"lane-preserving (commits your work at your turn boundary, keeps your token/lease) and "
-        f"/clear's you in place.\n"
+        f"or commit your in-flight state for you) to your own handoff path, THEN run "
+        f"`scripts/self_recycle.sh --reset scripts/reset_lane.sh --handoff <your-handoff-path>` — "
+        f"reset_lane.sh is the GENERIC in-place recycler for any Mini worker lane (no lane-specific "
+        f"reset_*.sh exists or is needed; self_recycle.sh REQUIRES --reset, a bare call with no args "
+        f"will refuse). It is lane-preserving (commits your work at your turn boundary, keeps your "
+        f"token/lease) and /clear's you in place.\n"
         f"YOU DECIDE: if you're mid-critical where recycling now is worse than the bloat, you may "
         f"DECLINE and keep going — this is a proactive nudge, NOT a reset, and I never recycle you. "
         f"The SRE dead-man stays your backstop and pages a human only if you cross {deadman_pct}% and "
@@ -181,6 +184,30 @@ def _send_nudge(cur, conn, lane_base: str, subject: str, body: str) -> None:
     conn.commit()
 
 
+def _gauge_for_lane(conn, cur, base: str):
+    """(tokens, age_s) for `base`'s context gauge, or (None, None) if it cannot be reliably
+    attributed to a specific sibling.
+
+    WHY (2026-10-19, cc-cosem-platform-3's #71710/#71711, found right after the discover_lanes
+    lane/session fix landed): dm._gauge(cur, base) reads cc_session_costs WHERE cc_identity=base
+    -- but cc_identity is written as the BARE BASE for every sibling (confirmed: cc_session_costs
+    has exactly one distinct cc_identity value per base, 'cc-cosem-platform', regardless of how
+    many live instances -1/-2/-3/-4 are running). On a multi-sibling base the 'freshest row'
+    could belong to ANY sibling's session, not the one this iteration is about -- fixing the
+    lane/session NAME consistency (PR#439) did not fix this, because the gauge VALUE itself has
+    no per-instance identity to match against. -3 caught it immediately: the lane name was
+    correct this time, but the pct was still borrowed from elsewhere.
+
+    FIX: when >1 live session shares this base, the gauge is unattributable -- return (None,
+    None) so resolve_lane_pct's EXISTING fallback (gauge-stale/unreadable -> pane) takes over.
+    The pane check (dm._pane(session)) IS session-specific (a real tmux capture-pane on the
+    exact session string), so it stays trustworthy even when the gauge can't be. If the pane
+    also can't resolve, resolve_lane_pct correctly returns UNKNOWN rather than guessing."""
+    if len(slr.live_sessions_for_base(conn, base)) > 1:
+        return None, None
+    return dm._gauge(cur, base)
+
+
 def _lease_ok() -> "tuple[bool, str]":
     """fleet_health_lease.gate() wrapper (monkeypatchable). Fail-SAFE: any check error -> holder
     (never strand the monitor); returns (False, reason) only on positive evidence the hub holds a
@@ -197,7 +224,7 @@ def run(conn, dry: bool = False) -> int:
     lease-held; otherwise scans + logs WOULD-NUDGE and mutates no state. Never recycles anything."""
     lease_ok, lease_reason = _lease_ok()
     send_live = ENABLED and not dry and lease_ok
-    lanes = slr.discover_lanes(conn)
+    lanes = slr.discover_lanes(conn, per_instance=True)
     state = _load_state()
     now = time.time()
     print(f"lane-proactive-recycle-nudge — {'LIVE' if send_live else 'SCAN+LOG'} — "
@@ -211,16 +238,17 @@ def run(conn, dry: bool = False) -> int:
             # defence in depth — discover_lanes already excludes singletons; crash loudly if one slips.
             fhb.assert_sre_never_targets_singleton(base)
             session = lr.get("tmux_session")
-            tokens, age_s = dm._gauge(cur, base)
+            tokens, age_s = _gauge_for_lane(conn, cur, base)
             pane_pct, pane_hint_k = dm._pane(session) if session else (None, None)
             known, pct, _last_known, reason = dm.resolve_lane_pct(
                 tokens, age_s, pane_pct, pane_hint_k, max_gauge_age_s=NUDGE_GAUGE_STALE_S)
-            episode = state.get(base)
+            key = slr.state_key_for(base, session)
+            episode = state.get(key)
             verdict, new_ep = evaluate_proactive_nudge(known, pct, episode, now)
             if new_ep is None:
-                state.pop(base, None)
+                state.pop(key, None)
             else:
-                state[base] = new_ep
+                state[key] = new_ep
             pct_s = f"{pct}%" if pct is not None else "UNKNOWN"
             print(f"  {base:22s} {pct_s:>7s} -> {verdict}")
             if verdict in ("nudge", "renudge"):

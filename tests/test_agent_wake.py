@@ -273,3 +273,55 @@ def test_live_same_family_sibling_owner_is_not_treated_as_hijack(monkeypatch):
     out = agent_wake._first_live_session(
         candidates, has_session=live, agent_id="cc-irsyad-9", owner_source=owners)
     assert out == "irsyad-prog1"
+
+
+# ── quiet switch (bus#66792 / gate #66802, held_commitment #440) ─────────────
+# The zero-GLM-pilot hold set fleet_lanes.desired_state='paused' on adcda-1/adcda-2,
+# but the realtime subscriber's auto-wake path never read desired_state at all, so
+# ordinary P2 bus doorbells still woke the paused lanes — defeating the pause.
+# is_wake_suppressed_by_pause() is the pure decision the call site (agent_messages_
+# realtime.py) consults BEFORE invoking agent_wake.wake_agent — it never touches
+# message delivery (the agent_messages INSERT already happened by the time this
+# runs), only the keystroke.
+class TestIsWakeSuppressedByPause:
+    def test_paused_p2_is_suppressed(self):
+        """(a) paused + P2 -> suppressed (the wake keystroke is skipped)."""
+        assert agent_wake.is_wake_suppressed_by_pause(
+            "cc-cosem-adcda-1", "P2", desired_state_of=lambda a: "paused") is True
+
+    def test_paused_p0_always_wakes(self):
+        """(b) paused + P0 -> NOT suppressed. A genuine P0 safety/degrade page must
+        never be silenced by a pause (invariant 3) — P0 is an unconditional override."""
+        assert agent_wake.is_wake_suppressed_by_pause(
+            "cc-cosem-adcda-1", "P0", desired_state_of=lambda a: "paused") is False
+
+    def test_up_lane_wakes_regardless_of_priority(self):
+        """(c) desired_state != 'paused' (e.g. 'up') -> NOT suppressed, for any priority."""
+        for prio in ("P0", "P1", "P2", "P3"):
+            assert agent_wake.is_wake_suppressed_by_pause(
+                "cc-ihsanos", prio, desired_state_of=lambda a: "up") is False
+
+    def test_lookup_error_fails_open_wakes(self):
+        """(d) the fleet_lanes read errors -> FAIL-OPEN, not suppressed (invariant 2).
+        A DB read hiccup must never silently turn into a permanent, unexplained
+        never-wakes for a lane."""
+        def boom(agent_id):
+            raise RuntimeError("db unavailable")
+        assert agent_wake.is_wake_suppressed_by_pause(
+            "cc-ihsanos", "P2", desired_state_of=boom) is False
+
+    def test_missing_fleet_lanes_row_fails_open_wakes(self):
+        """(d) no fleet_lanes row at all (agent not registered as a lane) -> NOT
+        suppressed — absence of a row is not evidence of a pause."""
+        assert agent_wake.is_wake_suppressed_by_pause(
+            "cc-brand-new", "P2", desired_state_of=lambda a: None) is False
+
+    def test_no_recipient_never_suppressed(self):
+        assert agent_wake.is_wake_suppressed_by_pause(
+            None, "P2", desired_state_of=lambda a: "paused") is False
+
+    def test_default_desired_state_of_used_when_not_injected(self, monkeypatch):
+        """With no DSN configured, the real DB-backed default must fail OPEN (not
+        raise, not suppress) — same fail-open contract as the injectable path."""
+        monkeypatch.setattr(agent_wake, "_DSN", None)
+        assert agent_wake.is_wake_suppressed_by_pause("cc-ihsanos", "P2") is False

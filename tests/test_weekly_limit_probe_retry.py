@@ -86,7 +86,7 @@ def test_http_529_overload_is_retried_then_succeeds(monkeypatch):
         return _fake_resp(0.42)
 
     monkeypatch.setattr(wl.urllib.request, "urlopen", overloaded_then_ok)
-    p = wl.probe_pool("musa2")
+    p = wl.probe_pool("irsyad")
     assert calls["n"] == 3, "a 529 must be RETRIED, not immediately treated as a break"
     assert abs(p["u7d"] - 0.42) < 1e-9
 
@@ -103,7 +103,7 @@ def test_persistent_529_raises_after_retries_not_immediately(monkeypatch):
 
     monkeypatch.setattr(wl.urllib.request, "urlopen", always_529)
     with pytest.raises(Exception):
-        wl.probe_pool("musa2")
+        wl.probe_pool("irsyad")
     assert calls["n"] == 3, "a 529 must be retried PROBE_RETRIES times before raising"
 
 

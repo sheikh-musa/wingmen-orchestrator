@@ -61,7 +61,8 @@ def drift_dsn(pg_dsn, monkeypatch):
                  priority text,
                  requires_response boolean NOT NULL DEFAULT false,
                  thread_id uuid,
-                 created_at timestamptz NOT NULL DEFAULT now()
+                 created_at timestamptz NOT NULL DEFAULT now(),
+                 sub_tag text
                )"""
         )
         # Every identity this module's paging path uses (ingest.PAGE_FROM_AGENT/

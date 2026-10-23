@@ -39,10 +39,35 @@ GB = 1 << 30
 # --- tunables (env-overridable) ---
 DATA_VOL = os.environ.get("DISK_DATA_VOL", "/System/Volumes/Data")
 REMEDIATE_UNDER = int(os.environ.get("DISK_REMEDIATE_UNDER_GB", "20")) * GB  # reclaim below this
-FLOOR = int(os.environ.get("DISK_FLOOR_GB", "8")) * GB                       # page if still below
+# 2026-10-22 retune (bus #73391): steady-state free sits at ~7-9GB once the fleet's live
+# lanes are up — this floor used to page P1 on EVERY tick once free dipped under it, even
+# though the real crash zone is ~0GB (2026-08-28 [Errno 28] incident) and reclaim was
+# already exhausted (0GB freed per tick). Same lesson + same number as the HARD_FREE_GB
+# floor in file_history_prune.py (PR#463) and disk_space_monitor.sh (PR#464): 6GB is the
+# genuine near-crash margin, not 8GB which is this Mini's normal healthy baseline.
+FLOOR = int(os.environ.get("DISK_FLOOR_GB", "6")) * GB                       # page if still below
+# 2026-10-22 pager-routing retune (bus #73430): steady-state has fallen further and can now
+# sit genuinely below FLOOR with 0GB reclaimable (structural capacity+load per orch-console's
+# own du/lsof dig, not a leak) — a REAL floor breach, but with NO new action, since the
+# external-drive fix is already escalated to Musa and both sides hold the emergency line below.
+# Paging P1 to console every ~5min for an already-handled condition is the exact
+# perpetual-noise pattern the FLOOR retune (PR#465) just killed, reappearing one tier down.
+# So: FLOOR..EMERGENCY_FLOOR is a "managed band" — log-only / P3, no console wake. Below
+# EMERGENCY_FLOOR (or any reclaimer error) is the genuine near-[Errno 28] emergency and still
+# pages loud (P1) exactly as before.
+EMERGENCY_FLOOR = int(os.environ.get("DISK_EMERGENCY_FREE_GB", "4")) * GB     # always page LOUD
 PROJECTS_ROOT = pathlib.Path(os.environ.get("WINGMEN_PROJECTS_ROOT",
                                             os.path.expanduser("~/wingmen/projects")))
 NEXT_CACHE_MIN_AGE_S = int(os.environ.get("DISK_NEXT_CACHE_MIN_AGE_S", "3600"))  # >60min
+# 2026-10-22 (bus #73708): orch-console hand-reclaimed these during the disk-crash-averted
+# fix and asked for them as standing reclaimer tiers. BACKUPS_ROOT holds date-named daily
+# snapshot dirs (sortable lexicographically); LIBRARY_CACHES_ROOT is the per-user macOS
+# cache dir (Apple-blessed as regenerable, distinct from app support/profile data).
+BACKUPS_ROOT = pathlib.Path(os.environ.get("WINGMEN_BACKUPS_ROOT",
+                                           os.path.expanduser("~/wingmen/backups")))
+BACKUP_KEEP_DAYS = int(os.environ.get("DISK_BACKUP_KEEP_DAYS", "3"))
+LIBRARY_CACHES_ROOT = pathlib.Path(os.environ.get("DISK_LIBRARY_CACHES_ROOT",
+                                                  os.path.expanduser("~/Library/Caches")))
 # operator-held / never-auto-reaped project dirs (first path component under PROJECTS_ROOT)
 EXCLUDE_PROJECTS = set(filter(None, os.environ.get(
     "DISK_EXCLUDE_PROJECTS", "cosem-video-pipeline").split(",")))
@@ -56,6 +81,32 @@ def log(msg: str) -> None:
 def decide(free, *, remediate_under, floor):
     """free AT or below `remediate_under` triggers reclaim (inclusive); strictly above is ok."""
     return "remediate" if free <= remediate_under else "ok"
+
+
+def page_severity(free_after, errors, *, floor, emergency_floor):
+    """How loud to page after a reclaim attempt (bus #73430 pager-routing retune;
+    RETUNED bus #73901 to decouple reclaimer errors from disk danger).
+
+    An unreadable free-probe is always 'loud' — can't confirm safety. Below
+    `emergency_floor` is the genuine near-crash zone — always 'loud'. A reclaimer ERROR
+    combined with an actual floor breach is still the real emergency — 'loud'. But a
+    reclaimer error on an otherwise-HEALTHY disk (free_after >= floor) is a tooling bug,
+    not a disk emergency — 'log' only, same as the managed band, never a false P1.
+    Between `emergency_floor` and `floor` with no errors: the MANAGED band, already
+    diagnosed as structural with no new action — 'log' only, no console wake. At/above
+    `floor` with no errors: 'none'.
+    """
+    if free_after is None:
+        return "loud"
+    if free_after < emergency_floor:
+        return "loud"
+    if errors and free_after < floor:
+        return "loud"
+    if free_after < floor:
+        return "log"
+    if errors:
+        return "log"
+    return "none"
 
 
 def _disk_free(path=DATA_VOL):
@@ -162,20 +213,32 @@ def _reclaim_file_history(dry_run):
     return freed
 
 
-def _reclaim_dir_cmd(size_dir, cmd):
+def _reclaim_dir_cmd(size_dir, cmd, *, measure_via_disk_free=False):
     """Generic cache reclaimer: dry-run reports the dir's current size (would-free);
-    apply runs `cmd` and returns the size delta (best-effort)."""
+    apply runs `cmd` and returns the size delta (best-effort). Set `measure_via_disk_free`
+    when the command's real effect isn't confined to `size_dir` — e.g. `brew cleanup -s`
+    also prunes OLD Cellar formula versions, not just the download cache, so measuring only
+    `size_dir` (the cache) silently reports ~0GB freed even when real disk was reclaimed
+    (bus #73431: a manual `brew cleanup -s` freed ~1GB that the automated reclaimer's own
+    per-tick log kept showing as 0GB — misleading attribution, not a missing/soft command;
+    the hard variant was already in use). Dry-run is unaffected (no side effect to measure a
+    delta around, so it still uses the cheap dir-size estimate)."""
     def _apply(dry_run):
-        before = _dir_size(pathlib.Path(size_dir)) if size_dir else 0
+        before_dir = _dir_size(pathlib.Path(size_dir)) if size_dir else 0
         if dry_run:
-            return before
+            return before_dir
+        before_disk = _disk_free() if measure_via_disk_free else None
         try:
             subprocess.run(cmd, capture_output=True, text=True, timeout=120,
                            env=_augmented_env())
         except (subprocess.TimeoutExpired, OSError) as e:
             raise RuntimeError(f"{cmd[0]} failed: {e}") from e
-        after = _dir_size(pathlib.Path(size_dir)) if size_dir else 0
-        return max(0, before - after)
+        if measure_via_disk_free and before_disk is not None:
+            after_disk = _disk_free()
+            if after_disk is not None:
+                return max(0, after_disk - before_disk)
+        after_dir = _dir_size(pathlib.Path(size_dir)) if size_dir else 0
+        return max(0, before_dir - after_dir)
     return _apply
 
 
@@ -231,6 +294,148 @@ def _augmented_env():
     return env
 
 
+# ---- Chrome cache reclaimer -----------------------------------------------------
+# Operator-authorized 2026-10-14 (Musa: "go ahead ... add it to the list of clearable
+# things in future so you never have to ask"). ALL targets regenerate: HTTP/code/GPU/
+# shader caches, Service Worker CacheStorage/ScriptCache, and OptGuideOnDeviceModel
+# (Chrome re-downloads the on-device model on demand). NEVER touches profile/credential
+# data (Cookies, Login Data, History, Bookmarks, Preferences) — only the cache whitelist.
+# The _lsof_in_use guard skips any dir a running Chrome holds open, so this is safe even
+# during a live fleet browser task.
+_CHROME_ROOT = pathlib.Path(os.path.expanduser(
+    "~/Library/Application Support/Google/Chrome"))
+_CHROME_PROFILE_CACHE_SUBPATHS = [
+    "Cache", "Code Cache", "GPUCache", "GrShaderCache", "ShaderCache",
+    "DawnGraphiteCache", "DawnWebGPUCache",
+    "Service Worker/CacheStorage", "Service Worker/ScriptCache",
+]
+_CHROME_TOPLEVEL_CACHES = [
+    "OptGuideOnDeviceModel", "ShaderCache", "GrShaderCache", "GraphiteDawnCache",
+    "component_crx_cache",
+]
+
+
+def chrome_cache_candidates():
+    """Regenerable Chrome cache dirs (per-profile + top-level); never profile/credential
+    data. Empty list if Chrome isn't installed. fs read only."""
+    if not _CHROME_ROOT.is_dir():
+        return []
+    out = []
+    for prof in _CHROME_ROOT.iterdir():
+        if not prof.is_dir():
+            continue
+        if prof.name in ("Default", "Guest Profile", "System Profile") \
+                or prof.name.startswith("Profile"):
+            for sub in _CHROME_PROFILE_CACHE_SUBPATHS:
+                d = prof / sub
+                if d.is_dir():
+                    out.append(d)
+    for name in _CHROME_TOPLEVEL_CACHES:
+        d = _CHROME_ROOT / name
+        if d.is_dir():
+            out.append(d)
+    return out
+
+
+def _reclaim_chrome_cache(dry_run):
+    """Clear regenerable Chrome caches. Mirrors _reclaim_next_cache's lsof-guarded rmtree
+    so a running Chrome's open cache dirs are skipped (never corrupt a live session)."""
+    freed = 0
+    for d in chrome_cache_candidates():
+        sz = _dir_size(d)
+        if dry_run:
+            freed += sz
+            continue
+        if _lsof_in_use(d):  # KILL-TIME re-verify — skip if Chrome is using it
+            log(f"    chrome-cache {d} in use (lsof) — skipped")
+            continue
+        try:
+            shutil.rmtree(d)
+            freed += sz
+        except OSError as e:
+            raise RuntimeError(f"rmtree {d} failed: {e}") from e
+    return freed
+
+
+def daily_backup_candidates(root, keep_n):
+    """Dirs under `root` sorted by name (date-named -> lexicographic == chronological);
+    return all but the newest `keep_n`. Pure -- listdir only, no deletion. Missing root
+    or fewer than `keep_n` dirs -> empty (nothing to prune)."""
+    root = pathlib.Path(root)
+    try:
+        entries = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name)
+    except OSError:
+        return []
+    if keep_n <= 0 or len(entries) <= keep_n:
+        return [] if keep_n > 0 else entries
+    return entries[:-keep_n]
+
+
+def _reclaim_daily_backups(dry_run):
+    """Prune the oldest daily backup dirs beyond BACKUP_KEEP_DAYS. Mirrors next-cache's
+    lsof-guarded rmtree: an active backup write holds its dir open, so a lsof hit skips it
+    rather than corrupting an in-progress snapshot."""
+    freed = 0
+    for d in daily_backup_candidates(BACKUPS_ROOT, BACKUP_KEEP_DAYS):
+        sz = _dir_size(d)
+        if dry_run:
+            freed += sz
+            continue
+        if _lsof_in_use(d):
+            log(f"    daily-backup {d} in use (lsof) — skipped")
+            continue
+        try:
+            shutil.rmtree(d)
+            freed += sz
+        except OSError as e:
+            raise RuntimeError(f"rmtree {d} failed: {e}") from e
+    return freed
+
+
+def library_caches_candidates(root):
+    """Top-level entries under `root` (~/Library/Caches). Pure -- listdir only. Missing
+    root -> empty."""
+    root = pathlib.Path(root)
+    try:
+        return list(root.iterdir())
+    except OSError:
+        return []
+
+
+def _reclaim_library_caches(dry_run):
+    """Clear ~/Library/Caches entries (Apple-blessed regenerable, per orch-console's own
+    dig, bus #73708). Several subdirs are TCC/SIP-protected even for the owning user
+    (CloudKit, HomeKit, Safari, etc) -- a PermissionError on one entry is EXPECTED. Others
+    are actively written to by their owning process between our listing and our rmtree
+    (bus #73901 live incident: com.apple.python raised OSError(ENOTEMPTY) from a TOCTOU
+    race, not a permission error) -- Library/Caches entries are known-flaky in BOTH ways,
+    so UNLIKE the other reclaimers' raise-on-OSError, ANY OSError here is logged + skipped
+    WITHOUT raising: one stubborn/racing cache dir must never abort the whole reclaim pass
+    or escalate into a false disk-emergency page (see page_severity's error/floor split)."""
+    freed = 0
+    for d in library_caches_candidates(LIBRARY_CACHES_ROOT):
+        try:
+            sz = _dir_size(d) if d.is_dir() else d.stat().st_size
+        except OSError:
+            continue
+        if dry_run:
+            freed += sz
+            continue
+        if d.is_dir() and _lsof_in_use(d):
+            log(f"    library-caches {d} in use (lsof) — skipped")
+            continue
+        try:
+            if d.is_dir():
+                shutil.rmtree(d)
+            else:
+                d.unlink()
+            freed += sz
+        except OSError as e:
+            log(f"    library-caches {d} skipped ({type(e).__name__}, protected/racing): {e}")
+            continue
+    return freed
+
+
 def build_reclaimers():
     """Ordered safest/highest-known-yield first. npm/brew reclaimers are added only
     when the tool resolves to an absolute path — a missing tool is SKIPPED LOUDLY
@@ -254,27 +459,68 @@ def build_reclaimers():
         except (subprocess.TimeoutExpired, OSError):
             brew_cache = None
         reclaimers.append({"name": "brew-cleanup", "apply": _reclaim_dir_cmd(
-            brew_cache, [brew, "cleanup", "-s"])})
+            brew_cache, [brew, "cleanup", "-s"], measure_via_disk_free=True)})
     else:
         log("    brew not found on PATH or in known bin dirs — brew-cleanup reclaimer unavailable")
 
     reclaimers.append({"name": "next-cache", "apply": _reclaim_next_cache})
+    reclaimers.append({"name": "chrome-cache", "apply": _reclaim_chrome_cache})
+    reclaimers.append({"name": "library-caches", "apply": _reclaim_library_caches})
+    reclaimers.append({"name": "daily-backups", "apply": _reclaim_daily_backups})
     return reclaimers
 
 
 # ---- fail-loud page ------------------------------------------------------------
-def _page(free_before, free_after, summary):
+def _page(free_before, free_after, summary, *, loud=True):
+    """loud=True: P1 blocker bus row, console wakes (genuine emergency, i.e. a floor breach,
+    optionally combined with a reclaimer error). loud=False: LOG-FILE ONLY (bus #73447 — a
+    follow-up to #73430/PR#466; further decoupled from reclaimer errors per bus #73901) — no
+    bus row at all. orch-console clarified that the console's reconcile-doorbell rings on ANY
+    new unread row regardless of priority, so even a P3 bus row in the managed band was still
+    indefinite console churn, just lower-stakes churn than P1. Two distinct loud=False cases
+    now share this path: (a) the managed band (a real floor breach, already diagnosed
+    structural with no new action), and (b) a HEALTHY disk where a reclaimer merely errored
+    (a tooling bug, not a disk emergency — see page_severity). Both stay ENTIRELY local: the
+    stderr banner (which lands in the launchd log) is the full record, never silent, just
+    never a bus row. <4GB emergency, or any error COMBINED with an actual floor breach, still
+    always gets the bus row via loud=True."""
+    if not loud:
+        healthy = free_after is not None and free_after >= FLOOR
+        if healthy:
+            banner = ("⚪ disk auto-remediation: disk HEALTHY, reclaimer error logged not paged "
+                       "(log-only, no bus row)\n  "
+                       f"free before={free_before // GB if free_before else '?'}GB "
+                       f"after={free_after // GB if free_after else '?'}GB (floor {FLOOR // GB}GB) "
+                       "— tooling bug, not a disk emergency (bus #73901).")
+        else:
+            banner = ("⚪ disk auto-remediation: managed band, no new action (log-only, no bus row)\n  "
+                       f"free before={free_before // GB if free_before else '?'}GB "
+                       f"after={free_after // GB if free_after else '?'}GB (floor {FLOOR // GB}GB, "
+                       f"emergency {EMERGENCY_FLOOR // GB}GB) — already diagnosed structural "
+                       f"(bus #73430/#73447), no new action.")
+        for r in summary["results"]:
+            banner += f"\n    reclaimed {r['name']}: ~{r['freed'] // GB}GB"
+        for e in summary["errors"]:
+            banner += f"\n    🔴 {e['name']} FAILED: {e['error']}"
+        print(banner, file=sys.stderr, flush=True)
+        return
+    header = "🔴 DISK AUTO-REMEDIATION INSUFFICIENT"
+    tldr = (f"TL;DR: disk auto-remediation ran but free is STILL below the "
+            f"{FLOOR // GB}GB floor (or a reclaimer errored) — needs a look before the "
+            f"fleet crashes on [Errno 28].")
+    mtype, priority = "blocker", "P1"
+    subject = "disk auto-remediation insufficient — free still below floor"
     lines = [
-        f"TL;DR: disk auto-remediation ran but free is STILL below the {FLOOR // GB}GB floor "
-        f"(or a reclaimer errored) — needs a look before the fleet crashes on [Errno 28].",
+        tldr,
         f"free before={free_before // GB if free_before else '?'}GB "
-        f"after={free_after // GB if free_after else '?'}GB (floor {FLOOR // GB}GB).",
+        f"after={free_after // GB if free_after else '?'}GB (floor {FLOOR // GB}GB, "
+        f"emergency {EMERGENCY_FLOOR // GB}GB).",
     ]
     for r in summary["results"]:
         lines.append(f"  reclaimed {r['name']}: ~{r['freed'] // GB}GB")
     for e in summary["errors"]:
         lines.append(f"  🔴 {e['name']} FAILED: {e['error']}")
-    banner = "🔴 DISK AUTO-REMEDIATION INSUFFICIENT\n  " + "\n  ".join(lines)
+    banner = header + "\n  " + "\n  ".join(lines)
     print(banner, file=sys.stderr, flush=True)
     try:
         import psycopg2
@@ -284,9 +530,8 @@ def _page(free_before, free_after, summary):
             cur = c.cursor()
             cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
             cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-                           VALUES ('cc-fleet-health','orch-console','blocker','P1',
-                           'disk auto-remediation insufficient — free still below floor',%s)""",
-                        ("\n".join(lines),))
+                           VALUES ('cc-fleet-health','orch-console',%s,%s,%s,%s)""",
+                        (mtype, priority, subject, "\n".join(lines)))
             c.commit()
     except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already stands
         print(f"[disk-autoremediate] WARN bus-page failed ({e}); banner stands", file=sys.stderr)
@@ -302,7 +547,8 @@ def main(argv=None) -> int:
         return 1
     tier = decide(free, remediate_under=REMEDIATE_UNDER, floor=FLOOR)
     log(f"[disk-autoremediate {mode}] free={free // GB}GB tier={tier} "
-        f"(remediate<{REMEDIATE_UNDER // GB}GB floor={FLOOR // GB}GB)")
+        f"(remediate<{REMEDIATE_UNDER // GB}GB floor={FLOOR // GB}GB "
+        f"emergency={EMERGENCY_FLOOR // GB}GB)")
     if tier == "ok":
         return 0
     summary = run_reclaimers(build_reclaimers(), free_probe=_disk_free,
@@ -312,9 +558,12 @@ def main(argv=None) -> int:
     log(f"[disk-autoremediate {mode}] {'would free' if not apply else 'freed'} "
         f"~{total_freed // GB}GB total; free after={free_after // GB if free_after else '?'}GB; "
         f"errors={len(summary['errors'])}")
-    # Fail-loud PAGE (apply mode only): still below floor after reclaim, or any reclaimer errored.
-    if apply and ((free_after is not None and free_after < FLOOR) or summary["errors"]):
-        _page(free, free_after, summary)
+    # Fail-loud PAGE (apply mode only) — severity-gated per bus #73430 (see page_severity doc).
+    if apply:
+        severity = page_severity(free_after, summary["errors"],
+                                 floor=FLOOR, emergency_floor=EMERGENCY_FLOOR)
+        if severity != "none":
+            _page(free, free_after, summary, loud=(severity == "loud"))
     return 0
 
 

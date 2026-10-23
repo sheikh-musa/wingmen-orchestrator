@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- hub-self-recovery-staleness-watchdog (DETECT-ONLY). hc#175 / CAI-RESP-1439
+       pre-arming precondition: pages if hub_self_recovery_settings.last_tick_at
+       (the gzb-local ~2min wedge-recovery timer's own liveness stamp) goes stale
+       past ~8min, or is NULL. A pure remote DB-read — runs on the Mini, never
+       touches gzb/the hub's pane. Armed by default (HSR_STALENESS_WATCHDOG_ENABLED
+       defaults to 1 in the script itself) — a false-positive page here costs a
+       cheap P2, so there is no reason to ship this one review-gated/inert like a
+       pane-facing monitor. Does NOT arm HSR_MODE=act or touch hub_self_recovery.py's
+       decision core in any way; purely informs orch-console + cc-fleet-health. -->
+  <key>Label</key>
+  <string>dev.wingmen.hub-self-recovery-staleness-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; exec .venv/bin/python3 scripts/hub_self_recovery_staleness_watchdog.py</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>120</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/hub_self_recovery_staleness_watchdog.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/hub_self_recovery_staleness_watchdog.log</string>
+</dict>
+</plist>

@@ -37,6 +37,7 @@ _TRACKED_VARS = (
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
     "CLAUDE_CODE_SUBAGENT_MODEL",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE",
@@ -153,7 +154,10 @@ def test_glm_routes_to_zai_with_vault_key(tmp_path, glm_fetch):
     assert env["ANTHROPIC_AUTH_TOKEN"] == "glm-secret-key"
     assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5"
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5"
-    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"  # documented small default
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-5.3"  # small default = glm-5.3 (1M), NOT glm-4.7 (131K) — op#29665
+    # BOTH small-slot names route to $small: newer CC reads HAIKU, older reads
+    # the legacy SMALL_FAST (bus #65856 — unset SMALL_FAST wedged substrate-1).
+    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "glm-5.3"
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5"
     assert env["PROVIDER_ROUTING_LABEL"] == "z.ai GLM"
     # Anthropic creds scrubbed, never leaked to a non-Anthropic provider. A
@@ -165,10 +169,27 @@ def test_glm_routes_to_zai_with_vault_key(tmp_path, glm_fetch):
     assert env["CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE"] == ""
 
 
+def test_glm53_resolves_main_and_small_both_to_glm53(tmp_path, glm_fetch):
+    # op#29665 / #65656: a lane pointed at glm-5.3 must route BOTH the main slot
+    # (opus/sonnet/subagent) AND the small/fast slot (haiku) to glm-5.3. The small
+    # slot is what claude-code uses for summarisation/auto-compaction; if it stayed
+    # the 131K glm-4.7, compaction would overflow and wedge ("Not logged in") even
+    # with a 1M main pointer. glm-5.3 is 1M on the Coding Plan, so no cliff.
+    rc, env, _ = _run("glm-5.3", str(tmp_path), glm_fetch)
+    assert rc == 0
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-5.3"   # the compaction small slot — MUST be 1M too
+    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "glm-5.3"       # legacy name for the same slot
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.3"
+
+
 def test_glm_small_model_env_override_honored(tmp_path, glm_fetch):
     rc, env, _ = _run("glm-5", str(tmp_path), glm_fetch, pre_env={"GLM_SMALL_MODEL": "glm-4.6-custom"})
     assert rc == 0
     assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.6-custom"
+    # the override drives BOTH small-slot names, not just the newer one
+    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "glm-4.6-custom"
 
 
 def test_glm_scrubs_preexisting_anthropic_creds(tmp_path, glm_fetch):
@@ -320,3 +341,123 @@ def test_one_providers_vault_outage_does_not_affect_another(tmp_path):
     rc, env, _ = _run("deepseek-v4-pro", str(tmp_path), fetch)
     assert rc == 1
     assert env["ANTHROPIC_AUTH_TOKEN"] == ""
+
+
+# ── GUARD: every model-slot var claude-code reads must be ROUTED ──────────────
+# The env vars claude-code consults to pick which model to call for each slot.
+# If a future CC version adds a NEW slot var, add it here AND provider_routing.sh
+# must export it — otherwise the new slot silently falls back to an UNROUTED
+# Claude model id, called against the provider base with no Anthropic creds ->
+# the "Not logged in" wedge (bus #65856). Keep this in sync with claude-code's
+# documented model-slot env vars; this test is the fall-through tripwire.
+_MODEL_SLOT_VARS = (
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",   # newer CC: small/background slot
+    "ANTHROPIC_SMALL_FAST_MODEL",      # legacy name for the same small/background slot
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+)
+
+
+def test_every_model_slot_var_is_routed_on_a_native_arm(tmp_path, glm_fetch):
+    """No model slot may fall through to an unrouted Claude id on a routed lane."""
+    rc, env, _ = _run("glm-5.3", str(tmp_path), glm_fetch)
+    assert rc == 0
+    for v in _MODEL_SLOT_VARS:
+        assert env.get(v), (
+            f"model-slot var {v} is UNSET on a native (glm) arm -> claude-code would "
+            f"fall back to an unrouted Claude model id and wedge 'Not logged in'"
+        )
+        assert env[v].startswith("glm-"), f"{v}={env[v]!r} is not a routed glm model id"
+
+
+# ── GUARD: the routed vars must SURVIVE the env -i least-privilege allow-list ──
+# The op#29348 part-b launcher (launch_dangerous_cc.sh) exec's claude via
+# `env -i` + scripts/lib/lane_env_allowlist.sh, so provider_routing's exports
+# reach claude ONLY if the allow-list passes them. Before this fix the allow-list
+# listed NONE of them -> a glm lane received `--model glm-5.3` with no base_url /
+# no auth token / no routed slots -> "Not logged in" on the first turn
+# (substrate-1, bus #65856/#65890). This test ties the two libs together exactly
+# as the launcher does; the subprocess strips every VALUE in-pipeline (sed), so
+# only NAMES ever reach captured output — no secret can leak.
+_ALLOWLIST = os.path.join(_ROOT, "scripts", "lib", "lane_env_allowlist.sh")
+_ROUTED_MUST_SURVIVE = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+)
+
+
+def test_routed_vars_survive_the_env_i_allowlist_scrub(tmp_path, glm_fetch):
+    env = dict(os.environ)
+    for k in _TRACKED_VARS + _OVERRIDE_ENV_VARS:
+        env.pop(k, None)
+    script = (
+        f'export ORCH_DIR="{_ROOT}"\n'
+        f'source "{_LIB}"\n'
+        f'source "{_ALLOWLIST}"\n'
+        f'apply_provider_routing "glm-5.3" "{_ROOT}" "{sys.executable}" "test-agent" "{glm_fetch}"\n'
+        # Emit only the NAMES the launcher would pass through env -i. The sed
+        # strips every value INSIDE the subprocess, so no secret reaches stdout.
+        f'lane_env_scrubbed_pairs0 "test-agent" | tr "\\0" "\\n" | sed "s/=.*//"\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, cwd=_ROOT, env=env)
+    survivors = {ln for ln in out.stdout.splitlines() if ln}
+    missing = [v for v in _ROUTED_MUST_SURVIVE if v not in survivors]
+    routed_survivors = sorted(s for s in survivors if "ANTHROPIC" in s or "MODEL" in s)
+    assert not missing, (
+        f"these provider-routing vars are DROPPED by the env -i allow-list and never reach "
+        f"claude: {missing} -> add them to scripts/lib/lane_env_allowlist.sh. "
+        f"(routed NAMES that did survive: {routed_survivors}; stderr={out.stderr!r})"
+    )
+
+
+# ── CAI-1225 / TENANT-RESIDENCY-001: a provider-routed boot drops client-silo write-DSN
+#    creds, but KEEPS DATABASE_URL (the shared substrate/bus DSN) ─────────────────────
+_SILO_VARS = ("GOUMLYNE_DATABASE_URL", "IHSANOS_PROD_DATABASE_URL", "WRITE_DSN_ALLOWED")
+_SEED = {"GOUMLYNE_DATABASE_URL": "x", "IHSANOS_PROD_DATABASE_URL": "y",
+         "WRITE_DSN_ALLOWED": "1", "DATABASE_URL": "z"}
+
+
+def _run_silo(resolved_model, orch_dir, fetch_script, pre_env):
+    """Like _run but seeds + reads back the client-silo vars + DATABASE_URL via ${VAR+SET}
+    (SET even when empty, "" when truly unset) so we can assert unset-vs-kept precisely."""
+    keys = _SILO_VARS + ("DATABASE_URL",)
+    env = dict(os.environ)
+    for k in _TRACKED_VARS + _OVERRIDE_ENV_VARS + keys:
+        env.pop(k, None)
+    for k, v in pre_env.items():
+        env[k] = v
+    dump = " ".join(f'"${{{v}+SET}}"' for v in keys)
+    script = (
+        f'source "{_LIB}"\n'
+        f'apply_provider_routing "{resolved_model}" "{orch_dir}" "{sys.executable}" "test-agent" "{fetch_script}"\n'
+        'echo "RC=$?"\n'
+        f'printf "%s\\x1f" {dump}\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, cwd=_ROOT, env=env)
+    rc_line, _, rest = out.stdout.partition("\n")
+    rc = int(rc_line.split("=", 1)[1])
+    vals = rest.rstrip("\n").split("\x1f")[:-1]
+    assert len(vals) == len(keys), (vals, out.stdout, out.stderr)
+    return rc, {k: (v == "SET") for k, v in zip(keys, vals)}, out.stderr
+
+
+def test_glm_route_strips_client_silo_creds_keeps_database_url(tmp_path, glm_fetch):
+    rc, is_set, stderr = _run_silo("glm-5.3", str(tmp_path), glm_fetch, _SEED)
+    assert rc == 0, stderr
+    assert is_set["GOUMLYNE_DATABASE_URL"] is False, "goumlyne silo DSN must be stripped on a provider route"
+    assert is_set["IHSANOS_PROD_DATABASE_URL"] is False, "ihsanos silo DSN must be stripped on a provider route"
+    assert is_set["WRITE_DSN_ALLOWED"] is False, "write-DSN allow-flag must be stripped on a provider route"
+    assert is_set["DATABASE_URL"] is True, "DATABASE_URL (bus/substrate) must be KEPT — not a client silo"
+
+
+def test_claude_noop_keeps_client_silo_creds(tmp_path, failing_fetch):
+    rc, is_set, stderr = _run_silo("claude-opus-4-8", str(tmp_path), failing_fetch, _SEED)
+    assert rc == 0, stderr
+    assert all(is_set[k] for k in _SILO_VARS), "no-op (claude-*) path must leave silo creds untouched"
+    assert is_set["DATABASE_URL"] is True

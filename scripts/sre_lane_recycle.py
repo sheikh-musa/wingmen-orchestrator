@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -37,13 +38,17 @@ from pathlib import Path
 
 _ORCH_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ORCH_DIR / "scripts" / "lib"))
+sys.path.insert(0, str(_ORCH_DIR / "scripts"))
 import fleet_health_boundaries as fhb  # noqa: E402
 import handoff_compaction_policy as hcp  # noqa: E402  (SSOT staged handoff compaction)
 import context_truth as _ct  # noqa: E402  (Gap-1: ONE gauge source, shared with the dead-man)
 import handoff_find as _hf  # noqa: E402  (ONE newest-handoff definition, CAI-1392 C)
+import lane_recycle_deadman as _lrd  # noqa: E402  (bus #74293 facet 13: the sibling-ambiguous pane fallback)
+import hub_reach  # noqa: E402  (bus #74293 FIX 2: the shared gzb ssh-alias resolver)
 
 TMUX = os.environ.get("SRE_TMUX_BIN", "/usr/local/bin/tmux")
 _TMUX_TIMEOUT = 5
+_SSH_TIMEOUT = int(os.environ.get("SRE_SSH_TIMEOUT", "10"))
 
 # Spinner glyphs Claude-Code shows on its ACTIVE status line (mirrors panes.py).
 _SPINNER_GLYPHS = "✻✳✶✷✸✹✺✽❋⚹"
@@ -64,19 +69,32 @@ _CTX_FRESH_MIN = 30  # minutes: telemetry older than this can't prove current bl
 
 
 # ── gate computation — mechanical, fail-closed ────────────────────────────────
-def _raw_pane(session: str) -> "str | None":
+def _raw_pane(session: str, ssh_target: "str | None" = None) -> "str | None":
+    """The lane's pane text. LOCAL (ssh_target=None): the direct tmux capture-pane, unchanged.
+    REMOTE (ssh_target set, bus #74293 FIX 2): the SAME capture-pane invocation, read-only, run
+    over `ssh <ssh_target>` instead — the identical primitive hub_reach.py already documents for
+    the hub's own gzb reach ('ssh gzb tmux capture-pane -t orch -p'), here parameterized by the
+    lane's own session instead of the hub's. Any failure (unreachable host, dead ssh, no such
+    session) -> None, the same fail-closed shape as a local capture failure."""
     try:
-        r = subprocess.run([TMUX, "capture-pane", "-t", f"={session}:0.0", "-p", "-S", "-200"],
-                           capture_output=True, text=True, timeout=_TMUX_TIMEOUT)
+        if ssh_target:
+            remote_cmd = f"tmux capture-pane -t {shlex.quote('=' + session + ':0.0')} -p -S -200"
+            r = subprocess.run(["ssh", ssh_target, remote_cmd],
+                               capture_output=True, text=True, timeout=_SSH_TIMEOUT)
+        else:
+            r = subprocess.run([TMUX, "capture-pane", "-t", f"={session}:0.0", "-p", "-S", "-200"],
+                               capture_output=True, text=True, timeout=_TMUX_TIMEOUT)
         return r.stdout if r.returncode == 0 else None
     except Exception:
         return None
 
 
-def gate_idle(session: str) -> bool:
+def gate_idle(session: str, ssh_target: "str | None" = None) -> bool:
     """True iff the lane's pane is present AND not actively generating a turn.
-    Fail-closed: an unreadable pane (session gone, capture failed) is NOT idle."""
-    raw = _raw_pane(session)
+    Fail-closed: an unreadable pane (session gone, capture failed) is NOT idle.
+    ssh_target (bus #74293 FIX 2): when set, the pane is read cross-host (read-only ssh)
+    instead of a local tmux capture — see _raw_pane."""
+    raw = _raw_pane(session, ssh_target=ssh_target)
     if raw is None:
         return False
     lines = [ln for ln in raw.splitlines() if ln.strip()]
@@ -92,12 +110,27 @@ def gate_idle(session: str) -> bool:
     return True
 
 
-def gate_git_clean(worktree_path: "str | None") -> bool:
+def gate_git_clean(worktree_path: "str | None", ssh_target: "str | None" = None) -> bool:
     """True iff the lane's worktree has NO uncommitted changes. Fail-closed: a
     missing/unreadable worktree, or any git error, is NOT clean (a reset there
-    could discard uncommitted work)."""
+    could discard uncommitted work).
+
+    ssh_target (bus #74293 FIX 2): when set, worktree_path lives on the REMOTE host — status is
+    read via read-only ssh instead of a local os.path/git check (a local isdir check on a
+    remote-only path would always fail closed, but for the wrong reason; the ssh path lets this
+    gate actually PROVE remote cleanliness instead of just always refusing)."""
     if not worktree_path:
         return False
+    if ssh_target:
+        try:
+            remote_cmd = f"git -C {shlex.quote(worktree_path)} status --porcelain"
+            r = subprocess.run(["ssh", ssh_target, remote_cmd],
+                               capture_output=True, text=True, timeout=_SSH_TIMEOUT)
+            if r.returncode != 0:
+                return False
+            return r.stdout.strip() == ""
+        except Exception:
+            return False
     wt = os.path.expanduser(worktree_path)
     if not os.path.isdir(wt):
         return False
@@ -150,11 +183,21 @@ def _newest_handoff_mtime(base_agent_id: str, notes: "str | None") -> "float | N
         return None
 
 
-def gate_fresh_handoff(base_agent_id: str, notes: "str | None", last_action_epoch: "float | None") -> bool:
+def gate_fresh_handoff(base_agent_id: str, notes: "str | None", last_action_epoch: "float | None",
+                       sibling_ambiguous: bool = False) -> bool:
     """cond 2, LOAD-BEARING. True iff a handoff exists AND was written at/after
     the lane's last material action — so a /clear reconstitutes losslessly.
     Fail-closed: no handoff, or an indeterminable last action, or a handoff older
-    than the last action -> False (a stale handoff means the reset loses work)."""
+    than the last action -> False (a stale handoff means the reset loses work).
+
+    sibling_ambiguous (bus #74293, facet 13): handoff_find's glob matches purely on the
+    base's short name -- it carries NO per-instance marker at all. When >1 live session
+    shares this base, ANY sibling's freshest handoff write reads as fresh to EVERY sibling,
+    so this gate cannot prove the handoff belongs to THIS instance -> fail closed, same
+    '>1 live sibling -> unattributable' shape as gate_context_bloat's pane fallback (though
+    here there is no session-specific signal to fall back to, so the answer is simply False)."""
+    if sibling_ambiguous:
+        return False
     ho = _newest_handoff_mtime(base_agent_id, notes)
     if ho is None:
         return False
@@ -163,14 +206,29 @@ def gate_fresh_handoff(base_agent_id: str, notes: "str | None", last_action_epoc
     return ho >= last_action_epoch
 
 
-def last_material_action_epoch(conn, base_agent_id: str) -> "float | None":
+def last_material_action_epoch(conn, base_agent_id: str, session: "str | None" = None,
+                               sibling_ambiguous: bool = False) -> "float | None":
     """The lane's last material action, mechanically: the timestamp of its most
-    recent bus message (agent_messages.from_agent = base). None if it never
-    posted (then fresh_handoff fails closed — we can't prove the handoff is
-    current)."""
+    recent bus message. None if it never posted (then fresh_handoff fails closed —
+    we can't prove the handoff is current).
+
+    sibling_ambiguous (bus #74293, facet 13 sub-fix 2, unblocked by PR #324's sub_tag
+    column): a bare from_agent=base query is unattributable across siblings -- ANY
+    sibling's bus post would count toward EVERY sibling's 'last material action', the
+    same class of gap gate_context_bloat/gate_fresh_handoff already closed. Resolves
+    THIS session's own instance id via instance_id_for_session (the same resolver
+    pick_instance_id/the nudge path already use) and filters on sub_tag instead. A
+    session with no live agent_status row falls back to the bare base — which can
+    NEVER equal a real sub_tag (the DB CHECK requires sub_tag strictly longer than
+    from_agent, 'base-something') — so an unattributable session naturally finds zero
+    rows -> None, fail-closed, same as today's 'never posted' case."""
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT max(created_at) FROM agent_messages WHERE from_agent = %s", [base_agent_id])
+            if sibling_ambiguous:
+                aid = instance_id_for_session(cur, session, base_agent_id)
+                cur.execute("SELECT max(created_at) FROM agent_messages WHERE sub_tag = %s", [aid])
+            else:
+                cur.execute("SELECT max(created_at) FROM agent_messages WHERE from_agent = %s", [base_agent_id])
             row = cur.fetchone()
         ts = row[0] if row else None
         return ts.timestamp() if ts is not None else None
@@ -178,7 +236,23 @@ def last_material_action_epoch(conn, base_agent_id: str) -> "float | None":
         return None
 
 
-def latest_context_frac(conn, base_agent_id: str, window: int = _CTX_WINDOW) -> "float | None":
+def _pane_only_frac(session: str, window: int) -> "float | None":
+    """PANE-only context fraction for `session` -- the sibling-ambiguous fallback (bus #74293,
+    facet 13: cc_session_costs.cc_identity is written as the bare base for EVERY sibling, the
+    same structural gap lane_proactive_recycle_nudge._gauge_for_lane already found for the
+    nudge tier -- a multi-sibling base's 'freshest row' could belong to ANY sibling, not
+    necessarily this session's). No gauge input reaches resolve_lane_pct here at all -- a
+    sibling-ambiguous gauge must never leak in even as a tiebreak. The pane IS session-specific
+    (a real tmux capture-pane on the exact session string) so it stays trustworthy when the
+    gauge can't be; if the pane is also blind, this correctly returns None (unknown, not low)."""
+    pane_pct, pane_hint_k = _lrd._pane(session)
+    known, pct, _last_known, _reason = _lrd.resolve_lane_pct(
+        gauge_tokens=None, gauge_age_s=None, pane_pct=pane_pct, pane_hint_k=pane_hint_k, window=window)
+    return (pct / 100.0) if known and pct is not None else None
+
+
+def latest_context_frac(conn, base_agent_id: str, window: int = _CTX_WINDOW,
+                        session: "str | None" = None) -> "float | None":
     """Latest context fraction (0..1) for a lane, or None when it CANNOT be established.
 
     Gap-1 resolution (sre_lane_recycle.py:219, bus 37752): the measurable-or-not DECISION now
@@ -192,9 +266,20 @@ def latest_context_frac(conn, base_agent_id: str, window: int = _CTX_WINDOW) -> 
 
     op#14565 is preserved: freshness keys on COALESCE(ended_at, created_at) (the last-write time
     the auto-writer advances), so a long-lived bloated-but-un-recycled lane (old created_at, fresh
-    ended_at) still reads its bloat rather than falling to None."""
+    ended_at) still reads its bloat rather than falling to None.
+
+    `session` (bus #74293, facet 13): when >1 live tmux session shares this base, the
+    cc_session_costs row is UNATTRIBUTABLE -- it could belong to ANY sibling (cc_identity is
+    written as the bare base for every sibling, confirmed the same way
+    lane_proactive_recycle_nudge._gauge_for_lane found it for the nudge tier). Rather than trust
+    a row that might describe a different sibling's context entirely, fall back to a
+    session-specific pane probe (_pane_only_frac) -- same '>1 live sibling -> force
+    unattributable, re-measure via the pane' shape _gauge_for_lane already uses. A caller that
+    omits `session` (every pre-existing call site) keeps today's base-keyed behaviour exactly."""
     if conn is None:
         return None
+    if session and len(live_sessions_for_base(conn, base_agent_id)) > 1:
+        return _pane_only_frac(session, window)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -218,14 +303,15 @@ def latest_context_frac(conn, base_agent_id: str, window: int = _CTX_WINDOW) -> 
 
 
 def gate_context_bloat(conn, base_agent_id: str, hard: float = _CTX_HARD,
-                       window: int = _CTX_WINDOW) -> bool:
+                       window: int = _CTX_WINDOW, session: "str | None" = None) -> bool:
     """The operator's 'auto-recycle AT 80%' trigger. True iff FRESH telemetry proves
     the lane's context fraction >= hard. Fail-closed: no/stale/untrustworthy
     telemetry -> False (never recycle a lane we can't prove is bloated — that both
     matches 'at 80%' and never spends a lossless-but-not-free reset on a lane still
     early in its window). Reads cc_session_costs today; migrate to the SRE's
-    canonical per-lane pct once Gap-1 lands so the window lives in ONE place."""
-    frac = latest_context_frac(conn, base_agent_id, window)
+    canonical per-lane pct once Gap-1 lands so the window lives in ONE place.
+    `session` is threaded to latest_context_frac's sibling-ambiguity fallback (bus #74293)."""
+    frac = latest_context_frac(conn, base_agent_id, window, session=session)
     if frac is None:
         return False
     return frac >= hard
@@ -250,16 +336,34 @@ def compute_gates(conn, lane_row: dict, handoff_ref_epoch: "float | None" = None
     handoff mtime against. Default None -> use last_material_action_epoch (the autonomous
     detector's 'is an EXISTING handoff current?' question). The DRIVEN checkpoint path passes
     T_nudge instead, so a 'DONE' ack the lane posts AFTER writing its handoff cannot make a
-    genuinely-fresh handoff read as stale."""
+    genuinely-fresh handoff read as stale.
+
+    sibling-ambiguity (bus #74293, facet 13): when conn is available, checks whether >1 live
+    tmux session shares this lane's base -- if so, context_bloat falls back to a
+    session-specific pane probe (gate_context_bloat/latest_context_frac), fresh_handoff fails
+    closed (no per-instance handoff marker exists to fall back to), and (sub-fix 2, unblocked
+    by PR #324's sub_tag column) last_material_action_epoch resolves THIS session's own
+    instance id and filters on sub_tag instead of the unattributable bare base. conn=None
+    (several existing unit tests / the offline self-test) skips the check -- unattributable can
+    only be PROVEN with a DB read, so it defaults to False (today's unchanged single-sibling
+    shape).
+
+    cross-host (bus #74293 FIX 2): lane_row['host'] resolves (via hub_reach.ssh_target_for_host)
+    to an ssh_target for a gzb-hosted lane, threaded into gate_idle/gate_git_clean so DETECTION
+    works cross-host too -- a lane_row with no 'host' key (every pre-existing caller) or a local
+    host resolves to ssh_target=None, i.e. today's unchanged local dispatch."""
     session = lane_row.get("tmux_session") or lane_row.get("lane")
     base = lane_row.get("base_agent_id") or lane_row.get("lane")
+    ssh_target = hub_reach.ssh_target_for_host(lane_row.get("host"))
+    ambiguous = conn is not None and len(live_sessions_for_base(conn, base)) > 1
     ref = handoff_ref_epoch if handoff_ref_epoch is not None \
-        else last_material_action_epoch(conn, base)
+        else last_material_action_epoch(conn, base, session=session, sibling_ambiguous=ambiguous)
     return {
-        "idle": gate_idle(session) if session else False,
-        "git_clean": gate_git_clean(lane_row.get("worktree_path")),
-        "fresh_handoff": gate_fresh_handoff(base, lane_row.get("notes"), ref),
-        "context_bloat": gate_context_bloat(conn, base),
+        "idle": gate_idle(session, ssh_target=ssh_target) if session else False,
+        "git_clean": gate_git_clean(lane_row.get("worktree_path"), ssh_target=ssh_target),
+        "fresh_handoff": gate_fresh_handoff(base, lane_row.get("notes"), ref,
+                                            sibling_ambiguous=ambiguous),
+        "context_bloat": gate_context_bloat(conn, base, session=session),
     }
 
 
@@ -334,36 +438,80 @@ def _self_test() -> int:
     return 1 if fails else 0
 
 
-def discover_lanes(conn, lane: "str | None" = None) -> list:
-    """Enumerate ACTUALLY-RUNNING worker lanes (OPTION 2, CAI-RESP-705): the freshest live
-    instance per base from agent_status, cross-referenced to fleet_lanes ONLY for
+def discover_lanes(conn, lane: "str | None" = None, per_instance: bool = False) -> list:
+    """Enumerate ACTUALLY-RUNNING worker lanes (OPTION 2, CAI-RESP-705): by default, the freshest
+    live instance per base from agent_status, cross-referenced to fleet_lanes ONLY for
     worktree_path/branch/notes. Correct-by-construction: no stale-registry blind spot. An
     unregistered running lane appears but has NO worktree_path -> gate_git_clean fails closed
     (fail-SAFE, not blind). Singletons AND the SRE itself (fhb.SINGLETON_BODIES) are excluded —
     defence-in-depth with assert_sre_never_targets_singleton. `lane` restricts to one
-    fleet_lanes.lane. Shared by the CLI and the checkpoint-recycle driver's entrypoint."""
+    fleet_lanes.lane. Shared by the CLI and the checkpoint-recycle driver's entrypoint.
+
+    LANE/SESSION CONSISTENCY (fixed 2026-10-19, #71678/#71679/#71705): the inner subquery's
+    per-base row picks a fleet_lanes row INDEPENDENTLY via a LATERAL join that prefers the row
+    whose `lane` exactly equals the chosen `tmux_session` (the naming convention this fleet
+    already follows everywhere) before falling back to the old tiebreak (worktree_path-not-null,
+    then lane name alphabetically) -- so a returned row's `lane` and `tmux_session` always
+    describe the SAME instance (confirmed regression: 'cosem-platform-adhoc' text once landed on
+    cc-cosem-platform-3/author, 3x in under an hour, before this fix).
+
+    per_instance (bus #73007/#73009/#73011, cc-fleet-health): default False preserves the
+    original one-row-per-base cardinality (freshest heartbeat wins) EXACTLY, unchanged -- this is
+    what sre_lane_recycle.py's own CLI/checkpoint-recycle driver keeps using, because ITS gates
+    (gate_context_bloat/gate_fresh_handoff/last_material_action_epoch) are base-keyed, not yet
+    sibling-aware (facet 13, not fixed here) -- giving the driver N rows per base today would
+    silently misattribute a bloat/handoff reading across siblings on the live /clear path.
+    per_instance=True returns EVERY live sibling session for a multi-sibling base instead of
+    collapsing to one -- only lane_proactive_recycle_nudge.py and lane_recycle_deadman.py pass
+    this, now that their per-sibling state keying (state_key_for) makes evaluating each sibling
+    independently safe (those two tiers never recycle; they only message).
+
+    `host` (bus #74293 FIX 2): agent_status.host is now selected per row -- the ONLY place a
+    lane_row's host can come from, so compute_gates' cross-host ssh_target resolution and
+    main()'s armed-branch routing both key off THIS column. A row with host=None/unregistered
+    resolves hub_reach.ssh_target_for_host(None) -> None -> today's unchanged local dispatch."""
     singletons = sorted(fhb.SINGLETON_BODIES)
     ph = ",".join(["%s"] * len(singletons))
+    if per_instance:
+        s_subq = ("SELECT base_agent_id, tmux_session, host FROM agent_status "
+                  "WHERE tmux_session IS NOT NULL AND base_agent_id IS NOT NULL "
+                  f"  AND base_agent_id NOT IN ({ph}) "
+                  "  AND last_heartbeat > now() - interval '30 minutes'")
+    else:
+        s_subq = ("SELECT DISTINCT ON (base_agent_id) base_agent_id, tmux_session, host "
+                  "FROM agent_status "
+                  "WHERE tmux_session IS NOT NULL AND base_agent_id IS NOT NULL "
+                  f"  AND base_agent_id NOT IN ({ph}) "
+                  "  AND last_heartbeat > now() - interval '30 minutes' "
+                  "ORDER BY base_agent_id, last_heartbeat DESC")
     q = ("SELECT COALESCE(l.lane, s.base_agent_id) AS lane, "
          "       l.worktree_path, l.branch, s.base_agent_id, l.desired_state, l.notes, "
-         "       s.tmux_session "
-         "FROM (SELECT DISTINCT ON (base_agent_id) base_agent_id, tmux_session "
-         "      FROM agent_status "
-         "      WHERE tmux_session IS NOT NULL AND base_agent_id IS NOT NULL "
-         f"        AND base_agent_id NOT IN ({ph}) "
-         "        AND last_heartbeat > now() - interval '30 minutes' "
-         "      ORDER BY base_agent_id, last_heartbeat DESC) s "
+         "       s.tmux_session, s.host "
+         f"FROM ({s_subq}) s "
          "LEFT JOIN LATERAL (SELECT lane, worktree_path, branch, notes, desired_state "
          "                   FROM fleet_lanes fl WHERE fl.base_agent_id = s.base_agent_id "
-         "                   ORDER BY (worktree_path IS NOT NULL) DESC, lane LIMIT 1) l ON true")
+         "                   ORDER BY (fl.lane = s.tmux_session) DESC, "
+         "                            (worktree_path IS NOT NULL) DESC, lane LIMIT 1) l ON true")
     params: list = list(singletons)
     if lane:
         q += " WHERE COALESCE(l.lane, s.base_agent_id) = %s"; params.append(lane)
-    q += " ORDER BY s.base_agent_id"
+    q += " ORDER BY s.base_agent_id" + (", s.tmux_session" if per_instance else "")
     with conn.cursor() as cur:
         cur.execute(q, params)
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def state_key_for(base_agent_id: str, session: "str | None") -> str:
+    """Per-sibling state-dict key for the nudge/dead-man tiers' persisted episode/sustain timers
+    (bus #73007/#73009/#73011). A multi-sibling base's live sessions must NEVER share one state
+    key: once discover_lanes(per_instance=True) returns N rows for a base, keying state on the
+    bare base lets whichever sibling is processed LAST in a sweep silently overwrite (or pop)
+    the timer an earlier sibling just started -- a genuinely-watching sibling's sustain clock can
+    be erased within the SAME pass by a healthy sibling read right after it. `session` (the live
+    tmux_session, already unique per instance) disambiguates; a missing session (no live
+    candidate to key on) falls back to the bare base -- a safe no-op when there is only one row."""
+    return f"{base_agent_id}::{session}" if session else base_agent_id
 
 
 def live_sessions_for_base(conn, base_agent_id) -> list:
@@ -458,6 +606,66 @@ def apply_lane_scope(lanes: list, exclude_prefixes: list) -> list:
             if not any(str(lr["base_agent_id"]).startswith(p) for p in exclude_prefixes)]
 
 
+_CROSS_HOST_NUDGE_PREFIX = "[sre-cross-host-recycle-nudge]"
+_CROSS_HOST_NUDGE_COOLDOWN_MIN = int(os.environ.get("SRE_CROSS_HOST_NUDGE_COOLDOWN_MIN", "30"))
+
+
+def cross_host_recycle_nudge_message(base: str, session: str, host: str, gates: dict,
+                                     reason: str) -> tuple:
+    """PURE: the (subject, body) of the non-destructive self-recycle nudge sent to a gzb-hosted
+    lane whose gates are confirmed permitted (bus #74293 FIX 2). The FORCING action (checkpoint
+    -> /clear -> reboot) is never driven cross-host — fleet doctrine keeps tmux-WRITE Mini-only
+    (hub_reach.py's own gzb remedy text) — so the lane itself decides and runs self_recycle.sh at
+    its own next seam, mirroring the proven lane_proactive_recycle_nudge.py shape."""
+    subject = (f"{_CROSS_HOST_NUDGE_PREFIX} {base}: confirmed idle+clean+bloated+fresh-handoff "
+              f"on {host} — self-recycle")
+    body = (
+        f"The SRE's CAI-681 gates confirm your lane (session {session}, host {host}) is idle, "
+        f"git-clean, context-bloated, and has a fresh handoff -- {gates}. On a Mini-hosted lane "
+        f"this would now be auto-recycled (checkpoint -> /clear -> reboot from handoff). The SRE "
+        f"cannot drive that cross-host (fleet doctrine keeps tmux-WRITE Mini-only; cross-host "
+        f"reach stays read-only), so YOU decide and act: run "
+        f"`scripts/self_recycle.sh --reset scripts/reset_lane.sh --handoff <your-handoff-path>` "
+        f"at your own next seam (your existing handoff already reads as fresh, so a bare "
+        f"self_recycle.sh with that path should be lossless). Reason: {reason}"
+    )
+    return subject, body
+
+
+def _cross_host_nudge_recently(conn, base: str,
+                               cooldown_min: int = _CROSS_HOST_NUDGE_COOLDOWN_MIN) -> bool:
+    """True iff a cross-host nudge was already sent to `base` within the cooldown window —
+    dedup against the 5-minute launchd cadence (dev.wingmen.sre-lane-recycle.plist) so a
+    not-yet-acted-on gzb lane isn't re-nudged every cycle."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM agent_messages WHERE from_agent = %s "
+            "  AND subject LIKE %s AND created_at > now() - make_interval(mins => %s) LIMIT 1",
+            [fhb.SRE_AGENT_ID, f"{_CROSS_HOST_NUDGE_PREFIX} {base}:%", cooldown_min])
+        return cur.fetchone() is not None
+
+
+def send_cross_host_recycle_nudge(conn, lane_row: dict, gates: dict, reason: str) -> bool:
+    """The cross-host FORCING-action fallback (bus #74293 FIX 2): post the non-destructive
+    self-recycle-nudge bus row instead of attempting any cross-host armed_recycle/reset_lane.sh
+    tmux-write (no such primitive exists, and fleet doctrine forbids it). Returns True iff a
+    nudge row was actually sent (False when skipped on cooldown)."""
+    base = lane_row.get("base_agent_id") or lane_row.get("lane")
+    session = lane_row.get("tmux_session") or lane_row.get("lane")
+    host = lane_row.get("host")
+    if _cross_host_nudge_recently(conn, base):
+        return False
+    subject, body = cross_host_recycle_nudge_message(base, session, host, gates, reason)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
+            " priority, requires_response, created_at) "
+            "VALUES (%s, %s, 'blocker', %s, %s, 'P2', false, now())",
+            [fhb.SRE_AGENT_ID, base, subject, body])
+    conn.commit()
+    return True
+
+
 def armed_recycle(conn, lane_row: dict, *, reason: str,
                   handoff_ref_epoch: "float | None" = None) -> dict:
     """The armed checkpoint-recycle ACTION on ONE specific lane_row, in-process. Re-verifies the
@@ -489,6 +697,26 @@ def armed_recycle(conn, lane_row: dict, *, reason: str,
     out = (r.stdout + r.stderr).strip()
     return {"recycled": r.returncode == 0, "rc": r.returncode, "session": p["session"],
             "boot": boot, "gates": p["gates"], "output": out}
+
+
+def _perform_armed_action(conn, lane_row: dict, p: dict, *, reason: str,
+                          handoff_ref_epoch: "float | None",
+                          invoker_agent: "str | None", invoker_session: "str | None",
+                          i_mean_it: bool) -> dict:
+    """The ARMED branch's single dispatch point (bus #74293 FIX 2): self-check guard first (op
+    #29023/#63326, unchanged), then route by host — a gzb-hosted lane gets the non-destructive
+    cross-host nudge (send_cross_host_recycle_nudge), everything else (local / unknown host,
+    today's unchanged default) gets armed_recycle exactly as before."""
+    if self_recycle_refused(invoker_agent, invoker_session, p["base"], p["session"],
+                            True, i_mean_it):
+        return {"acted": False, "refused": True}
+    ssh_target = hub_reach.ssh_target_for_host(lane_row.get("host"))
+    if ssh_target:
+        sent = send_cross_host_recycle_nudge(conn, lane_row, p["gates"], reason)
+        return {"acted": sent, "refused": False, "cross_host": True,
+                "host": lane_row.get("host"), "nudged": sent}
+    res = armed_recycle(conn, lane_row, reason=reason, handoff_ref_epoch=handoff_ref_epoch)
+    return {"acted": True, "refused": False, "cross_host": False, **res}
 
 
 def _resolve_armed(no_arm: bool, env_lane_arm: "str | None") -> bool:
@@ -547,7 +775,12 @@ def main() -> int:
     conn = psycopg.connect(dsn)
 
     exclude = _excluded_prefixes()
-    all_lanes = discover_lanes(conn, args.lane)
+    # per_instance=True (bus #74293, slice 1b): now that all 3 base-keyed gates are
+    # sibling-aware (gate_context_bloat's pane fallback, gate_fresh_handoff's fail-closed,
+    # last_material_action_epoch's sub_tag filter — sub-fix 2), every live sibling of a
+    # multi-sibling base can be evaluated/recycled independently instead of only the
+    # freshest-heartbeat one.
+    all_lanes = discover_lanes(conn, args.lane, per_instance=True)
     lanes = apply_lane_scope(all_lanes, exclude)
 
     # op#29023/#63312/#63326: who is invoking (a lane running this on itself?). Named env vars
@@ -576,7 +809,7 @@ def main() -> int:
         p = plan(conn, lr, armed, require_bloat=require_bloat,
                  handoff_ref_epoch=args.handoff_after)
         base = p["base"]
-        frac = latest_context_frac(conn, base)
+        frac = latest_context_frac(conn, base, session=p["session"])
         pct = f"{frac * 100:.0f}%" if frac is not None else "?%"
         mark = "RECYCLE" if p["permitted"] else "skip"
         print(f"  [{mark}] {base:22s} ctx={pct:>4s} session={p['session']} gates={p['gates']}")
@@ -586,20 +819,28 @@ def main() -> int:
         if not armed:
             print("            would recycle (disarmed — not touching it)")
             continue
-        # op#29023/#63326: a lane running this ARMED ON ITSELF must pass --i-mean-it — a bare
-        # self-invocation is refused so a "self-check" can never silently red-reset.
-        if self_recycle_refused(invoker_agent, invoker_session, p["base"], p["session"],
-                                armed, args.i_mean_it):
+        # ARMED + permitted: self-check guard (op#29023/#63326), then dispatch by host —
+        # cross-host (gzb) gets the non-destructive nudge, local/unknown gets armed_recycle
+        # (audit-before-clear + reset_lane.sh) exactly as before (bus #74293 FIX 2).
+        act = _perform_armed_action(conn, lr, p, reason=args.reason,
+                                    handoff_ref_epoch=args.handoff_after,
+                                    invoker_agent=invoker_agent, invoker_session=invoker_session,
+                                    i_mean_it=args.i_mean_it)
+        if act.get("refused"):
             print(f"            REFUSED: armed self-recycle of session {p['session']} by "
                   f"{invoker_agent or invoker_session} without --i-mean-it "
                   f"(op#29023/#63326 self-check guard)")
             continue
-        # ARMED + permitted: audit BEFORE clear (cond 4), then reset_lane.sh — via the shared
-        # armed_recycle action (re-verifies the floor at the moment of action).
-        res = armed_recycle(conn, lr, reason=args.reason, handoff_ref_epoch=args.handoff_after)
-        print(f"            reset_lane.sh rc={res.get('rc')} recycled={res.get('recycled')} "
-              f":: {(res.get('output') or '').splitlines()[-1:]}")
-        acted += 1
+        if act.get("cross_host"):
+            print(f"            cross-host ({act.get('host')}): "
+                  f"{'nudge sent' if act.get('nudged') else 'nudge skipped (cooldown)'}")
+        else:
+            print(f"            reset_lane.sh rc={act.get('rc')} recycled={act.get('recycled')} "
+                  f":: {(act.get('output') or '').splitlines()[-1:]}")
+        # cc-fleet-health review nit (bus #74368, PR #480): a cooldown-skipped cross-host nudge
+        # genuinely did nothing to the lane -- don't count it toward "N recycled".
+        if act.get("acted"):
+            acted += 1
     print(f"done — {acted} recycled, {len(lanes)-acted} left alone.")
     conn.close()
     return 0

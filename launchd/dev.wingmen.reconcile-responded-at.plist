@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.reconcile-responded-at</string>
+  <key>ProgramArguments</key><array><string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string><string>-m</string><string>scripts.reconcile_responded_at</string><string>--apply</string></array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/sheikhmusa</string><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <!-- cc-fleet-health, held_commitment #446 (audit-20261006 item 6, bus#54648).
+       Nightly RR auto-stamp sweep: verified-match-only responded_at stamping
+       (tiers: commitment/thread/backref — see scripts/reconcile_responded_at.py
+       module docstring) plus one coalesced drop-page per recipient for any
+       genuinely-aged P0/P1 that matched nothing. Host TZ is Asia/Singapore
+       (UTC+8, same gotcha as dev.wingmen.asks-reconcile.plist) -- target
+       03:00 UTC = 11:00 SGT, an hour and a half ahead of the asks-reconcile
+       slot so the two nightly sweeps don't stack. --apply is baked into
+       ProgramArguments deliberately, same reasoning as asks-reconcile's:
+       this plist IS the stamping go-live decision; a manual dry-run
+       (`scripts/reconcile_responded_at.py`, no flags) stays available any
+       time. Stamping is idempotent + ledgered
+       (logs/reconcile_responded_at_ledger.jsonl) -- safe to run unattended.
+       --page is DELIBERATELY NOT included here yet: the first live dry-run
+       (2026-10-20/21) showed the unmatched-P0/P1 pool is dominated by
+       60-126-day-old rows addressed to long-gone/renamed ephemeral worker
+       lanes -- auto-paging those on day one would be noise, not help (the
+       same "paging a dead body" problem held_commitment #444's
+       console_alive() work targets elsewhere). classify()'s pageable_max_age
+       (default 14d) already keeps ancient unmatched rows out of to_page and
+       into a stale_backlog report bucket instead, but --page itself should
+       get a recipient-liveness check (or at least a few manually-reviewed
+       --page runs) before it's trusted unattended nightly -- tracked as a
+       fast-follow, not blocking this landing. Landing this file alone does
+       NOT make it live -- loading it into launchd is a separate, logged
+       go-live step. -->
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/reconcile_responded_at.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/reconcile_responded_at.log</string>
+</dict>
+</plist>

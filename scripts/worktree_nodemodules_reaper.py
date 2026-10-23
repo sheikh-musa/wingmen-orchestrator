@@ -277,9 +277,9 @@ def _page(summary):  # pragma: no cover - exercised via bus in prod
     for e in summary["errors"]:
         body.append(f"  ERROR: {e}")
     try:
-        bus_send.send(to="orch-console", from_agent="cc-fleet-health", type="blocker",
+        bus_send.send(from_agent="cc-fleet-health", to="orch-console", mtype="blocker",
                       priority="P2", subject="worktree node_modules reaper: removal error(s)",
-                      body="\n".join(body), requires_response=False)
+                      body="\n".join(body), req=False)
     except Exception as e:
         log(f"PAGE-FALLBACK (bus_send.send failed: {e}): " + json.dumps(summary))
 

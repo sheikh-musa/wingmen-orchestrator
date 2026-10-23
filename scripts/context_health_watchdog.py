@@ -307,6 +307,36 @@ class GaugeUnreachable(Exception):
     A distinct type so main() never confuses a transient DB blip with a real bug."""
 
 
+def _live_agent_bases(conn) -> "Optional[set]":
+    """Bases with >=1 non-offline, recently-heartbeating agent_status row (Build B slice 3,
+    bus #73041 -- the 11th-facet incident: a retired body's last cc_session_costs row kept
+    looking fresh enough to page/auto-recycle long after it went offline).
+
+    Returns None (never an empty set) when the liveness query itself fails -- the caller
+    must treat that as "liveness unknown this pass" and skip the veto entirely, same
+    fail-safe shape as lane_wedge_watchdog.py's agent_status_instance_map call site: degrade
+    to the pre-fix behavior, never silently widen a suppression to every real page fleet-wide.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT base_agent_id FROM agent_status "
+                "WHERE status <> 'offline' AND last_heartbeat > now() - interval '30 minutes'"
+            )
+            return {row[0] for row in cur.fetchall() if row[0]}
+    except Exception:
+        # A failed query leaves the shared connection's transaction ABORTED (psycopg
+        # refuses every further command on it until rolled back) -- without this, the
+        # main cc_session_costs query right after us would raise too, turning one
+        # missing/locked table into "read_context_gauge returns nothing" (the opposite
+        # of fail-safe). Roll back so the caller's query still runs this pass.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+
+
 def read_context_gauge(dropped: Optional[list] = None) -> list[AgentCtx]:
     """Freshest latest_context_tokens per always-on identity -> classification.
 
@@ -319,6 +349,12 @@ def read_context_gauge(dropped: Optional[list] = None) -> list[AgentCtx]:
     that hides its own failure, so a body whose window we have wrong simply
     VANISHES from the gauge and reads as "not monitored" rather than "not
     measurable". Callers that pass nothing behave exactly as before.
+
+    Any identity with NO live (non-offline, recently-heartbeating) agent_status row is
+    vetoed from the returned list entirely -- a retired/offline body isn't a measurement
+    failure (nothing to fix there), it's accurately having nothing left to monitor, so it
+    is excluded rather than routed through `dropped`. A liveness-query failure disables
+    this veto for the run (see `_live_agent_bases`), never the reverse.
     """
     dsn = _dsn()
     if not dsn:
@@ -344,6 +380,7 @@ def read_context_gauge(dropped: Optional[list] = None) -> list[AgentCtx]:
                 raise GaugeUnreachable(str(_e)) from _e
             time.sleep(_GAUGE_CONNECT_BACKOFF_S * (_attempt + 1))
     out: list[AgentCtx] = []
+    live_bases = _live_agent_bases(conn)
     with conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -357,6 +394,12 @@ def read_context_gauge(dropped: Optional[list] = None) -> list[AgentCtx]:
             """
         )
         for ident, ctx, age_s in cur.fetchall():
+            if live_bases is not None and ident not in live_bases:
+                # Retired/offline body (Build B slice 3) -- no agent_status row claims it is
+                # alive, so it is excluded outright, never classified/paged/recycled off a
+                # stale cc_session_costs row. Not routed through `dropped`: this isn't a
+                # measurement failure, it's correctly having nothing left to monitor.
+                continue
             ctx = int(ctx or 0)
             # Per-agent window: a registered body's real window (1M for the hub + cai,
             # 200K for the Mini console), else the global default for transient lanes.

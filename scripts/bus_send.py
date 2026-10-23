@@ -94,7 +94,7 @@ def live_instance_ids(base_to: str, dsn: str | None = None) -> list[str]:
     coords) -- that case is a no-op by construction, not a special case."""
     import psycopg2
 
-    conn = psycopg2.connect(dsn or dburl(os.environ))
+    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
     cur = conn.cursor()
     cur.execute(
         "SELECT agent_id FROM agent_status "
@@ -118,7 +118,7 @@ def _heartbeat_age_str(agent_id: str, dsn: str | None = None) -> str:
     import psycopg2
 
     try:
-        conn = psycopg2.connect(dsn or dburl(os.environ))
+        conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
         cur = conn.cursor()
         cur.execute(
             "SELECT status, now() - last_heartbeat FROM agent_status WHERE agent_id=%s",
@@ -160,7 +160,7 @@ def _agent_status_row(agent_id: str, dsn: str | None = None) -> tuple | None:
     and a heartbeat inside _LIVE_INSTANCE_WINDOW."""
     import psycopg2
 
-    conn = psycopg2.connect(dsn or dburl(os.environ))
+    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
     cur = conn.cursor()
     cur.execute(
         "SELECT base_agent_id, "
@@ -353,7 +353,7 @@ def _open_rr_from(to_agent: str, addressed_to: str, dsn: str | None = None) -> t
     without linking via --reply-to. None when there is no such open row."""
     import psycopg2
 
-    conn = psycopg2.connect(dsn or dburl(os.environ))
+    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
     cur = conn.cursor()
     cur.execute(
         "SELECT id, now() - created_at FROM agent_messages "
@@ -469,12 +469,55 @@ def apply_pii_redaction(
 resolve_from_agent = resolve_agent_id
 
 
-def dburl(env: dict) -> str:
-    # The .env FILE wins over the inherited environment: a long-running session
-    # keeps the DATABASE_URL it was launched with, so after a password rotation
-    # every bus post from it failed auth and kept the pooler circuit breaker
-    # tripped fleet-wide (2026-09-28 rotation incident). The file is the
-    # rotation's single push-point (Mini .env; gzb .env -> /dev/shm secrets).
+def resolve_sub_tag(from_agent: str, env: dict) -> str | None:
+    """Per-instance attribution for a multi-instance family (bus #57180/#57183).
+
+    from_agent stays base-only by design (agent_messages.from_agent is the
+    FK-enforced family id, per the dual-identity convention in
+    scripts/lib/auto_agent_id.py) -- this does NOT change that. But
+    launch_dangerous_cc.sh exports CC_AGENT_ID (the full per-instance sub-tag,
+    e.g. cc-cosem-platform-4) alongside CC_BASE_AGENT_ID, and bus_send.py was
+    the only sanctioned agent_messages writer that never captured it: every
+    lane using the default auto-resolve (or an explicit --from) left `sub_tag`
+    NULL, so once a family scales to 3+ concurrent instances (cc-cosem-platform
+    hit 5 live), nothing in the row said WHICH instance actually sent it --
+    orch-console worked around this by hand-passing --from with the full
+    instance id instead, which duplicates the id into from_agent rather than
+    recording it where the schema already has a column for exactly this.
+
+    Returns CC_AGENT_ID when present and distinct from from_agent (the normal
+    multi-instance case); None when absent (daemons/singletons with no
+    sub-tag) or equal to from_agent (an explicit --from already named the
+    instance, so sub_tag would be pure duplication).
+    """
+    sub_tag = env.get("CC_AGENT_ID")
+    if not sub_tag or sub_tag == from_agent:
+        return None
+    return sub_tag
+
+
+def dburl(database_url: str | None) -> str:
+    """Resolve the DSN. `database_url` must be the ALREADY-RESOLVED value (e.g.
+    `os.environ.get("DATABASE_URL")`) -- NEVER the whole os.environ/env dict.
+
+    WHY (bus #64769/#64771, #67528/#67541, #74596/#74623 -- the same leak class hit
+    6+ times): this used to take `env: dict` and every caller passed the whole
+    `os.environ` mapping as that argument.
+    When dburl() raised (no DATABASE_URL resolved -- a real, expected failure mode,
+    e.g. in a deliberately-scrubbed test env), that `env` parameter sat as a LOCAL
+    VARIABLE in this function's own stack frame holding the FULL process environment.
+    Any traceback-rendering path that prints frame locals -- pytest's own default
+    failure renderer is the repeated offender -- then printed every real secret in
+    `os.environ` (COSEM_CAAI_BOT_TOKEN, DATABASE_URL itself, etc.) into whatever
+    transcript/log captured that traceback. Taking a single resolved string instead
+    means no frame anywhere in this call chain can ever hold an environ-shaped local
+    again -- the leak vector is closed at the type, not patched at each call site.
+
+    The .env FILE still wins over the inherited environment: a long-running session
+    keeps the DATABASE_URL it was launched with, so after a password rotation every
+    bus post from it failed auth and kept the pooler circuit breaker tripped
+    fleet-wide (2026-09-28 rotation incident). The file is the rotation's single
+    push-point (Mini .env; gzb .env -> /dev/shm secrets)."""
     env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
     try:
         with open(env_path) as f:
@@ -484,9 +527,8 @@ def dburl(env: dict) -> str:
                     return line.split("=", 1)[1].strip().strip('"')
     except FileNotFoundError:
         pass
-    v = env.get("DATABASE_URL")
-    if v:
-        return v
+    if database_url:
+        return database_url
     raise SystemExit("no DATABASE_URL: set it in the environment or .env")
 
 
@@ -621,6 +663,7 @@ def send(
     from_agent: str, to: str, mtype: str, subject: str, body: str, priority: str,
     req: bool = False, thread: str | None = None, reply_to: int | None = None,
     link_ask: int | None = None, dsn: str | None = None, allow_undeliverable: bool = False,
+    sub_tag: str | None = None,
 ) -> tuple[int, str]:
     """Do the actual INSERT. The one place the SQL lives — CLI (`main`) and
     every shim (`_bus_tmp.py`, `scratchpad/bus_send.py`) call this so there is
@@ -632,7 +675,7 @@ def send(
 
     import psycopg2
 
-    conn = psycopg2.connect(dsn or dburl(os.environ))
+    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
     cur = conn.cursor()
     cur.execute("SELECT set_config('app.current_agent_id', %s, true)", (from_agent,))
 
@@ -656,10 +699,10 @@ def send(
     cur.execute(
         """INSERT INTO agent_messages
              (from_agent, to_agent, message_type, subject, body,
-              priority, requires_response, thread_id)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+              priority, requires_response, thread_id, sub_tag)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
            RETURNING id, thread_id""",
-        (from_agent, to, mtype, subject, body, priority, req, thread),
+        (from_agent, to, mtype, subject, body, priority, req, thread, sub_tag),
     )
     row_id, thread_id = cur.fetchone()
 
@@ -721,13 +764,16 @@ def main(argv: list[str] | None = None) -> int:
     refuse_if_instance_stale_and_base_live(args.to)
     warn_if_answering_rr_without_reply_to(from_agent, args.to, args.reply_to)
 
+    sub_tag = resolve_sub_tag(from_agent, os.environ)
     row_id, thread_id = send(
         from_agent, args.to, args.type, args.subject, body, args.priority,
         req=args.req, thread=args.thread, reply_to=args.reply_to,
         link_ask=args.link_ask, allow_undeliverable=args.allow_undeliverable,
+        sub_tag=sub_tag,
     )
     print(f"SENT id={row_id} thread={thread_id} from={from_agent} to={args.to} "
-          f"priority={args.priority} req={args.req}")
+          f"priority={args.priority} req={args.req}"
+          + (f" sub_tag={sub_tag}" if sub_tag else ""))
     return 0
 
 

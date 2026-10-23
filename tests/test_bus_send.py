@@ -98,6 +98,32 @@ def test_identity_refuses_rather_than_guesses_when_nothing_resolves():
         bs.resolve_from_agent({})
 
 
+# ---- resolve_sub_tag: per-instance attribution without widening from_agent's
+# base-only contract (bus #57180/#57183, cc-cosem-platform scaling to 5
+# concurrent instances exposed that bus_send.py never captured CC_AGENT_ID).
+
+def test_resolve_sub_tag_uses_cc_agent_id_when_distinct_from_base():
+    env = {"CC_AGENT_ID": "cc-cosem-platform-4"}
+    assert bs.resolve_sub_tag("cc-cosem-platform", env) == "cc-cosem-platform-4"
+
+
+def test_resolve_sub_tag_none_when_absent():
+    assert bs.resolve_sub_tag("cc-fleet-health", {}) is None
+
+
+def test_resolve_sub_tag_none_when_equal_to_from_agent():
+    # --from already named the instance explicitly (orch-console's workaround)
+    # -- sub_tag would just duplicate it.
+    env = {"CC_AGENT_ID": "cc-cosem-platform-4"}
+    assert bs.resolve_sub_tag("cc-cosem-platform-4", env) is None
+
+
+def test_resolve_sub_tag_none_for_singleton_with_no_sub_tag_env():
+    # A daemon/singleton body (no CC_AGENT_ID at all) must never fabricate one.
+    env = {"AGENT_ID": "cc-fleet-health"}
+    assert bs.resolve_sub_tag("cc-fleet-health", env) is None
+
+
 # ---- empty-body guard (Nazim shipped 3 blank rows on 2026-09-05) -----------
 
 def test_read_body_refuses_short_body():
@@ -340,6 +366,30 @@ def test_send_never_creates_a_new_operator_asks_row(monkeypatch):
     assert (row_id, thread_id) == (4242, "th-uuid-abc")
     assert conn.committed is True
     assert not any("operator_asks" in e[0].lower() for e in cur.executed)
+
+
+def test_send_passes_sub_tag_through_to_the_insert(monkeypatch):
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
+    bs.send(
+        "cc-cosem-platform", "orch-console", "update", "status",
+        "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
+        sub_tag="cc-cosem-platform-4",
+    )
+    insert = next(e for e in cur.executed if "insert into agent_messages" in e[0].lower())
+    assert "sub_tag" in insert[0].lower()
+    assert insert[1][-1] == "cc-cosem-platform-4"
+
+
+def test_send_sub_tag_defaults_to_none(monkeypatch):
+    # No sub_tag passed (singleton/daemon caller) — the column still gets an
+    # explicit NULL, never omitted/positionally-misaligned.
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
+    bs.send(
+        "cc-fleet-health", "orch-console", "update", "status",
+        "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
+    )
+    insert = next(e for e in cur.executed if "insert into agent_messages" in e[0].lower())
+    assert insert[1][-1] is None
 
 
 def test_send_with_link_ask_updates_the_existing_row(monkeypatch):
@@ -1125,3 +1175,67 @@ def test_clean_body_dry_run_has_no_redaction_notice(monkeypatch, capsys):
     assert rc == 0
     captured = capsys.readouterr()
     assert "redacted" not in captured.err
+
+
+# ---- dburl() must never hold an environ-shaped local (bus #64769/#64771,
+# #67528/#67541, #74596/#74623 -- the SAME leak class hit 6+ times): a caller
+# passing the whole os.environ dict means an uncaught exception near dburl()'s
+# own frame lets pytest's (or any) traceback renderer print every real secret in
+# the process environment. The fix: dburl() now takes the already-resolved
+# `database_url` string (or None), never a dict -- no frame in this call chain
+# can hold an environ-shaped local again. This worktree has no .env file, so a
+# call with no database_url argument is a real, deterministic SystemExit.
+
+def test_dburl_resolves_from_the_passed_string():
+    assert bs.dburl("postgres://example/db") == "postgres://example/db"
+
+
+def test_dburl_raises_systemexit_when_nothing_resolves():
+    with pytest.raises(SystemExit):
+        bs.dburl(None)
+
+
+def test_dburl_failure_frame_holds_no_environ_shaped_local():
+    # the actual incident shape: prove at the TYPE level that dburl()'s own stack
+    # frame cannot hold an environ-shaped dict when it raises -- real os.environ
+    # always has 10+ keys in any real process, so a dict local that large would
+    # be exactly the leak vector this closes.
+    try:
+        bs.dburl(None)
+        assert False, "expected SystemExit"
+    except SystemExit:
+        tb = sys.exc_info()[2]
+        while tb.tb_next:  # walk to the innermost frame -- where dburl() itself raised
+            tb = tb.tb_next
+        frame = tb.tb_frame
+        assert frame.f_code.co_name == "dburl"
+        for name, value in frame.f_locals.items():
+            assert not (isinstance(value, dict) and len(value) > 5), (
+                f"dburl()'s own frame holds a dict-shaped local {name!r} with "
+                f"{len(value)} keys -- environ-shaped, exactly the leak this closes")
+
+
+def test_no_caller_anywhere_passes_the_whole_environ_to_dburl():
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    skip_dirs = ("/tests/", "/.claude/", "/worktrees/", "/.venv/", "/node_modules/", "/.git/")
+    bad_patterns = [
+        re.compile(r"dburl\(\s*os\.environ\s*\)"),
+        re.compile(r"dburl\(\s*dict\(os\.environ\)\s*\)"),
+    ]
+    offenders = []
+    for pattern in ("*.py", "*.sh"):
+        for path in root.rglob(pattern):
+            sp = str(path)
+            if any(d in sp for d in skip_dirs):
+                continue
+            try:
+                text = path.read_text()
+            except Exception:
+                continue
+            if any(pat.search(text) for pat in bad_patterns):
+                offenders.append(sp)
+    assert offenders == [], (
+        f"dburl() called with the whole environ (the leak class this closed) in: {offenders}")

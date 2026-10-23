@@ -11,6 +11,7 @@ Enqueue (from any agent/process, incl. headless):
     tg_out.enqueue("mamadah", "answer", chat_id=12345)          # explicit chat
 CLI (drop-in for the send scripts during migration):
     .venv/bin/python3 -m nervous_system.tg_out send <channel_key> "text"
+    .venv/bin/python3 -m nervous_system.tg_out replay-dead      # held_commitment #314
 Daemon (launchd dev.wingmen.tg-out):
     .venv/bin/python3 -m nervous_system.tg_out
 
@@ -18,6 +19,15 @@ Delivery: chunked at Telegram's 4096-char limit (the b48bfe5 lesson), token via
 the channel's token_env_key (never argv, never the DB), MAX_ATTEMPTS then 'dead'
 (never silently dropped — dead rows are a watchdog surface). Every delivered
 chunk-set is logged once, full text, to operator_messages (outbound, channel_tag).
+
+Dead-row consumer (fable-audit-substrate-20261006 finding, held_commitment #314):
+'dead' rows used to just accumulate (352 rows, +11/week) with nothing reading
+them. replay_once_then_purge() (launchd dev.wingmen.tg-out-dead-replay) gives
+each one exactly one more delivery attempt; a success is bookkept identically
+to a normal send, a failure deletes the row (another attempt would fail the
+same way) and posts one attributable bus note to orch-console recording what
+was dropped — so the loss is visible instead of silent, without letting dead
+rows pile up forever.
 """
 from __future__ import annotations
 
@@ -326,6 +336,199 @@ def drain_once(conn) -> int:
     return len(rows)
 
 
+# ── Dead-row consumer (held_commitment #314) ──────────────────────────────────
+
+_DEAD_REPLAY_LOCK_KEY = 0x74675F6F  # arbitrary; just needs to be stable
+
+# orch-console change-request (bus #69991, after mig107's read-back): the
+# first real run found 353 dead rows spanning 2026-07-08..10-09, 290 of them
+# on nazim-console -- whose token (@nazim_cto_bot) resolves LIVE today, so a
+# bare replay-once would succeed and re-deliver ~290 three-month-old messages
+# to the operator's phone (plus 290 stale operator_messages audit rows).
+# replay-once is correct for a FRESH transient failure, not a backlog that
+# accumulated because the daemon was never running this consumer — a row
+# older than this cap is purged WITHOUT a replay attempt (still gets the
+# attributable bus note) so the operator is never re-sent a stale backlog.
+DEAD_ROW_AGE_CAP_HOURS = 48
+
+
+def replay_once_then_purge(conn) -> dict:
+    """A 'dead' row (MAX_ATTEMPTS exhausted) used to just sit there forever —
+    nothing consumed it (352 rows, +11/week, fable-audit-substrate-20261006).
+    Give each one exactly one more delivery attempt: success is bookkept the
+    same as a normal send ('sent' + the operator_messages audit row); failure
+    deletes the row (a further attempt would fail the same way) and posts one
+    attributable bus note to orch-console recording what was dropped, so the
+    loss is visible instead of silent. A row older than DEAD_ROW_AGE_CAP_HOURS
+    skips the replay attempt entirely (see the constant's comment) — it is
+    purged the same way a failed replay would be, just without ever dialing
+    Telegram.
+
+    Single-flight via a session advisory lock: this runs as its own
+    low-frequency pass (CLI / launchd), not inside drain_once's hot loop, and
+    'dead' has no atomic-claim status of its own (migration 015's CHECK only
+    allows queued/sending/sent/failed/dead) — the lock is what keeps two
+    overlapping runs from each grabbing the same row.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (_DEAD_REPLAY_LOCK_KEY,))
+        got = cur.fetchone()[0]
+    if not got:
+        _log_line("replay_once_then_purge: another run holds the lock, skipping")
+        return {"replayed": 0, "purged": 0, "total": 0}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
+            cur.execute(
+                "SELECT id, channel_key, chat_id, text, file_path, created_at, "
+                "now() - created_at > make_interval(hours => %s) AS is_stale "
+                "FROM tg_out WHERE status='dead' ORDER BY id",
+                (DEAD_ROW_AGE_CAP_HOURS,))
+            rows = cur.fetchall()
+        conn.commit()
+
+        replayed = purged = 0
+        # orch-console finding (bus #70262): a bulk age-cap drain can purge
+        # hundreds of rows in one pass -- collect those into stale_batch and
+        # post ONE summary bus note after the loop instead of one per row.
+        # A fresh-failure purge (is_stale=False) is rare and keeps its own
+        # immediate note.
+        stale_batch: list[dict] = []
+        for rid, channel_key, chat_id, text, file_path, created_at, is_stale in rows:
+            if _replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale,
+                            created_at=created_at, stale_batch=stale_batch):
+                replayed += 1
+            else:
+                purged += 1
+        if stale_batch:
+            _post_stale_batch_summary(stale_batch)
+        return {"replayed": replayed, "purged": purged, "total": len(rows)}
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(%s)", (_DEAD_REPLAY_LOCK_KEY,))
+        conn.commit()
+
+
+def _replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale: bool = False,
+                 created_at=None, stale_batch: list | None = None) -> bool:
+    """One more delivery attempt for a dead row — UNLESS it is past the age
+    cap, in which case it is purged WITHOUT ever attempting delivery (a
+    months-old row re-sending to a LIVE channel is the harm this guards
+    against; the bus note still records what was dropped). True on success
+    ('sent'), False on failure or age-cap purge (row deleted + bus note
+    posted, or appended to stale_batch for a batched summary note — see
+    _purge_dead_row)."""
+    if is_stale:
+        _log_line(f"dead row {rid} purged (age cap: older than "
+                  f"{DEAD_ROW_AGE_CAP_HOURS}h, NOT replayed — backlog, not a fresh failure)")
+        _purge_dead_row(conn, rid, channel_key, text, file_path, None, stale=True,
+                         created_at=created_at, stale_batch=stale_batch)
+        return False
+    try:
+        token, default_chat, tag = _resolve(conn, channel_key)
+        target = chat_id or default_chat
+        if target is None:
+            raise LookupError(f"no chat target for '{channel_key}' (empty allowlist, no override)")
+        if text:
+            _send_text(token, target, text)
+        if file_path:
+            _send_file(token, target, file_path)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tg_out SET status='sent', sent_at=now(), attempts=attempts+1 WHERE id=%s",
+                (rid,))
+            cur.execute(
+                "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered) "
+                "VALUES ('outbound','telegram',%s,%s,%s,true)",
+                (str(target), tag, text or f"[file] {file_path}"),
+            )
+        conn.commit()
+        _log_line(f"dead row {rid} REPLAYED ok on '{channel_key}'")
+        return True
+    except Exception as e:
+        _log_line(f"dead row {rid} purged (replay failed: {type(e).__name__}: {e})")
+        _purge_dead_row(conn, rid, channel_key, text, file_path, e)
+        return False
+
+
+def _purge_dead_row(conn, rid, channel_key, text, file_path, err, stale: bool = False,
+                     created_at=None, stale_batch: list | None = None) -> None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
+        cur.execute("DELETE FROM tg_out WHERE id=%s", (rid,))
+    conn.commit()
+
+    if stale and stale_batch is not None:
+        # Bulk age-cap drain (orch-console finding, bus #70262): don't send a
+        # bus note per row here -- the caller (replay_once_then_purge) collects
+        # these and posts ONE summary note after the whole pass, so a
+        # hundreds-of-rows backlog drain doesn't flood orch-console's inbox
+        # with near-identical receipts. The row is still deleted above.
+        stale_batch.append({"rid": rid, "channel_key": channel_key, "created_at": created_at})
+        return
+
+    snippet = (text or (f"[file] {file_path}" if file_path else "") or "")[:300]
+    if stale:
+        detail = (f"older than the {DEAD_ROW_AGE_CAP_HOURS}h age cap, so this pass "
+                  "purged it WITHOUT attempting a replay (orch-console change-request "
+                  "bus #69991 — a dead row this old is backlog accumulation, not a "
+                  "fresh transient failure; replaying it risks re-sending a months-old "
+                  "message to a LIVE channel)")
+    else:
+        detail = (f"exhausted MAX_ATTEMPTS, then failed its one replay.\n"
+                  f"Replay error: {type(err).__name__}: {err}")
+    body = (
+        f"tg_out row #{rid} on channel '{channel_key}' never delivered ({detail}); "
+        "purged by the tg_out.dead consumer (held_commitment #314).\n\n"
+        f"Content snippet:\n{snippet}"
+    )
+
+    # CLAUDE.md forbids a hand-written `INSERT INTO agent_messages` (bus #43651).
+    # This purge note goes through scripts/bus_send.py's send() instead, with
+    # from_agent='tg-out-dead-replay' — a dedicated identity (migration 107),
+    # not the hub's 'cc-orchestrator': this runs as a bare launchd daemon on the
+    # Mac Mini with no AGENT_ID/CC_BASE_AGENT_ID in its environment, so it can't
+    # resolve a live session identity, and 'cc-orchestrator' names the VPS hub
+    # process (ORCH-TOPOLOGY-001), not this daemon. Mirrors the existing
+    # 'sla-watchdog' / 'ddl-coverage-watchdog' / 'ingest-watchdog' precedent.
+    from scripts import bus_send
+    bus_send.send(
+        from_agent="tg-out-dead-replay", to="orch-console", mtype="update",
+        subject=f"tg_out dead row #{rid} purged ('{channel_key}')", body=body,
+        priority="P3", req=False, dsn=_dsn(),
+    )
+
+
+def _post_stale_batch_summary(batch: list) -> None:
+    """One bus note for an entire age-cap backlog drain, instead of the one-
+    per-row receipt _purge_dead_row posts for a (rare) fresh-failure purge.
+    orch-console finding, bus #70262: a one-time backlog drain was firing
+    hundreds of near-identical P3 receipts, each tripping a reconcile nudge
+    and drowning the inbox-signal the nudge exists to protect."""
+    channels = sorted({b["channel_key"] for b in batch})
+    timestamps = [b["created_at"] for b in batch if b["created_at"] is not None]
+    ids = sorted(b["rid"] for b in batch)
+    oldest = min(timestamps) if timestamps else "unknown"
+    newest = max(timestamps) if timestamps else "unknown"
+    id_range = f"{ids[0]}..{ids[-1]}" if ids else "none"
+    body = (
+        f"tg_out.dead age-cap drain: purged {len(batch)} row(s) in this pass "
+        f"WITHOUT attempting a replay (all older than the {DEAD_ROW_AGE_CAP_HOURS}h "
+        "age cap — backlog accumulation, not fresh failures; see bus #69991). "
+        "replayed=0 for this batch.\n\n"
+        f"Channels affected: {', '.join(channels) if channels else 'none'}\n"
+        f"Oldest created_at: {oldest}\n"
+        f"Newest created_at: {newest}\n"
+        f"Row ids: {id_range} ({len(ids)} total)"
+    )
+    from scripts import bus_send
+    bus_send.send(
+        from_agent="tg-out-dead-replay", to="orch-console", mtype="update",
+        subject=f"tg_out.dead age-cap drain: {len(batch)} row(s) purged (batched receipt, bus #70262)",
+        body=body, priority="P3", req=False, dsn=_dsn(),
+    )
+
+
 def main() -> int:
     if len(sys.argv) >= 4 and sys.argv[1] == "send":
         rid = enqueue(sys.argv[2], sys.argv[3])
@@ -343,6 +546,12 @@ def main() -> int:
                 time.sleep(1)
         print(f"tg_out #{rid}: {status}" + (f" ({err})" if err else ""))
         return 0 if status == "sent" else 1
+    if len(sys.argv) >= 2 and sys.argv[1] == "replay-dead":
+        with psycopg.connect(_dsn()) as conn:
+            result = replay_once_then_purge(conn)
+        print(f"tg_out replay-dead: {result['replayed']} replayed, "
+              f"{result['purged']} purged, {result['total']} total")
+        return 0
     _log_line("outbound gateway daemon starting")
     while True:
         try:

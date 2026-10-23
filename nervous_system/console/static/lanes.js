@@ -408,10 +408,10 @@
   function famKey(r) { return String((r && r.session) || "").split("-")[0] || "?"; }
 
   // The GROUP's current token, shown at the group level. Consensus across the
-  // family's VERIFIED lanes: one shared account -> that name (e.g. "musa2"); a
+  // family's VERIFIED lanes: one shared account -> that name (e.g. "irsyad"); a
   // split -> "mixed (…)" SURFACED with the per-account counts, never hidden
   // (op#12600 — the operator explicitly asked that ambiguity be visible, e.g. the
-  // irsyad group with import still on syed reads "mixed (musa2·4, syed·1)").
+  // irsyad group with import still on syed reads "mixed (irsyad·4, syed·1)").
   function groupToken(rows) {
     var accts = {};
     (rows || []).forEach(function (r) {

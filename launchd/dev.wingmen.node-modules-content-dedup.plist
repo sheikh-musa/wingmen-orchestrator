@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- node-modules-content-dedup ARMED (orch-console #71581/#71583, 2026-10-19). The durable
+       fix for the recurring disk-CRIT cycles: content-hash hardlink dedup across worktree
+       node_modules (cosem-adcda/cosem-platform/cosem-tdu/cosem-port/cosem-exams families) --
+       byte-identical files get one repointed to share the other's inode, never touching
+       content. Safe even on a LIVE lane's node_modules: a hardlink only changes which inode a
+       directory entry points to, and any process with the old file already open-for-read keeps
+       reading it unaffected (unlike the sibling reaper's rm-based clear, which needs the
+       lsof+12h-build-recency gates because deletion IS destructive). Still gated: re-verifies
+       content immediately before each link, skips files modified in the last 10 min, refuses
+       the whole sweep if any npm/pnpm/yarn install is running anywhere.
+
+       WET-PROVEN before arming: detect-only against the real fleet found 8.48GB/19397 groups/0
+       errors; applied for real the same session (8.48GB freed, 0 errors, all live lanes'
+       heartbeats confirmed undisturbed after); the specific edge orch-console asked to verify
+       (does any installer edit a hardlinked file in place rather than replace it) was tested
+       with a real npm install/reinstall cycle in an isolated sandbox across 3 scenarios --
+       npm always removes+recreates, never edits in place.
+
+       INTERVAL CHOICE (3600s, not the sibling reaper's 1800s): this tool hashes every
+       >=4KB file under the scanned trees every run (the reaper's rm-candidate scan is far
+       cheaper, just lsof+mtime checks) -- the first live apply took ~13min over ~135k files.
+       Hourly balances catching new duplication from fresh installs against not spending ~20%+
+       duty cycle on repeated full-tree hashing. Reversible: launchctl bootout this label; a
+       fresh `npm install` in any affected worktree always restores an independent copy if ever
+       needed (the content was never wrong, only its on-disk sharing). -->
+  <key>Label</key>
+  <string>dev.wingmen.node-modules-content-dedup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; export NM_DEDUP_FAMILIES="$HOME/wingmen/projects/cosem-adcda*:$HOME/wingmen/projects/cosem-platform*:$HOME/wingmen/projects/cosem-tdu*:$HOME/wingmen/projects/cosem-port*:$HOME/wingmen/projects/cosem-exams*" &amp;&amp; exec .venv/bin/python3 -m scripts.node_modules_content_dedup --apply</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/node_modules_content_dedup.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/node_modules_content_dedup.log</string>
+</dict>
+</plist>

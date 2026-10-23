@@ -34,13 +34,14 @@ def _iso(dt: datetime) -> str:
 
 
 def _job(jid=1, status="queued", labels=("self-hosted", LBL), age_min=45,
-         name="Lint & Test", started_ago=None):
+         name="Lint & Test", started_ago=None, pr_numbers=()):
     return {
         "id": jid, "run_id": 900 + jid, "name": name, "status": status,
         "labels": list(labels), "created_at": _iso(NOW - timedelta(minutes=age_min)),
         # GitHub fills started_at with a placeholder on queued jobs; must NOT be used for age.
         "started_at": _iso(NOW - timedelta(minutes=started_ago if started_ago is not None else 0)),
         "html_url": f"https://github.com/{REPO}/actions/runs/900/job/{jid}",
+        "_pr_numbers": list(pr_numbers),
     }
 
 
@@ -58,8 +59,9 @@ def _runner(status="online", busy=False, name="cubeasht-orchestrator",
     return {"name": name, "status": status, "busy": busy, "labels": [{"name": l} for l in labels]}
 
 
-def _ev(active, runners, completed=(), threshold=30, grace=5):
-    return w.evaluate(REPO, LBL, list(active), list(runners), list(completed), threshold, grace, NOW)
+def _ev(active, runners, completed=(), threshold=30, grace=5, offline_grace=30):
+    return w.evaluate(REPO, LBL, list(active), list(runners), list(completed), threshold, grace,
+                       NOW, offline_grace)
 
 
 # ---------------------------------------------------------------- the #58367 scenario
@@ -115,10 +117,13 @@ def test_avg_uses_last_10_label_jobs_only_and_ignores_cancelled():
 # ---------------------------------------------------------------- offline / idle / none
 
 def test_runner_offline_with_queue_pages_offline_wording():
-    f = _ev([_job(11, age_min=10), _job(12, age_min=7)], [_runner(status="offline")])
+    # past offline-grace (30) AND an open PR is queued -> pages
+    f = _ev([_job(11, age_min=35, pr_numbers=(411,)), _job(12, age_min=32)],
+            [_runner(status="offline")])
     assert len(f) == 1 and f[0]["kind"] == "runner_offline" and f[0]["key"] == KEY
     subj, body = w.render_page(f[0])
-    assert "runner offline (desktop may be off/asleep)" in subj
+    assert "runner offline past 30min" in subj and "#411" in subj
+    assert "desktop may be off or asleep" in body
     assert "11" in body and "12" in body
 
 
@@ -128,7 +133,42 @@ def test_runner_offline_nothing_queued_no_page():
 
 def test_offline_within_grace_no_page():
     # a job queued 2 min ago while the runner reconnects is not yet an outage
-    assert _ev([_job(11, age_min=2)], [_runner(status="offline")]) == []
+    assert _ev([_job(11, age_min=2, pr_numbers=(411,))], [_runner(status="offline")]) == []
+
+
+# ---------------------------------------------------------------- runner_offline throttle
+# (bus #68485/#68486/#68491, 2026-10-15): a routine overnight/asleep-desktop wait on a
+# non-PR (push/trunk) job must NOT page, even well past the general 5-min grace — only a
+# real stall (past offline_grace_min) blocking an OPEN PR does.
+
+def test_offline_push_only_job_no_pr_queued_no_page_even_past_old_grace():
+    # 45 min queued, well past the OLD 5-min grace -- but no PR is waiting (a post-merge
+    # trunk re-validation push), so this must NOT page under the new throttle.
+    assert _ev([_job(11, age_min=45)], [_runner(status="offline")]) == []
+
+
+def test_offline_pr_job_queued_under_30_no_page():
+    # a PR job is queued, but only 25 min in -- under the new 30-min offline-grace floor.
+    assert _ev([_job(11, age_min=25, pr_numbers=(412,))], [_runner(status="offline")]) == []
+
+
+def test_offline_pr_job_queued_over_30_pages():
+    f = _ev([_job(11, age_min=31, pr_numbers=(412,))], [_runner(status="offline")])
+    assert len(f) == 1 and f[0]["kind"] == "runner_offline"
+    assert f[0]["pr_numbers"] == [412]
+
+
+def test_offline_mixed_queue_pr_and_push_pages_only_on_the_pr_signal():
+    # a push job alone wouldn't page; adding a PR job to the SAME queue does.
+    f = _ev([_job(11, age_min=40), _job(12, age_min=35, pr_numbers=(413,))],
+            [_runner(status="offline")])
+    assert len(f) == 1 and f[0]["pr_numbers"] == [413]
+
+
+def test_offline_custom_offline_grace_min_respected():
+    f = _ev([_job(11, age_min=12, pr_numbers=(411,))], [_runner(status="offline")],
+            offline_grace=10)
+    assert len(f) == 1 and f[0]["kind"] == "runner_offline"
 
 
 def test_idle_with_queue_stuck_pickup_pages():
@@ -202,9 +242,9 @@ def test_one_offline_one_busy_not_draining_says_degraded():
 
 def test_two_runners_both_offline_pages_offline():
     runners = [_runner(name=R1, status="offline"), _runner(name=R2, status="offline")]
-    f = _ev([_job(11, age_min=20)], runners)
+    f = _ev([_job(11, age_min=35, pr_numbers=(411,))], runners)
     assert len(f) == 1 and f[0]["kind"] == "runner_offline" and f[0]["key"] == KEY
-    assert "runner offline (desktop may be off/asleep)" in w.render_page(f[0])[0]
+    assert "runner offline past 30min" in w.render_page(f[0])[0]
 
 
 def test_one_idle_one_busy_with_queue_is_stuck_pickup():
@@ -217,7 +257,7 @@ def test_one_idle_one_busy_with_queue_is_stuck_pickup():
 # ---------------------------------------------------------------- collapse
 
 def test_collapse_one_finding_listing_all_jobs():
-    active = [_job(i, age_min=100 + i) for i in range(1, 6)]
+    active = [_job(i, age_min=100 + i, pr_numbers=(999,) if i == 1 else ()) for i in range(1, 6)]
     f = _ev(active, [_runner(status="offline")])
     assert len(f) == 1
     assert [j["id"] for j in f[0]["jobs"]] == [5, 4, 3, 2, 1]  # oldest first
@@ -229,7 +269,7 @@ def test_collapse_one_finding_listing_all_jobs():
 # ---------------------------------------------------------------- dedup
 
 def test_dedup_cooldown_and_resolve():
-    f = _ev([_job(11, age_min=20)], [_runner(status="offline")])
+    f = _ev([_job(11, age_min=35, pr_numbers=(411,))], [_runner(status="offline")])
     to_page, state = w.plan_pages(f, {}, NOW, cooldown_min=60)
     assert len(to_page) == 1
     state = w.mark_paged(state, to_page[0], NOW)
@@ -248,7 +288,7 @@ def test_dedup_cooldown_and_resolve():
 
 def test_legacy_v1_state_values_tolerated():
     legacy = {f"queued_job:{REPO}:1": "2026-10-07T11:00:00Z", KEY: "2026-10-07T11:50:00Z"}
-    f = _ev([_job(11, age_min=20)], [_runner(status="offline")])
+    f = _ev([_job(11, age_min=35, pr_numbers=(411,))], [_runner(status="offline")])
     to_page, st = w.plan_pages(f, legacy, NOW, 60)
     assert to_page == []                       # KEY paged 10 min ago (legacy str value)
     assert list(st) == [KEY]                   # old per-job key cleared
@@ -312,7 +352,8 @@ def test_main_exits_nonzero_on_gh_failure(monkeypatch, tmp_path, capsys):
 
 
 def test_main_dry_run_touches_nothing(monkeypatch, tmp_path, capsys):
-    _patch_live(monkeypatch, [_job(1, age_min=45), _job(2, age_min=40)], [_runner(status="offline")])
+    _patch_live(monkeypatch, [_job(1, age_min=45, pr_numbers=(411,)), _job(2, age_min=40)],
+                [_runner(status="offline")])
     sent = []
     monkeypatch.setattr(w, "_send_page", lambda f: sent.append(f))
     assert w.main(["--dry-run", "--state-file", str(tmp_path / "s.json")]) == 0
@@ -332,7 +373,8 @@ def test_main_todays_scenario_sends_nothing(monkeypatch, tmp_path):
 
 
 def test_main_live_pages_once_per_label_then_dedups(monkeypatch, tmp_path):
-    _patch_live(monkeypatch, [_job(1, age_min=45), _job(2, age_min=44), _job(3, age_min=43)],
+    _patch_live(monkeypatch, [_job(1, age_min=45, pr_numbers=(411,)), _job(2, age_min=44),
+                              _job(3, age_min=43)],
                 [_runner(status="offline")])
     sent = []
     monkeypatch.setattr(w, "_send_page", lambda f: sent.append(f["key"]) or 123)
@@ -344,7 +386,7 @@ def test_main_live_pages_once_per_label_then_dedups(monkeypatch, tmp_path):
 
 
 def test_main_send_failure_exits_nonzero(monkeypatch, tmp_path, capsys):
-    _patch_live(monkeypatch, [_job(1, age_min=45)], [_runner(status="offline")])
+    _patch_live(monkeypatch, [_job(1, age_min=45, pr_numbers=(411,))], [_runner(status="offline")])
 
     def fail(f):
         raise RuntimeError("db down")

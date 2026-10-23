@@ -17,10 +17,22 @@ ACTION TIERS (evaluate(), per channel):
   - unanswered > escalate_s (default 2h) AND coord was nudged on a PRIOR cycle: ALSO page
     orch-console (Nazim). The operator (Musa) is NEVER paged.
 
-CHANNELS: DERIVED from bot_channels (mode=agent-session, group_routing.agent_reviewer = a
-`cc-*` coord), so a new client group is covered automatically once its bot_channel exists
-(Nazim 43631). gazzabyte-irsyad is EXCLUDED (its dedicated watch owns it, different windows).
-Fail-safe: if bot_channels can't be read, fall back to the known static cosem-tdu entry.
+CHANNELS: DERIVED from bot_channels (mode=agent-session, audience='client'), so a new client
+group is covered automatically once its bot_channel exists (Nazim 43631). gazzabyte-irsyad is
+EXCLUDED (its dedicated watch owns it, different windows). Fail-safe: if bot_channels can't be
+read, fall back to the known static cosem-tdu entry.
+
+Fixed (fable-audit-20261006 finding 12, held_commitment #314): the original filter required
+`group_routing->>'agent_reviewer' LIKE 'cc-%'` — a naming-convention heuristic, not the
+schema's actual client marker. That both MISSED cosem-caai/cosem-exams (routed straight to
+orch-console, no separate `cc-*` coord — 2,194 live operator_messages between them, the "2
+missing channels" the audit found) and would have WRONGLY INCLUDED any future internal
+channel that happens to route to a `cc-*` agent (e.g. `mamadah`, audience='internal', was
+already matching the old filter by coincidence). `audience='client'` is the field the schema
+defines for exactly this; `coord` can legitimately be `orch-console` itself for a channel
+with no separate coordinator — the nudge→escalate ladder still works (console nudges, then
+escalates to itself if still unanswered), it just collapses to one escalation tier instead
+of two for those channels.
 
 STAGED ARMING: DETECT-ONLY by default (logs what it WOULD page, writes NOTHING). --arm posts
 the bus nudges. FAIL-CLOSED: a could-not-measure on a channel pages orch-console LOUD.
@@ -56,6 +68,8 @@ EXCLUDE_TAGS = {"gazzabyte-irsyad"}  # dedicated gazzabyte_request_nodrop_watch.
 SEND_SCRIPTS = {
     "cosem-tdu": "scripts/cosem_tdu_support_send.sh",
     "gazzabyte-irsyad": "scripts/reviewer_send.sh",
+    "cosem-caai": "scripts/caai_send.sh",
+    "cosem-exams": "scripts/cosem_exams_support_send.sh",
 }
 # Fail-safe fallback if bot_channels can't be read: the known-live client channel.
 FALLBACK_CHANNELS = [
@@ -76,6 +90,29 @@ def _dsn() -> str:
     if not m:
         raise SystemExit("DATABASE_URL not found")
     return m.group(1).strip()
+
+
+def _musa_telegram_id() -> "str | None":
+    """Operator Telegram id (migrations/020_operator_messages_sender_identity.sql) — an
+    inbound row FROM the operator is never a client waiting for a reply, even on a client
+    channel (orch-console #72925/#72951/#72953/#72963: Musa's own message, misfired into
+    cosem-exams and deleted, kept re-paging because this watch had no sender check).
+
+    SAME env-then-file fallback shape as _dsn() (orch-console #72969): the deployed
+    launchd plist for this watch never sources .env (unlike other client-nodrop plists),
+    so a bare os.environ.get() read None in the real cron's process environment and the
+    PR#452 sender-check silently never fired in production. Fail-safe: None if absent from
+    BOTH env and the .env file (never raises — is_operator_sender(musa_id=None) already
+    fails toward NOT skipping, which is the right default when this id is unknown)."""
+    env = os.environ.get("MUSA_TELEGRAM_ID")
+    if env:
+        return env
+    try:
+        text = open(os.path.join(ORCH, ".env")).read()
+    except OSError:
+        return None
+    m = re.search(r"^MUSA_TELEGRAM_ID=(.+)$", text, re.M)
+    return m.group(1).strip() if m else None
 
 
 def _load_state() -> dict:
@@ -99,14 +136,28 @@ def is_receipt(text: "str | None") -> bool:
     return "got your message" in (text or "").lower()
 
 
-def latest_unanswered_inbound(rows):
+def is_operator_sender(from_user_id, *, musa_id=None) -> bool:
+    """True iff `from_user_id` is the operator's own Telegram id (orch-console
+    #72925/#72951/#72953) — an inbound FROM the operator is never a client waiting for a
+    reply. Caller resolves musa_id via _musa_telegram_id() (env-then-.env-file fallback,
+    orch-console #72969); musa_id=None never matches anything (fail toward NOT skipping,
+    since silently losing every channel's drop-watch is worse than one false page)."""
+    return bool(musa_id) and str(from_user_id) == str(musa_id)
+
+
+def latest_unanswered_inbound(rows, *, musa_id=None):
     """rows = recent messages for ONE channel, NEWEST-FIRST, each
-    {id, direction, created_epoch, from_name, text}. Return the latest INBOUND that has NOT
-    been answered by a NON-RECEIPT outbound after it, or None (answered / empty / not-waiting).
-    A '📨 Got your message' receipt does NOT count as an answer (Nazim 43631)."""
-    # newest-first: find the first (latest) inbound
+    {id, direction, created_epoch, from_name, text, from_user_id}. Return the latest INBOUND
+    that has NOT been answered by a NON-RECEIPT outbound after it, or None (answered / empty
+    / not-waiting). A '📨 Got your message' receipt does NOT count as an answer (Nazim
+    43631). An inbound FROM THE OPERATOR is skipped entirely — not a client waiting, and
+    does not count as "answered" either, so a genuine older unanswered client message
+    underneath it still surfaces (#72953)."""
+    # newest-first: find the first (latest) inbound NOT from the operator
     for i, r in enumerate(rows):
         if r["direction"] == "inbound":
+            if is_operator_sender(r.get("from_user_id"), musa_id=musa_id):
+                continue
             # any row newer than it (earlier in the list) that is a real (non-receipt) outbound?
             for newer in rows[:i]:
                 if newer["direction"] == "outbound" and not is_receipt(newer.get("text")):
@@ -189,15 +240,17 @@ def evaluate(waiting, now, state, *, coord, label, tag, send_script,
 
 # ---- channel discovery + fetch ------------------------------------------------
 def load_channels(dsn) -> list:
-    """Derive client support channels from bot_channels: mode=agent-session with a `cc-*`
-    coord in group_routing.agent_reviewer (a real coord, not orch-console), minus EXCLUDE_TAGS
-    (gazzabyte has its own watch). Fail-safe: any read error -> FALLBACK_CHANNELS."""
+    """Derive client support channels from bot_channels: mode=agent-session,
+    audience='client' (the schema's actual client marker — NOT a `cc-*` naming
+    convention on the coord, which misses any channel routed straight to orch-console),
+    minus EXCLUDE_TAGS (gazzabyte has its own watch). Fail-safe: any read error ->
+    FALLBACK_CHANNELS."""
     try:
         with psycopg2.connect(dsn) as c, c.cursor() as cur:
             cur.execute(
                 "SELECT channel_tag, group_routing->>'agent_reviewer' "
-                "FROM bot_channels WHERE mode='agent-session' "
-                "AND group_routing->>'agent_reviewer' LIKE 'cc-%'"
+                "FROM bot_channels WHERE mode='agent-session' AND audience='client' "
+                "AND group_routing->>'agent_reviewer' IS NOT NULL"
             )
             rows = cur.fetchall()
     except Exception:  # noqa: BLE001 — fail-safe: still watch the known channel
@@ -216,7 +269,8 @@ def fetch_recent(dsn: str, tag: str, limit: int = FETCH_LIMIT) -> list:
     try:
         with psycopg2.connect(dsn) as c, c.cursor() as cur:
             cur.execute(
-                "SELECT id, direction, EXTRACT(EPOCH FROM created_at), from_name, LEFT(text, 240) "
+                "SELECT id, direction, EXTRACT(EPOCH FROM created_at), from_name, LEFT(text, 240), "
+                "from_user_id "
                 "FROM operator_messages WHERE tag=%s ORDER BY created_at DESC LIMIT %s",
                 (tag, limit),
             )
@@ -224,7 +278,7 @@ def fetch_recent(dsn: str, tag: str, limit: int = FETCH_LIMIT) -> list:
     except Exception as e:  # noqa: BLE001 — fail-closed
         raise CouldNotMeasure(str(e))
     return [{"id": int(r[0]), "direction": r[1], "created_epoch": float(r[2]),
-             "from_name": r[3], "text": r[4] or ""} for r in rs]
+             "from_name": r[3], "text": r[4] or "", "from_user_id": r[5]} for r in rs]
 
 
 def _bus(dsn: str, action: dict) -> None:
@@ -259,6 +313,7 @@ def main(argv=None) -> int:
     mode = "ARMED" if armed else "DETECT-ONLY"
 
     dsn = _dsn()
+    musa_id = _musa_telegram_id()
     now = time.time()
     state = _load_state()
     new_state = dict(state)
@@ -274,7 +329,7 @@ def main(argv=None) -> int:
             had_error = True
             _fail_closed_page(dsn, tag, str(e), armed)
             continue
-        waiting = latest_unanswered_inbound(rows)
+        waiting = latest_unanswered_inbound(rows, musa_id=musa_id)
         actions, ns = evaluate(waiting, now, state.get(tag, {}), coord=ch["coord"],
                                label=ch["label"], tag=tag, send_script=ch["send_script"])
         new_state[tag] = ns

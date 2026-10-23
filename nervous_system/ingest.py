@@ -237,16 +237,33 @@ def _unknown_marker(ch: "Channel", msg: dict, upd_id: int) -> str:
     return f"[non-text update {upd_id} — keys: {keys}]"
 
 
-def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
+def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> tuple[str, dict | None]:
     """The type-dispatch half of message_content. Split out so message_content
     can guard the WHOLE dispatch: a raise here must degrade to the old marker,
     never propagate — the durable log write (step 2 of process_update) is the
-    one thing that must always happen."""
+    one thing that must always happen.
+
+    Returns (content, media_meta). media_meta is None for a non-media update
+    (text, sticker, poll, location, ...); for a photo/animation/document/
+    voice/audio/video/video_note it is always a dict — even when the download
+    failed after all retries — so the caller can persist the Telegram file_id
+    identity REGARDLESS of download outcome (bus #74111: previously a failed
+    download degraded to a dead-end text marker and the file_id that could
+    have re-fetched it was simply discarded, never written anywhere)."""
+    media_meta: dict | None = None
+
+    def _dl(file_id: str, file_unique_id: str, kind: str, name: str | None = None) -> str:
+        nonlocal media_meta
+        media_meta = {"file_id": file_id, "file_unique_id": file_unique_id,
+                      "kind": kind, "ok": False}
+        path = _download_media(ch.token, file_id, file_unique_id, ch.key, upd_id, name)
+        media_meta["ok"] = True
+        return path
+
     if msg.get("photo"):
         try:
             photo = msg["photo"][-1]
-            path = _download_media(ch.token, photo["file_id"], photo["file_unique_id"],
-                                    ch.key, upd_id)
+            path = _dl(photo["file_id"], photo["file_unique_id"], "photo")
             content = f"sent a SCREENSHOT → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
             _log_media_fail(ch, "photo", upd_id, e)
@@ -258,8 +275,7 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
         anim = msg["animation"]
         try:
             name = anim.get("file_name") or f"anim_{anim['file_id'][:12]}.mp4"
-            path = _download_media(ch.token, anim["file_id"], anim["file_unique_id"],
-                                    ch.key, upd_id, name)
+            path = _dl(anim["file_id"], anim["file_unique_id"], "animation", name)
             content = f"sent an ANIMATION/GIF → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
             _log_media_fail(ch, "animation", upd_id, e)
@@ -267,19 +283,17 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
     elif msg.get("document"):
         doc = msg["document"]
         try:
-            path = _download_media(ch.token, doc["file_id"], doc["file_unique_id"],
-                                    ch.key, upd_id, doc.get("file_name"))
+            path = _dl(doc["file_id"], doc["file_unique_id"], "document", doc.get("file_name"))
             content = f"sent a FILE → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
             _log_media_fail(ch, "document", upd_id, e)
             content = f"sent a file (download failed: {e})" + (f" | {text}" if text else "")
     elif msg.get("voice") or msg.get("audio"):
-        media = msg.get("voice") or msg.get("audio")
+        voice_or_audio = msg.get("voice") or msg.get("audio")
         try:
-            name = media.get("file_name") or f"voice_{media['file_id'][:12]}.ogg"
-            path = _download_media(ch.token, media["file_id"], media["file_unique_id"],
-                                    ch.key, upd_id, name)
-            dur = media.get("duration")
+            name = voice_or_audio.get("file_name") or f"voice_{voice_or_audio['file_id'][:12]}.ogg"
+            path = _dl(voice_or_audio["file_id"], voice_or_audio["file_unique_id"], "voice/audio", name)
+            dur = voice_or_audio.get("duration")
             content = (f"sent a VOICE note ({dur}s) → {path}"
                        + (f"  | caption: {text}" if text else ""))
         except Exception as e:
@@ -292,8 +306,7 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
         vid = msg["video"]
         try:
             name = vid.get("file_name") or f"video_{vid['file_id'][:12]}.mp4"
-            path = _download_media(ch.token, vid["file_id"], vid["file_unique_id"],
-                                    ch.key, upd_id, name)
+            path = _dl(vid["file_id"], vid["file_unique_id"], "video", name)
             dur = vid.get("duration")
             content = (f"sent a VIDEO ({dur}s) → {path}"
                        + (f"  | caption: {text}" if text else ""))
@@ -303,8 +316,8 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
     elif msg.get("video_note"):
         note = msg["video_note"]
         try:
-            path = _download_media(ch.token, note["file_id"], note["file_unique_id"],
-                                    ch.key, upd_id, f"videonote_{note['file_id'][:12]}.mp4")
+            path = _dl(note["file_id"], note["file_unique_id"], "video_note",
+                       f"videonote_{note['file_id'][:12]}.mp4")
             dur = note.get("duration")
             content = (f"sent a VIDEO NOTE ({dur}s) → {path}"
                        + (f"  | caption: {text}" if text else ""))
@@ -368,16 +381,30 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
                    f"— bot_channels.allowed_chat_ids NOT auto-updated, needs orch-console action")
     else:
         content = text or _unknown_marker(ch, msg, upd_id)
-    return content
+    return content, media_meta
 
 
 def message_content(ch: "Channel", msg: dict, upd_id: int) -> str:
     """Human-readable content for the log row — text, or a downloaded-media
     pointer cc-orchestrator can Read, or a last-resort shape marker. Reply
-    context is preserved so cc-orch knows which message the operator answered."""
+    context is preserved so cc-orch knows which message the operator answered.
+
+    Thin wrapper over message_content_with_media() that drops the media
+    identity — kept so every existing caller/test with this exact signature
+    is untouched (bus #74111 added the identity as an addition, not a
+    behavior change to this function)."""
+    return message_content_with_media(ch, msg, upd_id)[0]
+
+
+def message_content_with_media(ch: "Channel", msg: dict, upd_id: int) -> tuple[str, dict | None]:
+    """Same as message_content(), plus the Telegram media identity (file_id/
+    file_unique_id/kind/ok) when this update carried a media attachment —
+    None for a text/sticker/poll/location/... update. process_update uses
+    the identity to persist a re-fetchable pointer into operator_messages
+    EVEN WHEN the download failed (bus #74111)."""
     text = msg.get("text") or msg.get("caption") or ""
     try:
-        content = _media_content(ch, msg, upd_id, text)
+        content, media_meta = _media_content(ch, msg, upd_id, text)
     except Exception as e:                                          # noqa: BLE001
         # Dead-man's rule: extraction is best-effort, the LOG is load-bearing
         # (Option B — the durable row is the truth). A bug in any branch above
@@ -385,6 +412,7 @@ def message_content(ch: "Channel", msg: dict, upd_id: int) -> str:
         _log_line(f"{ch.key}: content extraction raised on update {upd_id} "
                   f"({type(e).__name__}: {e}) — degrading to bare marker")
         content = text or f"[non-text update {upd_id}]"
+        media_meta = None
 
     # Reply-threading: prepend the quoted message so cc-orch knows the referent
     # (parity with the retired bridge — an operator reply loses its meaning
@@ -393,7 +421,7 @@ def message_content(ch: "Channel", msg: dict, upd_id: int) -> str:
     if rep:
         snip = (rep.get("text") or rep.get("caption") or "[media]").strip().replace("\n", " ")[:80]
         content = f'↩️ re "{snip}": {content}'
-    return content
+    return content, media_meta
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -610,6 +638,59 @@ def gate_allows(ch: Channel, chat_id: int, username: str | None) -> bool:
     ]:
         return True
     return False
+
+
+# ── Token groups: one-bot-many-clients (op#31298/31307, one getUpdates loop per
+# UNIQUE token, not per channel_key — the dual-poller 409 fix) ────────────────
+
+def group_by_token(channels: dict[str, Channel]) -> dict[str, list[Channel]]:
+    """Channels sharing one token_env_key poll together. Sorted by channel_key
+    for a deterministic first-match order (see match_channel_in_group)."""
+    groups: dict[str, list[Channel]] = {}
+    for ch in channels.values():
+        groups.setdefault(ch.token_env_key, []).append(ch)
+    for group in groups.values():
+        group.sort(key=lambda c: c.key)
+    return groups
+
+
+def overlapping_chat_ids(group: list[Channel]) -> dict[int, list[str]]:
+    """chat_ids claimed by more than one row sharing a token — ambiguous
+    routing. Refused (not first-match) by the caller: a shared token's
+    group must have disjoint allowed_chat_ids, or there's no way to tell
+    which client a message belongs to. Empty dict = no overlap."""
+    seen: dict[int, list[str]] = {}
+    for ch in group:
+        for cid in (ch.allowed_chat_ids or []):
+            seen.setdefault(cid, []).append(ch.key)
+    return {cid: keys for cid, keys in seen.items() if len(keys) > 1}
+
+
+def empty_allowlist_rows(group: list[Channel]) -> list[str]:
+    """A row with no allowed_chat_ids/allowed_usernames can never match in a
+    SHARED-token group (gate_allows is always False for it) — not dangerous
+    (deny-by-default fails safe either way) but silent in a multi-row group
+    is how a client looks 'live' while actually never receiving anything.
+    A solo-token group (today's shape for every channel) is unaffected —
+    an unconfigured standalone channel is the normal pre-cutover state."""
+    if len(group) <= 1:
+        return []
+    return [ch.key for ch in group if not (ch.allowed_chat_ids or ch.allowed_usernames)]
+
+
+def match_channel_in_group(group: list[Channel], chat_id: int | None,
+                            username: str | None) -> Channel | None:
+    """Which row in this token's group handles an update, by chat_id/username
+    — reuses gate_allows so matching IS the gate (no divergent logic). Returns
+    None (unmatched) for an update from a chat no row in the group claims;
+    the caller still logs it (under the group's first row, for audit) and
+    gates it exactly like today's single-channel 'random stranger' case."""
+    if chat_id is None:
+        return None
+    for ch in group:
+        if gate_allows(ch, chat_id, username):
+            return ch
+    return None
 
 
 # ── Route: agent-session / log-and-route => nudge-only tmux line ─────────────
@@ -1072,7 +1153,7 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
 
         # 2. LOG — durable first, always. Media is downloaded here so the row
         #    carries the local path (screenshot/doc), not a bare non-text marker.
-        content = message_content(ch, msg, upd_id)
+        content, media_meta = message_content_with_media(ch, msg, upd_id)
         # GROUP->SUPERGROUP MIGRATION (orch-console bus #50332): the durable
         # row above already captures the new chat_id (message_content), but a
         # row sitting in the log is easy to miss. Page loudly too, same
@@ -1109,6 +1190,18 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
             stored_from_user_id = None
             stored_from_username = None
             stored_from_name = None
+            # The file_id is a RETRIEVAL KEY, not metadata like sender identity —
+            # anyone with substrate read access + the bot token could re-download
+            # the personal content through it. Same containment as stored_content:
+            # NEVER written to the substrate row for a personal-routed tag. (The
+            # real media, if any, is best-effort-lost here same as before this
+            # change — wiring media_refs into write_personal_content() is a
+            # separate, out-of-scope fix for the personal silo, not this
+            # substrate-only directive, bus #74111.)
+            stored_file_id = None
+            stored_file_unique_id = None
+            stored_media_kind = None
+            stored_media_status = None
         else:
             # PASSIVE CoS triage (Step 1): compute the read-only route suggestion and
             # store it in the additive `cos_triage` column. STRICTLY additive — it
@@ -1126,14 +1219,31 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
             stored_from_user_id = from_user_id
             stored_from_username = from_username
             stored_from_name = from_name
+            # bus #74111: persist the Telegram file_id identity in THIS SAME
+            # insert regardless of download outcome — media_meta is built
+            # before the except branch sets content to a "download failed"
+            # marker, so a failed download still leaves a re-fetchable
+            # pointer instead of a dead end (message_queue.file_id was the
+            # prior, abandoned attempt at this: dead since 2026-04-16,
+            # unused by this ingest).
+            if media_meta is None:
+                stored_file_id = stored_file_unique_id = stored_media_kind = None
+                stored_media_status = None
+            else:
+                stored_file_id = media_meta["file_id"]
+                stored_file_unique_id = media_meta["file_unique_id"]
+                stored_media_kind = media_meta["kind"]
+                stored_media_status = "ok" if media_meta["ok"] else "failed"
         cur.execute(
             "INSERT INTO operator_messages "
             "(direction, channel, chat_id, tag, text, delivered, "
-            " from_user_id, from_username, from_name, cos_triage) "
-            "VALUES ('inbound','telegram',%s,%s,%s,true,%s,%s,%s,%s) RETURNING id",
+            " from_user_id, from_username, from_name, cos_triage, "
+            " file_id, file_unique_id, media_kind, media_status) "
+            "VALUES ('inbound','telegram',%s,%s,%s,true,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             (str(chat_id) if chat_id is not None else None, ch.channel_tag,
              stored_content, stored_from_user_id, stored_from_username,
-             stored_from_name, cos_triage),
+             stored_from_name, cos_triage,
+             stored_file_id, stored_file_unique_id, stored_media_kind, stored_media_status),
         )
         op_msg_id = cur.fetchone()[0]
         cur.execute(
@@ -1272,37 +1382,71 @@ def unread_count(conn, ch: Channel) -> int:
         return cur.fetchone()[0]
 
 
-# ── Channel task: long-poll loop w/ DB-held offset ────────────────────────────
+# ── Token task: long-poll loop w/ DB-held offset, ONE per unique token ────────
+# (op#31298/31307 one-bot-many-clients: a solo-channel token group is this
+# exact loop, unchanged — grouping only matters once 2+ channel_keys share a
+# token_env_key.)
 
-async def channel_loop(key: str, channels: dict[str, Channel]):
-    last_db_alert = 0.0
-    while True:
-        ch = channels.get(key)
-        if ch is None:            # disabled on refresh → task retires
-            _log_line(f"{key}: disabled — loop exiting")
-            return
-        if not ch.token:
-            _log_line(f"{key}: token env '{ch.token_env_key}' empty — sleeping (graceful, no crash-loop)")
-            await asyncio.sleep(CONFIG_REFRESH)
-            continue
-        try:
-            params = {"timeout": POLL_TIMEOUT,
-                      "allowed_updates": '["message","edited_message","callback_query"]'}
-            if ch.poll_offset is not None:
-                params["offset"] = ch.poll_offset + 1
-            updates = await asyncio.to_thread(tg_call, ch.token, "getUpdates", params)
-            with psycopg.connect(_dsn()) as conn:
-                for upd in (updates or []):
-                    process_update(conn, ch, upd)
-                if updates:
-                    # Offset fail-safe: ack ONLY after the whole batch is durable.
-                    new_off = updates[-1]["update_id"]
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "UPDATE bot_channels SET poll_offset=%s, updated_at=now() "
-                            "WHERE channel_key=%s", (new_off, ch.key))
-                    conn.commit()
-                    ch.poll_offset = new_off
+async def _run_token_cycle(token_env_key: str, channels: dict[str, Channel],
+                            last_db_alert: float) -> tuple[float, float | None]:
+    """One getUpdates cycle for a token's group. Returns (last_db_alert,
+    sleep_for) — sleep_for is None when the caller should proceed straight
+    into the next cycle (getUpdates' own long-poll already paced it), or a
+    number of seconds otherwise. Split out from channel_loop so a test can
+    drive exactly one cycle without an infinite loop (tg_call is the only
+    real-network call — monkeypatch it)."""
+    # Re-derived every cycle from the live (main()-refreshed) channels dict
+    # — a channel joining/leaving this token's group takes effect on the
+    # NEXT cycle with no restart and no task replacement needed.
+    group = [ch for ch in channels.values() if ch.token_env_key == token_env_key]
+    if not group:
+        _log_line(f"{token_env_key}: no channels left — loop exiting")
+        return last_db_alert, -1.0   # sentinel: caller returns, task retires
+    token = group[0].token
+    if not token:
+        _log_line(f"{token_env_key}: token env empty — sleeping (graceful, no crash-loop)")
+        return last_db_alert, CONFIG_REFRESH
+    overlap = overlapping_chat_ids(group)
+    if overlap:
+        _log_line(f"WATCHDOG: {token_env_key}: overlapping allowed_chat_ids across "
+                  f"{sorted(c.key for c in group)} ({overlap}) — refusing to poll until fixed")
+        return last_db_alert, ERROR_BACKOFF
+    for misconfigured_key in empty_allowlist_rows(group):
+        _log_line(f"WATCHDOG: {token_env_key}: '{misconfigured_key}' has an EMPTY "
+                  f"allowed_chat_ids/allowed_usernames in a {len(group)}-channel "
+                  "token group — it will never match any message")
+    try:
+        params = {"timeout": POLL_TIMEOUT,
+                  "allowed_updates": '["message","edited_message","callback_query"]'}
+        # Telegram's offset is per-BOT (one token), not per-chat — every row
+        # sharing this token advances in lockstep, so any one of them carries
+        # the shared cursor; max() tolerates a row that drifted (manual edit).
+        offsets = [c.poll_offset for c in group if c.poll_offset is not None]
+        if offsets:
+            params["offset"] = max(offsets) + 1
+        updates = await asyncio.to_thread(tg_call, token, "getUpdates", params)
+        with psycopg.connect(_dsn()) as conn:
+            for upd in (updates or []):
+                msg = upd.get("message") or upd.get("edited_message") or {}
+                chat_id = (msg.get("chat") or {}).get("id")
+                username = (msg.get("from") or {}).get("username")
+                matched = match_channel_in_group(group, chat_id, username)
+                # Unmatched (no row in the group claims this chat): still log it,
+                # under the group's first row — same as today's single-channel
+                # "random stranger messages the bot" case (logged, then gated,
+                # never routed). group[0] is deterministic (sorted by key).
+                process_update(conn, matched or group[0], upd)
+            if updates:
+                # Offset fail-safe: ack ONLY after the whole batch is durable.
+                new_off = updates[-1]["update_id"]
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE bot_channels SET poll_offset=%s, updated_at=now() "
+                        "WHERE token_env_key=%s", (new_off, token_env_key))
+                conn.commit()
+                for c in group:
+                    c.poll_offset = new_off
+            for ch in group:
                 # CAI-RESP-382 max-latency cap — runs every cycle (incl. empty
                 # polls) so a message deferred while the agent stays busy still
                 # nudges once it crosses MAX_DEFER_SEC. This is what was missing
@@ -1313,10 +1457,10 @@ async def channel_loop(key: str, channels: dict[str, Channel]):
                 # stuck-idle (neither replying nor busy) — never left wondering.
                 reassure_if_unhandled(conn, ch)
                 # STEP-0 poll-health (channel-liveness watchdog; SRE 38560): record a
-                # SUCCESSFUL getUpdates cycle. Reuses this conn so it fires ONLY when the
-                # poll actually succeeded — last_ok_at is the liveness clock the rung-1
-                # reader keys on, consec_errors resets to 0. host distinguishes a dark hub
-                # instance from a dark Mini-pinned instance. updated_at bumps every cycle.
+                # SUCCESSFUL getUpdates cycle, per channel_key (health stays keyed
+                # per logical channel even though one getUpdates served the whole
+                # group) — last_ok_at is the liveness clock the rung-1 reader keys
+                # on, consec_errors resets to 0.
                 with conn.cursor() as cur:
                     cur.execute(
                         "INSERT INTO ingest_poll_health "
@@ -1325,25 +1469,28 @@ async def channel_loop(key: str, channels: dict[str, Channel]):
                         "ON CONFLICT (channel_key, host) DO UPDATE SET "
                         "last_ok_at=now(), consec_errors=0, last_error=NULL, updated_at=now()",
                         (ch.key, socket.gethostname()))
-                conn.commit()
-        except psycopg.Error as e:
-            # DB unreachable: offset stays un-acked → Telegram will redeliver →
-            # A1 dedupe absorbs. Surface loudly for the watchdog (CAI-RESP-357).
-            now = time.monotonic()
-            if now - last_db_alert > DB_ALERT_EVERY:
-                _log_line(f"WATCHDOG: substrate DB unreachable from ingest ({type(e).__name__}: {e}) — channels paused, offsets held")
-                last_db_alert = now
-            await asyncio.sleep(ERROR_BACKOFF)
-        except Exception as e:
-            _log_line(f"{key}: loop error {type(e).__name__}: {e}")
-            # STEP-0 poll-health (SRE 38560): count this FAILED poll (the Errno-54 path).
-            # Short-lived conn — the success block's conn isn't open here — in its OWN
-            # try/except so a poll-health write failure can never crash or mask the loop's
-            # error handling. last_ok_at deliberately NOT touched: preserve the last REAL
-            # success time (the watchdog's liveness clock). Typed error string so a real
-            # Telegram 409 would ever surface verbatim (honest competitor-confirm signal).
-            try:
-                with psycopg.connect(_dsn()) as _hconn, _hconn.cursor() as _hcur:
+            conn.commit()
+        return last_db_alert, None
+    except psycopg.Error as e:
+        # DB unreachable: offset stays un-acked → Telegram will redeliver →
+        # A1 dedupe absorbs. Surface loudly for the watchdog (CAI-RESP-357).
+        now = time.monotonic()
+        if now - last_db_alert > DB_ALERT_EVERY:
+            _log_line(f"WATCHDOG: substrate DB unreachable from ingest ({type(e).__name__}: {e}) — channels paused, offsets held")
+            last_db_alert = now
+        return last_db_alert, ERROR_BACKOFF
+    except Exception as e:
+        _log_line(f"{token_env_key}: loop error {type(e).__name__}: {e}")
+        # STEP-0 poll-health (SRE 38560): count this FAILED poll (the Errno-54 /
+        # 409-conflict path) against EVERY channel_key in the group — the failure
+        # (e.g. a stray second poller on this token) affects all of them, not just
+        # one. Short-lived conn — the success block's conn isn't open here — in its
+        # OWN try/except so a poll-health write failure can never crash or mask the
+        # loop's error handling. last_ok_at deliberately NOT touched: preserve the
+        # last REAL success time (the watchdog's liveness clock).
+        try:
+            with psycopg.connect(_dsn()) as _hconn, _hconn.cursor() as _hcur:
+                for ch in group:
                     _hcur.execute(
                         "INSERT INTO ingest_poll_health "
                         "(channel_key, host, last_ok_at, consec_errors, last_error, updated_at) "
@@ -1352,10 +1499,23 @@ async def channel_loop(key: str, channels: dict[str, Channel]):
                         "consec_errors = ingest_poll_health.consec_errors + 1, "
                         "last_error = EXCLUDED.last_error, updated_at = now()",
                         (ch.key, socket.gethostname(), f"{type(e).__name__}: {e}"[:200]))
-                    _hconn.commit()
-            except Exception:
-                pass  # poll-health write is best-effort; never mask the real loop error
-            await asyncio.sleep(ERROR_BACKOFF)
+                _hconn.commit()
+        except Exception:
+            pass  # poll-health write is best-effort; never mask the real loop error
+        return last_db_alert, ERROR_BACKOFF
+
+
+async def channel_loop(token_env_key: str, channels: dict[str, Channel]):
+    """Thin driver: re-derives the token's group fresh every cycle from the
+    live `channels` dict, so a channel joining/leaving the group takes effect
+    on the next cycle with no restart (hot-reload for free)."""
+    last_db_alert = 0.0
+    while True:
+        last_db_alert, sleep_for = await _run_token_cycle(token_env_key, channels, last_db_alert)
+        if sleep_for == -1.0:
+            return
+        if sleep_for:
+            await asyncio.sleep(sleep_for)
 
 
 def _run_pinned_channel_drift_check() -> None:
@@ -1397,10 +1557,15 @@ async def main():
                 ch._last_forced_nudge_id = getattr(channels[k], "_last_forced_nudge_id", 0)
         channels.clear()
         channels.update(fresh)
-        for k in list(channels):
-            if k not in tasks or tasks[k].done():
-                tasks[k] = asyncio.create_task(channel_loop(k, channels))
-                _log_line(f"{k}: channel task up (mode={channels[k].mode})")
+        # One task per UNIQUE token_env_key, not per channel_key (op#31298
+        # one-bot-many-clients) — a brand-new token spawns a task here; an
+        # EXISTING token's group picking up a new/removed channel_key needs
+        # no respawn, since channel_loop re-derives its group from `channels`
+        # every cycle (true hot-reload, no restart required).
+        for token_env_key in list(group_by_token(channels)):
+            if token_env_key not in tasks or tasks[token_env_key].done():
+                tasks[token_env_key] = asyncio.create_task(channel_loop(token_env_key, channels))
+                _log_line(f"{token_env_key}: token task up")
         await asyncio.sleep(CONFIG_REFRESH)
 
 

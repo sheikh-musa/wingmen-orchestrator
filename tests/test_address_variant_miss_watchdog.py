@@ -13,18 +13,22 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scripts.address_variant_miss_watchdog import (
+    _nudge_lane,
     due_for_page,
     find_address_variant_misses,
+    lane_nudge_message,
 )
 
 NOW = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
 
 
-def _row(instance_id, base_id, unread_age_min, base_read_age_min, unread_count=1, instance_status="working"):
+def _row(instance_id, base_id, unread_age_min, base_read_age_min, unread_count=1,
+         instance_status="working", tmux_session=None):
     return {
         "instance_id": instance_id,
         "base_agent_id": base_id,
         "instance_status": instance_status,
+        "tmux_session": tmux_session,
         "oldest_unread_created_at": NOW - timedelta(minutes=unread_age_min) if unread_age_min is not None else None,
         "unread_count": unread_count,
         "last_base_read_at": NOW - timedelta(minutes=base_read_age_min) if base_read_age_min is not None else None,
@@ -107,3 +111,61 @@ def test_due_for_page_within_cooldown():
 def test_due_for_page_after_cooldown():
     state = {"cc-shipforge-1": {"last_paged_ts": 1000.0}}
     assert due_for_page("cc-shipforge-1", state, now_ts=1000.0 + 241 * 60, cooldown_min=240) is True
+
+
+# ── bus#58273 (held_commitment #360): direct lane nudge, additive to the
+# console page ────────────────────────────────────────────────────────────
+
+def test_lane_nudge_message_names_the_instance_and_the_fix():
+    miss = _row("cc-shipforge-1", "cc-shipforge", unread_age_min=30, base_read_age_min=5,
+                unread_count=3, tmux_session="shipforge")
+    msg = lane_nudge_message(miss)
+    assert "cc-shipforge-1" in msg
+    assert "cc-shipforge" in msg
+    assert "to_agent IN (base, instance)" in msg
+    assert "3" in msg  # unread_count
+
+
+def test_nudge_lane_skips_cleanly_with_no_tmux_session_on_record():
+    """A miss row with no registered tmux_session (agent_status.tmux_session
+    NULL) must not attempt a nudge at all -- there is nothing to send-keys
+    into, and this must be a clean skip, never a crash or a hang."""
+    miss = _row("cc-shipforge-1", "cc-shipforge", unread_age_min=30, base_read_age_min=5,
+                tmux_session=None)
+    assert _nudge_lane(miss) is False
+
+
+def test_nudge_lane_calls_lane_nudge_sh_with_session_and_message(tmp_path):
+    """_nudge_lane must invoke the sanctioned lane_nudge.sh wrapper (never a
+    raw tmux send-keys) with (tmux_session, message) -- verified against a
+    fake binary that records its argv and exits 0 (verified-submit success)."""
+    fake_bin = tmp_path / "lane_nudge.sh"
+    record = tmp_path / "called_with.txt"
+    fake_bin.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "%s\\n" "$1" "$2" > "{record}"\n'
+        "exit 0\n"
+    )
+    fake_bin.chmod(0o755)
+
+    miss = _row("cc-shipforge-1", "cc-shipforge", unread_age_min=30, base_read_age_min=5,
+                unread_count=2, tmux_session="shipforge")
+    assert _nudge_lane(miss, lane_nudge_bin=fake_bin) is True
+
+    lines = record.read_text().splitlines()
+    assert lines[0] == "shipforge"  # tmux session, exact
+    assert "cc-shipforge-1" in lines[1]  # the message body mentions the instance
+
+
+def test_nudge_lane_false_on_non_zero_exit_never_raises(tmp_path):
+    """lane_nudge.sh exit codes 2/3/5/6/7/8 are all REFUSED/failed-delivery
+    shapes (menu-parked, unreadable pane, ceiling hit, ...) -- _nudge_lane
+    must report False for any of them, never raise, and never be mistaken
+    for a successful delivery."""
+    fake_bin = tmp_path / "lane_nudge.sh"
+    fake_bin.write_text("#!/usr/bin/env bash\nexit 5\n")  # 5 = menu-parked refusal
+    fake_bin.chmod(0o755)
+
+    miss = _row("cc-shipforge-1", "cc-shipforge", unread_age_min=30, base_read_age_min=5,
+                tmux_session="shipforge")
+    assert _nudge_lane(miss, lane_nudge_bin=fake_bin) is False

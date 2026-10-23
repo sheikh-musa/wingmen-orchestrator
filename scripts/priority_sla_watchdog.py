@@ -39,7 +39,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -57,6 +56,7 @@ sys.path.insert(0, str(ORCH))
 # reclaims on expiry) so the SRE and a reclaiming hub never double-nudge/page.
 from scripts.lib import fleet_health_lease  # noqa: E402
 from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
+from scripts.lib.console_alive import console_alive  # noqa: E402  (audit-20261006 item 4)
 
 # ---------------------------------------------------------------------------
 # Config — all overridable via environment (launchd EnvironmentVariables).
@@ -79,7 +79,7 @@ def _envint(name: str, default: int) -> int:
 # 2026-07-14: within 3h there are ~6 violations; within 24h there are ~131. So
 # 3h cleanly isolates fresh stalls from chronic backlog. This is the primary
 # spam-guard — widen only deliberately (and watch the circuit breaker).
-MAX_VIOLATION_AGE_MIN = _envint("SLA_MAX_VIOLATION_AGE_MIN", 180)  # 3h
+MAX_VIOLATION_AGE_MIN = _envint("SLA_MAX_VIOLATION_AGE_MIN", 300)  # 5h (audit-20261006 item 4)
 
 # Re-nudge the SAME (agent,message) at most once per this window.
 RENUDGE_BACKOFF_MIN = _envint("SLA_RENUDGE_BACKOFF_MIN", 15)
@@ -205,6 +205,14 @@ HUB_SESSIONS = {
     "cc-orchestrator": os.environ.get("SLA_HUB_SESSION_ORCH", "orch"),
     "cc-infra": os.environ.get("SLA_HUB_SESSION_INFRA", "infra"),
 }
+
+# Human identities that appear as `agent` on inbox_sla_violations rows but are NEVER
+# agent lanes and so NEVER have an agent_status row (cc-fleet-health review, PR #456 /
+# bus #73227): the OFFLINE RECIPIENT check below can't tell "dead agent lane" from
+# "never-was-an-agent-lane" and must not run for these at all, or every urgent page
+# addressed to a human (e.g. the weekly-limit operator page via renudge()'s
+# agent=='musa' branch) gets silently marked attended and never reaches send_page().
+HUMAN_RECIPIENTS = frozenset({"musa", "cto-desktop"})
 
 # op#11774 #5 INTERIM (ship-first, page-only): the read-parked-hub grace. A hub that
 # READS a P0/P1 rr row then PARKS (responded_at NULL) is silenced by attended_for()'s
@@ -647,20 +655,20 @@ def build_page(v: dict, nudges: int) -> str:
 # the operator still gets it. A missed page is worse than an unnecessary one; this
 # only removes pages we can PROVE somebody else can act on.
 def _internal_path_alive(recipient: str) -> bool:
-    """Is orch-console live and NOT itself the stalled recipient?"""
-    if recipient == "orch-console":
-        return False                      # the internal escalator IS the stall
-    tmux = shutil.which("tmux") or "/opt/homebrew/bin/tmux"
-    try:
-        r = subprocess.run([tmux, "has-session", "-t", "=nazim"],
-                           capture_output=True, timeout=5)
-        return r.returncode == 0
-    except Exception:                      # noqa: BLE001 — cannot tell => page
-        return False
+    """Is there a non-circular internal (non-operator) party to escalate to at all?
+    False only when the recipient itself IS orch-console — escalating a stall about
+    orch-console's own queue back to orch-console is circular. The live/dead choice
+    BETWEEN orch-console and its audit-20261006-item-4 hub fallback (cc-orchestrator)
+    is escalate_internally's job, via console_alive()."""
+    return recipient != "orch-console"
 
 
 def escalate_internally(v: dict, nudges: int) -> bool:
-    """File the stall to orch-console instead of paging the operator."""
+    """File the stall to orch-console instead of paging the operator (CAI-600) -- or, if
+    orch-console has no fresh agent_status heartbeat (console_alive() False; audit-20261006
+    item 4, bus#54648), re-address to the hub (cc-orchestrator) as P1+requires_response
+    instead of relaying into a void. Never downgrades a P0 violation's own priority on
+    redirect."""
     body = (f"SLA stall on an agent queue — routed to you rather than the operator, who cannot "
             f"clear another body's inbox (CAI-600).\n\n"
             f"  recipient : {v['agent']}\n  message   : #{v['message_id']} ({v['priority']})\n"
@@ -670,14 +678,24 @@ def escalate_internally(v: dict, nudges: int) -> bool:
             f"If this genuinely needs the operator, escalate it yourself with the reason — that "
             f"judgement is yours, not this watchdog's.")
     try:
+        console_is_alive = console_alive()
+    except Exception as e:  # noqa: BLE001 — an unprovable check never claims "alive"
+        log(f"console_alive check raised ({e}) — treating as dead")
+        console_is_alive = False
+    to_agent, priority, requires_response = "orch-console", v["priority"], False
+    if not console_is_alive:
+        to_agent, requires_response = "cc-orchestrator", True
+        body = (f"[console-dead-redirect] orch-console has no fresh heartbeat — routed to "
+                f"you instead (audit-20261006 item 4, bus#54648).\n\n{body}")
+    try:
         import psycopg
         dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
         with psycopg.connect(dsn, connect_timeout=15) as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
-                "priority) VALUES ('sla-watchdog','orch-console','blocker',%s,%s,%s)",
-                (f"SLA stall: {v['agent']} #{v['message_id']} ({v['priority']}, "
-                 f"{v['elapsed_minutes']}m)", body, v["priority"]))
+                "priority, requires_response) VALUES ('sla-watchdog',%s,'blocker',%s,%s,%s,%s)",
+                (to_agent, f"SLA stall: {v['agent']} #{v['message_id']} ({v['priority']}, "
+                 f"{v['elapsed_minutes']}m)", body, priority, requires_response))
             conn.commit()
         return True
     except Exception as e:                 # noqa: BLE001
@@ -792,7 +810,31 @@ def attended_for(conn, mid: int, violation_type: str, agent: str = "") -> bool:
         read_at set == attending -> suppress. A hub row NOT EVEN READ past the
         threshold still pages — that's the real 'hub not woken' alarm (#16246),
         deliberately preserved.
-    Fail-OPEN toward paging on error (a rare double-page beats missing a real P0)."""
+      * ASK-AWARE (Build B slice 4, bus #73068, incident #59453/ask#1146): a
+        violation whose thread is LINKED to an OPEN operator_asks row (via
+        --link-ask — see bus_send.py) that has since been re-committed to a
+        future date, or is flagged waiting_on_operator, is attended from the
+        operator's own side — re-paging about it is noise. A thread with no
+        linked ask, or a CLOSED one, is unaffected (falls through unchanged).
+      * OFFLINE RECIPIENT (Build B slice 4, bus #73068, same principle as slice
+        3's context-gauge veto): a violation addressed to a recipient with NO
+        live (non-offline, recently-heartbeating) agent_status row is structural
+        noise — the recipient doesn't exist to act on it. Independent of the HUB
+        read_at exception above: that one is about a SLOW but alive hub, this is
+        about a recipient that is not live at all. `agent` here is the violation's
+        raw to_agent, which for a multi-instance lane family is the SPECIFIC
+        INSTANCE id (e.g. 'cc-cosem-platform-2'), never the bare base — so the
+        liveness lookup must match EITHER agent_id OR base_agent_id (bus #73084:
+        matching base_agent_id alone made every live multi-instance recipient
+        look offline and mass-suppressed real pages, caught in cc-fleet-health's
+        review before merge). NEVER runs for HUMAN_RECIPIENTS (bus #73227): a
+        human recipient has no agent_status row by design, not because it's
+        dead — running this check for `musa`/`cto-desktop` would mark every
+        human-addressed violation attended unconditionally, silencing exactly
+        the operator-page mechanism this watchdog exists for.
+    Each new sub-check below fails toward False (not attended) on its own lookup
+    error — a DB hiccup must never silently swallow a real page — same posture as
+    the function's pre-existing Fail-OPEN-toward-paging-on-error contract."""
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -815,15 +857,42 @@ def attended_for(conn, mid: int, violation_type: str, agent: str = "") -> bool:
                     (agent, thread_id, created_at),
                 )
                 same_thread_reply_after = cur.fetchone() is not None
+            ask_attended = False
+            if thread_id is not None:
+                try:
+                    cur.execute(
+                        "SELECT 1 FROM operator_asks WHERE thread_id=%s AND closed_at IS NULL "
+                        "AND (waiting_on_operator IS TRUE OR committed_date > now()) LIMIT 1",
+                        (thread_id,),
+                    )
+                    ask_attended = cur.fetchone() is not None
+                except Exception as e:
+                    log(f"attended-recheck-ask-lookup-failed #{mid}: {e}")
+                    ask_attended = False
+            recipient_offline = False
+            if agent and agent not in HUMAN_RECIPIENTS:
+                try:
+                    cur.execute(
+                        "SELECT 1 FROM agent_status WHERE (agent_id=%s OR base_agent_id=%s) "
+                        "AND status <> 'offline' AND last_heartbeat > now() - interval '30 minutes' "
+                        "LIMIT 1",
+                        (agent, agent),
+                    )
+                    recipient_offline = cur.fetchone() is None
+                except Exception as e:
+                    log(f"attended-recheck-liveness-lookup-failed #{mid}: {e}")
+                    recipient_offline = False
             return _attended_decision(is_read, is_resp, violation_type, agent,
-                                      same_thread_reply_after, HUB_SESSIONS)
+                                      same_thread_reply_after, HUB_SESSIONS,
+                                      ask_attended, recipient_offline)
     except Exception as e:
         log(f"attended-recheck-failed #{mid}: {e}")
         return False
 
 
 def _attended_decision(is_read, is_resp, violation_type, agent,
-                       same_thread_reply_after, hub_sessions) -> bool:
+                       same_thread_reply_after, hub_sessions,
+                       ask_attended=False, recipient_offline=False) -> bool:
     """PURE attended-recheck decision (see attended_for for the full rationale)."""
     if is_resp:
         return True
@@ -832,6 +901,10 @@ def _attended_decision(is_read, is_resp, violation_type, agent,
     if agent in hub_sessions and is_read:
         return True
     if same_thread_reply_after:
+        return True
+    if ask_attended:
+        return True
+    if recipient_offline:
         return True
     return False
 
@@ -1090,6 +1163,55 @@ def _send_aged_repage(conn, owner: str, row: dict) -> bool:
         return False
 
 
+def resolve_recipient(owner: Optional[str], valid_agent_ids, tmux_to_agent, down_lanes):
+    """PURE: resolve a chase net's `owner`/`delegated_to` value to a live-
+    addressable agents.id, or (None, reason) if the net should SKIP rather than
+    attempt an insert that would either FK-violate or page a lane that cannot
+    act. Checked 2026-10-15 (bus#67757/#67841/#67958/#67965) in one hour: a
+    chase's owner is sometimes a tmux/lane session name instead of the
+    registered agents.id (irsyad-coord, cosem-exams, cosem-port,
+    cosem-tdu-coord, angullia all hit this -- a recurring CLASS, not a typo),
+    and sometimes a valid agents.id whose lane is desired_state='down' and so
+    can never actually act on the nudge (cc-oeh, bus#67757). Resolve through
+    `tmux_to_agent` (built from fleet_lanes.lane -> base_agent_id) rather than
+    failing at insert time, and skip outright if the lane is down either way
+    `owner` was spelled."""
+    if not owner:
+        return None, "no owner given"
+    if owner in down_lanes:
+        return None, f"lane {owner!r} is desired_state=down, cannot act"
+    if owner in valid_agent_ids:
+        resolved = owner
+    elif owner in tmux_to_agent:
+        resolved = tmux_to_agent[owner]
+    else:
+        return None, f"delegated_to={owner!r} is not a registered agents.id or a known lane"
+    if resolved in down_lanes:
+        return None, f"lane for {owner!r} (-> {resolved}) is desired_state=down, cannot act"
+    return resolved, "ok"
+
+
+def fetch_recipient_resolution(conn):
+    """Impure: one cheap query per scan building the three sets/maps
+    resolve_recipient needs. fleet_lanes is the source of truth for both the
+    lane-name -> agent-id mapping and down-ness (agent_status may have no row
+    at all for a down lane, so fleet_lanes alone must be sufficient)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM agents")
+        valid_agent_ids = {r[0] for r in cur.fetchall()}
+        cur.execute("SELECT lane, base_agent_id, desired_state FROM fleet_lanes")
+        tmux_to_agent = {}
+        down_lanes = set()
+        for lane, base_agent_id, desired_state in cur.fetchall():
+            if base_agent_id:
+                tmux_to_agent[lane] = base_agent_id
+            if desired_state == "down":
+                down_lanes.add(lane)
+                if base_agent_id:
+                    down_lanes.add(base_agent_id)
+    return valid_agent_ids, tmux_to_agent, down_lanes
+
+
 def dry_identity_guard(conn) -> bool:
     """Set the agent-id GUC in this tx so any agent_status trigger attributes the
     re-page to cc-fleet-health. agent_messages itself needs no trigger, so this is a
@@ -1260,14 +1382,24 @@ def _fetch_waiting_asks(conn):
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def _send_asks_chase(conn, owner: str, row: dict) -> bool:
+def _send_asks_chase(conn, owner: str, row: dict, recipient_resolution=None) -> bool:
     """Impure: post ONE P1 chase to the ask's OWNER body (never the operator —
     this net exists to prompt someone to go chase HIM, not to page him again).
     Returns True only on a committed insert; any failure returns False so
-    chase_waiting_asks leaves it unstamped and the next scan retries."""
+    chase_waiting_asks leaves it unstamped and the next scan retries.
+    `recipient_resolution` (valid_agent_ids, tmux_to_agent, down_lanes), when
+    given, resolves `owner` through resolve_recipient() first and skips the
+    insert entirely (logging why, never attempting a doomed FK-violating or
+    down-lane send) rather than failing at the DB — bus#67757/#67841/#67958."""
     aid = row.get("id")
     ask_text = (row.get("ask") or "")[:200]
     owner = owner or "orch-console"
+    if recipient_resolution is not None:
+        resolved, reason = resolve_recipient(owner, *recipient_resolution)
+        if resolved is None:
+            log(f"asks-chase SKIPPED ask#{aid} -> {owner}: {reason}")
+            return False
+        owner = resolved
     subj = f"[asks-chase] operator_asks #{aid} still waiting on Musa — go chase him"
     body = (
         f"operator_asks #{aid} (yours) has been waiting on the operator's reply past "
@@ -1318,10 +1450,13 @@ def client_chase_targets(rows, *, now, chase_state, chase_every_min=CLIENT_ASKS_
 def chase_client_asks(targets, *, dry, now, chase_state, send_chase,
                        max_chases=MAX_CLIENT_ASKS_CHASE_PER_RUN):
     """Same dead-man's-switch/cap shape as chase_waiting_asks. `send_chase`
-    is responsible for paging BOTH the owning lane and orch-console (bus
-    #47110 item 3b) — that dual-recipient behavior lives in the impure sender,
-    not here, so this stays a pure counter/gate like its sibling."""
+    pages the owning lane only (console visibility is the periodic summary
+    client_ask_chase_summary() builds from the returned `sent_list`, not a
+    per-ask CC — bus#67841/#67965). Returns (sent_count, sent_list) where
+    sent_list is [(id, delegated_to), ...] for every successful send this
+    scan, oldest-processed-first."""
     sent = 0
+    sent_list = []
     for t in targets:
         if sent >= max_chases:
             log(f"client-asks-chase HELD (per-scan cap {max_chases}) ask#{t.get('id')} -> {t.get('delegated_to')}")
@@ -1332,9 +1467,10 @@ def chase_client_asks(targets, *, dry, now, chase_state, send_chase,
         if ok:
             chase_state[str(t["id"])] = now
             sent += 1
+            sent_list.append((t["id"], t.get("delegated_to")))
         else:
             log(f"client-asks-chase SEND FAILED ask#{t.get('id')} (left UNSTAMPED for retry)")
-    return sent
+    return sent, sent_list
 
 
 def _fetch_client_chase_asks(conn):
@@ -1365,16 +1501,38 @@ def _fetch_client_chase_asks(conn):
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def _send_client_ask_chase(conn, owner: str, row: dict) -> bool:
-    """Impure: post ONE P1 chase to the owning lane, PLUS a copy to
-    orch-console (bus #47110 item 3b — unlike _send_asks_chase, orch-console
-    is never dropped: op#23944's finding was that nothing at all was watching
-    these channels). Returns True only if every insert commits."""
+def _send_client_ask_chase(conn, owner: str, row: dict, recipient_resolution=None) -> bool:
+    """Impure: post ONE P1 chase to the owning lane. Returns True only on a
+    committed insert.
+
+    orch-console is NO LONGER cc'd per-ask here (bus #47110 item 3b's original
+    intent, but bus#67841/#67965, 2026-10-15: a first-flush backlog drain
+    turned that into 52-then-27 separate P1 pings to console in under an
+    hour — a storm, not oversight). Console visibility is now the ONE periodic
+    summary `run()` sends after the scan via client_ask_chase_summary(), not a
+    per-row CC — op#23944's original finding (nothing was watching these
+    channels) is still satisfied, just without re-creating the storm.
+
+    `recipient_resolution` (valid_agent_ids, tmux_to_agent, down_lanes), when
+    given, resolves `owner` through resolve_recipient() first and skips the
+    insert entirely rather than failing at the DB or paging a down lane —
+    same bugs as _send_asks_chase, bus#67757/#67958."""
     aid = row.get("id")
     ask_text = (row.get("ask") or "")[:200]
     owner = owner or "orch-console"
+    if recipient_resolution is not None:
+        resolved, reason = resolve_recipient(owner, *recipient_resolution)
+        if resolved is None:
+            log(f"client-asks-chase SKIPPED ask#{aid} -> {owner}: {reason}")
+            return False
+        owner = resolved
     created_epoch = row.get("created_epoch")
-    age_str = f"{int((time.time() - created_epoch) // 60)}m" if created_epoch is not None else "unknown"
+    # created_epoch comes from psycopg2's extract(epoch FROM ...) as a decimal.Decimal
+    # (SQL numeric), never a float -- float - Decimal raises TypeError. This path is
+    # only reached when apply=True (chase_client_asks skips it entirely in dry mode),
+    # so the 60h observe-only soak before arming hc#312 never exercised it live;
+    # caught on the first-ever ARMED run (2026-10-15T12:25:43Z).
+    age_str = f"{int((time.time() - float(created_epoch)) // 60)}m" if created_epoch is not None else "unknown"
     if row.get("committed_date") is not None:
         subj = f"[client-asks-chase] operator_asks #{aid} — committed date MISSED"
         detail = "a dated commitment was sent to the client and has now passed with the ask still open"
@@ -1385,25 +1543,70 @@ def _send_client_ask_chase(conn, owner: str, row: dict) -> bool:
         f"operator_asks #{aid} (client-channel, yours) is past its chase deadline — {detail}. "
         f"\"{ask_text}\" — age since the client asked: {age_str}. Reply with a dated commitment "
         "via scripts/asks_triage.py <id> ask --committed-date ... --outbound-msg-id ..., or "
-        "close it (done) once delivered. orch-console is CC'd on this page (bus #47110 item "
-        "3b) — this is the net op#23944 found missing."
+        "close it (done) once delivered. orch-console gets a periodic summary of this net, "
+        "not a per-ask copy — this is the net op#23944 found missing."
     )
     try:
         if not dry_identity_guard(conn):
             return False
-        recipients = [owner] if owner == "orch-console" else [owner, "orch-console"]
         with conn.cursor() as cur:
-            for rcpt in recipients:
-                cur.execute(
-                    "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-                    "  requires_response,priority,is_test) "
-                    "VALUES ('cc-fleet-health',%s,%s,%s,%s,false,'P1',false)",
-                    (rcpt, PAGE_MESSAGE_TYPE, subj, body))
+            cur.execute(
+                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
+                "  requires_response,priority,is_test) "
+                "VALUES ('cc-fleet-health',%s,%s,%s,%s,false,'P1',false)",
+                (owner, PAGE_MESSAGE_TYPE, subj, body))
         conn.commit()
-        log(f"client-asks-chase SENT ask#{aid} -> {'+'.join(recipients)}")
+        log(f"client-asks-chase SENT ask#{aid} -> {owner}")
         return True
     except Exception as e:
         log(f"client-asks-chase INSERT failed ask#{aid} -> {owner}: {e!r}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
+def client_ask_chase_summary(sent: list) -> Dict[str, str]:
+    """PURE: build the ONE periodic console summary (subject, body) for a
+    batch of (ask_id, owner) pairs chased this scan — replaces the per-ask
+    console-CC that caused bus#67841/#67965's storms. Returns {} (send
+    nothing) for an empty batch."""
+    if not sent:
+        return {}
+    lines = "\n".join(f"- #{aid} -> {owner}" for aid, owner in sent)
+    return {
+        "subject": f"[client-asks-chase] {len(sent)} client-channel ask(s) chased this scan",
+        "body": (
+            f"{len(sent)} client-channel operator_asks past chase_by were nudged to their "
+            f"owner this scan (op#23944's net, now summarized not per-row — bus#67965):\n\n"
+            f"{lines}\n\nNo action needed unless one of these owners doesn't disposition it; "
+            "this is oversight visibility, not a request."
+        ),
+    }
+
+
+def send_client_ask_chase_summary(conn, sent: list) -> bool:
+    """Impure: post the ONE periodic summary to orch-console, if there's
+    anything to report. Never raises; a failure here never blocks the chases
+    that already committed."""
+    payload = client_ask_chase_summary(sent)
+    if not payload:
+        return True
+    try:
+        if not dry_identity_guard(conn):
+            return False
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
+                "  requires_response,priority,is_test) "
+                "VALUES ('cc-fleet-health','orch-console',%s,%s,%s,false,'P2',false)",
+                (PAGE_MESSAGE_TYPE, payload["subject"], payload["body"]))
+        conn.commit()
+        log(f"client-asks-chase SUMMARY sent -> orch-console ({len(sent)} ask(s))")
+        return True
+    except Exception as e:
+        log(f"client-asks-chase SUMMARY failed: {e!r}")
         try:
             conn.rollback()
         except Exception:
@@ -1717,6 +1920,19 @@ def run(dry: bool, injected: list[dict] | None = None,
         except Exception as e:  # fail LOUD, keep the scan alive
             log(f"aged-rr-repage ERROR: {e!r}")
 
+        # recipient-resolve guard (bus#67757/#67841/#67958/#67965, 2026-10-15):
+        # one cheap query per scan shared by both chase nets below, so a chase
+        # owner that is a lane-name-not-agents.id or a down lane is SKIPPED
+        # (logged, not silently dropped) rather than FK-violating at insert
+        # time or paging a lane that structurally cannot act. A fetch failure
+        # here degrades to the OLD behavior (attempt the send, let the DB
+        # catch it) rather than silently skipping every chase this scan.
+        try:
+            recipient_resolution = fetch_recipient_resolution(conn)
+        except Exception as e:  # noqa: BLE001 — fail loud, degrade not crash
+            log(f"recipient-resolve guard ERROR (degrading to no-guard this scan): {e!r}")
+            recipient_resolution = None
+
         # op#22669 asks-chase net (piece 4): waiting_on_operator asks (migration
         # 072) overdue past chase_by (or ASKS_CHASE_GRACE_MIN with none set) get
         # their owner body re-paged. Same observe-first doctrine as read-parked/
@@ -1732,7 +1948,8 @@ def run(dry: bool, injected: list[dict] | None = None,
             if asks_targets:
                 n = chase_waiting_asks(
                     asks_targets, dry=asks_dry, now=now, chase_state=chase_state,
-                    send_chase=lambda owner, t: _send_asks_chase(conn, owner, t),
+                    send_chase=lambda owner, t: _send_asks_chase(
+                        conn, owner, t, recipient_resolution=recipient_resolution),
                     max_chases=MAX_ASKS_CHASE_PER_RUN)
                 for t in asks_targets:
                     actions.append(f"{'[DRY] ' if asks_dry else ''}ASKS-CHASE ask#{t['id']} "
@@ -1745,9 +1962,9 @@ def run(dry: bool, injected: list[dict] | None = None,
 
         # migration 085 (Musa op#23944, bus #47105 -> #47110/#47114): every OPEN
         # ask_surface='client-channel' row past its (REQUIRED at open) chase_by
-        # gets its owning lane AND orch-console paged — the net that would have
-        # caught Shuq's 44h-unanswered ask. Same observe-first doctrine: ships
-        # INERT (force-dry, log-only) until ARMED via
+        # gets its owning lane re-paged (console gets ONE periodic summary
+        # below, not a per-ask CC — bus#67841/#67965). Same observe-first
+        # doctrine: ships INERT (force-dry, log-only) until ARMED via
         # SLA_CLIENT_ASKS_CHASE_ENABLED=1 at an orch-console go-live (separate
         # gate from the operator asks-chase net above — this is a brand-new
         # mechanism, armed only once the backfill's open-set list is reviewed).
@@ -1757,10 +1974,11 @@ def run(dry: bool, injected: list[dict] | None = None,
             client_asks_targets = client_chase_targets(
                 _fetch_client_chase_asks(conn), now=now, chase_state=client_chase_state)
             if client_asks_targets:
-                n = chase_client_asks(
+                n, sent_list = chase_client_asks(
                     client_asks_targets, dry=client_asks_dry, now=now,
                     chase_state=client_chase_state,
-                    send_chase=lambda owner, t: _send_client_ask_chase(conn, owner, t),
+                    send_chase=lambda owner, t: _send_client_ask_chase(
+                        conn, owner, t, recipient_resolution=recipient_resolution),
                     max_chases=MAX_CLIENT_ASKS_CHASE_PER_RUN)
                 for t in client_asks_targets:
                     actions.append(f"{'[DRY] ' if client_asks_dry else ''}CLIENT-ASKS-CHASE "
@@ -1768,6 +1986,8 @@ def run(dry: bool, injected: list[dict] | None = None,
                 log(f"client-asks-chase [{'DRY/observe' if client_asks_dry else 'ARMED'}] "
                     f"sent={0 if client_asks_dry else n}/{len(client_asks_targets)} due: "
                     + ", ".join(f"#{t['id']}->{t.get('delegated_to')}" for t in client_asks_targets))
+                if not client_asks_dry and sent_list:
+                    send_client_ask_chase_summary(conn, sent_list)
         except Exception as e:  # fail LOUD, keep the scan alive
             log(f"client-asks-chase ERROR: {e!r}")
 

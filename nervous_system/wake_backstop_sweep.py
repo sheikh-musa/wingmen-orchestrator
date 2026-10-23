@@ -49,6 +49,7 @@ from agent_wake import (  # noqa: E402  (same-dir module; nervous_system on sys.
     auto_wake_enabled,
     clear_pending,
     is_wake_eligible_recipient,
+    is_wake_suppressed_by_pause,
     pending_rows,
     resolve_tmux_session,
     should_backstop_wake,
@@ -181,7 +182,8 @@ _SWEEP_SQL = """
 # this long after send. skipped_at is taken by the quiesce, so the once-guard for THIS page is a
 # separate process-level seen-set keyed by row id (below), not skipped_at.
 _STUCK_SQL = """
-    SELECT id, to_agent, message_type, requires_response, priority, is_test, created_at
+    SELECT id, to_agent, message_type, requires_response, priority, is_test, created_at,
+           from_agent
     FROM agent_messages
     WHERE read_at IS NULL
       AND skipped_at IS NOT NULL
@@ -205,6 +207,7 @@ def _rf(r, idx, key):
 def _row_id(r):     return _rf(r, 0, "id")
 def _to_agent(r):   return _rf(r, 1, "to_agent")
 def _created_at(r): return _rf(r, 6, "created_at")
+def _from_agent(r): return _rf(r, 7, "from_agent")
 
 
 def _deliveries_of(row_id) -> "int | None":
@@ -542,17 +545,48 @@ def _base_of(agent):
 _ESCALATED_SEEN: set = set()
 
 
-def _escalate_operator(subject: str, body: str) -> None:
-    """One page to the operator-ops body (default orch-console) about a rotting/dead row.
-    Best-effort: a page failure must never crash the sweep floor (KeepAlive re-runs)."""
+def _default_console_alive() -> bool:
+    """orch-console's own liveness (audit-20261006 item 4, bus#54648): a fresh agent_status
+    heartbeat, not the hub's lease. Resolved lazily (same shape as _default_this_host) so this
+    module never hard-imports scripts.lib at load time. Any failure fails to False — an
+    unprovable check never licenses treating orch-console as reachable."""
+    try:
+        if _ORCH_ROOT not in sys.path:
+            sys.path.insert(0, _ORCH_ROOT)
+        from scripts.lib.console_alive import console_alive
+        return console_alive()
+    except Exception as e:  # noqa: BLE001 — an unprovable check never claims "alive"
+        print(f"wake_backstop_sweep: console_alive check failed ({e!r}) — treating as dead",
+              file=sys.stderr, flush=True)
+        return False
+
+
+def _escalate_operator(subject: str, body: str, *, console_alive=None) -> None:
+    """One page about a rotting/dead row. Normally to the operator-ops body (orch-console);
+    if orch-console itself has no fresh heartbeat (audit-20261006 item 4, bus#54648), re-
+    address to the hub (cc-orchestrator) as P1+requires_response instead of relaying into a
+    void. Best-effort: a page failure must never crash the sweep floor (KeepAlive re-runs)."""
     if not _DSN:
         return
+    alive_check = console_alive if console_alive is not None else _default_console_alive
+    to_agent, priority, requires_response, text = _ESCALATE_TO, "P2", False, body
+    try:
+        console_is_alive = alive_check()
+    except Exception as e:  # noqa: BLE001 — an unprovable check never claims "alive"
+        print(f"wake_backstop_sweep: console_alive check raised ({e!r}) — treating as dead",
+              file=sys.stderr, flush=True)
+        console_is_alive = False
+    if not console_is_alive:
+        to_agent, priority, requires_response = HUB_AGENT, "P1", True
+        text = (f"[console-dead-redirect] {_ESCALATE_TO} has no fresh heartbeat — routed to "
+                f"you instead (audit-20261006 item 4, bus#54648).\n\n{body}")
     try:
         with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
             cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
             cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body) "
-                "VALUES ('cc-fleet-health',%s,'blocker','P2',%s,%s)", (_ESCALATE_TO, subject, body))
+                "INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,"
+                "body,requires_response) VALUES ('cc-fleet-health',%s,'blocker',%s,%s,%s,%s)",
+                (to_agent, priority, subject, text, requires_response))
             conn.commit()
     except Exception as e:  # noqa: BLE001 — page best-effort
         print(f"wake_backstop_sweep: escalation page failed ({e})", file=sys.stderr, flush=True)
@@ -594,14 +628,34 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
 
       DEAD-FOREIGN — gone on EVERY host (no base-inclusive heartbeat < gone_window_s, hub lease
         not fresh, and no live base) AND desired_state is not 'up' → quiesce all its capped rows
-        via CAS + escalate ONCE naming agent, ids, evidence. Any instance may do this; the CAS
-        (mark returns only the ids IT set) makes it exactly-once. Clearing skipped_at re-delivers.
+        via CAS (any instance may do this; the CAS — mark returns only the ids IT set — makes it
+        exactly-once; clearing skipped_at re-delivers). Whether this ALSO escalates depends on
+        desired_state (Nazim #66506/op#27235, held_commitment #430):
+          - desired_state='down' (operator INTENTIONALLY parked the lane) → quiesce SILENTLY,
+            no console escalation. The trigger case was the second-brain nightly-regen handoff
+            re-firing into a deliberately-down lane every night — escalating every cycle for a
+            lane the operator put down on purpose is a false page, not a finding.
+          - anything else not-'up' (None/unregistered/other) → escalate ONCE naming agent, ids,
+            evidence, same as before — an unexplained gone-and-not-explicitly-parked agent is
+            still worth a human look.
 
       VETOED (amend C) — gone but desired_state='up' → NOT quiesced (a wanted-up-but-dark lane is
         a singleton/lane-watchdog page, never a delivery-drop here).
 
       LOOKUP-FAILED (amend C fail-closed) — the desired_state veto lookup errored/ambiguous →
         NEVER quiesce on an unprovable check; escalate for a human. Once-guarded.
+
+    QUIET SWITCH (bus#66792/#66802/#67032, held_commitment #440): before any wake(), each
+    eligible_recipients(fresh) target is run through the SAME canonical predicate the realtime
+    doorbell uses — agent_wake.is_wake_suppressed_by_pause — so a fleet_lanes.desired_state=
+    'paused' lane is not re-woken by this separate KeepAlive daemon either (the gap the gate
+    review (#67032) found: this sweep bypassed the quiet switch entirely). A target with ANY
+    fresh P0 row is never checked (P0 is an unconditional override, same invariant as realtime);
+    otherwise the pause check reuses THIS module's own injectable `desired_state_of` (same lane-
+    or-base_agent_id match as agent_wake's default) so the sweep stays hermetically testable with
+    no new DB dependency. is_wake_suppressed_by_pause fails OPEN (wakes) on any lookup error —
+    the sweep does not re-implement that; it only supplies the lookup. Suppressing the wake never
+    touches delivery, quiesce, or the stuck-page machinery below — those are untouched by this.
 
     The two NON-quiescing escalations (re-address, lookup-failed) share one process-level guard
     keyed (kind, agent) — see _ESCALATED_SEEN. Injectable deps make it unit-testable without
@@ -636,6 +690,33 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
     fresh = [r for r in rows if not is_capped(r, now_dt, cap_age_s, deliveries, cap_deliveries)]
 
     targets = eligible_recipients(fresh)
+    # QUIET SWITCH (held_commitment #440, gate #67032): a target is dropped from `targets` (never
+    # woken) iff agent_wake.is_wake_suppressed_by_pause says so for it — the SAME canonical
+    # predicate the realtime doorbell gates on, never a forked/reimplemented check here. A target
+    # with any fresh P0 row skips the check entirely (P0 is an unconditional override, so there is
+    # nothing it could be suppressed by); for every other target we pass a representative non-P0
+    # priority from its own fresh rows (the predicate only distinguishes P0 from everything else,
+    # so any one of them yields the same answer) and this module's own `desired_state_of` lookup,
+    # which already fails CLOSED for the quiesce veto above but is wrapped by
+    # is_wake_suppressed_by_pause in a try/except that fails OPEN (wakes) for THIS check — the
+    # fail-open contract lives in agent_wake, not duplicated here.
+    _fresh_priorities: dict = {}
+    for r in fresh:
+        _fresh_priorities.setdefault(_to_agent(r), []).append(_rf(r, 4, "priority"))
+    paused_suppressed: list = []
+    if targets:
+        _kept: list = []
+        for a in targets:
+            prios = _fresh_priorities.get(a, [])
+            if any(p == "P0" for p in prios):
+                _kept.append(a)                     # P0 present -> unconditional override
+                continue
+            rep_prio = next((p for p in prios if p), "P2")
+            if is_wake_suppressed_by_pause(a, rep_prio, desired_state_of=desired_state_of):
+                paused_suppressed.append(a)
+            else:
+                _kept.append(a)
+        targets = _kept
     # Per-row ceiling (Nazim #43063): key each agent's wake to a STABLE representative row —
     # its oldest (min id) fresh unread row. If that same stale row keeps driving the wake,
     # lane_nudge's per-row ceiling bounds re-delivery across successive sweeps (the storm
@@ -716,6 +797,7 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
         return True
 
     dead_foreign, live_stuck, readdress, vetoed, lookup_failed = [], [], [], [], []
+    quiesced_silent: list = []   # dead-foreign + desired_state='down' — quiesced, no escalation
     foreign_live: list = []
     escalations: list[dict] = []
     for agent, ids in capped_by_agent.items():
@@ -766,6 +848,13 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
         newly = mark(ids)                                # CAS: only the ids we actually set
         if newly:                                        # escalate ONLY if we won the CAS
             dead_foreign.append(agent)
+            # desired_state='down' = the operator INTENTIONALLY parked this lane (Nazim
+            # #66506/op#27235, held_commitment #430) — quiesce SILENTLY, no console page.
+            # Without this branch a lane deliberately held down (e.g. second-brain's nightly
+            # regen handoff) re-escalates every sweep for a state that is not a finding.
+            if str(ds or "").lower() == "down":
+                quiesced_silent.append(agent)
+                continue
             escalate(
                 f"[wake-backstop] directed rows rotting to dead agent {agent} — quiesced once",
                 f"TL;DR: {len(newly)} directed row(s) to {agent} (ids={newly}) are past the "
@@ -795,6 +884,14 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                     continue
             except Exception:  # noqa: BLE001 — un-ageable → let the SQL fetch's bound govern
                 age_s = 0.0
+        # SELF-NOTICE EXCLUSION (orch-console #72904, 2nd occurrence of the class): the
+        # sweep's OWN "[idle-unread]" nudge rows (idle_unread_sweep._default_nudge) are
+        # directed-unread rows too, and idle_unread_sweep's own self-feed-killer (facet d,
+        # Nazim #60531) only excludes them from ITS OWN counting — this STUCK-PAGE pass has
+        # a separate fetch with no such filter, so it paged ABOUT a row cc-fleet-health
+        # itself sent (bus #72875/#72903). A self-notice is never a "stuck lane" signal.
+        if _from_agent(r) == _IDLE_NUDGE_FROM:
+            continue
         if should_backstop_wake(_to_agent(r), _rf(r, 2, "message_type"), _rf(r, 3, "requires_response"),
                                 _rf(r, 4, "priority"), _rf(r, 5, "is_test")):
             ag = _to_agent(r)
@@ -851,7 +948,8 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
             "dead_foreign": dead_foreign, "live_stuck": live_stuck, "readdress": readdress,
             "vetoed": vetoed, "lookup_failed": lookup_failed, "stuck_paged": stuck_paged,
             "stuck_suppressed": stuck_suppressed, "escalations": escalations,
-            "foreign_live": foreign_live, "pending_retried": pending_retried}
+            "foreign_live": foreign_live, "pending_retried": pending_retried,
+            "paused_suppressed": paused_suppressed, "quiesced_silent": quiesced_silent}
 
 
 # ── idle-while-unread nudge (Fable audit follow-up, orch-console bus #46860 item 2) ──

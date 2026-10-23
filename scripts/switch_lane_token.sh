@@ -87,6 +87,14 @@ RESUME_MODE="${SWITCH_RESUME_MODE:-summary}"   # default SUMMARY (#34, bus 22582
 DRAIN="${SWITCH_DRAIN:-0}"
 RELAUNCH="${SWITCH_RELAUNCH:-0}"
 DRAIN_TIMEOUT="${SWITCH_DRAIN_TIMEOUT:-240}"
+# --fresh (op#29665): force a NO-RESUME relaunch by skipping resume-session resolution,
+# so the lane boots a CLEAN context (no `-- --resume <id>` forwarded). For a deliberate
+# clean-context move — e.g. flipping a lane onto a text-only GLM model, where resuming a
+# Claude transcript (image blocks + Claude-specific thinking/tool artifacts) is wrong and
+# would burn the whole old context at provider rates every turn. A fresh relaunch LOSES
+# the live conversation, so it WARNS LOUDLY that a pre-written handoff is the only
+# reconstitution source.
+FRESH="${SWITCH_FRESH:-0}"
 SESS=""
 TOKFILE=""
 for a in "$@"; do
@@ -98,11 +106,12 @@ for a in "$@"; do
     --full) RESUME_MODE=full ;;
     --drain) DRAIN=1 ;;
     --relaunch) RELAUNCH=1 ;;   # same-account restart for identity/env repair (op#20540 CC_BASE_OVERRIDE drift)
+    --fresh) FRESH=1 ;;         # op#29665: force NO-RESUME relaunch (clean context) — skip resume resolution
     *) if [ -z "$SESS" ]; then SESS="$a"; elif [ -z "$TOKFILE" ]; then TOKFILE="$a"; fi ;;
   esac
 done
-[ -n "$SESS" ]    || { echo "usage: switch_lane_token.sh [--force] [--dry-run] [--summary] [--drain] <tmux-session> <token-file>" >&2; exit 2; }
-[ -n "$TOKFILE" ] || { echo "usage: switch_lane_token.sh [--force] [--dry-run] [--summary] [--drain] <tmux-session> <token-file>" >&2; exit 2; }
+[ -n "$SESS" ]    || { echo "usage: switch_lane_token.sh [--force] [--dry-run] [--summary] [--drain] [--fresh] <tmux-session> <token-file>" >&2; exit 2; }
+[ -n "$TOKFILE" ] || { echo "usage: switch_lane_token.sh [--force] [--dry-run] [--summary] [--drain] [--fresh] <tmux-session> <token-file>" >&2; exit 2; }
 
 # ── 1. Token-file validation (fail-closed, loud) ─────────────────────────────
 [ -r "$TOKFILE" ] || { echo "ERROR: token file not readable: $TOKFILE" >&2; exit 3; }
@@ -165,11 +174,22 @@ fi
 # replaced only '/', so a DOTTED worktree found NO session and relaunched FRESH,
 # silently LOSING the lane's context (the irsyad-coord incident this fixes).
 # Resolve BEFORE the kill. No session found → RESUME_ID empty → FRESH (logged loud).
-RESUME_ID="$(resolve_resume_session "$WORKTREE")"
-if [ -n "$RESUME_ID" ]; then
-  echo "[switch_lane_token] active session resolved: $RESUME_ID (will RESUME on the new account)"
+if [ "$FRESH" = "1" ]; then
+  # --fresh (op#29665): deliberately DO NOT resolve/resume a session — force a clean
+  # context. RESUME_ID stays empty so the launch path forwards NO `-- --resume <id>`.
+  # A fresh relaunch LOSES the live conversation, so warn LOUDLY: a pre-written handoff
+  # is the ONLY reconstitution source (the caller's procedure writes one at a clean seam
+  # before invoking --fresh; verify it exists).
+  RESUME_ID=""
+  echo "[switch_lane_token] ⚠⚠ --fresh: forcing a NO-RESUME relaunch of '$SESS' — the live conversation will NOT be resumed and its context is LOST. The lane must boot from a FRESH HANDOFF; ensure one was written at this seam BEFORE this run (op#29665 clean GLM-move procedure)." >&2
 else
-  echo "[switch_lane_token] ⚠ no active claude session found for worktree $WORKTREE — will relaunch FRESH (context NOT preserved)"
+  # Resolve BEFORE the kill. No session found → RESUME_ID empty → FRESH (logged loud).
+  RESUME_ID="$(resolve_resume_session "$WORKTREE")"
+  if [ -n "$RESUME_ID" ]; then
+    echo "[switch_lane_token] active session resolved: $RESUME_ID (will RESUME on the new account)"
+  else
+    echo "[switch_lane_token] ⚠ no active claude session found for worktree $WORKTREE — will relaunch FRESH (context NOT preserved)"
+  fi
 fi
 
 # ── 3. Capture BEFORE fingerprint from agent_status ──────────────────────────
@@ -288,6 +308,43 @@ if [ -n "$_APPLY_MODEL" ]; then
   _provider_for_model "$_APPLY_MODEL" >/dev/null 2>&1 && _EXPECT_PROVIDER=1
 fi
 
+# ── GLM FLIP GATE (orch-console #74584/#74588, bus #74586 spec,
+# reports/provider-policy-flip-gate-spec-20261023.md): a lane applying a glm-*
+# model must be ALLOWED by provider_policy (+ its lane override) BEFORE any
+# kill/relaunch happens — hard-refuse, never a silent proceed, so the mamadah-
+# class incident (bus #74420/#74563: a lane flipped to GLM against a standing
+# lane-specific residency ruling the table had never been synced to) cannot
+# recur through this script. Scoped to glm-* ONLY — provider_policy's
+# allowed_providers vocabulary today only covers "zai"; a kimi-*/deepseek-*/
+# OpenRouter-routed model has no corresponding policy concept yet and is
+# deliberately NOT gated here (not a silent gap — scoped out of this build).
+# This check runs even under DRY-RUN/preview (next block) — a preview must
+# show the refusal, not a misleadingly clean plan.
+case "$_APPLY_MODEL" in
+  glm-*)
+    GATE_SESS="$SESS" GATE_ACTOR="${ACTOR:-cli}" GATE_ARMED="${ARMED:-0}" GATE_BREAKGLASS="${BREAK_GLASS:-0}" \
+    "$VENV_PY" - <<'PYGATE'
+import os
+import sys
+
+sys.path.insert(0, os.environ.get("ORCH_DIR", os.getcwd()))
+from scripts.lib.provider_policy import gate_or_post_refusal  # noqa: E402
+
+gate_or_post_refusal(
+    os.environ["GATE_SESS"],
+    actor=os.environ.get("GATE_ACTOR", "cli"),
+    armed=os.environ.get("GATE_ARMED") == "1",
+    break_glass=os.environ.get("GATE_BREAKGLASS") == "1",
+)
+PYGATE
+    _GATE_RC=$?
+    if [ "$_GATE_RC" != 0 ]; then
+      echo "ERROR: GLM flip REFUSED by the provider_policy gate (escalation posted to orch-console) — no kill/relaunch performed." >&2
+      exit 7
+    fi
+    ;;
+esac
+
 # ── DRY-RUN (op#10706 R3): print the plan, change NOTHING, exit 0. Proves the
 # resume path so a real apply never comes back blank. ────────────────────────
 if [ "$DRY" = "1" ]; then
@@ -302,6 +359,8 @@ if [ "$DRY" = "1" ]; then
   fi
   if [ -n "$RESUME_ID" ]; then
     echo "  would RESUME conversation: $RESUME_ID  (prior turns replay; identity + context preserved)"
+  elif [ "$FRESH" = "1" ]; then
+    echo "  would relaunch FRESH (--fresh FORCED): NO --resume — clean context; the lane MUST boot from a fresh handoff (context not preserved)"
   else
     echo "  would relaunch FRESH: no prior session found to resume for this worktree"
   fi

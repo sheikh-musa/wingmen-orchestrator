@@ -1,5 +1,5 @@
 // irsyad.js — dedicated operator IRSYAD page (op#12501). READ-ONLY: the irsyad
-// lane-family (session/status/token/model/context %) + the musa2 weekly pool the
+// lane-family (session/status/token/model/context %) + the irsyad weekly pool the
 // family runs on, from /api/irsyad. No actions, no relaunch — mirrors the fleet
 // view's derivation (live-pane bucket, process-verified token, context gauge).
 // Vanilla JS, bearer auth from localStorage (same key as fleet.js / lanes.js).
@@ -30,13 +30,13 @@
   }
 
   // fingerprint → friendly account name. Shares fleet.js's Musa/Syed mapping,
-  // PLUS the musa2 fingerprint (e1dfa48eec85) — the account this whole family
+  // PLUS the irsyad fingerprint (e1dfa48eec85) — the account this whole family
   // runs on, which the fleet-wide token registry labels "Max (unknown acct)"
   // (no named key file), so we name it here where the family is known.
   function acctForFp(fp) {
     fp = fp || "";
     // SSOT for the set = nervous_system/console/pools.py; fleet.js POOL_FP mirrors it (op#20684).
-    if (fp.indexOf("e1dfa48eec85") === 0) return "musa2";
+    if (fp.indexOf("e1dfa48eec85") === 0) return "irsyad";
     if (fp.indexOf("68142948") === 0) return "Musa";
     if (fp.indexOf("582043088") === 0) return "Syed";
     return "";
@@ -49,14 +49,14 @@
     return '<span title="' + esc(fp) + '" style="color:' + color + '">🔑 ' + esc(name || fp.slice(0, 8)) + '</span>';
   }
   // The account pill label: the process-verified account when it's a NAMED one,
-  // else the fp-derived name (so a known-but-unregistered fp like musa2 reads as
-  // "musa2", not "Max (unknown acct)"), else the raw value — never a guess.
+  // else the fp-derived name (so a known-but-unregistered fp like irsyad reads as
+  // "irsyad", not "Max (unknown acct)"), else the raw value — never a guess.
   function acctLabel(r) {
     if (r.account && !/unknown/i.test(r.account)) return r.account;
     return acctForFp(r.auth_fp) || r.account || (r.verified ? "verified" : "unverified");
   }
 
-  // Weekly Max-pool card for musa2 (same green/warn/bad thresholds as the fleet
+  // Weekly Max-pool card for irsyad (same green/warn/bad thresholds as the fleet
   // header + the SRE's weekly monitor: <75 good, 75-90 warn, >=90 bad; a reading
   // older than STALE greys out rather than showing a frozen number).
   var POOL_STALE_S = 1800;
@@ -86,7 +86,7 @@
     el.innerHTML =
       '<div class="pool ' + cls + '">' +
         '<div class="phead">' +
-          '<span class="pname">musa2 · weekly pool</span>' +
+          '<span class="pname">irsyad · weekly pool</span>' +
           '<span class="ppct">' + pct + '<span class="u">%</span></span>' +
         '</div>' +
         '<div class="pbar"><i style="width:' + Math.min(100, pct) + '%"></i></div>' +

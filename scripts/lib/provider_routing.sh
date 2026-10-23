@@ -65,7 +65,13 @@
 _provider_for_model() {
     case "$1" in
         glm-*)
-            echo "z.ai GLM|https://api.z.ai/api/anthropic|GLM_CODING_KEY|glm-4.7|GLM_SMALL_MODEL|unset"
+            # small_default is glm-5.3 (NOT glm-4.7): claude-code runs summarisation/
+            # auto-compaction through the SMALL/fast slot, and glm-4.7's 131K window made
+            # that slot overflow and wedge ("Not logged in") even when the main pointer was
+            # bigger. glm-5.3 is a 1M-context model on the Coding Plan (verified: /context
+            # reports a 1m auto-compact window; direct API accepts a 787K-token input), so
+            # both the main pointer and this small slot must be glm-5.3. (op#29665, #65656.)
+            echo "z.ai GLM|https://api.z.ai/api/anthropic|GLM_CODING_KEY|glm-5.3|GLM_SMALL_MODEL|unset"
             ;;
         kimi-*|moonshot-*)
             # api.moonshot.ai/anthropic confirmed (platform.kimi.ai docs + CC
@@ -136,6 +142,16 @@ apply_provider_routing() {
     fi
 
     unset CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE
+    # RESIDENCY (CAI-1225 / TENANT-RESIDENCY-001): a non-Anthropic-routed body must NOT carry
+    # raw CLIENT-SILO write-DSN credentials into a context that inferences on the provider —
+    # same logic as stripping the Anthropic LLM creds above (no client-silo credential reaches
+    # a non-Anthropic endpoint). boot_cai sources ~/.wingmen/private/write_dsn.env (the live-write
+    # GOUMLYNE/ceayj silos) with no env -i wall, so without this a GLM-routed cai could connect to
+    # a client silo and pull raw PII into z.ai context. GENERIC + safe: a no-op for every lane
+    # that never sourced write_dsn.env (these vars are simply unset). DATABASE_URL (the shared
+    # substrate/bus DSN) is deliberately KEPT — it is orchestration, not a client silo, and every
+    # routed lane needs the bus; dropping it would break all GLM lanes.
+    unset GOUMLYNE_DATABASE_URL IHSANOS_PROD_DATABASE_URL WRITE_DSN_ALLOWED
     if [ "$api_key_mode" = "empty" ]; then
         export ANTHROPIC_API_KEY=""
     else
@@ -151,6 +167,15 @@ apply_provider_routing() {
     export ANTHROPIC_DEFAULT_OPUS_MODEL="$resolved_model"
     export ANTHROPIC_DEFAULT_SONNET_MODEL="$resolved_model"
     export ANTHROPIC_DEFAULT_HAIKU_MODEL="$small"
+    # ANTHROPIC_SMALL_FAST_MODEL is the LEGACY name for the small/background
+    # slot that claude-code uses for its login/quota micro-check + background
+    # calls + auto-compaction. Newer CC reads ANTHROPIC_DEFAULT_HAIKU_MODEL for
+    # that slot and treats SMALL_FAST as legacy; OLDER CC reads only the legacy
+    # var. Unset, the slot falls back to an UNROUTED Claude model id -> called
+    # against the provider base with no Anthropic creds -> "Not logged in ·
+    # Please run /login" on the first turn (substrate-1 wedge, bus #65856).
+    # Export BOTH to $small so every CC version routes the small slot.
+    export ANTHROPIC_SMALL_FAST_MODEL="$small"
     export CLAUDE_CODE_SUBAGENT_MODEL="$resolved_model"
 
     PROVIDER_ROUTING_LABEL="$label"

@@ -39,3 +39,46 @@ def test_indexed_dir_is_not_missing_index(tmp_path):
     r = mia.audit(tmp_path)
     assert r["missing_index"] is False
     assert mia.missing_index_is_lossy(r) is False
+
+
+def test_real_tail_index_link_is_not_dangling(tmp_path):
+    # A dir correctly following the split-index pattern links to its own tail file with real
+    # markdown syntax: "[memory index overflow](MEMORY-INDEX.md)". MEMORY-INDEX.md is deliberately
+    # excluded from the orphan-detection file set (it's infra, not a content memory) — but that
+    # same exclusion must not make its own, correct, self-referential link register as DANGLING
+    # ("points at a file that is gone") when the tail file is sitting right there on disk.
+    # Regression for a false positive found live on -Users-sheikhmusa-wingmen-projects-cosem-adcda
+    # (orch-console audit, bus#67292): DANGLING=1 reported with zero actual silent loss.
+    (tmp_path / "MEMORY.md").write_text(
+        "# index\n- [memory index overflow](MEMORY-INDEX.md) - overflow\n"
+    )
+    (tmp_path / "MEMORY-INDEX.md").write_text("- [bar](bar.md) - a real overflow entry\n")
+    (tmp_path / "bar.md").write_text("---\nname: bar\ndescription: z\n---\nbody\n")
+    r = mia.audit(tmp_path)
+    assert r["split"] is True
+    assert r["tail_unreachable"] is False
+    assert r["dangling"] == []
+    assert r["orphans"] == []
+
+
+def test_tail_index_link_to_missing_file_is_still_dangling(tmp_path):
+    # The inverse case the fix must not paper over: MEMORY.md names a tail index that does not
+    # actually exist on disk. That really is a promise the index cannot keep.
+    (tmp_path / "MEMORY.md").write_text(
+        "# index\n- [memory index overflow](MEMORY-INDEX.md) - overflow\n"
+    )
+    r = mia.audit(tmp_path)
+    assert r["split"] is False
+    assert r["dangling"] == ["MEMORY-INDEX.md"]
+
+
+def test_dangling_link_to_a_genuinely_missing_file_is_still_caught(tmp_path):
+    # A real broken link to a plain content memory (not the tail index) must still be caught.
+    (tmp_path / "MEMORY.md").write_text(
+        "# index\n"
+        "- [memory index overflow](MEMORY-INDEX.md) - overflow\n"
+        "- [gone](gone.md) - this file was deleted but the link survived\n"
+    )
+    (tmp_path / "MEMORY-INDEX.md").write_text("no entries\n")
+    r = mia.audit(tmp_path)
+    assert r["dangling"] == ["gone.md"]

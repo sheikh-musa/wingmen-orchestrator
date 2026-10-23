@@ -342,6 +342,48 @@ def test_allows_ps_eww_piped_to_hash():
     })
 
 
+# ---- pgrep/pkill -f + -l (bus #68892/#68884, real incident) ---------------------
+
+def test_blocks_pgrep_dash_fl_without_sink():
+    assert_blocked("Bash", {"command": 'pgrep -fl "npm run dev"'})
+
+
+def test_blocks_pgrep_dash_lf_flag_order_reversed():
+    assert_blocked("Bash", {"command": 'pgrep -lf "npm run dev"'})
+
+
+def test_blocks_pgrep_separate_f_and_l_flags():
+    assert_blocked("Bash", {"command": 'pgrep -f -l "npm run dev"'})
+
+
+def test_blocks_pkill_dash_fl_too():
+    assert_blocked("Bash", {"command": 'pkill -fl "npm run dev"'})
+
+
+def test_allows_pgrep_dash_f_alone_bare_pids():
+    assert_allowed("Bash", {"command": 'pgrep -f "npm run dev"'})
+
+
+def test_allows_pgrep_dash_l_alone_no_full_args():
+    assert_allowed("Bash", {"command": 'pgrep -l "npm"'})
+
+
+def test_allows_pgrep_fl_where_fl_is_inside_the_quoted_pattern_not_a_flag():
+    # the pattern argument itself contains the letters f/l -- must not be mistaken
+    # for -f/-l flags since they're not in a dash-prefixed token.
+    assert_allowed("Bash", {"command": 'pgrep "flask"'})
+
+
+def test_blocks_pgrep_fl_piped_to_sed_mask():
+    # same unbounded-content reasoning as ps eww/proc-environ -- a sed-mask escape
+    # hatch is not trustworthy against a full-command-line dump either.
+    assert_blocked("Bash", {"command": 'pgrep -fl "npm run dev" | sed "s/GH_TOKEN=.*/REDACTED/"'})
+
+
+def test_allows_pgrep_fl_piped_to_hash_sink():
+    assert_allowed("Bash", {"command": 'pgrep -fl "npm run dev" | shasum'})
+
+
 def test_allows_grep_o_name_only():
     assert_allowed("Bash", {"command": "grep -o '^[A-Z_]*TOKEN' file"})
 

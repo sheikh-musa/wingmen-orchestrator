@@ -44,8 +44,25 @@ lane_env_safe_names() {
         CC_AGENT_ID CC_BASE_AGENT_ID SCOPE_REPO FLEET_HOST_ID \
         ORCH_DIR ORCH_ROOT TMUX_BIN SRE_TMUX_BIN \
         CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_AUTOCOMPACT_PCT_OVERRIDE CLAUDE_CODE_ENTRYPOINT \
-        GOOGLE_APPLICATION_CREDENTIALS CLOUDSDK_CONFIG
+        GOOGLE_APPLICATION_CREDENTIALS CLOUDSDK_CONFIG \
+        ANTHROPIC_BASE_URL \
+        ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
+        ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_SMALL_FAST_MODEL
 }
+# PROVIDER-ROUTING vars (bus #65856/#65890, op#29665 GLM wave 1): scripts/lib/
+# provider_routing.sh exports these into the LAUNCHER shell to point a lane at a
+# non-Anthropic Messages-API endpoint (GLM/z.ai etc). They are NOT in .env — they
+# are set at launch only for a provider-routed lane — so for a normal claude-*
+# lane they are unset and never emitted (printenv exit 1), i.e. a no-op. For a
+# routed lane they MUST survive the env -i scrub or claude gets `--model glm-5.3`
+# with no base_url / no auth token -> "Not logged in" on the first turn (the
+# substrate-1 wedge). ANTHROPIC_BASE_URL + the 4 model-slot ids are non-secret
+# (above); ANTHROPIC_AUTH_TOKEN is the vault key (a secret -> KEEP tier below).
+# ANTHROPIC_API_KEY is deliberately NOT allow-listed: on a native arm
+# provider_routing unsets it (so it's moot), and allow-listing it would let a
+# stray key in .env force metered billing on a plain claude lane. The OpenRouter
+# arm's ANTHROPIC_API_KEY="" fallback-suppression therefore does NOT survive
+# env -i — a separate gap, out of scope for the native GLM campaign (flagged).
 
 # Minimal SECRETS kept for every lane (verified fleet-wide need).
 lane_env_keep_secret_names() {
@@ -53,7 +70,8 @@ lane_env_keep_secret_names() {
         CLAUDE_CODE_OAUTH_TOKEN \
         DATABASE_URL SUPABASE_DB_URL SUPABASE_URL SUPABASE_SERVICE_KEY \
         ORCHESTRATOR_SUPABASE_URL ORCHESTRATOR_SUPABASE_SERVICE_KEY \
-        GH_TOKEN
+        GH_TOKEN \
+        ANTHROPIC_AUTH_TOKEN
 }
 
 # Per-lane opt-in extras from the git-tracked map. Format: one lane per line,

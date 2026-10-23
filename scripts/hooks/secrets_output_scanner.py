@@ -43,6 +43,7 @@ import json
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 from secret_shape_patterns import SECRET_VALUE_PATTERNS, find_hits  # noqa: E402
@@ -53,6 +54,52 @@ from secret_shape_patterns import SECRET_VALUE_PATTERNS, find_hits  # noqa: E402
 SECRET_PATTERNS = SECRET_VALUE_PATTERNS
 
 REDACTION = "[REDACTED by secrets_output_scanner -- pattern:{cls}]"
+
+# bus #74676: secret-READING CLI commands whose output has NO fixed shape any
+# SECRET_PATTERNS class could ever match -- cc-cosem-adcda-1 ran `firebase
+# functions:secrets:access SCHEDULE_PDF_S2S_SECRET --project cosem-adcda-cb6d9`
+# unredirected and the raw vaulted secret printed straight into the transcript;
+# this scanner never fired because an arbitrary secret value has no regex-
+# matchable structure (unlike an API key prefix or a DSN scheme). Detected by
+# COMMAND instead: when tool_input names one of these, the captured stdout
+# itself becomes a one-off literal redaction pattern (see
+# _secret_reading_command_hit below) -- reuses the exact same find+replace
+# machinery the shape-based classes use, with no risk of over-matching
+# unrelated text (the pattern is an exact-escaped literal of the real captured
+# output, not a generalized shape).
+SECRET_READING_COMMAND_RE = re.compile(
+    r"\bfirebase\s+functions:secrets:access\b|\bgcloud\s+secrets\s+versions\s+access\b")
+
+
+def _secret_reading_command_hit(input_text: str, tool_response) -> "tuple[str, re.Match, re.Pattern] | None":
+    """Returns (cls, match, pattern) if `input_text` names a known secret-reading
+    CLI command AND the captured stdout is non-empty, else None.
+
+    Deliberately conservative in the FLAG-everything direction: any non-empty
+    stdout from one of these commands is treated as presumptively the secret,
+    including a --help/error-message run that happens to print something --
+    over-redacting a false positive costs nothing (redaction is idempotent and
+    the fixture allowlist still exempts a known test marker from paging), while
+    under-redacting a real leak is the exact failure class this closes.
+
+    `tool_response` may be the dict shape a Bash tool_response normally carries
+    (stdout/stderr keys) or a bare string -- extracting just `stdout` when a
+    dict is available avoids building the pattern from the WHOLE JSON-encoded
+    response blob (stdout+stderr+flags), which would be needlessly broad and
+    miss the value if it ever appears in a different surrounding context."""
+    if not SECRET_READING_COMMAND_RE.search(input_text):
+        return None
+    if isinstance(tool_response, dict):
+        value = (tool_response.get("stdout") or "").strip()
+    elif isinstance(tool_response, str):
+        value = tool_response.strip()
+    else:
+        value = ""
+    if not value:
+        return None
+    pattern = re.compile(re.escape(value))
+    match = pattern.search(value)
+    return ("secret-cli-read", match, pattern) if match else None
 
 # PERF (bus #54580/#54643, fleet-health measured this hook at 61.8%+33.8% CPU on gzbai
 # during ordinary lane tool-output scanning): profiling on a representative 1.6MB clean
@@ -193,15 +240,24 @@ def _subagent_transcript_path(transcript_path: str | None, agent_id: str | None)
     return candidates[0]
 
 
-def redact_recent_lines(transcript_path: str, cls: str, pattern: re.Pattern, max_lines: int = 3) -> bool:
+# bus #74596/#74623: redact_recent_lines silently missed the real span TWICE in one
+# session (both pages fired correctly, both left the raw value on disk). Root cause:
+# window_start = len(lines) - max_lines is computed against the file's line count AT
+# THIS FUNCTION'S OWN READ TIME, not against the specific line the hook was actually
+# called about. In a busy session, bookkeeping lines (attachment / api-request-blob /
+# permission-mode / etc.) get appended by the harness AFTER the real content line but
+# BEFORE this function reads the file -- pushing the real line further back than
+# max_lines=3 by the time it looks. A fixed narrow window CANNOT be trusted alone; this
+# constant bounds a VERIFY-and-widen retry (never a full-file rescan) rather than
+# silently claiming success on a window that this exact interleaving defeats.
+WIDE_VERIFY_LINES = 50
+
+
+def _redact_window(transcript_path: str, cls: str, pattern: re.Pattern, max_lines: int) -> bool:
     """Redact `pattern` matches in each of the last `max_lines` JSONL lines of
     transcript_path, in place. Returns True if any redaction was made. Never touches
-    a line outside that window.
-
-    bus #48685/#48695: the assistant's tool_use (the command/input) and its tool_result
-    (the output) are SEPARATE JSONL lines -- a secret typed literally into the input can
-    land one line before the result that redact_last_line (max_lines=1) alone would
-    check, so this widens the window without touching anything further back."""
+    a line outside that window. The single-pass primitive redact_recent_lines wraps
+    with a verify-and-widen retry."""
     try:
         with open(transcript_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -231,6 +287,41 @@ def redact_recent_lines(transcript_path: str, cls: str, pattern: re.Pattern, max
     if changed:
         with open(transcript_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
+    return changed
+
+
+def _pattern_present_in_recent(transcript_path: str, pattern: re.Pattern, max_lines: int) -> bool:
+    """True iff `pattern` still matches anywhere in the last `max_lines` raw lines of
+    transcript_path. Used ONLY to decide whether a widen-retry is needed -- a cheap
+    text search, no JSON parsing (a redaction already landed is still valid JSON; a
+    miss is a plain substring the regex will find in the raw line either way)."""
+    try:
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return False
+    window_start = max(0, len(lines) - max_lines)
+    return any(pattern.search(line) for line in lines[window_start:])
+
+
+def redact_recent_lines(transcript_path: str, cls: str, pattern: re.Pattern, max_lines: int = 3) -> bool:
+    """Redact `pattern` matches in each of the last `max_lines` JSONL lines of
+    transcript_path, in place. Returns True if any redaction was made.
+
+    bus #48685/#48695: the assistant's tool_use (the command/input) and its tool_result
+    (the output) are SEPARATE JSONL lines -- a secret typed literally into the input can
+    land one line before the result that redact_last_line (max_lines=1) alone would
+    check, so this widens the window without touching anything further back.
+
+    VERIFY-AND-WIDEN (bus #74596/#74623): after the narrow-window pass, re-check
+    whether `pattern` is STILL present within WIDE_VERIFY_LINES (a bounded safety
+    margin, never a full-file rescan). If so, the real line was pushed beyond
+    `max_lines` by bookkeeping lines appended ahead of this read -- retry over the
+    wider window instead of silently trusting the narrow one that missed it. A match
+    beyond WIDE_VERIFY_LINES is a documented limit, not silently claimed clean."""
+    changed = _redact_window(transcript_path, cls, pattern, max_lines)
+    if max_lines < WIDE_VERIFY_LINES and _pattern_present_in_recent(transcript_path, pattern, WIDE_VERIFY_LINES):
+        changed = _redact_window(transcript_path, cls, pattern, WIDE_VERIFY_LINES) or changed
     return changed
 
 
@@ -485,7 +576,14 @@ def main() -> int:
     for p in persisted_paths:
         persisted_hits += scan_persisted_output(p)
 
-    all_hits = hits + persisted_hits
+    # (cls, match, pattern) triples throughout -- the shape-based hits above use the
+    # fixed module-level SECRET_PATTERNS[cls]; the command-detected hit below (bus
+    # #74676) carries its OWN dynamically-built literal pattern instead, since there
+    # is no fixed shape for an arbitrary secret value to register in SECRET_PATTERNS.
+    all_hits = [(cls, match, SECRET_PATTERNS[cls]) for cls, match in hits + persisted_hits]
+    cli_hit = _secret_reading_command_hit(input_text, tool_response)
+    if cli_hit:
+        all_hits.append(cli_hit)
     if not all_hits:
         return 0
 
@@ -506,19 +604,42 @@ def main() -> int:
     # not by (cls, match) pair, since two matches of the same class are still one leak
     # event worth reporting once. Redaction is unaffected -- it's idempotent per class
     # (a second call over an already-redacted line is a no-op), so only paging is deduped.
+    # bus #68892 (cc-cosem-adcda-2 triage, 2026-10-16): the stderr message below used to
+    # claim "redacted on disk" UNCONDITIONALLY -- the return values of redact_recent_lines/
+    # redact_persisted_output were never checked. A real incident showed the hook paging
+    # correctly (a hit WAS found) while the raw value sat unredacted on disk -- the claim
+    # was false and nobody could tell from the hook's own output. VERIFY, don't assert:
+    # track whether any redact_* call actually changed a file, and if a hit was found but
+    # NOTHING was actually redacted anywhere, say so loudly instead of lying.
+    #
+    # RETRY, bounded: a transcript write can plausibly still be in flight relative to this
+    # PostToolUse hook's own invocation (the harness's write-to-disk and this hook's
+    # execution are not provably ordered from in here), so a same-content line that isn't
+    # on disk YET would make the first attempt a correct no-op, not a bug. Retry the same
+    # redact_* calls a few times with a short sleep before concluding redaction truly
+    # failed -- cheap (the tool call already completed; this hook's own latency is the
+    # only cost) and never produces a WRONG success claim either way.
     seen_classes = set()
-    for cls, match in all_hits:
-        if transcript_path:
-            # window=3: covers the tool_use line and the tool_result line even with one
-            # intervening line (observed in some transcript shapes); cheap and harmless
-            # to widen since _redact_strings is a no-op on any line with no match.
-            redact_recent_lines(transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
-        if sub_transcript_path and sub_transcript_path != transcript_path:
-            # bus #49029/#49030: this call originated inside a subagent -- also redact
-            # its own transcript file, which `transcript_path` above does not cover.
-            redact_recent_lines(sub_transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
-        for p in persisted_paths:
-            redact_persisted_output(p, cls, SECRET_PATTERNS[cls])
+    any_redacted = False
+    for cls, match, pattern in all_hits:
+        redacted_this_hit = False
+        for attempt in range(3):
+            if attempt:
+                time.sleep(0.15)
+            if transcript_path:
+                # window=3: covers the tool_use line and the tool_result line even with one
+                # intervening line (observed in some transcript shapes); cheap and harmless
+                # to widen since _redact_strings is a no-op on any line with no match.
+                redacted_this_hit |= redact_recent_lines(transcript_path, cls, pattern, max_lines=3)
+            if sub_transcript_path and sub_transcript_path != transcript_path:
+                # bus #49029/#49030: this call originated inside a subagent -- also redact
+                # its own transcript file, which `transcript_path` above does not cover.
+                redacted_this_hit |= redact_recent_lines(sub_transcript_path, cls, pattern, max_lines=3)
+            for p in persisted_paths:
+                redacted_this_hit |= redact_persisted_output(p, cls, pattern)
+            if redacted_this_hit:
+                break
+        any_redacted |= redacted_this_hit
         if cls in seen_classes:
             continue
         seen_classes.add(cls)
@@ -528,12 +649,22 @@ def main() -> int:
             continue
         _page_orch_console(cls, tool_name, agent_id=agent_id, agent_type=agent_type)
 
-    classes = ", ".join(cls for cls, _ in all_hits)
-    sys.stderr.write(
-        f"secrets_output_scanner: this output contained secret-shaped content ({classes}); "
-        "it has been redacted on disk and orch-console paged. Treat the underlying value "
-        "as potentially exposed going forward.\n"
-    )
+    classes = ", ".join(cls for cls, _, _ in all_hits)
+    if any_redacted:
+        sys.stderr.write(
+            f"secrets_output_scanner: this output contained secret-shaped content ({classes}); "
+            "it has been redacted on disk and orch-console paged. Treat the underlying value "
+            "as potentially exposed going forward.\n"
+        )
+    else:
+        # The one thing the old message must never do: claim success it didn't verify.
+        sys.stderr.write(
+            f"secrets_output_scanner: this output contained secret-shaped content ({classes}) "
+            "and orch-console was paged, but NO ON-DISK REDACTION ACTUALLY LANDED after retries "
+            "-- the raw value may still be sitting in the transcript or a persisted-output file. "
+            "This is the backstop failing to close the loop, not just the original leak -- "
+            "treat it as still fully exposed and investigate why redaction didn't take.\n"
+        )
     return 0
 
 

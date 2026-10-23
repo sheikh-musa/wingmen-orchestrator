@@ -25,9 +25,13 @@ SEND = "scripts/cosem_tdu_support_send.sh"
 RECEIPT = "📨 Got your message — it's logged and I'll pick it up. (Reply URGENT to bump it now.)"
 
 
-def _row(mid, direction, age_s, text="hi"):
+MUSA_ID = "286619815"  # MUSA_TELEGRAM_ID (migrations/020), matches tests/test_stage_client_file.py
+
+
+def _row(mid, direction, age_s, text="hi", from_user_id=None):
     return {"id": mid, "direction": direction, "created_epoch": NOW - age_s,
-            "from_name": "Fazli" if direction == "inbound" else "coord", "text": text}
+            "from_name": "Fazli" if direction == "inbound" else "coord", "text": text,
+            "from_user_id": from_user_id}
 
 
 # ---- is_receipt --------------------------------------------------------------
@@ -61,6 +65,60 @@ def test_inbound_only_is_unanswered():
 def test_no_inbound_or_empty_is_none():
     assert nd.latest_unanswered_inbound([]) is None
     assert nd.latest_unanswered_inbound([_row(1, "outbound", 60, "broadcast")]) is None
+
+
+def test_operator_misfired_inbound_is_not_waiting_72953():
+    # orch-console #72953 (2nd occurrence): Musa's OWN operator message, misfired into a
+    # client channel, is NOT a client waiting for a reply -- it must never surface here.
+    # musa_id passed EXPLICITLY (not relying on an ambient MUSA_TELEGRAM_ID env var, which
+    # is present on a dev machine but NOT in CI -- this test must be hermetic).
+    rows = [_row(32580, "inbound", 3600, "oops wrong channel", from_user_id=MUSA_ID)]
+    assert nd.latest_unanswered_inbound(rows, musa_id=MUSA_ID) is None
+
+
+def test_operator_misfired_inbound_does_not_hide_a_real_older_unanswered_client_msg():
+    # the operator-sent row is skipped entirely (not even treated as "answered") so a
+    # GENUINE older unanswered client inbound underneath it still surfaces.
+    rows = [
+        _row(32580, "inbound", 60, "oops wrong channel", from_user_id=MUSA_ID),
+        _row(32500, "inbound", 3600, "any update on my request?"),
+    ]
+    w = nd.latest_unanswered_inbound(rows, musa_id=MUSA_ID)
+    assert w is not None and w["id"] == 32500
+
+
+def test_operator_id_default_none_still_counts_as_client_unanswered():
+    # a row with no from_user_id (historical rows, pre-migration-020) is NOT treated as the
+    # operator -- must not silently stop paging for every pre-existing channel.
+    assert nd.latest_unanswered_inbound([_row(1, "inbound", 60)])["id"] == 1
+
+
+# ---- _musa_telegram_id (env-then-file fallback, mirrors _dsn's shape) --------
+def test_musa_telegram_id_reads_env_var_first(monkeypatch):
+    monkeypatch.setenv("MUSA_TELEGRAM_ID", MUSA_ID)
+    assert nd._musa_telegram_id() == MUSA_ID
+
+
+def test_musa_telegram_id_falls_back_to_env_file(monkeypatch, tmp_path):
+    # orch-console #72969: the deployed launchd plist never sources .env (unlike other
+    # client-nodrop plists), so MUSA_TELEGRAM_ID is genuinely unset in the real cron's
+    # process environment -- the sender-check (PR#452) silently never fired in production.
+    # Same fallback shape _dsn() already has for DATABASE_URL.
+    monkeypatch.delenv("MUSA_TELEGRAM_ID", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"DATABASE_URL=postgres://x\nMUSA_TELEGRAM_ID={MUSA_ID}\n")
+    monkeypatch.setattr(nd, "ORCH", str(tmp_path))
+    assert nd._musa_telegram_id() == MUSA_ID
+
+
+def test_musa_telegram_id_returns_none_when_absent_everywhere(monkeypatch, tmp_path):
+    # fail-safe: absent entirely -> None (never skips every channel's drop-watch silently;
+    # is_operator_sender's own fail-safe already handles musa_id=None).
+    monkeypatch.delenv("MUSA_TELEGRAM_ID", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("DATABASE_URL=postgres://x\n")
+    monkeypatch.setattr(nd, "ORCH", str(tmp_path))
+    assert nd._musa_telegram_id() is None
 
 
 def test_older_answered_then_new_inbound_plus_receipt_is_unanswered():
@@ -148,6 +206,87 @@ def test_multichannel_coord_and_label_flow_through():
                              label="angullia", tag="angullia", send_script="x",
                              nudge_s=NUDGE, escalate_s=ESC, re_nudge_s=RENUDGE)
     assert actions[0]["to"] == "cc-angullia" and "angullia" in actions[0]["body"]
+
+
+# ---- load_channels() discovery (fable-audit-20261006 finding 12 / held_commitment #314) ----
+# The filter must key on audience='client' (the schema's actual client marker), not a `cc-*`
+# naming convention on the coord — that heuristic missed cosem-caai/cosem-exams (routed
+# straight to orch-console, no separate coord) and would wrongly include an internal channel
+# that happens to route to a cc-* agent (e.g. mamadah).
+class _FakeCursor:
+    def __init__(self, rows, captured):
+        self._rows = rows
+        self._captured = captured
+
+    def execute(self, sql, *a):
+        self._captured.append(sql)
+
+    def fetchall(self):
+        return self._rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, rows, captured):
+        self._rows = rows
+        self._captured = captured
+
+    def cursor(self):
+        return _FakeCursor(self._rows, self._captured)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_load_channels_query_keys_on_audience_client(monkeypatch):
+    captured = []
+    rows = [("cosem-tdu", "cc-cosem-tdu-coord"), ("cosem-caai", "orch-console"),
+            ("cosem-exams", "orch-console")]
+    monkeypatch.setattr(nd.psycopg2, "connect", lambda dsn: _FakeConn(rows, captured))
+
+    out = nd.load_channels("fake-dsn")
+
+    assert "audience='client'" in captured[0]
+    assert "LIKE 'cc-%'" not in captured[0]
+    tags = {c["tag"] for c in out}
+    assert tags == {"cosem-tdu", "cosem-caai", "cosem-exams"}
+
+
+def test_load_channels_console_routed_channel_keeps_console_as_coord(monkeypatch):
+    rows = [("cosem-caai", "orch-console")]
+    monkeypatch.setattr(nd.psycopg2, "connect", lambda dsn: _FakeConn(rows, []))
+
+    out = nd.load_channels("fake-dsn")
+
+    assert out[0]["coord"] == "orch-console"
+    assert out[0]["send_script"] == "scripts/caai_send.sh"
+
+
+def test_load_channels_excludes_gazzabyte_dedicated_watch(monkeypatch):
+    rows = [("gazzabyte-irsyad", "cc-irsyad-coord"), ("oeh", "cc-oeh")]
+    monkeypatch.setattr(nd.psycopg2, "connect", lambda dsn: _FakeConn(rows, []))
+
+    out = nd.load_channels("fake-dsn")
+
+    assert {c["tag"] for c in out} == {"oeh"}
+
+
+def test_load_channels_db_error_falls_back_to_static_list(monkeypatch):
+    def _boom(dsn):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(nd.psycopg2, "connect", _boom)
+
+    out = nd.load_channels("fake-dsn")
+
+    assert out == list(nd.FALLBACK_CHANNELS)
 
 
 if __name__ == "__main__":

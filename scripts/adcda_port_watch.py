@@ -4,8 +4,34 @@ need porting into the cosem platform (operator directive op#7517, 2026-07-26).
 
 The operator actively tweaks ~/wingmen/projects/cosem-adcda (github sheikh-musa/
 cosem-adcda). This watcher fetches origin, and on new commits to WATCHED_BRANCHES
-beyond the last-seen SHA, posts an attributable bus row to cc-cosem-platform (the
-port lane) listing the new commits for port-assessment, and nudges orch-console.
+beyond the last-seen SHA, posts an attributable bus row to PORT_OWNER (the
+single assigned port-watch lane) listing the new commits for port-assessment.
+
+ROUTING (fixed 2026-10-19, orch-console #71671/cc-cosem-platform-3's #71670):
+this used to post to the BARE BASE 'cc-cosem-platform', which fans out to every
+platform instance (-1/-2/-3/-4). op#7517 port-watch was assigned to
+cc-cosem-platform-1 ALONE back on 2026-10-11 (#62694/#62695) -- this script
+predates that ruling (created 2026-07-26) and nobody updated its hardcoded
+target after, so -3 kept getting + correctly declining duplicate pings (3
+consecutive occurrences). This is a DIFFERENT bug class from the October
+bare-base-identity fix (resolve_agent_id/agent_identity.py) -- that fixed
+agents posting AS the bare base; this is a standing SCRIPT whose own to_agent
+was hardcoded wrong. Fix is just targeting the actual owner.
+
+REASSIGNED 2026-10-23 (bus #74719/#74721/#74724): cc-cosem-platform-1 fully
+de-registered (zero agent_status rows), tripping the degrade path below. The
+underlying mandate (the cosem-port lane, ADCDA->cosem-platform porting) was
+independently wound down the same day under Musa's op#32789 re-platform HOLD
+("no new porting until required-core scope is defined") -- NOT just an owner
+migration. cc-cosem-platform-2/-4 were live that day but on unrelated Academy
+Calendar work with zero porting mandate; pointing there would have been a
+silent misdelegation (worse than the degrade it would have silenced). Per
+orch-console's explicit decision (#74724), PORT_OWNER now points at
+orch-console itself for the duration of the hold, so detected commits surface
+to the party already tracking op#32789 and the watcher stays live+attributable
+instead of degraded indefinitely. RE-POINT to the re-spun cosem-port lane's
+live owner once op#32789 lifts and porting resumes -- don't carry this
+forward past that.
 
 DETECTION ONLY — the JUDGEMENT ("does this feature need porting, where does it fit")
 is the lane's, on the bus row (CAI-603: fact out, judgement in). Read-only on the
@@ -19,11 +45,17 @@ Run manually to establish baseline; schedule via launchd for ongoing monitoring.
 """
 from __future__ import annotations
 import os, subprocess, sys, pathlib, datetime
+import psycopg
 
 ORCH = pathlib.Path.home() / "wingmen" / "orchestrator"
 ADCDA = pathlib.Path.home() / "wingmen" / "projects" / "cosem-adcda"
 STATE = ORCH / "logs" / "adcda_port_watch.state"
 WATCHED_BRANCHES = ["main"]  # add feature branches here if the operator wants them watched too
+# op#7517 port-watch owner — orch-console for the duration of the op#32789 porting HOLD
+# (#74719/#74721/#74724, 2026-10-23; see module docstring "REASSIGNED" note). Re-point to
+# the re-spun cosem-port lane's live owner once the hold lifts. NEVER the bare base
+# 'cc-cosem-platform' (fans out to every instance; see module docstring).
+PORT_OWNER = "orch-console"
 GIT = "/usr/bin/git" if os.path.exists("/usr/bin/git") else "git"
 
 
@@ -44,8 +76,24 @@ def _git(env, *args, check=True):
     return r.stdout.strip()
 
 
+def _owner_has_any_registration(env, agent_id: str) -> bool:
+    """True iff `agent_id` has ANY agent_status row at all (any status) -- a fully vanished
+    identity (zero rows) means PORT_OWNER is stale and needs reassignment, a different and
+    more serious signal than a routine offline blip (bus #74354, 2026-10-23: the hardcoded
+    PORT_OWNER migrated hosts then was wound down entirely, and this watcher kept posting
+    'assess new commits' into the void every ~3h with no live-check at all). Fail-SAFE: a DB
+    error assumes True (never silently suppress a real notification over a transient read
+    failure) -- same posture as this module's own dead-man's-switch philosophy elsewhere."""
+    try:
+        dsn = env.get("DATABASE_URL")
+        with psycopg.connect(dsn) as c, c.cursor() as cur:
+            cur.execute("SELECT 1 FROM agent_status WHERE agent_id=%s LIMIT 1", [agent_id])
+            return cur.fetchone() is not None
+    except Exception:
+        return True
+
+
 def _post_bus(env, to_agent, subject, body, priority="P2"):
-    import psycopg
     dsn = env.get("DATABASE_URL")
     with psycopg.connect(dsn) as c, c.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','orch-console',true)")
@@ -110,12 +158,25 @@ def main():
         print(f"[adcda_watch] {ts}: no new commits on {WATCHED_BRANCHES}")
         return
 
+    if not _owner_has_any_registration(env, PORT_OWNER):
+        degrade_body = (f"op#7517 port-watch owner {PORT_OWNER} has ZERO agent_status rows "
+                        f"(fully de-registered, not just offline) -- the hardcoded PORT_OWNER "
+                        f"in adcda_port_watch.py is stale and needs reassignment to whichever "
+                        f"lane currently owns the ADCDA port-watch mandate. Detected commits "
+                        f"are NOT lost (held in watcher state, will be reported once "
+                        f"reassigned):\n\n" + "\n\n".join(new_lines))
+        rid = _post_bus(env, "orch-console",
+                       "adcda_port_watch DEGRADED — PORT_OWNER de-registered, reassign",
+                       degrade_body, "P2")
+        print(f"[adcda_watch] {ts}: PORT_OWNER {PORT_OWNER} de-registered, DEGRADE posted as #{rid}")
+        return
+
     body = ("The operator is actively tweaking the LIVE ADCDA app (op#7517: monitor it for features to port). "
             "New commits detected since last check — assess each for PORT-WORTHINESS against your gap inventory, "
             "add the ones that belong in the platform to the port backlog, and report which to orch-console. "
             "This is DETECTION; the port-fit judgement is yours.\n\n" + "\n\n".join(new_lines))
-    rid = _post_bus(env, "cc-cosem-platform", "ADCDA app changed — assess new commits for porting", body)
-    print(f"[adcda_watch] {ts}: posted {len(new_lines)} branch-delta(s) to cc-cosem-platform as #{rid}")
+    rid = _post_bus(env, PORT_OWNER, "ADCDA app changed — assess new commits for porting", body)
+    print(f"[adcda_watch] {ts}: posted {len(new_lines)} branch-delta(s) to {PORT_OWNER} as #{rid}")
 
 
 if __name__ == "__main__":

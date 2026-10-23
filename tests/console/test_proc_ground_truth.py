@@ -27,17 +27,17 @@ def _fake_rows():
     a cross-host gzb session (must never leak into the Mini-scoped maps)."""
     return {
         "rows": [
-            {"session": "quality", "account": "musa2", "fp": "e1dfa48eec85",
+            {"session": "quality", "account": "irsyad", "fp": "e1dfa48eec85",
              "model": "claude-sonnet-5", "host": "Mini", "verified": True,
-             "expected": "musa2", "expected_fp": "e1dfa48eec85", "mismatch": False,
+             "expected": "irsyad", "expected_fp": "e1dfa48eec85", "mismatch": False,
              "metered": False},
             {"session": "cosem-adcda", "account": None, "fp": None,
              "model": None, "host": "Mini", "verified": False,
              "expected": "syed", "expected_fp": "582043088eae", "mismatch": False,
              "metered": False},
-            {"session": "irsyad-coord", "account": "musa2", "fp": "e1dfa48eec85",
+            {"session": "irsyad-coord", "account": "irsyad", "fp": "e1dfa48eec85",
              "model": "claude-opus-5-5", "host": "gzb", "verified": True,
-             "expected": "musa2", "expected_fp": "e1dfa48eec85", "mismatch": False,
+             "expected": "irsyad", "expected_fp": "e1dfa48eec85", "mismatch": False,
              "metered": False},
         ],
     }
@@ -52,8 +52,8 @@ def test_proc_ground_truth_matches_the_real_row_shape(monkeypatch):
                          lambda include_remote=False: _fake_rows())
     gt = console_app._proc_ground_truth()
     assert gt["quality"] == {
-        "model": "claude-sonnet-5", "account": "musa2", "fp": "e1dfa48eec85",
-        "mismatch": False, "expected": "musa2",
+        "model": "claude-sonnet-5", "account": "irsyad", "fp": "e1dfa48eec85",
+        "mismatch": False, "expected": "irsyad",
     }
 
 
@@ -82,7 +82,7 @@ def test_proc_accounts_includes_every_mini_session_regardless_of_model(monkeypat
 def test_auth_mismatch_fires_and_live_fp_wins_over_stale_snapshot(monkeypatch):
     """The incident this PR fixes, replayed through the REAL _resolve_auth_fp():
     agent_status.auth_fp is stuck on an OLD account (musa) while the live process
-    has long since moved to musa2 (same shape as cc-quality-1's own auth_account
+    has long since moved to irsyad (same shape as cc-quality-1's own auth_account
     bug, PR#291/#292). The main view must show the LIVE account and flag the
     disagreement -- never silently trust the stale snapshot."""
     _reset_proc_cache()
@@ -94,7 +94,7 @@ def test_auth_mismatch_fires_and_live_fp_wins_over_stale_snapshot(monkeypatch):
     resolved_fp, auth_mismatch = console_app._resolve_auth_fp("quality", stale_snapshot_auth_fp, proc_accounts)
 
     assert auth_mismatch is True
-    assert resolved_fp == "e1dfa48eec85"  # musa2 -- the LIVE truth, not the stale snapshot
+    assert resolved_fp == "e1dfa48eec85"  # irsyad -- the LIVE truth, not the stale snapshot
 
 
 def test_no_mismatch_when_snapshot_already_agrees_with_live(monkeypatch):

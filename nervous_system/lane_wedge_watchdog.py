@@ -434,7 +434,7 @@ class AgentObs:
     reason: str = ""
 
 
-def read_bus_signal(agent: str, conn) -> BusSignal:
+def read_bus_signal(agent: str, conn, also_match: "str | None" = None) -> BusSignal:
     """Signal A: unread pileup + quiet, straight off the substrate. Host-agnostic
     — works for the VPS hub with no SSH. 'Actionable' unread = created in the
     [MIN_AGE, MAX_AGE] window (fresh stall, not chronic backlog), excluding test
@@ -447,21 +447,42 @@ def read_bus_signal(agent: str, conn) -> BusSignal:
     new one, not by stamping `responded_at` (#12486), so handled rows otherwise sit
     read_at NULL forever and inflate the count into a phantom-backlog false-positive
     (this watchdog's own cai/cc-irsyad flags were partly that). Only rows that
-    arrived AFTER the agent's last activity and were never responded-to count."""
+    arrived AFTER the agent's last activity and were never responded-to count.
+
+    `also_match` (build-b-watchdog-instance-awareness.md): on a multi-sibling base,
+    the caller passes the OWNING instance id as `agent` so a sibling's pileup never
+    bleeds onto another live sibling of the same base; `also_match` (the bare base)
+    is OR'd in only to still catch stragglers addressed before the lane went
+    multi-instance — it never widens the match to a DIFFERENT sibling's instance id.
+    last_write_age stays keyed on `agent` alone (the specific instance's own cadence),
+    never the base, so one chatty sibling can't paper over another's genuine quiet."""
     with conn.cursor() as cur:
         # Fetch the windowed unread rows (not just counts) so wake-eligibility is decided
         # by the ONE shared predicate agent_wake.should_auto_wake — never forked into SQL.
-        cur.execute(
-            "SELECT am.priority, am.requires_response, am.message_type, "
-            "       EXTRACT(epoch FROM now() - am.created_at) "
-            "  FROM agent_messages am "
-            " WHERE am.to_agent = %s AND am.read_at IS NULL AND am.is_test IS NOT TRUE "
-            "   AND am.created_at <= now() - (%s * interval '1 second') "
-            "   AND am.created_at >= now() - (%s * interval '1 second') "
-            "   AND am.responded_at IS NULL "
-            "   AND NOT EXISTS (SELECT 1 FROM agent_messages r "
-            "                    WHERE r.from_agent = %s AND r.created_at > am.created_at)",
-            (agent, UNREAD_MIN_AGE_SEC, UNREAD_MAX_AGE_SEC, agent))
+        if also_match and also_match != agent:
+            cur.execute(
+                "SELECT am.priority, am.requires_response, am.message_type, "
+                "       EXTRACT(epoch FROM now() - am.created_at) "
+                "  FROM agent_messages am "
+                " WHERE am.to_agent IN (%s, %s) AND am.read_at IS NULL AND am.is_test IS NOT TRUE "
+                "   AND am.created_at <= now() - (%s * interval '1 second') "
+                "   AND am.created_at >= now() - (%s * interval '1 second') "
+                "   AND am.responded_at IS NULL "
+                "   AND NOT EXISTS (SELECT 1 FROM agent_messages r "
+                "                    WHERE r.from_agent = %s AND r.created_at > am.created_at)",
+                (agent, also_match, UNREAD_MIN_AGE_SEC, UNREAD_MAX_AGE_SEC, agent))
+        else:
+            cur.execute(
+                "SELECT am.priority, am.requires_response, am.message_type, "
+                "       EXTRACT(epoch FROM now() - am.created_at) "
+                "  FROM agent_messages am "
+                " WHERE am.to_agent = %s AND am.read_at IS NULL AND am.is_test IS NOT TRUE "
+                "   AND am.created_at <= now() - (%s * interval '1 second') "
+                "   AND am.created_at >= now() - (%s * interval '1 second') "
+                "   AND am.responded_at IS NULL "
+                "   AND NOT EXISTS (SELECT 1 FROM agent_messages r "
+                "                    WHERE r.from_agent = %s AND r.created_at > am.created_at)",
+                (agent, UNREAD_MIN_AGE_SEC, UNREAD_MAX_AGE_SEC, agent))
         rows = cur.fetchall()
         unread = len(rows)
         oldest = max((float(r[3]) for r in rows if r[3] is not None), default=0.0)
@@ -1102,6 +1123,44 @@ def agent_status_lane_map(conn) -> "tuple[dict, set]":
     return mapped, collided
 
 
+def agent_status_instance_map(conn) -> dict:
+    """(tmux session -> the LIVE registered agent_id, i.e. the OWNING instance identity —
+    never collapsed to base_agent_id) from agent_status. Host-scoped exactly like
+    agent_status_lane_map; a collided session (>1 live row) is dropped, same as there.
+
+    Why this exists separately from agent_status_lane_map: that map's `ident` is
+    `base or aid` — on a multi-sibling base every sibling's session maps to the SAME
+    base string, so Signal A (read_bus_signal) keyed on base alone pools every
+    sibling's unread mail into one shared count. A sibling that already answered its
+    OWN (instance-addressed) mail then false-fires on a DIFFERENT sibling's genuine
+    pileup (build-b-watchdog-instance-awareness.md, cc-fleet-health 2026-10-21). This
+    map lets gather_observations scope the Signal A query to the specific instance a
+    session actually registers as, with the base kept only as a secondary match for
+    stragglers addressed before the lane went multi-instance."""
+    try:
+        me = orch_lease._me()
+    except Exception as e:
+        log(f"host identity unresolved ({e}) — no instance map this scan (Signal A falls "
+            f"back to base-only matching)")
+        return {}
+    first: dict = {}
+    counts: dict = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT tmux_session, agent_id FROM agent_status "
+            "WHERE tmux_session IS NOT NULL AND status <> 'offline' "
+            "AND (host = %s OR host IS NULL) "
+            "ORDER BY tmux_session, agent_id",
+            (me,),
+        )
+        for sess, aid in cur.fetchall():
+            if not (sess and aid):
+                continue
+            counts[sess] = counts.get(sess, 0) + 1
+            first.setdefault(sess, aid)
+    return {s: first[s] for s in first if counts[s] == 1}
+
+
 def agent_status_base_fallback(conn) -> dict:
     """(tmux session -> base bus identity) for the FALLBACK tier ONLY — the recycle-window
     rescue (Nazim 41658/41661). It is deliberately LOOSER than agent_status_lane_map (the
@@ -1260,6 +1319,16 @@ def gather_observations(conn, state: Optional[dict] = None,
     except Exception as e:
         log(f"agent_status base fallback failed ({e}) — no recycle-window rescue this scan")
         base_fb = {}
+    # Instance map (build-b-watchdog-instance-awareness.md): the OWNING instance per live
+    # session, so Signal A below scopes to it instead of pooling every sibling of a
+    # multi-instance base into one shared unread count. A lookup failure (incl. conn=None
+    # in some callers) degrades to the exact pre-fix base-only read_bus_signal call below —
+    # never a crash, never a silent WIDER match.
+    try:
+        instance_map = agent_status_instance_map(conn)
+    except Exception as e:
+        log(f"agent_status instance map failed ({e}) — Signal A matches base only this scan")
+        instance_map = {}
     fleet_bases = set(fleet_map.values())
     unmapped: list[str] = []
     for sess in list_lane_sessions():
@@ -1285,8 +1354,10 @@ def gather_observations(conn, state: Optional[dict] = None,
                       # governance/SRE) — NEVER lane-track it: no nudge/reset against a
                       # singleton, and its episode state is keyed on `base`. `protected`
                       # is the fail-closed protected_agents registry (Nazim 37645 amd C).
+        instance = instance_map.get(sess)
         try:
-            bus = read_bus_signal(base, conn)
+            bus = (read_bus_signal(instance, conn, also_match=base)
+                   if instance and instance != base else read_bus_signal(base, conn))
         except Exception as e:
             log(f"bus read failed for lane {sess}/{base}: {e}")
             continue

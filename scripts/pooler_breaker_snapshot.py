@@ -14,12 +14,30 @@ transition) it immediately snapshots every pooler connection on BOTH hosts (pid+
 several rapid samples to catch the retrying hammer) and PAGES the SRE with the caught set —
 the process(es) hammering during the trip window are the culprit. State file dedups so one
 trip pages once. Dead-man: an unexpected error PAGES loudly.
+
+Dead-man rework (held_commitment #315): the page itself goes over the SAME pooler that just
+tripped, so a page that only does `INSERT INTO agent_messages` can silently lose the exact
+alert this script exists to deliver. _page() now:
+  1. SAVE-BEFORE-PAGE — writes the snapshot/alert to a local timestamped file FIRST, so the
+     forensic catch survives even if every delivery path below fails.
+  2. tries the normal DB bus insert.
+  3. on DB failure — SPOOLs the alert to a durable local queue (PBS_SPOOL) and immediately
+     falls back to a BOT-API flush via `scripts/nazim_send.sh` (dependency-free, times out,
+     never raises) so a human sees it even with the DB down.
+Every run also attempts to REPLAY the spool (retry the DB insert for anything still pending)
+and PURGE entries that land — so a recovered DB drains the backlog instead of leaving it
+stuck behind one failed delivery.
 """
 import os, sys, json, re, subprocess, pathlib, time
+from datetime import datetime, timezone
 
 STATE = pathlib.Path(os.environ.get(
     "PBS_STATE", os.path.expanduser("~/.wingmen/pooler_breaker_snapshot.state.json")))
+SPOOL = pathlib.Path(os.environ.get(
+    "PBS_SPOOL", os.path.expanduser("~/.wingmen/pooler_breaker_snapshot.spool.json")))
 ORCH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ALERT_LOG_DIR = pathlib.Path(os.environ.get(
+    "PBS_ALERT_LOG_DIR", os.path.join(ORCH_DIR, "logs", "pooler_breaker_snapshot_alerts")))
 POOLER_IPS = ["52.62.122.103", "52.65.247.42"]
 
 
@@ -132,7 +150,32 @@ def _recent_jobs():
     return out
 
 
-def _page(subject, body):
+def _load_spool():
+    try:
+        return json.loads(SPOOL.read_text())
+    except Exception:
+        return []
+
+
+def _save_spool(entries):
+    SPOOL.parent.mkdir(parents=True, exist_ok=True)
+    SPOOL.write_text(json.dumps(entries, indent=2))
+
+
+def _save_alert_to_disk(subject, body):
+    """SAVE-BEFORE-PAGE: persist the alert to disk before attempting any delivery, so the
+    forensic catch is never lost even if both the DB insert and the bot-API fallback fail."""
+    try:
+        ALERT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        path = ALERT_LOG_DIR / f"{ts}.json"
+        path.write_text(json.dumps({"subject": subject, "body": body, "saved_at": ts}, indent=2))
+    except Exception as e:  # noqa: BLE001 — a failed save must never block the page attempt
+        print(f"[pbs] WARNING: could not save-before-page: {e}", file=sys.stderr)
+
+
+def _db_insert(subject, body):
+    """One attempt at the normal bus page. Raises on failure (caller decides what to do)."""
     import psycopg
     with psycopg.connect(_dsn(), connect_timeout=15) as c, c.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
@@ -142,12 +185,67 @@ def _page(subject, body):
         c.commit()
 
 
+def _bot_fallback(subject, body):
+    """BOT-API FLUSH: dependency-free dead-man page via the SRE's sanctioned Telegram path
+    (same pattern as context_health_watchdog.py's _page_loud — nazim_send.sh, never the hub's
+    tg_send.sh/@wingmennorchbot). Times out, never raises — a failed fallback must never crash
+    the detector."""
+    try:
+        subprocess.run(
+            [os.path.join(ORCH_DIR, "scripts", "nazim_send.sh"), f"[pooler-breaker DB-DOWN] {subject}\n\n{body}"],
+            timeout=30, cwd=ORCH_DIR)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[pbs] bot-API fallback failed: {e}", file=sys.stderr)
+        return False
+
+
+def _flush_spool():
+    """REPLAY-THEN-PURGE: retry the DB insert for every spooled alert; drop any that land.
+    Runs on every invocation so a recovered DB drains the backlog without a human having to
+    intervene."""
+    entries = _load_spool()
+    if not entries:
+        return
+    remaining = []
+    for e in entries:
+        try:
+            _db_insert(e["subject"], e["body"])
+            print(f"[pbs] spool flush: delivered {e.get('saved_at', '?')} to the bus")
+        except Exception:
+            remaining.append(e)
+    _save_spool(remaining)
+
+
+def _page(subject, body):
+    """SAVE-BEFORE-PAGE, then DB bus; on DB failure SPOOL + BOT-API FLUSH so the alert still
+    reaches a human. Never raises — a page failure must never crash the detector (the prior
+    behaviour: an unhandled psycopg exception here killed main() before the state file was
+    even written, so the run looked like a silent no-op in the logs)."""
+    _save_alert_to_disk(subject, body)
+    try:
+        _db_insert(subject, body)
+    except Exception as e:
+        print(f"[pbs] DB page failed ({e}) — spooling + bot-API fallback", file=sys.stderr)
+        entries = _load_spool()
+        entries.append({"subject": subject, "body": body,
+                         "saved_at": datetime.now(timezone.utc).isoformat()})
+        _save_spool(entries)
+        _bot_fallback(subject, body)
+
+
 def main():
     st = _load()
     dsn = _dsn()
     state = _breaker_state(dsn)
     prev = st.get("state", "clear")
     print("[pbs] breaker=%s (prev=%s)" % (state, prev))
+
+    if state != "tripped":
+        # replay-then-purge: a recovered DB drains any backlog from a prior outage. Skipped
+        # while still tripped — every spooled entry would just fail the same way again, and
+        # each attempt pays a 15s connect timeout.
+        _flush_spool()
 
     if state == "tripped" and prev != "tripped":
         # FRESH trip -> catch it

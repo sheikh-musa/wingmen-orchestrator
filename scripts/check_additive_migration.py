@@ -3,8 +3,9 @@
 
 Per CAI-RESP-102, cc-orchestrator can pre-apply ADDITIVE migrations without
 cai review. This linter is the missing safety net: if a migration contains
-DROP/TRUNCATE/blanket-UPDATE/blanket-DELETE, exit 1 and require explicit
-cai approval first.
+DROP/TRUNCATE/blanket-UPDATE/blanket-DELETE/DISABLE-RLS, or a REVOKE against
+the shared `postgres` operational role, exit 1 and require explicit cai
+approval first.
 
 Usage:
   scripts/check_additive_migration.py path/to/migration.sql
@@ -102,6 +103,8 @@ def build_safe_zones(sql: str) -> set[tuple[int, int]]:
         _DROP_VIEW_RECREATE,
         _DROP_CONSTRAINT_RECREATE,
         _DROP_FUNCTION_RECREATE,
+        _DROP_POLICY_RECREATE,
+        _GRANT_REVOKE_POSTGRES_ROLE_CLEANUP,
     ):
         for m in pattern.finditer(sql):
             safe.add((m.start(), m.end()))
@@ -139,7 +142,12 @@ _DROP_TRIGGER = re.compile(r"\bDROP\s+TRIGGER\b", re.IGNORECASE)
 # We detect DROP FUNCTION and exclude "CREATE OR REPLACE" prefixed patterns.
 _DROP_FUNCTION = re.compile(r"\bDROP\s+FUNCTION\b", re.IGNORECASE)
 
-# TRUNCATE
+# TRUNCATE — statement-level (see _check_truncate): a real TRUNCATE command always leads
+# its own statement; TRUNCATE also appears as a PRIVILEGE NAME inside REVOKE/GRANT/ALTER
+# DEFAULT PRIVILEGES lists (e.g. "REVOKE ... TRUNCATE ... FROM anon", this fleet's routine
+# RLS-lockdown pattern, migrations 031/039) -- a blind \bTRUNCATE\b match misflagged those
+# as a real TRUNCATE command (found 2026-10-23 wet-proving the REVOKE fix against real
+# migration shapes, bus #74719/#74730 thread; pre-existing, independent of the REVOKE fix).
 _TRUNCATE = re.compile(r"\bTRUNCATE\b", re.IGNORECASE)
 
 # ALTER TYPE ... DROP VALUE (no cross-statement matching)
@@ -163,6 +171,40 @@ _UPDATE = re.compile(r"\bUPDATE\b", re.IGNORECASE)
 # DROP VIEW — standalone (not in a recreate pair)
 _DROP_VIEW = re.compile(r"\bDROP\s+VIEW\b", re.IGNORECASE)
 
+# DROP POLICY — standalone (not immediately followed by CREATE POLICY same name).
+# `DROP POLICY IF EXISTS x; CREATE POLICY x ...` is this fleet's routine RLS-hardening
+# recreate idiom (25 existing migrations) -- handled as a safe zone below, same shape as
+# the DROP TRIGGER/VIEW/FUNCTION/CONSTRAINT recreate pairs.
+_DROP_POLICY = re.compile(r"\bDROP\s+POLICY\b", re.IGNORECASE)
+
+# ALTER TABLE ... DISABLE ROW LEVEL SECURITY — silently exposes every row to every grantee;
+# zero safe/routine usage found in this fleet's migration history, always flag.
+_DISABLE_RLS = re.compile(r"\bDISABLE\s+ROW\s+LEVEL\s+SECURITY\b", re.IGNORECASE)
+
+# REVOKE ... FROM ... postgres — bus #74719/#74720/#74726/#74730 (PR#488): `postgres` is the
+# shared operational role every live writer connects as (see migrations/118's own comment),
+# NOT an anon/PUBIC/service_role lockdown target. REVOKE from anon/authenticated/PUBLIC/
+# service_role is this fleet's routine, SAFE security-hardening pattern (44 existing
+# migrations do exactly that) -- only revoking from `postgres` itself breaks something a live
+# writer depends on right now, which is the fleet-breaking shape the gap report named
+# (REVOKE INSERT ON agent_messages FROM postgres would have waved through bundled with an
+# additive migration, exactly audit item #9's failure mode). Deliberately narrow: do NOT
+# broaden to anon/service_role, that would false-positive the fleet's normal RLS-lockdown
+# migrations.
+_REVOKE_FROM_POSTGRES = re.compile(r"\bREVOKE\b[^;]*?\bFROM\b[^;]*?\bpostgres\b", re.IGNORECASE)
+
+# GRANT <role> TO postgres; ... REVOKE <role> FROM postgres -- a temporary role-membership
+# elevation (needed for e.g. ALTER ... OWNER TO <role>, which requires postgres to be a
+# member of <role> first) cleaned up within the SAME migration, not a removal of something
+# postgres relies on ongoing. Wet-proved against migrations/037_admin_mark_offline.sql and
+# 038_admin_mark_offline_scoped_reapers.sql's real `GRANT fleet_reaper TO postgres; ...
+# REVOKE fleet_reaper FROM postgres;` pattern (2026-10-23) -- an earlier version of the
+# postgres-REVOKE rule false-flagged this exact safe cleanup.
+_GRANT_REVOKE_POSTGRES_ROLE_CLEANUP = re.compile(
+    r"\bGRANT\s+(\w+)\s+TO\s+postgres\b.*?\bREVOKE\s+\1\s+FROM\s+postgres\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 # ---------------------------------------------------------------------------
 # Allow-list additions for safe recreate patterns detected in build_safe_zones
@@ -178,6 +220,20 @@ _DROP_CONSTRAINT_RECREATE = re.compile(
 # Match DROP FUNCTION IF EXISTS name followed by CREATE OR REPLACE FUNCTION name
 _DROP_FUNCTION_RECREATE = re.compile(
     r"DROP\s+FUNCTION\s+IF\s+EXISTS\s+(\w+)\s*\([^)]*\)\s*;.*?CREATE\s+OR\s+REPLACE\s+FUNCTION\s+\1\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# DROP POLICY IF EXISTS <name> ON <table>; ... CREATE POLICY <name> ON <table> -- this
+# fleet's routine RLS-hardening recreate idiom (see _DROP_POLICY comment above). Name is
+# captured WHOLE (quotes included, e.g. "service role full access") and backreferenced
+# verbatim, so a quoted name containing spaces still matches its recreate (wet-proved against
+# migrations/089_data_provenance.sql's `"service role full access"` pair, 2026-10-23 --
+# an earlier bare-\w+ version of this regex missed quoted multi-word names and false-flagged
+# it). A quoted name with NO same-named recreate anywhere later (a policy being retired/
+# renamed away, not recreated) is correctly left OUT of this safe zone -- that is a real drop
+# with no replacement under that name, not a recreate.
+_DROP_POLICY_RECREATE = re.compile(
+    r'DROP\s+POLICY\s+IF\s+EXISTS\s+("[^"]+"|\w+)\s+ON\s+[^;]+?;.*?CREATE\s+POLICY\s+\1(?!\w)',
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -260,6 +316,16 @@ def _check_update(stmt: str) -> bool:
     return True  # no WHERE, no FROM — blanket update
 
 
+def _check_truncate(stmt: str) -> bool:
+    """Return True (BLOCK) iff this statement is a real TRUNCATE command.
+
+    TRUNCATE also appears as a privilege name inside REVOKE/GRANT/ALTER DEFAULT
+    PRIVILEGES lists (e.g. "REVOKE ... TRUNCATE ... FROM anon") -- only a statement
+    that itself LEADS with the TRUNCATE keyword is the actual destructive command.
+    """
+    return bool(re.match(r"\s*TRUNCATE\b", stmt, re.IGNORECASE))
+
+
 # ---------------------------------------------------------------------------
 # Main scanner
 # ---------------------------------------------------------------------------
@@ -318,7 +384,6 @@ def scan_file(path: Path) -> list[str]:
         ("DROP COLUMN", _DROP_COLUMN),
         ("DROP CONSTRAINT", _DROP_CONSTRAINT),
         ("DROP INDEX", _DROP_INDEX),
-        ("TRUNCATE", _TRUNCATE),
     ]
 
     for label, pat in simple_patterns:
@@ -342,6 +407,21 @@ def scan_file(path: Path) -> list[str]:
         if not in_safe_zone(m.start(), safe_zones):
             report(m.start(), "DROP VIEW", m.group())
 
+    # ---- DROP POLICY — only flag if not in a safe recreate zone ----
+    for m in _DROP_POLICY.finditer(stripped):
+        if not in_safe_zone(m.start(), safe_zones):
+            report(m.start(), "DROP POLICY", m.group())
+
+    # ---- ALTER TABLE ... DISABLE ROW LEVEL SECURITY — always flag ----
+    for m in _DISABLE_RLS.finditer(stripped):
+        report(m.start(), "DISABLE ROW LEVEL SECURITY", m.group())
+
+    # ---- REVOKE ... FROM ... postgres — flag unless it's a same-migration GRANT-then-
+    #      REVOKE role-membership cleanup (see _GRANT_REVOKE_POSTGRES_ROLE_CLEANUP) ----
+    for m in _REVOKE_FROM_POSTGRES.finditer(stripped):
+        if not in_safe_zone(m.start(), safe_zones):
+            report(m.start(), "REVOKE FROM postgres", m.group())
+
     # ---- ALTER TYPE ... DROP VALUE ----
     for m in _ALTER_TYPE_DROP_VALUE.finditer(stripped):
         report(m.start(), "ALTER TYPE ... DROP VALUE", m.group())
@@ -364,6 +444,10 @@ def scan_file(path: Path) -> list[str]:
             um = _UPDATE.search(stmt)
             pos_in_stmt = um.start() if um else 0
             report(stmt_start + pos_in_stmt, "UPDATE without WHERE", stmt.strip()[:80])
+        if _check_truncate(stmt):
+            tm = _TRUNCATE.search(stmt)
+            pos_in_stmt = tm.start() if tm else 0
+            report(stmt_start + pos_in_stmt, "TRUNCATE", stmt.strip()[:80])
 
     return findings
 

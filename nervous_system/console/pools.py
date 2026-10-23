@@ -1,7 +1,7 @@
 """Max-pool nickname ⇐ OAuth-token fingerprint — the ONE backend map (op#20684).
 
 `auth_fp` = sha256(OAuth token)[:12] — a non-reversible short id the operator
-already uses on the bus. The POOL NICKNAME ("Musa" / "musa2" / "Syed") is the
+already uses on the bus. The POOL NICKNAME ("Musa" / "irsyad" / "Syed") is the
 operational, safe-to-show label; the raw fp stays off the hosted (phone) view.
 
 CANONICAL SET — keep these three in lockstep (a prefix mismatch = a lane with no
@@ -14,10 +14,11 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-# full 12-char fingerprint -> pool nickname (op#10706 Musa/Syed; op#12617 musa2).
+# full 12-char fingerprint -> pool nickname (op#10706 Musa/Syed; op#12617 musa2,
+# renamed to irsyad 2026-10-21 per Musa op#32599 — IRSYAD-ONLY pool key).
 KNOWN_POOLS: Dict[str, str] = {
     "68142948c003": "Musa",
-    "e1dfa48eec85": "musa2",
+    "e1dfa48eec85": "irsyad",
     "582043088eae": "Syed",
 }
 # fleet.js matches on a SHORT prefix (7-9 chars); mirror that so an fp truncated

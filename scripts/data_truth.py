@@ -102,7 +102,7 @@ def classify(project_ref: str, org_id: str | None = None, *, dsn: str | None = N
     convention (org_id is NOT NULL DEFAULT '' there, for the same dedup reason)."""
     org_id = org_id or ""
     resolved_ref = _resolve_project_ref(project_ref)
-    dsn = dsn or bus_send.dburl(os.environ)
+    dsn = dsn or bus_send.dburl(os.environ.get("DATABASE_URL"))
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
             "select classification, evidence, owner, alias, updated_at "

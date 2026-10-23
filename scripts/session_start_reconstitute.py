@@ -249,6 +249,10 @@ def main() -> int:
             "past rows you did not read — Fable audit 2026-09-30 B-2).\n"
             "  3. Reply to the operator ONLY via `scripts/nazim_send.sh` (a terminal "
             "reply never reaches his phone).\n\n"
+            "**KNOWN-OPS ONE-LINERS (canon → don't re-derive; full docs in `docs/runbooks/`):**\n"
+            "  • GLM spent / 'move lanes to musa' → `.venv/bin/python3 scripts/glm_overflow_switch.py` "
+            "(read-only state) then `--apply` to move all glm lanes → Musa. `glm lanes=0` = already done. "
+            "Full: `docs/runbooks/glm-playbook.md`.\n\n"
             f"--- newest handoff ({rel}) ---\n\n{handoff}"
             + asks_block
         )
