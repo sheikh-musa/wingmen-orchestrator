@@ -94,7 +94,7 @@ def live_instance_ids(base_to: str, dsn: str | None = None) -> list[str]:
     coords) -- that case is a no-op by construction, not a special case."""
     import psycopg2
 
-    conn = psycopg2.connect(dsn or dburl(os.environ))
+    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
     cur = conn.cursor()
     cur.execute(
         "SELECT agent_id FROM agent_status "
@@ -118,7 +118,7 @@ def _heartbeat_age_str(agent_id: str, dsn: str | None = None) -> str:
     import psycopg2
 
     try:
-        conn = psycopg2.connect(dsn or dburl(os.environ))
+        conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
         cur = conn.cursor()
         cur.execute(
             "SELECT status, now() - last_heartbeat FROM agent_status WHERE agent_id=%s",
@@ -160,7 +160,7 @@ def _agent_status_row(agent_id: str, dsn: str | None = None) -> tuple | None:
     and a heartbeat inside _LIVE_INSTANCE_WINDOW."""
     import psycopg2
 
-    conn = psycopg2.connect(dsn or dburl(os.environ))
+    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
     cur = conn.cursor()
     cur.execute(
         "SELECT base_agent_id, "
@@ -353,7 +353,7 @@ def _open_rr_from(to_agent: str, addressed_to: str, dsn: str | None = None) -> t
     without linking via --reply-to. None when there is no such open row."""
     import psycopg2
 
-    conn = psycopg2.connect(dsn or dburl(os.environ))
+    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
     cur = conn.cursor()
     cur.execute(
         "SELECT id, now() - created_at FROM agent_messages "
@@ -496,12 +496,28 @@ def resolve_sub_tag(from_agent: str, env: dict) -> str | None:
     return sub_tag
 
 
-def dburl(env: dict) -> str:
-    # The .env FILE wins over the inherited environment: a long-running session
-    # keeps the DATABASE_URL it was launched with, so after a password rotation
-    # every bus post from it failed auth and kept the pooler circuit breaker
-    # tripped fleet-wide (2026-09-28 rotation incident). The file is the
-    # rotation's single push-point (Mini .env; gzb .env -> /dev/shm secrets).
+def dburl(database_url: str | None) -> str:
+    """Resolve the DSN. `database_url` must be the ALREADY-RESOLVED value (e.g.
+    `os.environ.get("DATABASE_URL")`) -- NEVER the whole os.environ/env dict.
+
+    WHY (bus #64769/#64771, #67528/#67541, #74596/#74623 -- the same leak class hit
+    6+ times): this used to take `env: dict` and every caller passed the whole
+    `os.environ` mapping as that argument.
+    When dburl() raised (no DATABASE_URL resolved -- a real, expected failure mode,
+    e.g. in a deliberately-scrubbed test env), that `env` parameter sat as a LOCAL
+    VARIABLE in this function's own stack frame holding the FULL process environment.
+    Any traceback-rendering path that prints frame locals -- pytest's own default
+    failure renderer is the repeated offender -- then printed every real secret in
+    `os.environ` (COSEM_CAAI_BOT_TOKEN, DATABASE_URL itself, etc.) into whatever
+    transcript/log captured that traceback. Taking a single resolved string instead
+    means no frame anywhere in this call chain can ever hold an environ-shaped local
+    again -- the leak vector is closed at the type, not patched at each call site.
+
+    The .env FILE still wins over the inherited environment: a long-running session
+    keeps the DATABASE_URL it was launched with, so after a password rotation every
+    bus post from it failed auth and kept the pooler circuit breaker tripped
+    fleet-wide (2026-09-28 rotation incident). The file is the rotation's single
+    push-point (Mini .env; gzb .env -> /dev/shm secrets)."""
     env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
     try:
         with open(env_path) as f:
@@ -511,9 +527,8 @@ def dburl(env: dict) -> str:
                     return line.split("=", 1)[1].strip().strip('"')
     except FileNotFoundError:
         pass
-    v = env.get("DATABASE_URL")
-    if v:
-        return v
+    if database_url:
+        return database_url
     raise SystemExit("no DATABASE_URL: set it in the environment or .env")
 
 
@@ -660,7 +675,7 @@ def send(
 
     import psycopg2
 
-    conn = psycopg2.connect(dsn or dburl(os.environ))
+    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
     cur = conn.cursor()
     cur.execute("SELECT set_config('app.current_agent_id', %s, true)", (from_agent,))
 

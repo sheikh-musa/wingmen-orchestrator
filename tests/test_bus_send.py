@@ -1175,3 +1175,67 @@ def test_clean_body_dry_run_has_no_redaction_notice(monkeypatch, capsys):
     assert rc == 0
     captured = capsys.readouterr()
     assert "redacted" not in captured.err
+
+
+# ---- dburl() must never hold an environ-shaped local (bus #64769/#64771,
+# #67528/#67541, #74596/#74623 -- the SAME leak class hit 6+ times): a caller
+# passing the whole os.environ dict means an uncaught exception near dburl()'s
+# own frame lets pytest's (or any) traceback renderer print every real secret in
+# the process environment. The fix: dburl() now takes the already-resolved
+# `database_url` string (or None), never a dict -- no frame in this call chain
+# can hold an environ-shaped local again. This worktree has no .env file, so a
+# call with no database_url argument is a real, deterministic SystemExit.
+
+def test_dburl_resolves_from_the_passed_string():
+    assert bs.dburl("postgres://example/db") == "postgres://example/db"
+
+
+def test_dburl_raises_systemexit_when_nothing_resolves():
+    with pytest.raises(SystemExit):
+        bs.dburl(None)
+
+
+def test_dburl_failure_frame_holds_no_environ_shaped_local():
+    # the actual incident shape: prove at the TYPE level that dburl()'s own stack
+    # frame cannot hold an environ-shaped dict when it raises -- real os.environ
+    # always has 10+ keys in any real process, so a dict local that large would
+    # be exactly the leak vector this closes.
+    try:
+        bs.dburl(None)
+        assert False, "expected SystemExit"
+    except SystemExit:
+        tb = sys.exc_info()[2]
+        while tb.tb_next:  # walk to the innermost frame -- where dburl() itself raised
+            tb = tb.tb_next
+        frame = tb.tb_frame
+        assert frame.f_code.co_name == "dburl"
+        for name, value in frame.f_locals.items():
+            assert not (isinstance(value, dict) and len(value) > 5), (
+                f"dburl()'s own frame holds a dict-shaped local {name!r} with "
+                f"{len(value)} keys -- environ-shaped, exactly the leak this closes")
+
+
+def test_no_caller_anywhere_passes_the_whole_environ_to_dburl():
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    skip_dirs = ("/tests/", "/.claude/", "/worktrees/", "/.venv/", "/node_modules/", "/.git/")
+    bad_patterns = [
+        re.compile(r"dburl\(\s*os\.environ\s*\)"),
+        re.compile(r"dburl\(\s*dict\(os\.environ\)\s*\)"),
+    ]
+    offenders = []
+    for pattern in ("*.py", "*.sh"):
+        for path in root.rglob(pattern):
+            sp = str(path)
+            if any(d in sp for d in skip_dirs):
+                continue
+            try:
+                text = path.read_text()
+            except Exception:
+                continue
+            if any(pat.search(text) for pat in bad_patterns):
+                offenders.append(sp)
+    assert offenders == [], (
+        f"dburl() called with the whole environ (the leak class this closed) in: {offenders}")
