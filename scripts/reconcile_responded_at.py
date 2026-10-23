@@ -30,9 +30,9 @@ Tiers are tried in that order (most specific signal first); first hit wins.
 UNMATCHED rows split further:
   - to_page: priority in (P0,P1) AND older than RECONCILE_DROPPED_MIN_AGE_MIN
     (default 360min/6h — deliberately ABOVE priority_sla_watchdog's own
-    MAX_VIOLATION_AGE_MIN=180min window, so this sweeper only ever catches what
-    that real-time watchdog has already aged out of, never double-pages
-    something it is still actively working).
+    MAX_VIOLATION_AGE_MIN=300min window (audit-20261006 item 4), so this
+    sweeper only ever catches what that real-time watchdog has already aged
+    out of, never double-pages something it is still actively working).
   - needs_triage: everything else unmatched — reported, never touched.
 
 ACTIONS (both detect-only by default, staged arming like the rest of this
@@ -87,7 +87,7 @@ def _envint(name: str, default: int) -> int:
         return default
 
 
-# See module docstring "to_page" — deliberately above SLA_MAX_VIOLATION_AGE_MIN.
+# See module docstring "to_page" — deliberately above SLA_MAX_VIOLATION_AGE_MIN (300).
 DROPPED_MIN_AGE_MIN = _envint("RECONCILE_DROPPED_MIN_AGE_MIN", 360)
 
 # See classify()'s pageable_max_age docstring note — caps active paging to a

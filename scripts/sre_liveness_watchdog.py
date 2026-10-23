@@ -51,6 +51,9 @@ from __future__ import annotations
 import json, os, subprocess, sys, time, pathlib
 
 ORCH = pathlib.Path.home() / "wingmen" / "orchestrator"
+if str(ORCH) not in sys.path:
+    sys.path.insert(0, str(ORCH))
+from scripts.lib.console_alive import console_alive  # noqa: E402  (audit-20261006 item 4)
 COMPOSER_LIB = ORCH / "scripts" / "lib" / "composer_capture.sh"
 NAZIM_SEND = ORCH / "scripts" / "nazim_send.sh"
 STATE = ORCH / "logs" / "sre_liveness.state"
@@ -252,15 +255,23 @@ def _escalate(episode: str, verdict: str, nudges: int) -> None:
              f"clear it — needs a human. Verdict: {verdict}. It recycles everyone else but "
              f"cannot recover itself; a nudge-proof self-wedge is the reset-hardening dead-man "
              f"class. Check tmux 'fleet-health' on the Mini (may need a clean relaunch). Episode {episode}.")
-    # Loud bus row to orch-console (I add context + relay)...
+    # Loud bus row to orch-console (I add context + relay) -- or, if orch-console has no
+    # fresh heartbeat (audit-20261006 item 4, bus#54648), re-address to the hub
+    # (cc-orchestrator) instead of relaying into a void. Still P1+requires_response either way.
+    try:
+        console_is_alive = console_alive()
+    except Exception as e:  # noqa: BLE001 — an unprovable check never claims "alive"
+        _log(f"console_alive check raised ({e}) — treating as dead")
+        console_is_alive = False
+    bus_to = "orch-console" if console_is_alive else "cc-orchestrator"
     if dsn:
         try:
             import psycopg
             with psycopg.connect(dsn) as conn, conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response)"
-                    " VALUES (%s,'orch-console','blocker',%s,%s,'P1',true)",
-                    (POST_FROM, "SRE nudge-proof WEDGE — needs human relaunch", human))
+                    " VALUES (%s,%s,'blocker',%s,%s,'P1',true)",
+                    (POST_FROM, bus_to, "SRE nudge-proof WEDGE — needs human relaunch", human))
                 conn.commit()
         except Exception as e:
             _log(f"escalate bus row failed: {e}")
