@@ -6,6 +6,12 @@
 echo "CUBEMON_WSL_BEGIN"
 st=$(systemctl is-active actions.runner.sheikh-musa-wingmen-orchestrator.cubeasht-orchestrator.service 2>&1)
 echo "runner_service=${st}"
+# Every runner unit (2 runners since 2026-10-07: cubeasht-orchestrator{,-2}).
+for u in /etc/systemd/system/actions.runner.*cubeasht-orchestrator*.service; do
+  [ -e "$u" ] || continue
+  n=$(basename "$u")
+  echo "runner_unit=${n}=$(systemctl is-active "$n" 2>&1)"
+done
 echo "uptime_s=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)"
 echo "loadavg=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
 echo "FREE_BEGIN"
