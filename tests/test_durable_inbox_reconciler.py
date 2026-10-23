@@ -28,8 +28,9 @@ MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parent.parent / "migrations"
 @pytest.fixture
 def durable_inbox_db(pg_dsn):
     """Ephemeral Postgres carrying migration 117's schema (additive only --
-    the revoke in 118 is a separate, later, not-yet-applicable step, see its
-    header). Schema is dropped and recreated per-test on the shared
+    the revoke that would make this the only write path was rejected on
+    review and removed from this PR, tracked as backlog#124). Schema is
+    dropped and recreated per-test on the shared
     session-scoped cluster, same idiom as operator_ledger_db. pg_dsn is itself
     a freshly-created ephemeral socket-only cluster (tests/conftest.py), so it
     cannot resolve to the real substrate by construction."""

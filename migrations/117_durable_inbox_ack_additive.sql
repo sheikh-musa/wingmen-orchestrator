@@ -16,10 +16,13 @@
 --
 -- PURELY ADDITIVE, on purpose: every current writer (bus_send.py and every lane) still
 -- INSERTs directly into agent_messages today. This migration adds a parallel posting
--- RPC without disturbing that path at all -- revoking direct INSERT is a SEPARATE,
--- LATER migration (118), applied only after every writer has actually cut over
--- (console's catch, bus #74716: bundling both in one migration would have broken the
--- entire fleet's bus the instant it applied).
+-- RPC without disturbing that path at all. Revoking direct INSERT (the actual
+-- retirement of audit item #9) is NOT part of this migration or this PR -- an earlier
+-- draft (migration 118) was rejected on review (bus #74738/#74741: its REVOKE was a
+-- silent no-op, re-granted by this project's default-ACL on new tables, and separately
+-- would have killed this migration's own SECURITY DEFINER functions since they'd share
+-- an owner with the revoked role) and removed from the branch. Tracked as backlog#124,
+-- a distinct-writer-role redesign, a separate later PR.
 --
 -- Shape: three new timestamp columns track the ack lifecycle (delivered_at/acked_at/
 -- lease_expires_at); post_agent_message / mark_delivered / ack_message become available
@@ -128,9 +131,9 @@ $fn$;
 
 COMMENT ON FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text) IS
     'Durable acked inbox, additive step (migration 117). Available alongside direct '
-    'INSERT -- not yet the only write path. Migration 118 (the revoke that would make '
-    'this the only path) is REJECTED as written and out of this PR pending a distinct-'
-    'owner rework -- see its header.';
+    'INSERT -- not yet the only write path. The revoke that would make this the only '
+    'path was rejected on review and removed from this PR; tracked as backlog#124, a '
+    'separate later PR around a distinct writer role.';
 
 REVOKE EXECUTE ON FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION mark_delivered(bigint,integer) FROM PUBLIC;
