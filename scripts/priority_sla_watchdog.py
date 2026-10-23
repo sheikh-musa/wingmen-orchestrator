@@ -39,7 +39,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -57,6 +56,7 @@ sys.path.insert(0, str(ORCH))
 # reclaims on expiry) so the SRE and a reclaiming hub never double-nudge/page.
 from scripts.lib import fleet_health_lease  # noqa: E402
 from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
+from scripts.lib.console_alive import console_alive  # noqa: E402  (audit-20261006 item 4)
 
 # ---------------------------------------------------------------------------
 # Config — all overridable via environment (launchd EnvironmentVariables).
@@ -79,7 +79,7 @@ def _envint(name: str, default: int) -> int:
 # 2026-07-14: within 3h there are ~6 violations; within 24h there are ~131. So
 # 3h cleanly isolates fresh stalls from chronic backlog. This is the primary
 # spam-guard — widen only deliberately (and watch the circuit breaker).
-MAX_VIOLATION_AGE_MIN = _envint("SLA_MAX_VIOLATION_AGE_MIN", 180)  # 3h
+MAX_VIOLATION_AGE_MIN = _envint("SLA_MAX_VIOLATION_AGE_MIN", 300)  # 5h (audit-20261006 item 4)
 
 # Re-nudge the SAME (agent,message) at most once per this window.
 RENUDGE_BACKOFF_MIN = _envint("SLA_RENUDGE_BACKOFF_MIN", 15)
@@ -655,20 +655,20 @@ def build_page(v: dict, nudges: int) -> str:
 # the operator still gets it. A missed page is worse than an unnecessary one; this
 # only removes pages we can PROVE somebody else can act on.
 def _internal_path_alive(recipient: str) -> bool:
-    """Is orch-console live and NOT itself the stalled recipient?"""
-    if recipient == "orch-console":
-        return False                      # the internal escalator IS the stall
-    tmux = shutil.which("tmux") or "/opt/homebrew/bin/tmux"
-    try:
-        r = subprocess.run([tmux, "has-session", "-t", "=nazim"],
-                           capture_output=True, timeout=5)
-        return r.returncode == 0
-    except Exception:                      # noqa: BLE001 — cannot tell => page
-        return False
+    """Is there a non-circular internal (non-operator) party to escalate to at all?
+    False only when the recipient itself IS orch-console — escalating a stall about
+    orch-console's own queue back to orch-console is circular. The live/dead choice
+    BETWEEN orch-console and its audit-20261006-item-4 hub fallback (cc-orchestrator)
+    is escalate_internally's job, via console_alive()."""
+    return recipient != "orch-console"
 
 
 def escalate_internally(v: dict, nudges: int) -> bool:
-    """File the stall to orch-console instead of paging the operator."""
+    """File the stall to orch-console instead of paging the operator (CAI-600) -- or, if
+    orch-console has no fresh agent_status heartbeat (console_alive() False; audit-20261006
+    item 4, bus#54648), re-address to the hub (cc-orchestrator) as P1+requires_response
+    instead of relaying into a void. Never downgrades a P0 violation's own priority on
+    redirect."""
     body = (f"SLA stall on an agent queue — routed to you rather than the operator, who cannot "
             f"clear another body's inbox (CAI-600).\n\n"
             f"  recipient : {v['agent']}\n  message   : #{v['message_id']} ({v['priority']})\n"
@@ -678,14 +678,24 @@ def escalate_internally(v: dict, nudges: int) -> bool:
             f"If this genuinely needs the operator, escalate it yourself with the reason — that "
             f"judgement is yours, not this watchdog's.")
     try:
+        console_is_alive = console_alive()
+    except Exception as e:  # noqa: BLE001 — an unprovable check never claims "alive"
+        log(f"console_alive check raised ({e}) — treating as dead")
+        console_is_alive = False
+    to_agent, priority, requires_response = "orch-console", v["priority"], False
+    if not console_is_alive:
+        to_agent, requires_response = "cc-orchestrator", True
+        body = (f"[console-dead-redirect] orch-console has no fresh heartbeat — routed to "
+                f"you instead (audit-20261006 item 4, bus#54648).\n\n{body}")
+    try:
         import psycopg
         dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
         with psycopg.connect(dsn, connect_timeout=15) as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
-                "priority) VALUES ('sla-watchdog','orch-console','blocker',%s,%s,%s)",
-                (f"SLA stall: {v['agent']} #{v['message_id']} ({v['priority']}, "
-                 f"{v['elapsed_minutes']}m)", body, v["priority"]))
+                "priority, requires_response) VALUES ('sla-watchdog',%s,'blocker',%s,%s,%s,%s)",
+                (to_agent, f"SLA stall: {v['agent']} #{v['message_id']} ({v['priority']}, "
+                 f"{v['elapsed_minutes']}m)", body, priority, requires_response))
             conn.commit()
         return True
     except Exception as e:                 # noqa: BLE001

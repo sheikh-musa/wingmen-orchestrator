@@ -1042,3 +1042,80 @@ def test_paused_wake_veto_does_not_disturb_quiesce_logic_for_other_agents():
     assert res["paused_suppressed"] == ["cc-cosem-adcda-1"]   # the fresh paused row: wake vetoed
     assert res["dead_foreign"] == ["cc-cosem-platform"]       # the capped row: quiesce unaffected
     assert marked == [21]
+
+
+# ── _escalate_operator console-dead redirect (audit-20261006 item 4, bus#54648) ──────────
+# A dead-foreign/readdress/lookup-failed page normally goes to orch-console. If orch-console
+# itself has no fresh heartbeat, that page must re-address to the hub (cc-orchestrator) as
+# P1+requires_response instead of relaying into a void -- the exact failure this closes.
+
+class _CaptureCursor:
+    def __init__(self, store):
+        self.store = store
+
+    def execute(self, sql, params=None):
+        self.store.append((sql, params))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _CaptureConn:
+    def __init__(self, store):
+        self.store = store
+
+    def cursor(self):
+        return _CaptureCursor(self.store)
+
+    def commit(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_escalate_operator_goes_to_console_when_console_alive(monkeypatch):
+    store = []
+    monkeypatch.setattr(wbs, "_DSN", "postgres://fake")
+    monkeypatch.setattr(wbs.psycopg, "connect", lambda *a, **k: _CaptureConn(store))
+    wbs._escalate_operator("subj", "body", console_alive=lambda: True)
+    insert = [s for s, p in store if "INSERT INTO agent_messages" in s][0]
+    params = [p for s, p in store if "INSERT INTO agent_messages" in s][0]
+    assert params[0] == "orch-console"
+    assert params[1] == "P2"
+    assert params[4] is False
+
+
+def test_escalate_operator_redirects_to_hub_when_console_dead(monkeypatch):
+    store = []
+    monkeypatch.setattr(wbs, "_DSN", "postgres://fake")
+    monkeypatch.setattr(wbs.psycopg, "connect", lambda *a, **k: _CaptureConn(store))
+    wbs._escalate_operator("subj", "body", console_alive=lambda: False)
+    params = [p for s, p in store if "INSERT INTO agent_messages" in s][0]
+    assert params[0] == wbs.HUB_AGENT
+    assert params[1] == "P1"
+    assert params[4] is True
+    assert "audit-20261006" in params[3]
+    assert "body" in params[3]   # original body text preserved, not dropped
+
+
+def test_escalate_operator_default_console_alive_check_failure_treated_as_dead(monkeypatch):
+    # _default_console_alive is the real (lazy-imported) check; an exception inside it must
+    # never crash the page, and must fail toward the hub redirect (never toward "alive").
+    store = []
+    monkeypatch.setattr(wbs, "_DSN", "postgres://fake")
+    monkeypatch.setattr(wbs.psycopg, "connect", lambda *a, **k: _CaptureConn(store))
+
+    def boom():
+        raise RuntimeError("console_alive import blew up")
+
+    monkeypatch.setattr(wbs, "_default_console_alive", boom)
+    wbs._escalate_operator("subj", "body")
+    params = [p for s, p in store if "INSERT INTO agent_messages" in s][0]
+    assert params[0] == wbs.HUB_AGENT

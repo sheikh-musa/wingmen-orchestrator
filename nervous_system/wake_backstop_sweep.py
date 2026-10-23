@@ -545,17 +545,48 @@ def _base_of(agent):
 _ESCALATED_SEEN: set = set()
 
 
-def _escalate_operator(subject: str, body: str) -> None:
-    """One page to the operator-ops body (default orch-console) about a rotting/dead row.
-    Best-effort: a page failure must never crash the sweep floor (KeepAlive re-runs)."""
+def _default_console_alive() -> bool:
+    """orch-console's own liveness (audit-20261006 item 4, bus#54648): a fresh agent_status
+    heartbeat, not the hub's lease. Resolved lazily (same shape as _default_this_host) so this
+    module never hard-imports scripts.lib at load time. Any failure fails to False — an
+    unprovable check never licenses treating orch-console as reachable."""
+    try:
+        if _ORCH_ROOT not in sys.path:
+            sys.path.insert(0, _ORCH_ROOT)
+        from scripts.lib.console_alive import console_alive
+        return console_alive()
+    except Exception as e:  # noqa: BLE001 — an unprovable check never claims "alive"
+        print(f"wake_backstop_sweep: console_alive check failed ({e!r}) — treating as dead",
+              file=sys.stderr, flush=True)
+        return False
+
+
+def _escalate_operator(subject: str, body: str, *, console_alive=None) -> None:
+    """One page about a rotting/dead row. Normally to the operator-ops body (orch-console);
+    if orch-console itself has no fresh heartbeat (audit-20261006 item 4, bus#54648), re-
+    address to the hub (cc-orchestrator) as P1+requires_response instead of relaying into a
+    void. Best-effort: a page failure must never crash the sweep floor (KeepAlive re-runs)."""
     if not _DSN:
         return
+    alive_check = console_alive if console_alive is not None else _default_console_alive
+    to_agent, priority, requires_response, text = _ESCALATE_TO, "P2", False, body
+    try:
+        console_is_alive = alive_check()
+    except Exception as e:  # noqa: BLE001 — an unprovable check never claims "alive"
+        print(f"wake_backstop_sweep: console_alive check raised ({e!r}) — treating as dead",
+              file=sys.stderr, flush=True)
+        console_is_alive = False
+    if not console_is_alive:
+        to_agent, priority, requires_response = HUB_AGENT, "P1", True
+        text = (f"[console-dead-redirect] {_ESCALATE_TO} has no fresh heartbeat — routed to "
+                f"you instead (audit-20261006 item 4, bus#54648).\n\n{body}")
     try:
         with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
             cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
             cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body) "
-                "VALUES ('cc-fleet-health',%s,'blocker','P2',%s,%s)", (_ESCALATE_TO, subject, body))
+                "INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,"
+                "body,requires_response) VALUES ('cc-fleet-health',%s,'blocker',%s,%s,%s,%s)",
+                (to_agent, priority, subject, text, requires_response))
             conn.commit()
     except Exception as e:  # noqa: BLE001 — page best-effort
         print(f"wake_backstop_sweep: escalation page failed ({e})", file=sys.stderr, flush=True)
