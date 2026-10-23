@@ -194,15 +194,24 @@ def _subagent_transcript_path(transcript_path: str | None, agent_id: str | None)
     return candidates[0]
 
 
-def redact_recent_lines(transcript_path: str, cls: str, pattern: re.Pattern, max_lines: int = 3) -> bool:
+# bus #74596/#74623: redact_recent_lines silently missed the real span TWICE in one
+# session (both pages fired correctly, both left the raw value on disk). Root cause:
+# window_start = len(lines) - max_lines is computed against the file's line count AT
+# THIS FUNCTION'S OWN READ TIME, not against the specific line the hook was actually
+# called about. In a busy session, bookkeeping lines (attachment / api-request-blob /
+# permission-mode / etc.) get appended by the harness AFTER the real content line but
+# BEFORE this function reads the file -- pushing the real line further back than
+# max_lines=3 by the time it looks. A fixed narrow window CANNOT be trusted alone; this
+# constant bounds a VERIFY-and-widen retry (never a full-file rescan) rather than
+# silently claiming success on a window that this exact interleaving defeats.
+WIDE_VERIFY_LINES = 50
+
+
+def _redact_window(transcript_path: str, cls: str, pattern: re.Pattern, max_lines: int) -> bool:
     """Redact `pattern` matches in each of the last `max_lines` JSONL lines of
     transcript_path, in place. Returns True if any redaction was made. Never touches
-    a line outside that window.
-
-    bus #48685/#48695: the assistant's tool_use (the command/input) and its tool_result
-    (the output) are SEPARATE JSONL lines -- a secret typed literally into the input can
-    land one line before the result that redact_last_line (max_lines=1) alone would
-    check, so this widens the window without touching anything further back."""
+    a line outside that window. The single-pass primitive redact_recent_lines wraps
+    with a verify-and-widen retry."""
     try:
         with open(transcript_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -232,6 +241,41 @@ def redact_recent_lines(transcript_path: str, cls: str, pattern: re.Pattern, max
     if changed:
         with open(transcript_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
+    return changed
+
+
+def _pattern_present_in_recent(transcript_path: str, pattern: re.Pattern, max_lines: int) -> bool:
+    """True iff `pattern` still matches anywhere in the last `max_lines` raw lines of
+    transcript_path. Used ONLY to decide whether a widen-retry is needed -- a cheap
+    text search, no JSON parsing (a redaction already landed is still valid JSON; a
+    miss is a plain substring the regex will find in the raw line either way)."""
+    try:
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return False
+    window_start = max(0, len(lines) - max_lines)
+    return any(pattern.search(line) for line in lines[window_start:])
+
+
+def redact_recent_lines(transcript_path: str, cls: str, pattern: re.Pattern, max_lines: int = 3) -> bool:
+    """Redact `pattern` matches in each of the last `max_lines` JSONL lines of
+    transcript_path, in place. Returns True if any redaction was made.
+
+    bus #48685/#48695: the assistant's tool_use (the command/input) and its tool_result
+    (the output) are SEPARATE JSONL lines -- a secret typed literally into the input can
+    land one line before the result that redact_last_line (max_lines=1) alone would
+    check, so this widens the window without touching anything further back.
+
+    VERIFY-AND-WIDEN (bus #74596/#74623): after the narrow-window pass, re-check
+    whether `pattern` is STILL present within WIDE_VERIFY_LINES (a bounded safety
+    margin, never a full-file rescan). If so, the real line was pushed beyond
+    `max_lines` by bookkeeping lines appended ahead of this read -- retry over the
+    wider window instead of silently trusting the narrow one that missed it. A match
+    beyond WIDE_VERIFY_LINES is a documented limit, not silently claimed clean."""
+    changed = _redact_window(transcript_path, cls, pattern, max_lines)
+    if max_lines < WIDE_VERIFY_LINES and _pattern_present_in_recent(transcript_path, pattern, WIDE_VERIFY_LINES):
+        changed = _redact_window(transcript_path, cls, pattern, WIDE_VERIFY_LINES) or changed
     return changed
 
 

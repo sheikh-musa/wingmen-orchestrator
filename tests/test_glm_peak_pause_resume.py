@@ -5,7 +5,10 @@ import importlib.util
 import json
 from pathlib import Path
 
+import psycopg
 import pytest
+
+from scripts import bus_send as _bus_send_mod
 
 _SPEC = importlib.util.spec_from_file_location(
     "glm_peak_pause_resume", Path(__file__).resolve().parent.parent / "scripts" / "glm_peak_pause_resume.py")
@@ -208,3 +211,129 @@ def test_main_offpeak_noop_once_resume_done(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "nothing to resume" in out
     assert rc == 0
+
+
+# ── check_hard_exclude_divergence (orch-console Q5, bus #74588 transition period) ────
+
+class _FakeCursor:
+    def __init__(self, policy_rows, override_rows):
+        self._policy_rows = policy_rows
+        self._override_rows = override_rows
+        self._pending = None
+        self.description = None
+
+    def execute(self, sql, params=None):
+        if "provider_policy_lane_override" in sql:
+            self._pending = self._override_rows
+            self.description = [("lane",), ("allowed_providers",), ("text_only",)]
+        else:
+            self._pending = self._policy_rows
+            self.description = [("client_key",), ("allowed_providers",), ("text_only",)]
+
+    def fetchall(self):
+        return self._pending
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, policy_rows, override_rows):
+        self._policy_rows = policy_rows
+        self._override_rows = override_rows
+
+    def cursor(self):
+        return _FakeCursor(self._policy_rows, self._override_rows)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _connect_with(policy_rows, override_rows):
+    def _connect(dsn, **k):
+        return _FakeConn(policy_rows, override_rows)
+    return _connect
+
+
+def test_divergence_check_no_disagreement_posts_nothing(monkeypatch):
+    # cosem-port isn't hard-excluded (old=False) and resolves to an unmapped
+    # client_key with an empty policy table -> ANTHROPIC_ONLY -> new ALSO says
+    # excluded=True for zai... to keep old==new here, give it a zai-allowing row.
+    policy_rows = [("cosem", ["anthropic", "zai"], True)]
+    monkeypatch.setattr(psycopg, "connect", _connect_with(policy_rows, []))
+    monkeypatch.setattr(_bus_send_mod, "dburl", lambda env: "postgres://fake")
+    pages = []
+    monkeypatch.setattr(g, "page", lambda subject, body, apply: pages.append((subject, body)))
+    g.check_hard_exclude_divergence("cosem-port", True)
+    assert pages == []
+
+
+def test_divergence_check_disagreement_posts_one_loud_warning(monkeypatch):
+    # mamadah is NOT in HARD_EXCLUDE_LANES (old=False) but a correctly-anthropic-
+    # only policy row means the new gate says excluded=True -- a real divergence.
+    policy_rows = [("mamadah", ["anthropic"], False)]
+    monkeypatch.setattr(psycopg, "connect", _connect_with(policy_rows, []))
+    monkeypatch.setattr(_bus_send_mod, "dburl", lambda env: "postgres://fake")
+    pages = []
+    monkeypatch.setattr(g, "page", lambda subject, body, apply: pages.append((subject, body, apply)))
+    g.check_hard_exclude_divergence("cc-mamadah-1", True)
+    assert len(pages) == 1
+    subject, body, apply = pages[0]
+    assert "cc-mamadah-1" in subject
+    assert "old=False" in subject and "new=True" in subject
+    assert apply is True
+
+
+def test_divergence_check_hard_excluded_lane_with_matching_new_verdict_posts_nothing(monkeypatch):
+    # cosem-adcda-photos: old=True (HARD_EXCLUDE_LANES); give it a matching
+    # anthropic-only override so the new gate also says excluded=True -- no drift.
+    policy_rows = [("cosem-adcda", ["anthropic", "zai"], True)]
+    override_rows = [("cosem-adcda-photos", ["anthropic"], False)]
+    monkeypatch.setattr(psycopg, "connect", _connect_with(policy_rows, override_rows))
+    monkeypatch.setattr(_bus_send_mod, "dburl", lambda env: "postgres://fake")
+    pages = []
+    monkeypatch.setattr(g, "page", lambda subject, body, apply: pages.append((subject, body)))
+    g.check_hard_exclude_divergence("cosem-adcda-photos", True)
+    assert pages == []
+
+
+def test_divergence_check_misconfigured_override_posts_a_warning(monkeypatch):
+    policy_rows = [("irsyad", ["anthropic"], False)]
+    override_rows = [("irsyad-worker-1", ["anthropic", "zai"], True)]  # WIDENS -- invalid
+    monkeypatch.setattr(psycopg, "connect", _connect_with(policy_rows, override_rows))
+    monkeypatch.setattr(_bus_send_mod, "dburl", lambda env: "postgres://fake")
+    pages = []
+    monkeypatch.setattr(g, "page", lambda subject, body, apply: pages.append((subject, body)))
+    g.check_hard_exclude_divergence("irsyad-worker-1", True)
+    assert len(pages) == 1
+    assert "misconfigured" in pages[0][0]
+
+
+def test_divergence_check_db_failure_is_swallowed_never_raises(monkeypatch):
+    def boom(dsn, **k):
+        raise RuntimeError("db unreachable")
+    monkeypatch.setattr(psycopg, "connect", boom)
+    monkeypatch.setattr(_bus_send_mod, "dburl", lambda env: "postgres://fake")
+    # must not raise, and must not call page() at all
+    pages = []
+    monkeypatch.setattr(g, "page", lambda *a, **k: pages.append(a))
+    g.check_hard_exclude_divergence("anything", True)
+    assert pages == []
+
+
+def test_divergence_check_no_dsn_systemexit_is_swallowed_never_raises(monkeypatch):
+    # the real failure mode seen in practice: bus_send.dburl() raises SystemExit
+    # (not a plain Exception) when DATABASE_URL is unset.
+    def boom(env):
+        raise SystemExit("no DATABASE_URL")
+    monkeypatch.setattr(_bus_send_mod, "dburl", boom)
+    pages = []
+    monkeypatch.setattr(g, "page", lambda *a, **k: pages.append(a))
+    g.check_hard_exclude_divergence("anything", True)
+    assert pages == []

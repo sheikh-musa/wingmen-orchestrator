@@ -1037,3 +1037,80 @@ def test_scan_persisted_output_still_finds_a_hit_within_the_byte_cap(tmp_path):
     p.write_text(inline_dsn + "\n" + ("y" * (scanner.MAX_SCAN_BYTES * 3)))
     hits = scanner.scan_persisted_output(str(p))
     assert hits and any(h[0] == "postgres-dsn" for h in hits)
+
+
+# ---- bus #74596/#74623: redact_recent_lines silently missed the real span twice in
+# one session. Root cause: window_start = max(0, len(lines) - max_lines) is computed
+# against the file's line count AT HOOK-INVOCATION TIME, not against the specific
+# line the hook was actually called about. In a busy session, bookkeeping lines
+# (attachment/api-request-blob/permission-mode/etc.) get appended by the harness
+# AFTER the real content line but BEFORE (or during) the hook's own read -- pushing
+# the real line further than max_lines=3 back by the time redact_recent_lines reads
+# the file. The fix must widen the search when a VERIFY pass still finds the pattern
+# present beyond the initial narrow window, rather than silently trusting a fixed-size
+# window that this exact shape of interleaving defeats. Uses the sanctioned
+# FIXTURE_TELEGRAM_BOT_ID shape, built from parts (not one contiguous literal) so this
+# file's own source never trips the live Edit/Write secrets guard.
+
+def _fixture_token() -> str:
+    return scanner.FIXTURE_TELEGRAM_BOT_ID + ":AA" + "FakeTokenShapeForTestingOnly123456"
+
+
+def test_redact_recent_lines_catches_a_match_pushed_beyond_the_default_window(tmp_path):
+    p = tmp_path / "busy.jsonl"
+    secret_line = {"type": "user", "message": {"content": [
+        {"type": "tool_result", "content": "token=" + _fixture_token()}]}}
+    # the real content line, THEN several bookkeeping lines the harness appends
+    # after it in a busy session (attachment-shaped, content-free so they never
+    # match the pattern themselves) -- the exact shape observed in the real
+    # incident (bus #74596), pushing the real line 5 lines back by the time the
+    # hook reads the file.
+    bookkeeping = [{"type": "attachment", "n": i} for i in range(5)]
+    lines = [secret_line] + bookkeeping
+    with open(p, "w") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+
+    # default max_lines=3 is narrower than the 6-line file with the match at index 0 --
+    # this is RED on the pre-fix code (window_start = 6-3 = 3, the match at index 0 is
+    # never even looked at) and must be GREEN after the fix (a verify pass finds the
+    # pattern still present and widens the retry).
+    changed = scanner.redact_recent_lines(str(p), "telegram-bot-token",
+                                          scanner.SECRET_PATTERNS["telegram-bot-token"], max_lines=3)
+    assert changed is True
+    after_text = p.read_text()
+    assert _fixture_token() not in after_text
+    assert "REDACTED" in after_text
+
+
+def test_redact_recent_lines_still_leaves_a_genuinely_clean_file_untouched(tmp_path):
+    # the widen-on-verify-failure retry must not perturb a file with no match at all --
+    # changed stays False, bytes stay identical.
+    p = tmp_path / "clean.jsonl"
+    lines = [{"type": "attachment", "n": i} for i in range(6)]
+    with open(p, "w") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+    before = p.read_text()
+    changed = scanner.redact_recent_lines(str(p), "telegram-bot-token",
+                                          scanner.SECRET_PATTERNS["telegram-bot-token"], max_lines=3)
+    assert changed is False
+    assert p.read_text() == before
+
+
+def test_redact_recent_lines_widen_retry_is_bounded_not_a_full_file_scan(tmp_path):
+    # a match far beyond the widened verify ceiling must NOT be found/touched -- the
+    # retry is a bounded safety margin, never a full-file rescan (perf/safety on a
+    # multi-GB transcript).
+    p = tmp_path / "huge.jsonl"
+    far_back = {"type": "user", "message": {"content": [
+        {"type": "tool_result", "content": "token=" + _fixture_token()}]}}
+    filler = [{"type": "attachment", "n": i} for i in range(500)]
+    lines = [far_back] + filler
+    with open(p, "w") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+    changed = scanner.redact_recent_lines(str(p), "telegram-bot-token",
+                                          scanner.SECRET_PATTERNS["telegram-bot-token"], max_lines=3)
+    assert changed is False  # out of reach of the bounded widen ceiling -- not a miss, a documented limit
+    assert _fixture_token() in p.read_text()  # untouched, not silently claimed clean
