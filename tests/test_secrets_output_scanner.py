@@ -1114,3 +1114,135 @@ def test_redact_recent_lines_widen_retry_is_bounded_not_a_full_file_scan(tmp_pat
                                           scanner.SECRET_PATTERNS["telegram-bot-token"], max_lines=3)
     assert changed is False  # out of reach of the bounded widen ceiling -- not a miss, a documented limit
     assert _fixture_token() in p.read_text()  # untouched, not silently claimed clean
+
+
+# ---- bus #74676: secret-READING CLI commands that print a value with no fixed shape
+# (firebase functions:secrets:access, gcloud secrets versions access) -- the real
+# incident, cc-cosem-adcda-1 ran `firebase functions:secrets:access
+# SCHEDULE_PDF_S2S_SECRET --project ...` unredirected and the raw plaintext secret value
+# printed straight into the transcript. SECRET_PATTERNS never fired because an arbitrary
+# vaulted secret has no regex-matchable shape. Detected by COMMAND instead of value
+# shape: when tool_input names one of these commands, the captured (non-empty) stdout
+# itself becomes a one-off literal redaction pattern.
+
+def _fixture_secret_value() -> str:
+    # built from parts, never a contiguous literal, so this file's own source never
+    # trips the live Edit/Write secrets guard -- an opaque value with NO shape any
+    # existing SECRET_PATTERNS class would ever match (the whole point of this test).
+    return "fake-" + "Qx7mPz2Lk9VtRbN4sWcYhJd6Fg8TuA1E"
+
+
+def test_firebase_secrets_access_output_is_flagged_despite_no_known_shape(tmp_path):
+    import subprocess
+    import os
+
+    value = _fixture_secret_value()
+    transcript = tmp_path / "session.jsonl"
+    with open(transcript, "w") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash",
+             "input": {"command": "firebase functions:secrets:access SCHEDULE_PDF_S2S_SECRET --project cosem-adcda-cb6d9"}}
+        ]}}) + "\n")
+        f.write(json.dumps({"type": "tool_result", "toolUseResult": {"stdout": value, "stderr": ""}}) + "\n")
+
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": "firebase functions:secrets:access SCHEDULE_PDF_S2S_SECRET --project cosem-adcda-cb6d9"},
+        "tool_response": {"stdout": value, "stderr": ""},
+        "transcript_path": str(transcript),
+    })
+    env = dict(os.environ, SECRETS_SCANNER_DEMO="1")
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True, env=env)
+    assert "secret-shaped content" in r.stderr or "secret-cli-read" in r.stderr
+
+    after = transcript.read_text()
+    assert value not in after
+    assert "REDACTED" in after
+
+
+def test_gcloud_secrets_versions_access_output_is_flagged(tmp_path):
+    import subprocess
+    import os
+
+    value = _fixture_secret_value()
+    transcript = tmp_path / "session.jsonl"
+    with open(transcript, "w") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash",
+             "input": {"command": "gcloud secrets versions access 1 --secret=my-secret"}}
+        ]}}) + "\n")
+        f.write(json.dumps({"type": "tool_result", "toolUseResult": {"stdout": value, "stderr": ""}}) + "\n")
+
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": "gcloud secrets versions access 1 --secret=my-secret"},
+        "tool_response": {"stdout": value, "stderr": ""},
+        "transcript_path": str(transcript),
+    })
+    env = dict(os.environ, SECRETS_SCANNER_DEMO="1")
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True, env=env)
+    after = transcript.read_text()
+    assert value not in after
+    assert "REDACTED" in after
+
+
+def test_unrelated_command_with_the_same_output_is_not_flagged(tmp_path):
+    # proves detection is by COMMAND, not by the output's content/shape -- the exact
+    # same opaque value, printed by an unrelated command, is never touched.
+    import subprocess
+
+    value = _fixture_secret_value()
+    transcript = tmp_path / "session.jsonl"
+    with open(transcript, "w") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "echo some-opaque-string"}}
+        ]}}) + "\n")
+        f.write(json.dumps({"type": "tool_result", "toolUseResult": {"stdout": value, "stderr": ""}}) + "\n")
+    before = transcript.read_text()
+
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo some-opaque-string"},
+        "tool_response": {"stdout": value, "stderr": ""},
+        "transcript_path": str(transcript),
+    })
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True)
+    assert r.returncode == 0
+    assert transcript.read_text() == before
+
+
+def test_secret_reading_command_with_empty_output_is_not_flagged(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": "firebase functions:secrets:access FOO --project bar"},
+        "tool_response": {"stdout": "", "stderr": "permission denied"},
+        "transcript_path": str(transcript),
+    })
+    import subprocess
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True)
+    assert r.returncode == 0  # no hit -- nothing to redact, nothing to page
+
+
+def test_secret_reading_command_hit_unit_level():
+    # direct unit test of the pure detection helper, no subprocess.
+    value = _fixture_secret_value()
+    hit = scanner._secret_reading_command_hit(
+        "firebase functions:secrets:access FOO --project bar", {"stdout": value, "stderr": ""})
+    assert hit is not None
+    cls, match, pattern = hit
+    assert cls == "secret-cli-read"
+    assert pattern.search(value)
+
+
+def test_secret_reading_command_hit_requires_the_command_pattern():
+    value = _fixture_secret_value()
+    assert scanner._secret_reading_command_hit("echo hello", {"stdout": value, "stderr": ""}) is None
+
+
+def test_secret_reading_command_hit_requires_non_empty_output():
+    assert scanner._secret_reading_command_hit(
+        "firebase functions:secrets:access FOO --project bar", {"stdout": "  \n", "stderr": ""}) is None
+    assert scanner._secret_reading_command_hit(
+        "firebase functions:secrets:access FOO --project bar", "") is None
