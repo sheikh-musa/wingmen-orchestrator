@@ -358,7 +358,8 @@ def test_state_key_for_falls_back_to_bare_base_on_empty_session():
 # fixes the 2 that need no new data: gate_context_bloat/latest_context_frac (fall back to a
 # session-specific pane probe, mirroring lane_proactive_recycle_nudge._gauge_for_lane) and
 # gate_fresh_handoff (fail closed -- handoff_find has no per-instance marker to fall back to).
-# last_material_action_epoch's instance-attribution sub-fix is held pending PR #324 (sub_tag).
+# last_material_action_epoch's instance-attribution sub-fix (sub-fix 2) lands below, now that
+# PR #324 (sub_tag column + bus_send.resolve_sub_tag) is on trunk.
 
 def test_pane_only_frac_known_pane_returns_fraction(monkeypatch):
     monkeypatch.setattr(slr._lrd, "_pane", lambda session: (42, None))
@@ -477,7 +478,8 @@ def test_gate_fresh_handoff_sibling_ambiguous_fails_closed(monkeypatch):
 
 def test_compute_gates_sibling_ambiguous_forces_fresh_handoff_false(monkeypatch):
     monkeypatch.setattr(slr, "live_sessions_for_base", lambda conn, base: ["cosem-platform-2", "cosem-platform-3"])
-    monkeypatch.setattr(slr, "last_material_action_epoch", lambda conn, base: 1_000.0)
+    monkeypatch.setattr(slr, "last_material_action_epoch",
+                        lambda conn, base, session=None, sibling_ambiguous=False: 1_000.0)
     monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)  # genuinely fresh
     monkeypatch.setattr(slr, "gate_context_bloat", lambda conn, base, session=None: False)
     monkeypatch.setattr(slr, "gate_idle", lambda session: True)
@@ -491,7 +493,8 @@ def test_compute_gates_sibling_ambiguous_forces_fresh_handoff_false(monkeypatch)
 
 def test_compute_gates_single_sibling_fresh_handoff_unchanged(monkeypatch):
     monkeypatch.setattr(slr, "live_sessions_for_base", lambda conn, base: ["cosem-platform-3"])
-    monkeypatch.setattr(slr, "last_material_action_epoch", lambda conn, base: 1_000.0)
+    monkeypatch.setattr(slr, "last_material_action_epoch",
+                        lambda conn, base, session=None, sibling_ambiguous=False: 1_000.0)
     monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)
     monkeypatch.setattr(slr, "gate_context_bloat", lambda conn, base, session=None: False)
     monkeypatch.setattr(slr, "gate_idle", lambda session: True)
@@ -512,3 +515,114 @@ def test_compute_gates_conn_none_skips_ambiguity_check_defaults_unambiguous(monk
     # makes for a DIFFERENT reason (no last_action) -- here we confirm it's not ALSO forced
     # False by a spuriously-True ambiguity check when conn is None.
     assert gates["fresh_handoff"] is False
+
+
+# ── last_material_action_epoch (bus #74293 sub-fix 2): sibling-aware via sub_tag ────────────
+# Unblocked by PR #324 (sub_tag column + bus_send.resolve_sub_tag). A bare from_agent=base
+# query is unattributable across siblings -- ANY sibling's bus post would count toward EVERY
+# sibling's "last material action", the same class of gap gate_context_bloat/gate_fresh_handoff
+# already closed in facet 13's first slice.
+
+class _CaptureCursor:
+    def __init__(self, row):
+        self._row = row
+        self.calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+
+    def fetchone(self):
+        return self._row
+
+
+class _CaptureConn:
+    def __init__(self, row):
+        self.cur = _CaptureCursor(row)
+
+    def cursor(self):
+        return self.cur
+
+
+def test_last_material_action_epoch_unambiguous_queries_by_from_agent(monkeypatch):
+    """Regression: sibling_ambiguous=False (the default, every pre-existing caller) keeps
+    today's exact base-keyed query -- instance_id_for_session must never even be consulted."""
+    monkeypatch.setattr(
+        slr, "instance_id_for_session",
+        lambda cur, session, fallback: (_ for _ in ()).throw(
+            AssertionError("must not resolve an instance when unambiguous")))
+    import datetime as _dt
+    ts = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+    conn = _CaptureConn((ts,))
+
+    got = slr.last_material_action_epoch(conn, "cc-cosem-platform")
+
+    assert got == ts.timestamp()
+    sql, params = conn.cur.calls[0]
+    assert "from_agent" in sql and "sub_tag" not in sql
+    assert params == ["cc-cosem-platform"]
+
+
+def test_last_material_action_epoch_sibling_ambiguous_filters_by_sub_tag(monkeypatch):
+    """>1 live sibling sharing a base -> resolve THIS session's own instance id
+    (instance_id_for_session, the same resolver pick_instance_id/the nudge path already use)
+    and filter agent_messages on sub_tag -- never the unattributable bare base."""
+    monkeypatch.setattr(slr, "instance_id_for_session",
+                        lambda cur, session, fallback: "cc-cosem-platform-3")
+    import datetime as _dt
+    ts = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+    conn = _CaptureConn((ts,))
+
+    got = slr.last_material_action_epoch(conn, "cc-cosem-platform",
+                                         session="cosem-platform-3", sibling_ambiguous=True)
+
+    assert got == ts.timestamp()
+    sql, params = conn.cur.calls[0]
+    assert "sub_tag" in sql
+    assert params == ["cc-cosem-platform-3"]
+
+
+def test_last_material_action_epoch_sibling_ambiguous_unattributable_returns_none(monkeypatch):
+    """No live agent_status row for this session -> instance_id_for_session falls back to the
+    bare base (its own documented no-match behaviour), which can NEVER equal a real sub_tag
+    (the DB CHECK requires sub_tag to be strictly longer than from_agent, 'base-something') --
+    so the sub_tag filter naturally finds nothing -> None, fail-closed, never the bare-base
+    unattributable row."""
+    monkeypatch.setattr(slr, "instance_id_for_session",
+                        lambda cur, session, fallback: fallback)
+    conn = _CaptureConn((None,))
+
+    got = slr.last_material_action_epoch(conn, "cc-cosem-platform",
+                                         session="cosem-platform-3", sibling_ambiguous=True)
+
+    assert got is None
+
+
+def test_compute_gates_passes_session_and_ambiguity_to_last_material_action_epoch(monkeypatch):
+    """compute_gates must thread its own already-computed session + ambiguity verdict into
+    last_material_action_epoch, not just gate_context_bloat/gate_fresh_handoff."""
+    captured = {}
+
+    def _fake(conn, base, session=None, sibling_ambiguous=False):
+        captured["session"] = session
+        captured["sibling_ambiguous"] = sibling_ambiguous
+        return 1_000.0
+
+    monkeypatch.setattr(slr, "last_material_action_epoch", _fake)
+    monkeypatch.setattr(slr, "live_sessions_for_base",
+                        lambda conn, base: ["cosem-platform-2", "cosem-platform-3"])
+    monkeypatch.setattr(slr, "gate_context_bloat", lambda conn, base, session=None: False)
+    monkeypatch.setattr(slr, "gate_idle", lambda session: True)
+    monkeypatch.setattr(slr, "gate_git_clean", lambda wt: True)
+
+    lane_row = {"lane": "cosem-platform-3", "base_agent_id": "cc-cosem-platform",
+               "tmux_session": "cosem-platform-3", "worktree_path": "/wt", "notes": None}
+    slr.compute_gates(object(), lane_row)
+
+    assert captured["session"] == "cosem-platform-3"
+    assert captured["sibling_ambiguous"] is True
