@@ -1,31 +1,37 @@
 -- 118_durable_inbox_ack_revoke_direct_insert.sql
 -- ledger: silo=tscuymavysscrvoberrr
--- (orchestrator substrate)
+-- (orchestrator substrate -- kept for when the rework below lands; not applied by this PR)
+--
+-- *** REJECTED AS WRITTEN (orch-console review, bus #74738). DO NOT APPLY. ***
+-- Kept in this PR only as a documented placeholder of the wrong shape, so the next
+-- attempt starts from a recorded finding instead of repeating it. Not gated, not
+-- ledgered, not part of this merge's apply.
+--
+-- Durable acked inbox, step 2/2 (Tier-1(b) janky-tools audit, op#33149) -- intended
+-- to retire audit item #9 (raw-INSERT hole) by revoking direct INSERT once every
+-- writer has cut over to post_agent_message() from migration 117.
+--
+-- WHY IT'S REJECTED, not just deferred: migration 117's post_agent_message /
+-- mark_delivered / ack_message run SECURITY DEFINER, which means they execute with
+-- the PRIVILEGES OF THEIR OWNER -- and their owner is whoever applies 117, i.e. the
+-- same `postgres` role this migration strips INSERT from. The instant this applies,
+-- the removal kills BOTH the raw direct-write path AND the posting function's own
+-- internal INSERT that was supposed to survive it -- nothing can write the bus at
+-- all. The `-- assert: no_table_privilege postgres public.agent_messages INSERT`
+-- line below only checks that `postgres` lost the privilege (which it does -- an
+-- earlier, now-retracted version of this header wrongly treated that as proof the
+-- migration works); it has no way to see that the surviving path died too, because
+-- it never calls the function. An assert-blessed silent fleet-break.
+--
+-- Rework needed before this can ship (orch-console is designing this as the real
+-- item-#9 enforcement work, not delegated back to this migration file to guess at):
+-- the posting functions must be owned by / execute as a role DISTINCT from the one
+-- whose direct-write privilege is removed -- e.g. a dedicated owner role that
+-- retains INSERT permanently, with the raw app role only ever getting EXECUTE on
+-- the functions, never table-level INSERT. Whatever that lands as, it needs its own
+-- test proving the posting function STILL successfully writes a row AFTER the
+-- removal runs -- not just that the raw path lost its privilege.
+--
 -- assert: no_table_privilege postgres public.agent_messages INSERT
---
--- Durable acked inbox, step 2/2 (Tier-1(b) janky-tools audit, op#33149) -- the step
--- that actually retires audit item #9 (raw-INSERT hole). DO NOT apply until every
--- real writer (bus_send.py and every lane) has cut over to post_agent_message()
--- from migration 117 -- applying this first breaks the entire fleet's bus the
--- instant it lands, since every current writer still inserts directly today
--- (console's catch, bus #74716; that's why this is a separate, later migration
--- rather than bundled with 117).
---
--- Verified this REVOKE actually works against the real substrate's role shape, not
--- assumed: confirmed (read-only, same sanctioned access this lane uses for its own
--- inbox) that the connection bus_send.py's DATABASE_URL resolves to -- `postgres` --
--- is NOT a superuser (rolsuper=f) and owns agent_messages. An earlier pass at this
--- migration (bus #74720) wrongly claimed ownership alone makes a REVOKE a silent
--- no-op; that was retracted (bus #74726) once tested against a role matching the
--- real profile exactly (non-superuser, bypassrls=true, true owner, zero prior ACL)
--- rather than against the superuser role the first test happened to use -- a plain
--- non-superuser owner IS subject to REVOKE like any other grantee. Verified
--- end-to-end through this repo's own scripts/apply_migration.py --dry-run against
--- an isolated cluster built to match that exact role profile: the
--- no_table_privilege assert above correctly PASSES once the REVOKE runs.
---
--- So: this migration is expected to WORK once applied for real (not a tripwire,
--- not a placeholder) -- the only reason it's gated separately from 117 is
--- sequencing (writers must cut over first), not a known technical blocker.
 
 REVOKE INSERT ON agent_messages FROM postgres;

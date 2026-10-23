@@ -1,8 +1,13 @@
-"""Tests for the durable-inbox reconciler (Tier-1(b) janky-tools audit, op#33149).
+"""Tests for migration 117 (the additive durable-inbox schema) and its reconciler
+(Tier-1(b) janky-tools audit, op#33149).
 
-classify() is pure and DB-free. find_stuck_messages() needs a real agent_messages
+classify() is pure and DB-free. Everything else needs a real agent_messages
 table -- seeded on the shared ephemeral pg_dsn cluster (tests/conftest.py), same
 idiom as operator_ledger_db/reaper_db. NEVER the live substrate (op#22741).
+
+Review (bus #74738) flagged migration 117's whole additive premise -- that direct
+INSERT keeps working -- as untested, plus missing idempotency and ack coverage.
+Added below.
 """
 import datetime as dt
 import pathlib
@@ -143,3 +148,60 @@ def test_find_stuck_messages_is_idempotent(durable_inbox_db):
     second = reconciler.find_stuck_messages(durable_inbox_db)
     assert first == second
     assert stuck_id in first
+
+
+def test_direct_insert_still_works_after_migration_117(durable_inbox_db):
+    """The whole additive premise: migration 117 must never take away the
+    direct-INSERT path every current fleet writer (bus_send.py and every
+    lane) still uses today."""
+    with durable_inbox_db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO agent_messages "
+            "(from_agent, to_agent, message_type, subject, body, priority, "
+            " requires_response, thread_id) "
+            "VALUES ('x','y','update','direct write','b','P2', false, gen_random_uuid()) "
+            "RETURNING id"
+        )
+        (row_id,) = cur.fetchone()
+    durable_inbox_db.commit()
+    assert row_id is not None
+
+
+def test_migration_117_is_idempotent_on_rerun(pg_dsn):
+    """Re-applying 117 to a schema it has already been applied to must not
+    error -- ADD COLUMN IF NOT EXISTS / CREATE OR REPLACE FUNCTION / the
+    guarded ADD CONSTRAINT / REVOKE+GRANT are all re-run-safe by construction,
+    but that needs proving, not assuming."""
+    migration_117 = (MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text()
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP SCHEMA public CASCADE")
+        cur.execute("CREATE SCHEMA public")
+        for role in ("anon", "authenticated", "service_role"):
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+            if cur.fetchone() is None:
+                cur.execute(f"CREATE ROLE {role}")
+        cur.execute("""
+            CREATE TABLE agent_messages (
+                id BIGSERIAL PRIMARY KEY, from_agent TEXT NOT NULL, to_agent TEXT NOT NULL,
+                message_type TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL,
+                priority TEXT NOT NULL, requires_response BOOLEAN NOT NULL DEFAULT false,
+                thread_id UUID NOT NULL, sub_tag TEXT, read_at TIMESTAMPTZ,
+                responded_at TIMESTAMPTZ, response_ref TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        cur.execute(migration_117)
+        cur.execute(migration_117)  # re-run -- must not raise
+
+
+def test_ack_message_sets_acked_at(durable_inbox_db):
+    row_id = _post(durable_inbox_db)
+    with durable_inbox_db.cursor() as cur:
+        cur.execute("SELECT mark_delivered(%s, %s)", (row_id, 60))
+        cur.execute("SELECT ack_message(%s)", (row_id,))
+    durable_inbox_db.commit()
+
+    with durable_inbox_db.cursor() as cur:
+        cur.execute("SELECT acked_at FROM agent_messages WHERE id=%s", (row_id,))
+        (acked_at,) = cur.fetchone()
+    assert acked_at is not None

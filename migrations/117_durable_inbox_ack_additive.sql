@@ -4,6 +4,9 @@
 -- assert: no_execute public public.post_agent_message(text,text,text,text,text,text,boolean,uuid,text)
 -- assert: no_execute public public.mark_delivered(bigint,integer)
 -- assert: no_execute public public.ack_message(bigint)
+-- assert: search_path public.post_agent_message(text,text,text,text,text,text,boolean,uuid,text)
+-- assert: search_path public.mark_delivered(bigint,integer)
+-- assert: search_path public.ack_message(bigint)
 --
 -- Durable acked inbox, step 1/2 (Tier-1(b) janky-tools audit, op#33149; design:
 -- reports/durable-inbox-design-2026-10-24/DESIGN.md in the paperclip-spike repo, gated
@@ -19,15 +22,21 @@
 -- entire fleet's bus the instant it applied).
 --
 -- Shape: three new timestamp columns track the ack lifecycle (delivered_at/acked_at/
--- lease_expires_at); priority gets a real DB-level CHECK (today's guarantee is
--- argparse-required in bus_send.py, i.e. convention, per
--- reports/janky-tools-audit-20261023/INVENTORY.md item #9); post_agent_message /
--- mark_delivered / ack_message become available as an additional write path, callable
--- only by service_role (every current writer already connects via the service DSN,
--- which bypasses RLS the same way migration 065's header documents for vault_secrets --
--- new functions default-grant EXECUTE to PUBLIC in Postgres, so that default is revoked
--- here rather than left open to anon/authenticated, same class of risk CAI-RESP-1397
--- names for table privileges).
+-- lease_expires_at); post_agent_message / mark_delivered / ack_message become available
+-- as an additional write path, callable only by service_role (every current writer
+-- already connects via the service DSN, which bypasses RLS the same way migration 065's
+-- header documents for vault_secrets -- new functions default-grant EXECUTE to PUBLIC in
+-- Postgres, so that default is revoked here rather than left open to anon/authenticated,
+-- same class of risk CAI-RESP-1397 names for table privileges). Each SECURITY DEFINER
+-- function pins `search_path = public` (review catch: an unpinned search_path on a
+-- definer function is the classic lookup-path escalation vector -- same pattern as
+-- migrations 009/037/038/063).
+--
+-- priority already has a DB-level CHECK on the live substrate today (identical name and
+-- values) -- this migration's own guarded ADD CONSTRAINT is therefore a safe no-op there,
+-- kept only so this migration is self-contained/idempotent on a fresh schema too (review
+-- correction: an earlier draft of this header wrongly implied no DB-level constraint
+-- existed yet).
 --
 -- TDD'd against an isolated local Postgres, never this substrate -- see
 -- cc-paperclip-spike's durable_inbox/ build (paperclip-spike repo, branch
@@ -73,6 +82,7 @@ CREATE OR REPLACE FUNCTION post_agent_message(
 ) RETURNS TABLE(id BIGINT, thread_id UUID)
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $fn$
 BEGIN
     RETURN QUERY
@@ -92,6 +102,7 @@ CREATE OR REPLACE FUNCTION mark_delivered(
 ) RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $fn$
 BEGIN
     UPDATE agent_messages
@@ -106,6 +117,7 @@ CREATE OR REPLACE FUNCTION ack_message(
 ) RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $fn$
 BEGIN
     UPDATE agent_messages
@@ -116,8 +128,9 @@ $fn$;
 
 COMMENT ON FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text) IS
     'Durable acked inbox, additive step (migration 117). Available alongside direct '
-    'INSERT -- not yet the only write path. See migration 118''s header for the revoke '
-    '(currently not-yet-applicable pending the table-ownership question it documents).';
+    'INSERT -- not yet the only write path. Migration 118 (the revoke that would make '
+    'this the only path) is REJECTED as written and out of this PR pending a distinct-'
+    'owner rework -- see its header.';
 
 REVOKE EXECUTE ON FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION mark_delivered(bigint,integer) FROM PUBLIC;
