@@ -45,6 +45,11 @@ _DDL = (
 @pytest.fixture
 def reaper_dsn(pg_dsn, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", pg_dsn)
+    # Default scope covers every channel_key the existing tests in this file
+    # seed ("nazim-console", "client-x"); a test proving the scope FILTER
+    # itself (test_out_of_scope_tag_is_skipped_even_with_a_valid_token)
+    # narrows this with its own monkeypatch.setenv override.
+    monkeypatch.setenv("MEDIA_REAPER_CHANNELS", "nazim-console,client-x")
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP SCHEMA public CASCADE")
         cur.execute("CREATE SCHEMA public")
@@ -175,7 +180,14 @@ def test_repeated_failure_past_escalate_floor_pages_console_once(reaper_dsn, mon
 
 
 def test_unresolvable_tag_is_skipped_not_crashed(reaper_dsn, monkeypatch):
-    """No bot_channels row matches this tag at all — must skip cleanly, not raise."""
+    """No bot_channels row matches this tag at all (also outside the fixture's
+    default MEDIA_REAPER_CHANNELS scope, same outcome either way) — must skip
+    cleanly, not raise. nazim-console is seeded too so the run's OVERALL scope
+    still resolves to a non-empty set (otherwise this would hit the separate
+    "scope resolves to nothing" refusal instead of exercising the per-row
+    unresolvable-tag skip this test is actually about)."""
+    _seed_channel(reaper_dsn, "nazim-console", "nazim-console")
+    monkeypatch.setenv("FAKE_BOT_TOKEN", "tok")
     msg_id = _seed_message(
         reaper_dsn, tag="some-unknown-tag", text="sent a photo (download failed: boom)",
         file_id="F5", file_unique_id="U5", media_kind="photo", media_status="failed")
@@ -207,3 +219,36 @@ def test_missing_dsn_refuses_loudly(monkeypatch, capsys):
     monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
     assert media_reaper.reap(fire=False) == 2
     assert "MISSING DSN" in capsys.readouterr().err
+
+
+def test_out_of_scope_tag_is_skipped_even_with_a_valid_token(reaper_dsn, monkeypatch):
+    """bus #74154: a tag with a REAL bot_channels row and a REAL token on this
+    host, but whose channel_key is not in MEDIA_REAPER_CHANNELS, must still be
+    left alone — the scope filter, not token resolution, is what's gating it
+    (this is the exact cross-host-download-to-the-wrong-disk case the
+    scoping exists to prevent)."""
+    monkeypatch.setenv("MEDIA_REAPER_CHANNELS", "nazim-console")  # narrower than the fixture default
+    _seed_channel(reaper_dsn, "nazim-console", "nazim-console")  # keeps the scope non-empty
+    _seed_channel(reaper_dsn, "other-host-channel", "other-host-channel")
+    monkeypatch.setenv("FAKE_BOT_TOKEN", "tok")
+    msg_id = _seed_message(
+        reaper_dsn, tag="other-host-channel", text="sent a photo (download failed: boom)",
+        file_id="F7", file_unique_id="U7", media_kind="photo", media_status="failed")
+    monkeypatch.setattr(_ingest, "_download_media",
+                        lambda *a, **k: pytest.fail("must not even attempt the network"))
+
+    assert media_reaper.reap(fire=True) == 0
+
+    assert _row(reaper_dsn, msg_id)["media_status"] == "failed"
+
+
+def test_missing_media_reaper_channels_refuses_loudly(reaper_dsn, monkeypatch, capsys):
+    monkeypatch.delenv("MEDIA_REAPER_CHANNELS", raising=False)
+    assert media_reaper.reap(fire=False) == 2
+    assert "MEDIA_REAPER_CHANNELS" in capsys.readouterr().err
+
+
+def test_media_reaper_channels_resolving_to_no_known_channel_refuses_loudly(reaper_dsn, monkeypatch, capsys):
+    monkeypatch.setenv("MEDIA_REAPER_CHANNELS", "no-such-channel-key")
+    assert media_reaper.reap(fire=False) == 2
+    assert "MEDIA_REAPER_CHANNELS" in capsys.readouterr().err
