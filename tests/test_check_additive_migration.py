@@ -287,6 +287,132 @@ def test_drop_function_is_blocked(tmp_path):
     assert "DROP FUNCTION" in out
 
 
+# ---------------------------------------------------------------------------
+# REVOKE FROM postgres / DROP POLICY / DISABLE RLS (bus #74719/#74730, PR#488 gap)
+# ---------------------------------------------------------------------------
+
+def test_revoke_from_postgres_is_blocked(tmp_path):
+    """PR#488's real finding: REVOKE against the shared operational role every
+    live writer connects as would have waved through bundled with an additive
+    migration -- the exact fleet-breaking shape the audit is about."""
+    result = run_linter(
+        """
+        REVOKE INSERT ON agent_messages FROM postgres;
+        """,
+        tmp_path,
+    )
+    assert result.returncode == 1
+    out = result.stdout + result.stderr
+    assert "REVOKE" in out
+
+
+def test_revoke_from_anon_authenticated_public_is_safe(tmp_path):
+    """REVOKE ... FROM anon/authenticated/PUBLIC/service_role is this fleet's
+    routine, safe RLS-lockdown pattern (44 existing migrations) -- must NOT be
+    flagged, or every normal lockdown migration would start blocking."""
+    result = run_linter(
+        """
+        REVOKE ALL ON public.site_content FROM anon, authenticated, PUBLIC;
+        REVOKE UPDATE, DELETE, TRUNCATE ON public.admin_offline_audit FROM service_role, authenticated, anon;
+        """,
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_drop_policy_standalone_is_blocked(tmp_path):
+    result = run_linter(
+        """
+        DROP POLICY foo_policy ON foo;
+        """,
+        tmp_path,
+    )
+    assert result.returncode == 1
+    out = result.stdout + result.stderr
+    assert "DROP POLICY" in out
+
+
+def test_drop_policy_then_create_same_name_is_safe(tmp_path):
+    """DROP POLICY IF EXISTS x; CREATE POLICY x ... is this fleet's routine
+    RLS-hardening recreate idiom (25 existing migrations) -- must NOT be
+    flagged as destructive."""
+    result = run_linter(
+        """
+        DROP POLICY IF EXISTS "agent_context_service_only" ON public."agent_context";
+        CREATE POLICY "agent_context_service_only" ON public."agent_context"
+            FOR ALL TO service_role USING (true) WITH CHECK (true);
+        """,
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_drop_policy_quoted_multiword_name_recreate_is_safe(tmp_path):
+    """Regression pin: a quoted policy name containing SPACES must still match its
+    recreate. Real shape from migrations/089_data_provenance.sql -- an earlier bare-\\w+
+    version of the recreate regex missed this and false-flagged it (2026-10-23)."""
+    result = run_linter(
+        """
+        alter table data_provenance enable row level security;
+        drop policy if exists "service role full access" on data_provenance;
+        create policy "service role full access" on data_provenance
+            for all to service_role using (true) with check (true);
+        """,
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_grant_then_revoke_role_from_postgres_cleanup_is_safe(tmp_path):
+    """Regression pin: GRANT <role> TO postgres; ... REVOKE <role> FROM postgres is a
+    same-migration temporary-elevation cleanup (needed for ALTER ... OWNER TO <role>),
+    not a removal of something postgres relies on ongoing. Real shape from
+    migrations/037_admin_mark_offline.sql / 038 -- an earlier version of the
+    REVOKE-from-postgres rule false-flagged this (2026-10-23)."""
+    result = run_linter(
+        """
+        GRANT fleet_reaper TO postgres;
+        GRANT CREATE ON SCHEMA public TO fleet_reaper;
+        ALTER FUNCTION public.admin_mark_offline(text, text) OWNER TO fleet_reaper;
+        REVOKE CREATE ON SCHEMA public FROM fleet_reaper;
+        REVOKE fleet_reaper FROM postgres;
+        """,
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_disable_row_level_security_is_blocked(tmp_path):
+    result = run_linter(
+        """
+        ALTER TABLE foo DISABLE ROW LEVEL SECURITY;
+        """,
+        tmp_path,
+    )
+    assert result.returncode == 1
+    out = result.stdout + result.stderr
+    assert "DISABLE ROW LEVEL SECURITY" in out
+
+
+def test_real_rls_lockdown_migration_013_shape_is_safe(tmp_path):
+    """Wet-prove against the actual shape of a real shipped migration
+    (013_substrate_rls_grant_lockdown.sql) -- DROP POLICY+CREATE POLICY
+    recreate pairs plus REVOKE ALL ... FROM anon/authenticated/PUBLIC, zero
+    postgres-targeting REVOKE. Must stay additive-safe."""
+    result = run_linter(
+        """
+        ALTER TABLE public."agent_context" ENABLE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS "agent_context_service_only" ON public."agent_context"; CREATE POLICY "agent_context_service_only" ON public."agent_context" FOR ALL TO service_role USING (true) WITH CHECK (true);
+        DROP POLICY IF EXISTS "agent_context_console_ro" ON public."agent_context"; CREATE POLICY "agent_context_console_ro" ON public."agent_context" FOR SELECT TO console_readonly USING (true);
+        REVOKE ALL ON public."agent_context" FROM anon, authenticated, PUBLIC;
+        GRANT ALL ON public."agent_context" TO service_role;
+        GRANT SELECT ON public."agent_context" TO console_readonly;
+        """,
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
 def test_comment_mentioning_drop_table_does_not_trigger(tmp_path):
     """Comments like '-- DROP TABLE would be bad' must NOT be flagged."""
     result = run_linter(
