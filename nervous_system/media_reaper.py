@@ -31,9 +31,21 @@ to channel_key (e.g. channel_key='operator-orch' -> channel_tag='orch-
 channel'). Resolve per row via a tag->token_env_key lookup rather than
 assuming the two are interchangeable.
 
+MEDIA_REAPER_CHANNELS (cc-quality follow-up, bus #74154 — build-it-properly,
+not a "zero rows today" deferral): media bytes land on THIS host's local
+disk (logs/tg_media), so a reaper polling every tag fleet-wide would, the
+moment a second host runs this daemon, download into the wrong host's
+disk for a tag some OTHER host's ingest actually received. Mirrors
+ingest.py's INGEST_CHANNELS — a comma-separated list of bot_channels.
+channel_key values this host's reaper is allowed to touch. Required, not
+optional: an unset/empty value or one that resolves to zero channel_tags
+refuses to run rather than silently scanning every tag on the box.
+
 Usage:
-  python -m nervous_system.media_reaper            # dry-run: report, change nothing
-  python -m nervous_system.media_reaper --fire      # actually retry + write
+  MEDIA_REAPER_CHANNELS=<channel_key,channel_key,...> \
+    python -m nervous_system.media_reaper            # dry-run: report, change nothing
+  MEDIA_REAPER_CHANNELS=<channel_key,channel_key,...> \
+    python -m nervous_system.media_reaper --fire      # actually retry + write
 """
 from __future__ import annotations
 
@@ -60,6 +72,16 @@ FROM_AGENT = "media-reaper"
 # per-attempt counter (no such column); age-of-row is a cheap, good-enough
 # proxy for "this has been retried a lot and still isn't landing."
 ESCALATE_AFTER = _dt.timedelta(hours=2)
+
+# DESIGN ITEM (cc-quality obs-2, bus #74111, not actioned in this change): a
+# Telegram file_id is not eternal — the CDN can expire it independently of
+# any transient network failure this reaper retries against. Today a
+# permanently-expired file_id just keeps re-escalating past ESCALATE_AFTER
+# forever (ok — it pages, nobody silently loses the item — but it never
+# reaches a terminal state). A future fix would need a way to tell "expired"
+# apart from "transient" (Telegram's getFile error code on an expired file_id
+# is distinguishable from a network reset) and a terminal media_status (e.g.
+# 'expired') so this stops re-paging on something no retry will ever fix.
 
 RETRYABLE_STATUSES = ("pending", "failed")
 
@@ -96,6 +118,21 @@ def _token_for_tag(cur, tag: str) -> tuple[str, str] | None:
     return row["channel_key"], token
 
 
+def _scoped_tags(cur) -> set[str] | None:
+    """channel_tags this host's reaper may touch, resolved from
+    MEDIA_REAPER_CHANNELS (channel_keys, same format as INGEST_CHANNELS).
+    None means "not configured" — the caller must fail closed, never scan
+    every tag on the box by default."""
+    raw = os.environ.get("MEDIA_REAPER_CHANNELS", "").strip()
+    if not raw:
+        return None
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    if not keys:
+        return None
+    cur.execute("SELECT DISTINCT channel_tag FROM bot_channels WHERE channel_key = ANY(%s)", (keys,))
+    return {row["channel_tag"] for row in cur.fetchall()}
+
+
 def reap(fire: bool) -> int:
     dsn = _dsn()
     if not dsn:
@@ -107,14 +144,22 @@ def reap(fire: bool) -> int:
 
     with psycopg.connect(dsn, connect_timeout=20, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
+            allowed_tags = _scoped_tags(cur)
+            if not allowed_tags:
+                print("media_reaper: MISSING/empty MEDIA_REAPER_CHANNELS — refusing to run "
+                      "fleet-wide; set it to this host's own INGEST_CHANNELS channel_key list "
+                      "(bus #74154: media bytes land on THIS host's disk, a cross-host reaper "
+                      "would download into the wrong host's logs/tg_media)", file=sys.stderr)
+                return 2
+
             cur.execute(
                 """SELECT id, tag, text, file_id, file_unique_id, media_kind,
                           media_status, created_at
                      FROM operator_messages
-                    WHERE media_status = ANY(%s)
+                    WHERE media_status = ANY(%s) AND tag = ANY(%s)
                     ORDER BY created_at
                     LIMIT %s""",
-                (list(RETRYABLE_STATUSES), MAX_ROWS_PER_RUN))
+                (list(RETRYABLE_STATUSES), list(allowed_tags), MAX_ROWS_PER_RUN))
             due = cur.fetchall()
 
             for row in due:
@@ -131,6 +176,10 @@ def reap(fire: bool) -> int:
                             f"age={age}) cannot be retried — no bot_channels row matches this "
                             f"channel_tag, or its token_env_key is unset on THIS host. file_id is "
                             f"still safe in the row; this just needs the right host/token to retry.")
+                        conn.commit()  # cc-quality obs-3: sibling escalation branch (STILL FAILING,
+                                       # below) already commits its _notify insert; this branch
+                                       # didn't, leaving the page uncommitted until some later
+                                       # write on this connection happened to flush it.
                         escalated += 1
                     continue
 

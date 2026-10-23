@@ -77,6 +77,7 @@ def media_env(cycle_dsn, monkeypatch, tmp_path):
     the repo's own logs/tg_media."""
     monkeypatch.setenv("DATABASE_URL", cycle_dsn)
     monkeypatch.setenv("E2E_BOT_TOKEN", "tok-e2e")
+    monkeypatch.setenv("MEDIA_REAPER_CHANNELS", "e2e")
     monkeypatch.setattr(ingest, "_MEDIA_DIR", str(tmp_path))
     # Real retry COUNT stays exercised; only the real-world backoff WAIT is
     # skipped, so this proof runs in under a second instead of ~7s.

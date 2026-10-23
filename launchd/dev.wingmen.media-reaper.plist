@@ -25,14 +25,18 @@
   exactly the reason commitment_sweeper.py's own comment explains (A3's original defect).
   Do NOT put a credential in this plist to "fix" a future MISSING-DSN: this file is 0644,
   .env is 0600.
+
+  ProgramArguments runs scripts/boot_media_reaper.sh, NOT the bare python module: the
+  reaper REQUIRES MEDIA_REAPER_CHANNELS (bus #74154, cc-quality follow-up on PR #475/#476 —
+  a reaper with no host scope would download media into the wrong host's logs/tg_media the
+  moment a second host ever loads this plist) and that value — the same channel_key list as
+  boot_nazim_ingest.sh's own INGEST_CHANNELS — belongs in one script, same precedent as
+  INGEST_CHANNELS itself, not duplicated inline in this plist's XML.
 -->
 <plist version="1.0"><dict>
   <key>Label</key><string>dev.wingmen.media-reaper</string>
   <key>ProgramArguments</key><array>
-    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
-    <string>-m</string>
-    <string>nervous_system.media_reaper</string>
-    <string>--fire</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/boot_media_reaper.sh</string>
   </array>
   <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
   <key>RunAtLoad</key><true/>
