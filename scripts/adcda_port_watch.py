@@ -30,6 +30,7 @@ Run manually to establish baseline; schedule via launchd for ongoing monitoring.
 """
 from __future__ import annotations
 import os, subprocess, sys, pathlib, datetime
+import psycopg
 
 ORCH = pathlib.Path.home() / "wingmen" / "orchestrator"
 ADCDA = pathlib.Path.home() / "wingmen" / "projects" / "cosem-adcda"
@@ -58,8 +59,24 @@ def _git(env, *args, check=True):
     return r.stdout.strip()
 
 
+def _owner_has_any_registration(env, agent_id: str) -> bool:
+    """True iff `agent_id` has ANY agent_status row at all (any status) -- a fully vanished
+    identity (zero rows) means PORT_OWNER is stale and needs reassignment, a different and
+    more serious signal than a routine offline blip (bus #74354, 2026-10-23: the hardcoded
+    PORT_OWNER migrated hosts then was wound down entirely, and this watcher kept posting
+    'assess new commits' into the void every ~3h with no live-check at all). Fail-SAFE: a DB
+    error assumes True (never silently suppress a real notification over a transient read
+    failure) -- same posture as this module's own dead-man's-switch philosophy elsewhere."""
+    try:
+        dsn = env.get("DATABASE_URL")
+        with psycopg.connect(dsn) as c, c.cursor() as cur:
+            cur.execute("SELECT 1 FROM agent_status WHERE agent_id=%s LIMIT 1", [agent_id])
+            return cur.fetchone() is not None
+    except Exception:
+        return True
+
+
 def _post_bus(env, to_agent, subject, body, priority="P2"):
-    import psycopg
     dsn = env.get("DATABASE_URL")
     with psycopg.connect(dsn) as c, c.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','orch-console',true)")
@@ -122,6 +139,19 @@ def main():
 
     if not new_lines:
         print(f"[adcda_watch] {ts}: no new commits on {WATCHED_BRANCHES}")
+        return
+
+    if not _owner_has_any_registration(env, PORT_OWNER):
+        degrade_body = (f"op#7517 port-watch owner {PORT_OWNER} has ZERO agent_status rows "
+                        f"(fully de-registered, not just offline) -- the hardcoded PORT_OWNER "
+                        f"in adcda_port_watch.py is stale and needs reassignment to whichever "
+                        f"lane currently owns the ADCDA port-watch mandate. Detected commits "
+                        f"are NOT lost (held in watcher state, will be reported once "
+                        f"reassigned):\n\n" + "\n\n".join(new_lines))
+        rid = _post_bus(env, "orch-console",
+                       "adcda_port_watch DEGRADED — PORT_OWNER de-registered, reassign",
+                       degrade_body, "P2")
+        print(f"[adcda_watch] {ts}: PORT_OWNER {PORT_OWNER} de-registered, DEGRADE posted as #{rid}")
         return
 
     body = ("The operator is actively tweaking the LIVE ADCDA app (op#7517: monitor it for features to port). "
