@@ -837,7 +837,10 @@ def main() -> int:
         else:
             print(f"            reset_lane.sh rc={act.get('rc')} recycled={act.get('recycled')} "
                   f":: {(act.get('output') or '').splitlines()[-1:]}")
-        acted += 1
+        # cc-fleet-health review nit (bus #74368, PR #480): a cooldown-skipped cross-host nudge
+        # genuinely did nothing to the lane -- don't count it toward "N recycled".
+        if act.get("acted"):
+            acted += 1
     print(f"done — {acted} recycled, {len(lanes)-acted} left alone.")
     conn.close()
     return 0
