@@ -1,5 +1,6 @@
 """Tests for scripts.adcda_port_watch — routing fix (2026-10-19): the new-commits
-notification must go to PORT_OWNER (cc-cosem-platform-1 alone, #62694/#62695), never the
+notification must go to PORT_OWNER (the single assigned owner -- orch-console since
+2026-10-23's op#32789-hold reassignment, #74719/#74721/#74724), never the
 bare base 'cc-cosem-platform' which fans out to every platform instance.
 No DB, no network: _post_bus and _git are monkeypatched; a tiny real git repo backs _git's
 own command construction so the fetch/rev-parse/log plumbing is exercised for real."""
@@ -51,7 +52,7 @@ def test_posts_new_commits_to_port_owner_not_bare_base(tmp_path, monkeypatch):
     # baseline run: establishes state, posts the BASELINE notice
     watch.main()
     assert calls == [watch.PORT_OWNER]
-    assert watch.PORT_OWNER == "cc-cosem-platform-1"
+    assert watch.PORT_OWNER == "orch-console"
     assert "cc-cosem-platform" not in [c for c in calls if c != watch.PORT_OWNER]
 
     # new commit lands on origin/main
@@ -81,10 +82,12 @@ def test_no_new_commits_posts_nothing(tmp_path, monkeypatch, capsys):
     assert calls == []
 
 
-def test_port_owner_is_the_sole_assigned_instance_not_bare_base():
+def test_port_owner_is_a_single_assigned_identity_not_bare_base():
     """Direct regression pin for the #71670/#71671 bug: the constant itself must name a
-    specific instance, never the bare base string that fans out to every platform lane."""
-    assert watch.PORT_OWNER == "cc-cosem-platform-1"
+    single specific identity, never the bare base string that fans out to every platform
+    lane. As of 2026-10-23 (#74719/#74721/#74724) that identity is orch-console, standing
+    in for the held op#32789 porting mandate -- re-pin this when the hold lifts."""
+    assert watch.PORT_OWNER == "orch-console"
     assert watch.PORT_OWNER != "cc-cosem-platform"
 
 
@@ -96,6 +99,12 @@ def test_port_owner_is_the_sole_assigned_instance_not_bare_base():
 # ANY agent_status registration at all; if not, DEGRADE to orch-console instead (same shape as
 # the existing repo-missing/fetch-failed DEGRADE paths) -- detected commits aren't lost, state
 # still advances, and the escalation is attributable + loud, not a silent stranded post.
+#
+# NOTE (2026-10-23, #74719/#74721/#74724): PORT_OWNER is now itself "orch-console" (the
+# op#32789-hold reassignment), so the DEGRADE fallback target and PORT_OWNER coincide here --
+# there is no more-privileged identity to fall back to below the fleet's own console. This is
+# accepted, not a new gap: orch-console going fully dark is a top-tier fleet alarm owned by
+# other dead-man's-switches, not something this script needs its own second fallback for.
 
 def test_degrades_to_orch_console_when_port_owner_deregistered(tmp_path, monkeypatch):
     origin, clone = _make_adcda_repo(tmp_path)
@@ -121,7 +130,9 @@ def test_degrades_to_orch_console_when_port_owner_deregistered(tmp_path, monkeyp
     assert len(calls) == 1
     to_agent, subject, priority = calls[0]
     assert to_agent == "orch-console"
-    assert to_agent != watch.PORT_OWNER
+    # PORT_OWNER is itself "orch-console" right now (op#32789 hold) -- the degrade fallback and
+    # the owner coincide by design, see NOTE above. Pin the fact rather than assert inequality.
+    assert to_agent == watch.PORT_OWNER
     assert "DEGRADED" in subject and "reassign" in subject.lower()
 
 
