@@ -126,6 +126,21 @@ def _synthetic_update(upd_id: int, chat_id: int, text: str, user_id: int,
     }
 
 
+def _synthetic_photo_update(upd_id: int, chat_id: int, user_id: int,
+                             first_name: str, username: str) -> dict:
+    return {
+        "update_id": upd_id,
+        "message": {
+            "message_id": upd_id,
+            "date": 1_700_000_000,
+            "chat": {"id": chat_id, "type": "private"},
+            "from": {"id": user_id, "first_name": first_name, "username": username},
+            "photo": [{"file_id": "PHOTOFILE1", "file_unique_id": "PHOTOUNIQ1",
+                       "width": 100, "height": 100}],
+        },
+    }
+
+
 def _op_msg_insert_params(store):
     for sql, params in store:
         if sql.startswith("INSERT INTO operator_messages"):
@@ -177,6 +192,44 @@ def test_a_personal_routed_inbound_is_sentinel_free_of_identity(monkeypatch):
     # of the same content.
     assert conn.committed == 2
     assert conn.rolled_back == 0
+
+
+def test_a2_personal_routed_photo_is_also_sentinel_free_of_media_identity(monkeypatch):
+    """cc-quality obs-1 (bus #74111 PR #475 review): migration 115 added
+    file_id/file_unique_id/media_kind/media_status, a retrieval-capable
+    identity same containment class as sender identity — test_a above only
+    covers a text-only update (always-NULL media cols trivially). This pins
+    a personal-routed PHOTO specifically: message_content_with_media() always
+    attempts the download (and would return real media_meta) BEFORE the
+    personal_routed branch runs, so this is the one path actually exercising
+    the containment, not just inheriting a default."""
+    calls = []
+    monkeypatch.setattr(
+        personal_routing, "write_personal_content",
+        lambda *a, **k: calls.append((a, k)) or 321,
+    )
+    monkeypatch.setattr(
+        ingest, "_download_media",
+        lambda token, file_id, file_unique_id, channel_key, upd_id, name=None:
+            f"/media/{file_unique_id}",
+    )
+    ch = _mamadah_channel()
+    conn, store = _conn_won()
+    upd = _synthetic_photo_update(1004, _UNLISTED_CHAT_ID, 6606903261, "Zahidah", "zah")
+
+    won = ingest.process_update(conn, ch, upd)
+
+    assert won is True
+    params = _op_msg_insert_params(store)
+    (_, tag, text, from_user_id, from_username, from_name, cos_triage,
+     file_id, file_unique_id, media_kind, media_status) = params
+    assert tag == "mamadah"
+    assert text == personal_routing.SENTINEL_TEXT
+    assert from_user_id is None
+    # the whole point: a real, successfully-downloaded media identity
+    # (file_id=PHOTOFILE1 etc.) still never reaches the substrate row.
+    assert (file_id, file_unique_id, media_kind, media_status) == (None, None, None, None)
+    assert len(calls) == 1
 
 
 def test_b_forced_personal_write_failure_rolls_back_the_envelope(monkeypatch):

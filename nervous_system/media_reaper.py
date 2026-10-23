@@ -61,6 +61,16 @@ FROM_AGENT = "media-reaper"
 # proxy for "this has been retried a lot and still isn't landing."
 ESCALATE_AFTER = _dt.timedelta(hours=2)
 
+# DESIGN ITEM (cc-quality obs-2, bus #74111, not actioned in this change): a
+# Telegram file_id is not eternal — the CDN can expire it independently of
+# any transient network failure this reaper retries against. Today a
+# permanently-expired file_id just keeps re-escalating past ESCALATE_AFTER
+# forever (ok — it pages, nobody silently loses the item — but it never
+# reaches a terminal state). A future fix would need a way to tell "expired"
+# apart from "transient" (Telegram's getFile error code on an expired file_id
+# is distinguishable from a network reset) and a terminal media_status (e.g.
+# 'expired') so this stops re-paging on something no retry will ever fix.
+
 RETRYABLE_STATUSES = ("pending", "failed")
 
 MAX_ROWS_PER_RUN = 200   # cheap safety cap -- a stuck CDN outage must not turn
@@ -131,6 +141,10 @@ def reap(fire: bool) -> int:
                             f"age={age}) cannot be retried — no bot_channels row matches this "
                             f"channel_tag, or its token_env_key is unset on THIS host. file_id is "
                             f"still safe in the row; this just needs the right host/token to retry.")
+                        conn.commit()  # cc-quality obs-3: sibling escalation branch (STILL FAILING,
+                                       # below) already commits its _notify insert; this branch
+                                       # didn't, leaving the page uncommitted until some later
+                                       # write on this connection happened to flush it.
                         escalated += 1
                     continue
 
