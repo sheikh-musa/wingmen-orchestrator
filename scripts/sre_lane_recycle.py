@@ -175,14 +175,29 @@ def gate_fresh_handoff(base_agent_id: str, notes: "str | None", last_action_epoc
     return ho >= last_action_epoch
 
 
-def last_material_action_epoch(conn, base_agent_id: str) -> "float | None":
+def last_material_action_epoch(conn, base_agent_id: str, session: "str | None" = None,
+                               sibling_ambiguous: bool = False) -> "float | None":
     """The lane's last material action, mechanically: the timestamp of its most
-    recent bus message (agent_messages.from_agent = base). None if it never
-    posted (then fresh_handoff fails closed — we can't prove the handoff is
-    current)."""
+    recent bus message. None if it never posted (then fresh_handoff fails closed —
+    we can't prove the handoff is current).
+
+    sibling_ambiguous (bus #74293, facet 13 sub-fix 2, unblocked by PR #324's sub_tag
+    column): a bare from_agent=base query is unattributable across siblings -- ANY
+    sibling's bus post would count toward EVERY sibling's 'last material action', the
+    same class of gap gate_context_bloat/gate_fresh_handoff already closed. Resolves
+    THIS session's own instance id via instance_id_for_session (the same resolver
+    pick_instance_id/the nudge path already use) and filters on sub_tag instead. A
+    session with no live agent_status row falls back to the bare base — which can
+    NEVER equal a real sub_tag (the DB CHECK requires sub_tag strictly longer than
+    from_agent, 'base-something') — so an unattributable session naturally finds zero
+    rows -> None, fail-closed, same as today's 'never posted' case."""
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT max(created_at) FROM agent_messages WHERE from_agent = %s", [base_agent_id])
+            if sibling_ambiguous:
+                aid = instance_id_for_session(cur, session, base_agent_id)
+                cur.execute("SELECT max(created_at) FROM agent_messages WHERE sub_tag = %s", [aid])
+            else:
+                cur.execute("SELECT max(created_at) FROM agent_messages WHERE from_agent = %s", [base_agent_id])
             row = cur.fetchone()
         ts = row[0] if row else None
         return ts.timestamp() if ts is not None else None
@@ -294,15 +309,18 @@ def compute_gates(conn, lane_row: dict, handoff_ref_epoch: "float | None" = None
 
     sibling-ambiguity (bus #74293, facet 13): when conn is available, checks whether >1 live
     tmux session shares this lane's base -- if so, context_bloat falls back to a
-    session-specific pane probe (gate_context_bloat/latest_context_frac) and fresh_handoff
-    fails closed (no per-instance handoff marker exists to fall back to). conn=None (several
-    existing unit tests / the offline self-test) skips the check -- unattributable can only be
-    PROVEN with a DB read, so it defaults to False (today's unchanged single-sibling shape)."""
+    session-specific pane probe (gate_context_bloat/latest_context_frac), fresh_handoff fails
+    closed (no per-instance handoff marker exists to fall back to), and (sub-fix 2, unblocked
+    by PR #324's sub_tag column) last_material_action_epoch resolves THIS session's own
+    instance id and filters on sub_tag instead of the unattributable bare base. conn=None
+    (several existing unit tests / the offline self-test) skips the check -- unattributable can
+    only be PROVEN with a DB read, so it defaults to False (today's unchanged single-sibling
+    shape)."""
     session = lane_row.get("tmux_session") or lane_row.get("lane")
     base = lane_row.get("base_agent_id") or lane_row.get("lane")
-    ref = handoff_ref_epoch if handoff_ref_epoch is not None \
-        else last_material_action_epoch(conn, base)
     ambiguous = conn is not None and len(live_sessions_for_base(conn, base)) > 1
+    ref = handoff_ref_epoch if handoff_ref_epoch is not None \
+        else last_material_action_epoch(conn, base, session=session, sibling_ambiguous=ambiguous)
     return {
         "idle": gate_idle(session) if session else False,
         "git_clean": gate_git_clean(lane_row.get("worktree_path")),
@@ -635,7 +653,12 @@ def main() -> int:
     conn = psycopg.connect(dsn)
 
     exclude = _excluded_prefixes()
-    all_lanes = discover_lanes(conn, args.lane)
+    # per_instance=True (bus #74293, slice 1b): now that all 3 base-keyed gates are
+    # sibling-aware (gate_context_bloat's pane fallback, gate_fresh_handoff's fail-closed,
+    # last_material_action_epoch's sub_tag filter — sub-fix 2), every live sibling of a
+    # multi-sibling base can be evaluated/recycled independently instead of only the
+    # freshest-heartbeat one.
+    all_lanes = discover_lanes(conn, args.lane, per_instance=True)
     lanes = apply_lane_scope(all_lanes, exclude)
 
     # op#29023/#63312/#63326: who is invoking (a lane running this on itself?). Named env vars
@@ -664,7 +687,7 @@ def main() -> int:
         p = plan(conn, lr, armed, require_bloat=require_bloat,
                  handoff_ref_epoch=args.handoff_after)
         base = p["base"]
-        frac = latest_context_frac(conn, base)
+        frac = latest_context_frac(conn, base, session=p["session"])
         pct = f"{frac * 100:.0f}%" if frac is not None else "?%"
         mark = "RECYCLE" if p["permitted"] else "skip"
         print(f"  [{mark}] {base:22s} ctx={pct:>4s} session={p['session']} gates={p['gates']}")
