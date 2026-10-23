@@ -574,7 +574,7 @@ def connect():
     import psycopg2
     sys.path.insert(0, str(SCRIPTS_DIR.parent))
     from scripts.bus_send import dburl
-    return psycopg2.connect(dburl(os.environ))
+    return psycopg2.connect(dburl(os.environ.get("DATABASE_URL")))
 
 
 def insert_sample(conn, host: str, ok: bool, metrics: dict, error: Optional[str]) -> tuple[int, datetime]:

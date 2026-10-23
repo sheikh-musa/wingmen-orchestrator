@@ -145,7 +145,7 @@ def read_urgent_flags(sessions: List[str]) -> Dict[str, bool]:
         return {}
     import psycopg2
     from scripts.bus_send import dburl
-    conn = psycopg2.connect(dburl(os.environ))
+    conn = psycopg2.connect(dburl(os.environ.get("DATABASE_URL")))
     cur = conn.cursor()
     cur.execute("SELECT lane, glm_peak_urgent FROM fleet_lanes WHERE lane = ANY(%s)", (sessions,))
     return dict(cur.fetchall())
@@ -156,7 +156,7 @@ def read_lane_model(session: str) -> Optional[str]:
     flipping it onto Musa (NOT guessed; read from the DB each time)."""
     import psycopg2
     from scripts.bus_send import dburl
-    conn = psycopg2.connect(dburl(os.environ))
+    conn = psycopg2.connect(dburl(os.environ.get("DATABASE_URL")))
     cur = conn.cursor()
     cur.execute("SELECT model FROM fleet_lanes WHERE lane = %s", (session,))
     row = cur.fetchone()
@@ -166,7 +166,7 @@ def read_lane_model(session: str) -> Optional[str]:
 def set_desired_state(session: str, state: str) -> None:
     import psycopg2
     from scripts.bus_send import dburl
-    conn = psycopg2.connect(dburl(os.environ))
+    conn = psycopg2.connect(dburl(os.environ.get("DATABASE_URL")))
     cur = conn.cursor()
     cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
     cur.execute("UPDATE fleet_lanes SET desired_state=%s WHERE lane=%s", (state, session))
@@ -220,7 +220,7 @@ def check_hard_exclude_divergence(session: str, apply: bool) -> None:
         from scripts.lib import provider_policy as pp
         import psycopg
         from scripts.bus_send import dburl
-        with psycopg.connect(dburl(os.environ)) as conn, conn.cursor() as cur:
+        with psycopg.connect(dburl(os.environ.get("DATABASE_URL"))) as conn, conn.cursor() as cur:
             cur.execute("SELECT client_key, allowed_providers, text_only FROM provider_policy")
             cols = [d[0] for d in cur.description]
             policy_rows = [dict(zip(cols, r)) for r in cur.fetchall()]

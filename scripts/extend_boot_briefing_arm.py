@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dsn", default=None)
     args = p.parse_args(argv)
 
-    dsn = args.dsn or bus_send.dburl(os.environ)
+    dsn = args.dsn or bus_send.dburl(os.environ.get("DATABASE_URL"))
 
     with psycopg.connect(dsn) as conn:
         conn.autocommit = False

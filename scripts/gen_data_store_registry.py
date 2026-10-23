@@ -45,7 +45,7 @@ def render_table(rows: list[tuple]) -> str:
 
 
 def main() -> int:
-    dsn = bus_send.dburl(os.environ)
+    dsn = bus_send.dburl(os.environ.get("DATABASE_URL"))
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
             "select project_ref, org_id, org_name, alias, classification, evidence, owner, updated_at "

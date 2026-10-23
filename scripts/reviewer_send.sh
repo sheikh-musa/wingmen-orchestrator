@@ -42,7 +42,7 @@ read -r TOKEN_KEY CHAT < <(PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" 
 import sys, os, psycopg
 from scripts.bus_send import dburl
 ch = sys.argv[1]
-with psycopg.connect(dburl(dict(os.environ))) as c:
+with psycopg.connect(dburl(os.environ.get("DATABASE_URL"))) as c:
     r = c.execute("SELECT token_env_key, allowed_chat_ids FROM bot_channels WHERE channel_key=%s", (ch,)).fetchone()
 if not r or not r[0] or not r[1]:
     sys.exit(2)
