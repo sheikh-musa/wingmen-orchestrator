@@ -176,19 +176,17 @@ def _default_fetch_rows():
     return policy_rows, override_rows
 
 
-def _default_escalate(subject: str, body: str, priority: str) -> None:
-    """Impure: one loud bus row to orch-console about a refused flip. Factored
-    out so gate_or_post_refusal is unit-testable with an injected escalate,
-    never needing a real DB in a test."""
-    import psycopg
-    from scripts.bus_send import dburl
-    with psycopg.connect(dburl(os.environ)) as conn, conn.cursor() as cur:
-        cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,"
-            "requires_response) VALUES ('cc-fleet-health','orch-console','blocker',%s,%s,%s,false)",
-            (subject, body, priority))
-        conn.commit()
+def _default_escalate(subject: str, body: str, priority: str, requires_response: bool) -> None:
+    """Impure: one loud bus row to orch-console about a refused flip. Goes through
+    bus_send.send() (CLAUDE.md binding rule, bus #43651: post bus rows via bus_send,
+    never a hand-written INSERT — orch-console #74628 caught the earlier hand-written
+    version bypassing bus_send's deliverability/hub-wake-floor/provenance/sub_tag
+    guards). Mirrors glm_peak_pause_resume.py's page(), which already does this
+    correctly. Factored out so gate_or_post_refusal is unit-testable with an
+    injected escalate, never needing a real DB in a test."""
+    from scripts import bus_send
+    bus_send.send(from_agent="cc-fleet-health", to="orch-console", mtype="blocker",
+                  subject=subject, body=body, priority=priority, req=requires_response)
 
 
 def gate_or_post_refusal(session: str, *, actor: str = "cli", armed: bool = False,
@@ -198,23 +196,27 @@ def gate_or_post_refusal(session: str, *, actor: str = "cli", armed: bool = Fals
     for a glm-* model (orch-console #74584/#74588, bus #74586 spec). Resolves
     policy_rows/override_rows (via `fetch_rows`, defaulting to a real DB read)
     and calls assert_glm_allowed(); on refusal, posts ONE loud bus escalation
-    (via `escalate`, defaulting to a real bus post) then RAISES SystemExit(1) —
-    the exception shape the caller cannot forget to check (orch-console Q3), and
-    the shell wrapper's exit code the caller DOES check.
+    (via `escalate`, defaulting to a real bus post through bus_send.send()) then
+    RAISES SystemExit(1) — the exception shape the caller cannot forget to check
+    (orch-console Q3), and the shell wrapper's exit code the caller DOES check.
 
     Priority split (orch-console Q3): P1 if an armed/break-glass (operator-
     directed) path was refused — a human intended this and needs eyes; P2 for a
-    routine automated attempt correctly blocked (system working as intended)."""
+    routine automated attempt correctly blocked (system working as intended).
+    requires_response is True on the P1 armed/break-glass path (orch-console
+    #74628: a human intended this and needs eyes, not a fire-and-forget page) —
+    False on the routine P2 path."""
     fetch_rows = fetch_rows or _default_fetch_rows
     escalate = escalate or _default_escalate
     policy_rows, override_rows = fetch_rows()
     try:
         assert_glm_allowed(session, policy_rows=policy_rows, override_rows=override_rows, provider=provider)
     except (ProviderNotAllowedError, ProviderPolicyMisconfigured) as e:
-        priority = "P1" if (armed or break_glass) else "P2"
+        operator_directed = armed or break_glass
+        priority = "P1" if operator_directed else "P2"
         subject = f"[provider-policy-refused] {session}: GLM flip hard-refused ({type(e).__name__})"
         body = (f"{e}\n\nactor={actor} armed={armed} break_glass={break_glass}. "
                 f"No kill/relaunch happened — lane state is UNCHANGED.")
-        escalate(subject, body, priority)
+        escalate(subject, body, priority, operator_directed)
         print(f"REFUSED: {e}", file=sys.stderr)
         raise SystemExit(1)

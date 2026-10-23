@@ -189,6 +189,31 @@ def _fetch(policy_rows, override_rows):
     return lambda: (policy_rows, override_rows)
 
 
+# ── _default_escalate must go through bus_send.send(), never a hand-written INSERT
+# (CLAUDE.md binding rule, bus #43651; orch-console #74628 caught the earlier
+# hand-written version on this exact PR before merge). ───────────────────────────
+
+def test_default_escalate_calls_bus_send_send_not_a_raw_insert(monkeypatch):
+    calls = []
+
+    def fake_send(**kwargs):
+        calls.append(kwargs)
+        return (1, "thread")
+
+    from scripts import bus_send
+    monkeypatch.setattr(bus_send, "send", fake_send)
+    pp._default_escalate("subj", "body text", "P1", True)
+    assert len(calls) == 1
+    kw = calls[0]
+    assert kw["from_agent"] == "cc-fleet-health"
+    assert kw["to"] == "orch-console"
+    assert kw["mtype"] == "blocker"
+    assert kw["subject"] == "subj"
+    assert kw["body"] == "body text"
+    assert kw["priority"] == "P1"
+    assert kw["req"] is True
+
+
 def test_gate_allows_silently_when_allowed():
     rows = [{"client_key": "cosem", "allowed_providers": ["anthropic", "zai"], "text_only": True}]
     calls = []
@@ -207,9 +232,10 @@ def test_gate_refuses_and_escalates_and_exits_nonzero():
     except SystemExit as e:
         assert e.code == 1
     assert len(calls) == 1
-    subject, body, priority = calls[0]
+    subject, body, priority, requires_response = calls[0]
     assert "cc-mamadah-1" in subject
     assert priority == "P2"  # routine, not armed/break-glass
+    assert requires_response is False  # routine P2 is fire-and-forget, not an ask
 
 
 def test_gate_priority_is_p1_when_armed():
@@ -221,6 +247,7 @@ def test_gate_priority_is_p1_when_armed():
     except SystemExit:
         pass
     assert calls[0][2] == "P1"
+    assert calls[0][3] is True  # orch-console #74628: an armed/break-glass refusal needs eyes
 
 
 def test_gate_priority_is_p1_when_break_glass():
@@ -232,6 +259,7 @@ def test_gate_priority_is_p1_when_break_glass():
     except SystemExit:
         pass
     assert calls[0][2] == "P1"
+    assert calls[0][3] is True
 
 
 def test_gate_escalates_on_misconfigured_override_too():
