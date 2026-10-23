@@ -237,16 +237,33 @@ def _unknown_marker(ch: "Channel", msg: dict, upd_id: int) -> str:
     return f"[non-text update {upd_id} — keys: {keys}]"
 
 
-def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
+def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> tuple[str, dict | None]:
     """The type-dispatch half of message_content. Split out so message_content
     can guard the WHOLE dispatch: a raise here must degrade to the old marker,
     never propagate — the durable log write (step 2 of process_update) is the
-    one thing that must always happen."""
+    one thing that must always happen.
+
+    Returns (content, media_meta). media_meta is None for a non-media update
+    (text, sticker, poll, location, ...); for a photo/animation/document/
+    voice/audio/video/video_note it is always a dict — even when the download
+    failed after all retries — so the caller can persist the Telegram file_id
+    identity REGARDLESS of download outcome (bus #74111: previously a failed
+    download degraded to a dead-end text marker and the file_id that could
+    have re-fetched it was simply discarded, never written anywhere)."""
+    media_meta: dict | None = None
+
+    def _dl(file_id: str, file_unique_id: str, kind: str, name: str | None = None) -> str:
+        nonlocal media_meta
+        media_meta = {"file_id": file_id, "file_unique_id": file_unique_id,
+                      "kind": kind, "ok": False}
+        path = _download_media(ch.token, file_id, file_unique_id, ch.key, upd_id, name)
+        media_meta["ok"] = True
+        return path
+
     if msg.get("photo"):
         try:
             photo = msg["photo"][-1]
-            path = _download_media(ch.token, photo["file_id"], photo["file_unique_id"],
-                                    ch.key, upd_id)
+            path = _dl(photo["file_id"], photo["file_unique_id"], "photo")
             content = f"sent a SCREENSHOT → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
             _log_media_fail(ch, "photo", upd_id, e)
@@ -258,8 +275,7 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
         anim = msg["animation"]
         try:
             name = anim.get("file_name") or f"anim_{anim['file_id'][:12]}.mp4"
-            path = _download_media(ch.token, anim["file_id"], anim["file_unique_id"],
-                                    ch.key, upd_id, name)
+            path = _dl(anim["file_id"], anim["file_unique_id"], "animation", name)
             content = f"sent an ANIMATION/GIF → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
             _log_media_fail(ch, "animation", upd_id, e)
@@ -267,19 +283,17 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
     elif msg.get("document"):
         doc = msg["document"]
         try:
-            path = _download_media(ch.token, doc["file_id"], doc["file_unique_id"],
-                                    ch.key, upd_id, doc.get("file_name"))
+            path = _dl(doc["file_id"], doc["file_unique_id"], "document", doc.get("file_name"))
             content = f"sent a FILE → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
             _log_media_fail(ch, "document", upd_id, e)
             content = f"sent a file (download failed: {e})" + (f" | {text}" if text else "")
     elif msg.get("voice") or msg.get("audio"):
-        media = msg.get("voice") or msg.get("audio")
+        voice_or_audio = msg.get("voice") or msg.get("audio")
         try:
-            name = media.get("file_name") or f"voice_{media['file_id'][:12]}.ogg"
-            path = _download_media(ch.token, media["file_id"], media["file_unique_id"],
-                                    ch.key, upd_id, name)
-            dur = media.get("duration")
+            name = voice_or_audio.get("file_name") or f"voice_{voice_or_audio['file_id'][:12]}.ogg"
+            path = _dl(voice_or_audio["file_id"], voice_or_audio["file_unique_id"], "voice/audio", name)
+            dur = voice_or_audio.get("duration")
             content = (f"sent a VOICE note ({dur}s) → {path}"
                        + (f"  | caption: {text}" if text else ""))
         except Exception as e:
@@ -292,8 +306,7 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
         vid = msg["video"]
         try:
             name = vid.get("file_name") or f"video_{vid['file_id'][:12]}.mp4"
-            path = _download_media(ch.token, vid["file_id"], vid["file_unique_id"],
-                                    ch.key, upd_id, name)
+            path = _dl(vid["file_id"], vid["file_unique_id"], "video", name)
             dur = vid.get("duration")
             content = (f"sent a VIDEO ({dur}s) → {path}"
                        + (f"  | caption: {text}" if text else ""))
@@ -303,8 +316,8 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
     elif msg.get("video_note"):
         note = msg["video_note"]
         try:
-            path = _download_media(ch.token, note["file_id"], note["file_unique_id"],
-                                    ch.key, upd_id, f"videonote_{note['file_id'][:12]}.mp4")
+            path = _dl(note["file_id"], note["file_unique_id"], "video_note",
+                       f"videonote_{note['file_id'][:12]}.mp4")
             dur = note.get("duration")
             content = (f"sent a VIDEO NOTE ({dur}s) → {path}"
                        + (f"  | caption: {text}" if text else ""))
@@ -368,16 +381,30 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
                    f"— bot_channels.allowed_chat_ids NOT auto-updated, needs orch-console action")
     else:
         content = text or _unknown_marker(ch, msg, upd_id)
-    return content
+    return content, media_meta
 
 
 def message_content(ch: "Channel", msg: dict, upd_id: int) -> str:
     """Human-readable content for the log row — text, or a downloaded-media
     pointer cc-orchestrator can Read, or a last-resort shape marker. Reply
-    context is preserved so cc-orch knows which message the operator answered."""
+    context is preserved so cc-orch knows which message the operator answered.
+
+    Thin wrapper over message_content_with_media() that drops the media
+    identity — kept so every existing caller/test with this exact signature
+    is untouched (bus #74111 added the identity as an addition, not a
+    behavior change to this function)."""
+    return message_content_with_media(ch, msg, upd_id)[0]
+
+
+def message_content_with_media(ch: "Channel", msg: dict, upd_id: int) -> tuple[str, dict | None]:
+    """Same as message_content(), plus the Telegram media identity (file_id/
+    file_unique_id/kind/ok) when this update carried a media attachment —
+    None for a text/sticker/poll/location/... update. process_update uses
+    the identity to persist a re-fetchable pointer into operator_messages
+    EVEN WHEN the download failed (bus #74111)."""
     text = msg.get("text") or msg.get("caption") or ""
     try:
-        content = _media_content(ch, msg, upd_id, text)
+        content, media_meta = _media_content(ch, msg, upd_id, text)
     except Exception as e:                                          # noqa: BLE001
         # Dead-man's rule: extraction is best-effort, the LOG is load-bearing
         # (Option B — the durable row is the truth). A bug in any branch above
@@ -385,6 +412,7 @@ def message_content(ch: "Channel", msg: dict, upd_id: int) -> str:
         _log_line(f"{ch.key}: content extraction raised on update {upd_id} "
                   f"({type(e).__name__}: {e}) — degrading to bare marker")
         content = text or f"[non-text update {upd_id}]"
+        media_meta = None
 
     # Reply-threading: prepend the quoted message so cc-orch knows the referent
     # (parity with the retired bridge — an operator reply loses its meaning
@@ -393,7 +421,7 @@ def message_content(ch: "Channel", msg: dict, upd_id: int) -> str:
     if rep:
         snip = (rep.get("text") or rep.get("caption") or "[media]").strip().replace("\n", " ")[:80]
         content = f'↩️ re "{snip}": {content}'
-    return content
+    return content, media_meta
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -1125,7 +1153,7 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
 
         # 2. LOG — durable first, always. Media is downloaded here so the row
         #    carries the local path (screenshot/doc), not a bare non-text marker.
-        content = message_content(ch, msg, upd_id)
+        content, media_meta = message_content_with_media(ch, msg, upd_id)
         # GROUP->SUPERGROUP MIGRATION (orch-console bus #50332): the durable
         # row above already captures the new chat_id (message_content), but a
         # row sitting in the log is easy to miss. Page loudly too, same
@@ -1162,6 +1190,18 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
             stored_from_user_id = None
             stored_from_username = None
             stored_from_name = None
+            # The file_id is a RETRIEVAL KEY, not metadata like sender identity —
+            # anyone with substrate read access + the bot token could re-download
+            # the personal content through it. Same containment as stored_content:
+            # NEVER written to the substrate row for a personal-routed tag. (The
+            # real media, if any, is best-effort-lost here same as before this
+            # change — wiring media_refs into write_personal_content() is a
+            # separate, out-of-scope fix for the personal silo, not this
+            # substrate-only directive, bus #74111.)
+            stored_file_id = None
+            stored_file_unique_id = None
+            stored_media_kind = None
+            stored_media_status = None
         else:
             # PASSIVE CoS triage (Step 1): compute the read-only route suggestion and
             # store it in the additive `cos_triage` column. STRICTLY additive — it
@@ -1179,14 +1219,31 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
             stored_from_user_id = from_user_id
             stored_from_username = from_username
             stored_from_name = from_name
+            # bus #74111: persist the Telegram file_id identity in THIS SAME
+            # insert regardless of download outcome — media_meta is built
+            # before the except branch sets content to a "download failed"
+            # marker, so a failed download still leaves a re-fetchable
+            # pointer instead of a dead end (message_queue.file_id was the
+            # prior, abandoned attempt at this: dead since 2026-04-16,
+            # unused by this ingest).
+            if media_meta is None:
+                stored_file_id = stored_file_unique_id = stored_media_kind = None
+                stored_media_status = None
+            else:
+                stored_file_id = media_meta["file_id"]
+                stored_file_unique_id = media_meta["file_unique_id"]
+                stored_media_kind = media_meta["kind"]
+                stored_media_status = "ok" if media_meta["ok"] else "failed"
         cur.execute(
             "INSERT INTO operator_messages "
             "(direction, channel, chat_id, tag, text, delivered, "
-            " from_user_id, from_username, from_name, cos_triage) "
-            "VALUES ('inbound','telegram',%s,%s,%s,true,%s,%s,%s,%s) RETURNING id",
+            " from_user_id, from_username, from_name, cos_triage, "
+            " file_id, file_unique_id, media_kind, media_status) "
+            "VALUES ('inbound','telegram',%s,%s,%s,true,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             (str(chat_id) if chat_id is not None else None, ch.channel_tag,
              stored_content, stored_from_user_id, stored_from_username,
-             stored_from_name, cos_triage),
+             stored_from_name, cos_triage,
+             stored_file_id, stored_file_unique_id, stored_media_kind, stored_media_status),
         )
         op_msg_id = cur.fetchone()[0]
         cur.execute(
