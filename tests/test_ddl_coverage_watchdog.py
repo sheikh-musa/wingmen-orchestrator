@@ -64,7 +64,8 @@ def two_dsns(pg_dsn):
                  to_agent text NOT NULL REFERENCES agents(id),
                  message_type text NOT NULL, subject text, body text, priority text,
                  requires_response boolean NOT NULL DEFAULT false,
-                 thread_id uuid, created_at timestamptz NOT NULL DEFAULT now()
+                 thread_id uuid, created_at timestamptz NOT NULL DEFAULT now(),
+                 sub_tag text
                )"""
         )
         cur.execute(
