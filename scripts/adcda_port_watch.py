@@ -18,6 +18,21 @@ bare-base-identity fix (resolve_agent_id/agent_identity.py) -- that fixed
 agents posting AS the bare base; this is a standing SCRIPT whose own to_agent
 was hardcoded wrong. Fix is just targeting the actual owner.
 
+REASSIGNED 2026-10-23 (bus #74719/#74721/#74724): cc-cosem-platform-1 fully
+de-registered (zero agent_status rows), tripping the degrade path below. The
+underlying mandate (the cosem-port lane, ADCDA->cosem-platform porting) was
+independently wound down the same day under Musa's op#32789 re-platform HOLD
+("no new porting until required-core scope is defined") -- NOT just an owner
+migration. cc-cosem-platform-2/-4 were live that day but on unrelated Academy
+Calendar work with zero porting mandate; pointing there would have been a
+silent misdelegation (worse than the degrade it would have silenced). Per
+orch-console's explicit decision (#74724), PORT_OWNER now points at
+orch-console itself for the duration of the hold, so detected commits surface
+to the party already tracking op#32789 and the watcher stays live+attributable
+instead of degraded indefinitely. RE-POINT to the re-spun cosem-port lane's
+live owner once op#32789 lifts and porting resumes -- don't carry this
+forward past that.
+
 DETECTION ONLY — the JUDGEMENT ("does this feature need porting, where does it fit")
 is the lane's, on the bus row (CAI-603: fact out, judgement in). Read-only on the
 ADCDA repo (fetch + log, never checkout/mutate).
@@ -36,9 +51,11 @@ ORCH = pathlib.Path.home() / "wingmen" / "orchestrator"
 ADCDA = pathlib.Path.home() / "wingmen" / "projects" / "cosem-adcda"
 STATE = ORCH / "logs" / "adcda_port_watch.state"
 WATCHED_BRANCHES = ["main"]  # add feature branches here if the operator wants them watched too
-# op#7517 port-watch owner — cc-cosem-platform-1 ALONE (#62694/#62695, 2026-10-11). NEVER the
-# bare base 'cc-cosem-platform' (fans out to every instance; see module docstring).
-PORT_OWNER = "cc-cosem-platform-1"
+# op#7517 port-watch owner — orch-console for the duration of the op#32789 porting HOLD
+# (#74719/#74721/#74724, 2026-10-23; see module docstring "REASSIGNED" note). Re-point to
+# the re-spun cosem-port lane's live owner once the hold lifts. NEVER the bare base
+# 'cc-cosem-platform' (fans out to every instance; see module docstring).
+PORT_OWNER = "orch-console"
 GIT = "/usr/bin/git" if os.path.exists("/usr/bin/git") else "git"
 
 
