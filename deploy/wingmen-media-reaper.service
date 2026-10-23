@@ -1,0 +1,18 @@
+# /etc/systemd/system/wingmen-media-reaper.service
+# gzb hub media reaper (TG re-fetch for failed-download file_ids) — op#33149,
+# held_commitment #547 (image-receipt guarantee), bus #74689/#74696. Mini-side
+# proven on real traffic (operator_messages #33213/#33231); this is the hub
+# half -- the hub was 107 commits behind origin and had neither ingest.py's
+# file_id persistence nor media_reaper.py until this deploy. Channel scope
+# is pinned in scripts/boot_gzb_media_reaper.sh, mirrored from boot_media_reaper.sh's
+# convention (Mini) -- see that script's header for why host-pinning matters.
+[Unit]
+Description=Wingmen media reaper (TG re-fetch, hub channels) — gzb
+After=network-online.target wingmen-fetch-secrets.service
+Requires=wingmen-fetch-secrets.service
+
+[Service]
+Type=oneshot
+User=gazzai
+WorkingDirectory=/home/gazzai/wingmen/orchestrator
+ExecStart=/bin/bash -lc 'exec scripts/boot_gzb_media_reaper.sh'

@@ -1,0 +1,14 @@
+# /etc/systemd/system/wingmen-media-reaper.timer
+# Every 10min, per bus #74689's deploy plan -- frequent enough that a failed
+# Telegram media download (CDN reset etc.) gets re-fetched promptly, same
+# cadence philosophy as the Mini's existing dev.wingmen.media-reaper.
+[Unit]
+Description=Wingmen media reaper every 10min — gzb
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
