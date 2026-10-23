@@ -1,0 +1,31 @@
+-- 118_durable_inbox_ack_revoke_direct_insert.sql
+-- ledger: silo=tscuymavysscrvoberrr
+-- (orchestrator substrate)
+-- assert: no_table_privilege postgres public.agent_messages INSERT
+--
+-- Durable acked inbox, step 2/2 (Tier-1(b) janky-tools audit, op#33149) -- the step
+-- that actually retires audit item #9 (raw-INSERT hole). DO NOT apply until every
+-- real writer (bus_send.py and every lane) has cut over to post_agent_message()
+-- from migration 117 -- applying this first breaks the entire fleet's bus the
+-- instant it lands, since every current writer still inserts directly today
+-- (console's catch, bus #74716; that's why this is a separate, later migration
+-- rather than bundled with 117).
+--
+-- Verified this REVOKE actually works against the real substrate's role shape, not
+-- assumed: confirmed (read-only, same sanctioned access this lane uses for its own
+-- inbox) that the connection bus_send.py's DATABASE_URL resolves to -- `postgres` --
+-- is NOT a superuser (rolsuper=f) and owns agent_messages. An earlier pass at this
+-- migration (bus #74720) wrongly claimed ownership alone makes a REVOKE a silent
+-- no-op; that was retracted (bus #74726) once tested against a role matching the
+-- real profile exactly (non-superuser, bypassrls=true, true owner, zero prior ACL)
+-- rather than against the superuser role the first test happened to use -- a plain
+-- non-superuser owner IS subject to REVOKE like any other grantee. Verified
+-- end-to-end through this repo's own scripts/apply_migration.py --dry-run against
+-- an isolated cluster built to match that exact role profile: the
+-- no_table_privilege assert above correctly PASSES once the REVOKE runs.
+--
+-- So: this migration is expected to WORK once applied for real (not a tripwire,
+-- not a placeholder) -- the only reason it's gated separately from 117 is
+-- sequencing (writers must cut over first), not a known technical blocker.
+
+REVOKE INSERT ON agent_messages FROM postgres;
