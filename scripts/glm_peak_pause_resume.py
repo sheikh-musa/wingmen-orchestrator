@@ -220,7 +220,7 @@ def check_hard_exclude_divergence(session: str, apply: bool) -> None:
         from scripts.lib import provider_policy as pp
         import psycopg
         from scripts.bus_send import dburl
-        with psycopg.connect(dburl(os.environ)) as conn, conn.cursor() as cur:
+        with psycopg.connect(dburl(os.environ.get("DATABASE_URL"))) as conn, conn.cursor() as cur:
             cur.execute("SELECT client_key, allowed_providers, text_only FROM provider_policy")
             cols = [d[0] for d in cur.description]
             policy_rows = [dict(zip(cols, r)) for r in cur.fetchall()]

@@ -84,7 +84,7 @@ def glm_pointer_lanes(orch_dir: Path) -> set:
 def fetch_rows():
     import psycopg
     from scripts.bus_send import dburl
-    dsn = dburl(os.environ)
+    dsn = dburl(os.environ.get("DATABASE_URL"))
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT client_key, allowed_providers, text_only FROM provider_policy")
         cols = [d[0] for d in cur.description]
