@@ -55,6 +55,52 @@ SECRET_PATTERNS = SECRET_VALUE_PATTERNS
 
 REDACTION = "[REDACTED by secrets_output_scanner -- pattern:{cls}]"
 
+# bus #74676: secret-READING CLI commands whose output has NO fixed shape any
+# SECRET_PATTERNS class could ever match -- cc-cosem-adcda-1 ran `firebase
+# functions:secrets:access SCHEDULE_PDF_S2S_SECRET --project cosem-adcda-cb6d9`
+# unredirected and the raw vaulted secret printed straight into the transcript;
+# this scanner never fired because an arbitrary secret value has no regex-
+# matchable structure (unlike an API key prefix or a DSN scheme). Detected by
+# COMMAND instead: when tool_input names one of these, the captured stdout
+# itself becomes a one-off literal redaction pattern (see
+# _secret_reading_command_hit below) -- reuses the exact same find+replace
+# machinery the shape-based classes use, with no risk of over-matching
+# unrelated text (the pattern is an exact-escaped literal of the real captured
+# output, not a generalized shape).
+SECRET_READING_COMMAND_RE = re.compile(
+    r"\bfirebase\s+functions:secrets:access\b|\bgcloud\s+secrets\s+versions\s+access\b")
+
+
+def _secret_reading_command_hit(input_text: str, tool_response) -> "tuple[str, re.Match, re.Pattern] | None":
+    """Returns (cls, match, pattern) if `input_text` names a known secret-reading
+    CLI command AND the captured stdout is non-empty, else None.
+
+    Deliberately conservative in the FLAG-everything direction: any non-empty
+    stdout from one of these commands is treated as presumptively the secret,
+    including a --help/error-message run that happens to print something --
+    over-redacting a false positive costs nothing (redaction is idempotent and
+    the fixture allowlist still exempts a known test marker from paging), while
+    under-redacting a real leak is the exact failure class this closes.
+
+    `tool_response` may be the dict shape a Bash tool_response normally carries
+    (stdout/stderr keys) or a bare string -- extracting just `stdout` when a
+    dict is available avoids building the pattern from the WHOLE JSON-encoded
+    response blob (stdout+stderr+flags), which would be needlessly broad and
+    miss the value if it ever appears in a different surrounding context."""
+    if not SECRET_READING_COMMAND_RE.search(input_text):
+        return None
+    if isinstance(tool_response, dict):
+        value = (tool_response.get("stdout") or "").strip()
+    elif isinstance(tool_response, str):
+        value = tool_response.strip()
+    else:
+        value = ""
+    if not value:
+        return None
+    pattern = re.compile(re.escape(value))
+    match = pattern.search(value)
+    return ("secret-cli-read", match, pattern) if match else None
+
 # PERF (bus #54580/#54643, fleet-health measured this hook at 61.8%+33.8% CPU on gzbai
 # during ordinary lane tool-output scanning): profiling on a representative 1.6MB clean
 # tool output found scan() cost scales with text size (~1.1 microseconds/byte dominated
@@ -530,7 +576,14 @@ def main() -> int:
     for p in persisted_paths:
         persisted_hits += scan_persisted_output(p)
 
-    all_hits = hits + persisted_hits
+    # (cls, match, pattern) triples throughout -- the shape-based hits above use the
+    # fixed module-level SECRET_PATTERNS[cls]; the command-detected hit below (bus
+    # #74676) carries its OWN dynamically-built literal pattern instead, since there
+    # is no fixed shape for an arbitrary secret value to register in SECRET_PATTERNS.
+    all_hits = [(cls, match, SECRET_PATTERNS[cls]) for cls, match in hits + persisted_hits]
+    cli_hit = _secret_reading_command_hit(input_text, tool_response)
+    if cli_hit:
+        all_hits.append(cli_hit)
     if not all_hits:
         return 0
 
@@ -568,7 +621,7 @@ def main() -> int:
     # only cost) and never produces a WRONG success claim either way.
     seen_classes = set()
     any_redacted = False
-    for cls, match in all_hits:
+    for cls, match, pattern in all_hits:
         redacted_this_hit = False
         for attempt in range(3):
             if attempt:
@@ -577,13 +630,13 @@ def main() -> int:
                 # window=3: covers the tool_use line and the tool_result line even with one
                 # intervening line (observed in some transcript shapes); cheap and harmless
                 # to widen since _redact_strings is a no-op on any line with no match.
-                redacted_this_hit |= redact_recent_lines(transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
+                redacted_this_hit |= redact_recent_lines(transcript_path, cls, pattern, max_lines=3)
             if sub_transcript_path and sub_transcript_path != transcript_path:
                 # bus #49029/#49030: this call originated inside a subagent -- also redact
                 # its own transcript file, which `transcript_path` above does not cover.
-                redacted_this_hit |= redact_recent_lines(sub_transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
+                redacted_this_hit |= redact_recent_lines(sub_transcript_path, cls, pattern, max_lines=3)
             for p in persisted_paths:
-                redacted_this_hit |= redact_persisted_output(p, cls, SECRET_PATTERNS[cls])
+                redacted_this_hit |= redact_persisted_output(p, cls, pattern)
             if redacted_this_hit:
                 break
         any_redacted |= redacted_this_hit
@@ -596,7 +649,7 @@ def main() -> int:
             continue
         _page_orch_console(cls, tool_name, agent_id=agent_id, agent_type=agent_type)
 
-    classes = ", ".join(cls for cls, _ in all_hits)
+    classes = ", ".join(cls for cls, _, _ in all_hits)
     if any_redacted:
         sys.stderr.write(
             f"secrets_output_scanner: this output contained secret-shaped content ({classes}); "
