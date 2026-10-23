@@ -57,8 +57,8 @@ def _worker_row():
 def gates_pass(monkeypatch):
     """Entry gates idle+git_clean True (unit-isolate the driver's orchestration from the
     real tmux/git probes, which have their own tests)."""
-    monkeypatch.setattr(slr, "gate_idle", lambda session: True)
-    monkeypatch.setattr(slr, "gate_git_clean", lambda wt: True)
+    monkeypatch.setattr(slr, "gate_idle", lambda session, ssh_target=None: True)
+    monkeypatch.setattr(slr, "gate_git_clean", lambda wt, ssh_target=None: True)
 
 
 _BRANCH = "feat/merge-people-app-layer"
@@ -96,8 +96,8 @@ def test_singleton_target_aborts_and_never_recycles():
 
 
 def test_not_idle_aborts_no_side_effects(monkeypatch):
-    monkeypatch.setattr(slr, "gate_idle", lambda session: False)
-    monkeypatch.setattr(slr, "gate_git_clean", lambda wt: True)
+    monkeypatch.setattr(slr, "gate_idle", lambda session, ssh_target=None: False)
+    monkeypatch.setattr(slr, "gate_git_clean", lambda wt, ssh_target=None: True)
     recycle, nudge, note = Spy(), Spy(ret=0), Spy()
     clock = Clock()
     out = drv.drive_checkpoint_recycle(
@@ -109,8 +109,8 @@ def test_not_idle_aborts_no_side_effects(monkeypatch):
 
 
 def test_dirty_git_aborts_no_recycle(monkeypatch):
-    monkeypatch.setattr(slr, "gate_idle", lambda session: True)
-    monkeypatch.setattr(slr, "gate_git_clean", lambda wt: False)
+    monkeypatch.setattr(slr, "gate_idle", lambda session, ssh_target=None: True)
+    monkeypatch.setattr(slr, "gate_git_clean", lambda wt, ssh_target=None: False)
     recycle = Spy()
     clock = Clock()
     out = drv.drive_checkpoint_recycle(
@@ -353,7 +353,7 @@ class _IdleGate:
     def __init__(self, busy_loop_checks):
         self.calls = 0
         self.busy = busy_loop_checks
-    def __call__(self, session):
+    def __call__(self, session, ssh_target=None):
         self.calls += 1
         if self.calls == 1:
             return True                       # entry gate
@@ -364,7 +364,7 @@ def test_settled_handoff_but_lane_busy_waits_for_idle(monkeypatch, tmp_path):
     """#27822: a COMPLETE, SETTLED handoff that names the branch must NOT be recycled while the lane
     is still finishing its handoff-write TURN (gate_idle False). The wait loop must hold until the
     lane returns to idle, THEN recycle — so STAGE-5 reverify's idle check can't false-abort."""
-    monkeypatch.setattr(slr, "gate_git_clean", lambda wt: True)
+    monkeypatch.setattr(slr, "gate_git_clean", lambda wt, ssh_target=None: True)
     monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)
     monkeypatch.setattr(slr, "last_material_action_epoch", lambda conn, base: 900.0)
     monkeypatch.setattr(slr, "plan", lambda conn, lr, armed=True, require_bloat=False,
@@ -390,11 +390,11 @@ def test_settled_handoff_but_lane_busy_waits_for_idle(monkeypatch, tmp_path):
 def test_wait_times_out_if_lane_never_idle(monkeypatch, tmp_path):
     """A settled, branch-naming handoff whose lane NEVER returns to idle -> timeout -> abort, NO
     recycle (never /clear a working body). Fail-closed with an idle-specific reason."""
-    monkeypatch.setattr(slr, "gate_git_clean", lambda wt: True)
+    monkeypatch.setattr(slr, "gate_git_clean", lambda wt, ssh_target=None: True)
     monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)
     monkeypatch.setattr(slr, "last_material_action_epoch", lambda conn, base: 900.0)
     calls = {"n": 0}
-    def never_idle(session):                 # True at entry, always busy in the loop
+    def never_idle(session, ssh_target=None):                 # True at entry, always busy in the loop
         calls["n"] += 1
         return calls["n"] == 1
     monkeypatch.setattr(slr, "gate_idle", never_idle)
@@ -431,8 +431,8 @@ def test_run_dry_run_outcome(monkeypatch):
     """run() in dry-run: discovers the lane, passes entry gates, returns dry-run, and NEVER
     constructs a real side effect firing (armed=False short-circuits)."""
     monkeypatch.setattr(drv, "discover_session_lane", lambda conn, session, **k: _worker_row())
-    monkeypatch.setattr(slr, "gate_idle", lambda session: True)
-    monkeypatch.setattr(slr, "gate_git_clean", lambda wt: True)
+    monkeypatch.setattr(slr, "gate_idle", lambda session, ssh_target=None: True)
+    monkeypatch.setattr(slr, "gate_git_clean", lambda wt, ssh_target=None: True)
 
     class Args:
         session = "irsyad"; arm = False; wait_s = 240; poll_s = 15
