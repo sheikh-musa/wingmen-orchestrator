@@ -327,7 +327,14 @@ def test_pager_truncates_traceback(tmp_path):
 
 # ---- bus_send: WARN only, never raises / blocks ------------------------------
 
-def test_bus_send_warns_on_mismatch():
+def test_bus_send_warns_on_mismatch(monkeypatch):
+    # pinned "today" (bus #74596-era CI failure: this test's own fixture text assumes
+    # "9 October" resolves within 2026 -- true only while today is close enough for the
+    # RECENT_PAST_DAYS/forward-resolution window to land there; by 2026-10-24 it had
+    # already rolled to 2027, a different weekday, and the hardcoded "Friday" assertion
+    # broke. Same pin value used by this file's own CLI tests (_cli()) for exactly this
+    # reason -- never let this test depend on real wall-clock "today" again.)
+    monkeypatch.setenv("DATE_WEEKDAY_GUARD_TODAY", "2026-10-07")
     buf = io.StringIO()
     bs.warn_if_weekday_date_mismatch("sync Thursday 9 October", "body text", stream=buf)
     assert "9 October" in buf.getvalue() and "Friday" in buf.getvalue()
@@ -349,6 +356,8 @@ def test_bus_send_warn_never_raises_even_if_guard_crashes(monkeypatch):
 
 
 def test_bus_send_main_dry_run_not_blocked_by_mismatch(monkeypatch, capsys):
+    # pinned "today" -- same reasoning as test_bus_send_warns_on_mismatch above.
+    monkeypatch.setenv("DATE_WEEKDAY_GUARD_TODAY", "2026-10-07")
     monkeypatch.setattr(sys, "stdin", io.StringIO(
         "Kickoff is Thursday 9 October, review Mon 13 Oct — padding to pass the min body."))
     rc = bs.main(["--to", "cc-fleet-health", "--type", "update", "--subject", "s",
