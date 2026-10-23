@@ -308,6 +308,43 @@ if [ -n "$_APPLY_MODEL" ]; then
   _provider_for_model "$_APPLY_MODEL" >/dev/null 2>&1 && _EXPECT_PROVIDER=1
 fi
 
+# ── GLM FLIP GATE (orch-console #74584/#74588, bus #74586 spec,
+# reports/provider-policy-flip-gate-spec-20261023.md): a lane applying a glm-*
+# model must be ALLOWED by provider_policy (+ its lane override) BEFORE any
+# kill/relaunch happens — hard-refuse, never a silent proceed, so the mamadah-
+# class incident (bus #74420/#74563: a lane flipped to GLM against a standing
+# lane-specific residency ruling the table had never been synced to) cannot
+# recur through this script. Scoped to glm-* ONLY — provider_policy's
+# allowed_providers vocabulary today only covers "zai"; a kimi-*/deepseek-*/
+# OpenRouter-routed model has no corresponding policy concept yet and is
+# deliberately NOT gated here (not a silent gap — scoped out of this build).
+# This check runs even under DRY-RUN/preview (next block) — a preview must
+# show the refusal, not a misleadingly clean plan.
+case "$_APPLY_MODEL" in
+  glm-*)
+    GATE_SESS="$SESS" GATE_ACTOR="${ACTOR:-cli}" GATE_ARMED="${ARMED:-0}" GATE_BREAKGLASS="${BREAK_GLASS:-0}" \
+    "$VENV_PY" - <<'PYGATE'
+import os
+import sys
+
+sys.path.insert(0, os.environ.get("ORCH_DIR", os.getcwd()))
+from scripts.lib.provider_policy import gate_or_post_refusal  # noqa: E402
+
+gate_or_post_refusal(
+    os.environ["GATE_SESS"],
+    actor=os.environ.get("GATE_ACTOR", "cli"),
+    armed=os.environ.get("GATE_ARMED") == "1",
+    break_glass=os.environ.get("GATE_BREAKGLASS") == "1",
+)
+PYGATE
+    _GATE_RC=$?
+    if [ "$_GATE_RC" != 0 ]; then
+      echo "ERROR: GLM flip REFUSED by the provider_policy gate (escalation posted to orch-console) — no kill/relaunch performed." >&2
+      exit 7
+    fi
+    ;;
+esac
+
 # ── DRY-RUN (op#10706 R3): print the plan, change NOTHING, exit 0. Proves the
 # resume path so a real apply never comes back blank. ────────────────────────
 if [ "$DRY" = "1" ]; then
