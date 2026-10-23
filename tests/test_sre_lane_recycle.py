@@ -482,8 +482,8 @@ def test_compute_gates_sibling_ambiguous_forces_fresh_handoff_false(monkeypatch)
                         lambda conn, base, session=None, sibling_ambiguous=False: 1_000.0)
     monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)  # genuinely fresh
     monkeypatch.setattr(slr, "gate_context_bloat", lambda conn, base, session=None: False)
-    monkeypatch.setattr(slr, "gate_idle", lambda session: True)
-    monkeypatch.setattr(slr, "gate_git_clean", lambda wt: True)
+    monkeypatch.setattr(slr, "gate_idle", lambda session, ssh_target=None: True)
+    monkeypatch.setattr(slr, "gate_git_clean", lambda wt, ssh_target=None: True)
 
     lane_row = {"lane": "cosem-platform-3", "base_agent_id": "cc-cosem-platform",
                "tmux_session": "cosem-platform-3", "worktree_path": "/wt", "notes": None}
@@ -497,8 +497,8 @@ def test_compute_gates_single_sibling_fresh_handoff_unchanged(monkeypatch):
                         lambda conn, base, session=None, sibling_ambiguous=False: 1_000.0)
     monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)
     monkeypatch.setattr(slr, "gate_context_bloat", lambda conn, base, session=None: False)
-    monkeypatch.setattr(slr, "gate_idle", lambda session: True)
-    monkeypatch.setattr(slr, "gate_git_clean", lambda wt: True)
+    monkeypatch.setattr(slr, "gate_idle", lambda session, ssh_target=None: True)
+    monkeypatch.setattr(slr, "gate_git_clean", lambda wt, ssh_target=None: True)
 
     lane_row = {"lane": "cosem-platform-3", "base_agent_id": "cc-cosem-platform",
                "tmux_session": "cosem-platform-3", "worktree_path": "/wt", "notes": None}
@@ -544,9 +544,13 @@ class _CaptureCursor:
 class _CaptureConn:
     def __init__(self, row):
         self.cur = _CaptureCursor(row)
+        self.commits = 0
 
     def cursor(self):
         return self.cur
+
+    def commit(self):
+        self.commits += 1
 
 
 def test_last_material_action_epoch_unambiguous_queries_by_from_agent(monkeypatch):
@@ -617,8 +621,8 @@ def test_compute_gates_passes_session_and_ambiguity_to_last_material_action_epoc
     monkeypatch.setattr(slr, "live_sessions_for_base",
                         lambda conn, base: ["cosem-platform-2", "cosem-platform-3"])
     monkeypatch.setattr(slr, "gate_context_bloat", lambda conn, base, session=None: False)
-    monkeypatch.setattr(slr, "gate_idle", lambda session: True)
-    monkeypatch.setattr(slr, "gate_git_clean", lambda wt: True)
+    monkeypatch.setattr(slr, "gate_idle", lambda session, ssh_target=None: True)
+    monkeypatch.setattr(slr, "gate_git_clean", lambda wt, ssh_target=None: True)
 
     lane_row = {"lane": "cosem-platform-3", "base_agent_id": "cc-cosem-platform",
                "tmux_session": "cosem-platform-3", "worktree_path": "/wt", "notes": None}
@@ -626,3 +630,360 @@ def test_compute_gates_passes_session_and_ambiguity_to_last_material_action_epoc
 
     assert captured["session"] == "cosem-platform-3"
     assert captured["sibling_ambiguous"] is True
+
+
+# ── cross-host (gzb) support (bus #74293 FIX 2) ──────────────────────────────────────────────
+# Design check-in with cc-fleet-health (bus #74346/#74348): gate_idle/gate_git_clean get
+# READ-ONLY cross-host ssh support (gated on agent_status.host resolving to gzb) so detection
+# works on a gzb-hosted lane (today cosem-port "always fails closed blind" — no ssh dispatch
+# anywhere in the detection path). The FORCING action stays local-only: armed_recycle/
+# reset_lane.sh is NEVER driven cross-host (no such primitive exists, by fleet doctrine — see
+# hub_reach.py's own gzb remedy text, which explicitly forbids raw cross-host keystroke
+# injection). A gzb-hosted lane whose gates confirm idle+clean+bloated+fresh-handoff gets the
+# SAME non-destructive self-recycle-nudge shape lane_proactive_recycle_nudge.py already proves
+# end-to-end, instead of a forced /clear.
+
+def test_gate_idle_local_dispatches_the_existing_tmux_capture(monkeypatch):
+    """ssh_target=None (the default, every pre-existing caller) must keep today's EXACT local
+    tmux capture-pane invocation — no ssh anywhere in the call."""
+    calls = []
+
+    def _fake_run(cmd, **kw):
+        calls.append(cmd)
+        class _R:
+            returncode = 0
+            stdout = "some idle pane text\n"
+        return _R()
+
+    monkeypatch.setattr(slr.subprocess, "run", _fake_run)
+    assert slr.gate_idle("cosem-port") is True
+    assert len(calls) == 1
+    assert calls[0][0] == slr.TMUX
+    assert "ssh" not in calls[0]
+
+
+def test_gate_idle_remote_dispatches_over_ssh(monkeypatch):
+    """ssh_target set -> the SAME capture-pane primitive, read-only, over `ssh <target>` —
+    the identical shape hub_reach.py documents for the hub's own gzb reach, here parameterized
+    by the lane's own session instead of the hub's 'orch'."""
+    calls = []
+
+    def _fake_run(cmd, **kw):
+        calls.append(cmd)
+        class _R:
+            returncode = 0
+            stdout = "some idle pane text\n"
+        return _R()
+
+    monkeypatch.setattr(slr.subprocess, "run", _fake_run)
+    assert slr.gate_idle("cosem-port", ssh_target="gzb") is True
+    assert len(calls) == 1
+    cmd = calls[0]
+    assert cmd[0] == "ssh" and cmd[1] == "gzb"
+    assert "capture-pane" in cmd[2]
+    assert "cosem-port" in cmd[2]
+
+
+def test_gate_idle_remote_ssh_failure_fails_closed(monkeypatch):
+    """A remote capture that errors (unreachable host, dead ssh) must fail CLOSED — same shape
+    as a local capture failure, never a guessed idle verdict."""
+    def _raise(cmd, **kw):
+        raise OSError("ssh unreachable")
+    monkeypatch.setattr(slr.subprocess, "run", _raise)
+    assert slr.gate_idle("cosem-port", ssh_target="gzb") is False
+
+
+def test_gate_git_clean_local_unchanged(monkeypatch, tmp_path):
+    """ssh_target=None keeps today's exact local os.path + git-status behaviour."""
+    calls = []
+
+    def _fake_run(cmd, **kw):
+        calls.append(cmd)
+        class _R:
+            returncode = 0
+            stdout = ""
+        return _R()
+
+    monkeypatch.setattr(slr.subprocess, "run", _fake_run)
+    assert slr.gate_git_clean(str(tmp_path)) is True
+    assert len(calls) == 1
+    assert calls[0][0] == "git"
+    assert "ssh" not in calls[0]
+
+
+def test_gate_git_clean_remote_dispatches_over_ssh_without_a_local_isdir_check(monkeypatch):
+    """A remote worktree_path lives on the OTHER host — a local os.path.isdir check on it would
+    always (wrongly-for-the-wrong-reason) read as missing. The remote path must be proven via
+    ssh instead, never short-circuited by a local filesystem check."""
+    calls = []
+
+    def _fake_run(cmd, **kw):
+        calls.append(cmd)
+        class _R:
+            returncode = 0
+            stdout = ""
+        return _R()
+
+    monkeypatch.setattr(slr.subprocess, "run", _fake_run)
+    assert slr.gate_git_clean("/Users/gazzai/wingmen/orchestrator/cosem-port",
+                             ssh_target="gzb") is True
+    assert len(calls) == 1
+    cmd = calls[0]
+    assert cmd[0] == "ssh" and cmd[1] == "gzb"
+    assert "git -C" in cmd[2] and "status --porcelain" in cmd[2]
+    assert "cosem-port" in cmd[2]
+
+
+def test_gate_git_clean_remote_dirty_fails(monkeypatch):
+    def _fake_run(cmd, **kw):
+        class _R:
+            returncode = 0
+            stdout = " M some/file.py\n"
+        return _R()
+    monkeypatch.setattr(slr.subprocess, "run", _fake_run)
+    assert slr.gate_git_clean("/wt/cosem-port", ssh_target="gzb") is False
+
+
+def test_gate_git_clean_remote_ssh_failure_fails_closed(monkeypatch):
+    def _raise(cmd, **kw):
+        raise OSError("ssh unreachable")
+    monkeypatch.setattr(slr.subprocess, "run", _raise)
+    assert slr.gate_git_clean("/wt/cosem-port", ssh_target="gzb") is False
+
+
+def test_compute_gates_threads_ssh_target_from_lane_row_host(monkeypatch):
+    """compute_gates must resolve lane_row['host'] -> an ssh_target (via hub_reach) and pass it
+    to BOTH gate_idle and gate_git_clean — a gzb-hosted lane's gates must be read cross-host,
+    not silently local (which would always read as unreachable/not-clean for the wrong reason)."""
+    captured = {}
+
+    def _fake_idle(session, ssh_target=None):
+        captured["idle_ssh_target"] = ssh_target
+        return True
+
+    def _fake_clean(wt, ssh_target=None):
+        captured["clean_ssh_target"] = ssh_target
+        return True
+
+    monkeypatch.setattr(slr, "gate_idle", _fake_idle)
+    monkeypatch.setattr(slr, "gate_git_clean", _fake_clean)
+    monkeypatch.setattr(slr, "gate_context_bloat", lambda conn, base, session=None: False)
+    monkeypatch.setattr(slr, "last_material_action_epoch",
+                        lambda conn, base, session=None, sibling_ambiguous=False: None)
+
+    lane_row = {"lane": "cosem-port", "base_agent_id": "cc-cosem-port",
+               "tmux_session": "cosem-port", "worktree_path": "/wt/cosem-port",
+               "notes": None, "host": "gzbai"}
+    slr.compute_gates(None, lane_row)
+
+    assert captured["idle_ssh_target"] == "gzb"
+    assert captured["clean_ssh_target"] == "gzb"
+
+
+def test_compute_gates_local_host_passes_no_ssh_target(monkeypatch):
+    captured = {}
+
+    def _fake_idle(session, ssh_target=None):
+        captured["idle_ssh_target"] = ssh_target
+        return True
+
+    def _fake_clean(wt, ssh_target=None):
+        captured["clean_ssh_target"] = ssh_target
+        return True
+
+    monkeypatch.setattr(slr, "gate_idle", _fake_idle)
+    monkeypatch.setattr(slr, "gate_git_clean", _fake_clean)
+    monkeypatch.setattr(slr, "gate_context_bloat", lambda conn, base, session=None: False)
+    monkeypatch.setattr(slr, "last_material_action_epoch",
+                        lambda conn, base, session=None, sibling_ambiguous=False: None)
+
+    lane_row = {"lane": "irsyad", "base_agent_id": "cc-irsyad",
+               "tmux_session": "irsyad", "worktree_path": "/wt/irsyad",
+               "notes": None, "host": "Sheikhs-Mini"}
+    slr.compute_gates(None, lane_row)
+
+    assert captured["idle_ssh_target"] is None
+    assert captured["clean_ssh_target"] is None
+
+
+def test_discover_lanes_sql_selects_host_per_instance(monkeypatch):
+    """discover_lanes must surface agent_status.host per row (bus #74293 FIX 2) — FIX 2's
+    cross-host gates key off lane_row['host'], so discover_lanes (the only populator of
+    lane_row) must select it, in BOTH the per_instance and the DISTINCT-ON cardinality."""
+    captured_sql = {}
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            captured_sql["sql"] = sql
+            captured_sql["params"] = params
+
+        @property
+        def description(self):
+            return [("lane",), ("worktree_path",), ("branch",), ("base_agent_id",),
+                   ("desired_state",), ("notes",), ("tmux_session",), ("host",)]
+
+        def fetchall(self):
+            return []
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    slr.discover_lanes(_Conn(), per_instance=True)
+    assert "s.host" in captured_sql["sql"]
+    assert ", host" in captured_sql["sql"] or " host " in captured_sql["sql"] or "host\n" in captured_sql["sql"]
+
+    captured_sql.clear()
+    slr.discover_lanes(_Conn(), per_instance=False)
+    assert "s.host" in captured_sql["sql"]
+
+
+# ── cross-host self-recycle nudge (the FORCING-action fallback) ──────────────────────────────
+
+def test_cross_host_recycle_nudge_message_is_pure_and_non_destructive():
+    subject, body = slr.cross_host_recycle_nudge_message(
+        "cc-cosem-port", "cosem-port", "gzbai",
+        {"idle": True, "git_clean": True, "fresh_handoff": True, "context_bloat": True},
+        "SRE auto-recycle: wedged/bloated lane")
+    assert slr._CROSS_HOST_NUDGE_PREFIX in subject
+    assert "cc-cosem-port" in subject
+    assert "self_recycle.sh" in body
+    assert "reset_lane.sh" in body
+    assert "gzbai" in body
+    assert "you decide" in body.lower() or "YOU decide" in body
+
+
+def test_cross_host_nudge_recently_true_within_cooldown():
+    conn = _CaptureConn((1,))
+    assert slr._cross_host_nudge_recently(conn, "cc-cosem-port") is True
+
+
+def test_cross_host_nudge_recently_false_when_no_prior_row():
+    conn = _CaptureConn(None)
+    assert slr._cross_host_nudge_recently(conn, "cc-cosem-port") is False
+
+
+def test_send_cross_host_recycle_nudge_inserts_when_not_on_cooldown(monkeypatch):
+    monkeypatch.setattr(slr, "_cross_host_nudge_recently", lambda conn, base, **kw: False)
+    conn = _CaptureConn(None)
+    lane_row = {"base_agent_id": "cc-cosem-port", "tmux_session": "cosem-port", "host": "gzbai"}
+
+    sent = slr.send_cross_host_recycle_nudge(
+        conn, lane_row, {"idle": True}, "SRE auto-recycle: wedged/bloated lane")
+
+    assert sent is True
+    assert conn.commits == 1
+    sql, params = conn.cur.calls[-1]
+    assert "INSERT INTO agent_messages" in sql
+    assert params[0] == slr.fhb.SRE_AGENT_ID
+    assert params[1] == "cc-cosem-port"
+
+
+def test_send_cross_host_recycle_nudge_skips_on_cooldown(monkeypatch):
+    monkeypatch.setattr(slr, "_cross_host_nudge_recently", lambda conn, base, **kw: True)
+    conn = _CaptureConn(None)
+    lane_row = {"base_agent_id": "cc-cosem-port", "tmux_session": "cosem-port", "host": "gzbai"}
+
+    sent = slr.send_cross_host_recycle_nudge(
+        conn, lane_row, {"idle": True}, "SRE auto-recycle: wedged/bloated lane")
+
+    assert sent is False
+    assert conn.commits == 0
+    assert conn.cur.calls == []
+
+
+# ── routing: a gzb-hosted permitted lane gets the nudge, never a cross-host armed_recycle ────
+
+def _plan_result(base="cc-cosem-port", session="cosem-port"):
+    return {"lane": session, "base": base, "session": session,
+           "gates": {"idle": True, "git_clean": True, "fresh_handoff": True, "context_bloat": True},
+           "permitted": True, "reason": "all gates verified; armed"}
+
+
+def test_perform_armed_action_remote_host_sends_nudge_not_armed_recycle(monkeypatch):
+    calls = {"armed_recycle": 0, "nudge": 0}
+    monkeypatch.setattr(slr, "armed_recycle",
+                        lambda *a, **k: calls.__setitem__("armed_recycle", calls["armed_recycle"] + 1))
+    monkeypatch.setattr(slr, "send_cross_host_recycle_nudge",
+                        lambda *a, **k: (calls.__setitem__("nudge", calls["nudge"] + 1), True)[1])
+    monkeypatch.setattr(slr, "self_recycle_refused", lambda *a, **k: False)
+
+    lane_row = {"base_agent_id": "cc-cosem-port", "tmux_session": "cosem-port", "host": "gzbai"}
+    p = _plan_result()
+
+    act = slr._perform_armed_action(object(), lane_row, p, reason="r",
+                                    handoff_ref_epoch=None,
+                                    invoker_agent=None, invoker_session=None, i_mean_it=False)
+
+    assert calls["armed_recycle"] == 0
+    assert calls["nudge"] == 1
+    assert act["cross_host"] is True
+    assert act["acted"] is True
+
+
+def test_perform_armed_action_local_host_calls_armed_recycle(monkeypatch):
+    calls = {"armed_recycle": 0, "nudge": 0}
+    monkeypatch.setattr(slr, "armed_recycle",
+                        lambda *a, **k: (calls.__setitem__("armed_recycle", calls["armed_recycle"] + 1),
+                                        {"recycled": True, "rc": 0, "output": "ok"})[1])
+    monkeypatch.setattr(slr, "send_cross_host_recycle_nudge",
+                        lambda *a, **k: calls.__setitem__("nudge", calls["nudge"] + 1))
+    monkeypatch.setattr(slr, "self_recycle_refused", lambda *a, **k: False)
+
+    lane_row = {"base_agent_id": "cc-irsyad", "tmux_session": "irsyad", "host": "Sheikhs-Mini"}
+    p = _plan_result(base="cc-irsyad", session="irsyad")
+
+    act = slr._perform_armed_action(object(), lane_row, p, reason="r",
+                                    handoff_ref_epoch=None,
+                                    invoker_agent=None, invoker_session=None, i_mean_it=False)
+
+    assert calls["nudge"] == 0
+    assert calls["armed_recycle"] == 1
+    assert act["cross_host"] is False
+    assert act["acted"] is True
+    assert act["recycled"] is True
+
+
+def test_perform_armed_action_local_host_missing_still_calls_armed_recycle(monkeypatch):
+    """A lane_row with NO host key at all (every pre-existing discover_lanes caller before this
+    FIX) must keep dispatching to armed_recycle exactly as today — ssh_target_for_host(None) is
+    None, so this is the unchanged default path."""
+    monkeypatch.setattr(slr, "armed_recycle", lambda *a, **k: {"recycled": True})
+    monkeypatch.setattr(slr, "send_cross_host_recycle_nudge",
+                        lambda *a, **k: pytest.fail("must not nudge a local/unknown-host lane"))
+    monkeypatch.setattr(slr, "self_recycle_refused", lambda *a, **k: False)
+
+    lane_row = {"base_agent_id": "cc-irsyad", "tmux_session": "irsyad"}
+    p = _plan_result(base="cc-irsyad", session="irsyad")
+
+    act = slr._perform_armed_action(object(), lane_row, p, reason="r",
+                                    handoff_ref_epoch=None,
+                                    invoker_agent=None, invoker_session=None, i_mean_it=False)
+
+    assert act["cross_host"] is False
+    assert act["recycled"] is True
+
+
+def test_perform_armed_action_self_recycle_refused_never_nudges_or_recycles(monkeypatch):
+    monkeypatch.setattr(slr, "armed_recycle",
+                        lambda *a, **k: pytest.fail("must not armed_recycle when self-refused"))
+    monkeypatch.setattr(slr, "send_cross_host_recycle_nudge",
+                        lambda *a, **k: pytest.fail("must not nudge when self-refused"))
+    monkeypatch.setattr(slr, "self_recycle_refused", lambda *a, **k: True)
+
+    lane_row = {"base_agent_id": "cc-cosem-port", "tmux_session": "cosem-port", "host": "gzbai"}
+    p = _plan_result()
+
+    act = slr._perform_armed_action(object(), lane_row, p, reason="r",
+                                    handoff_ref_epoch=None,
+                                    invoker_agent="cc-cosem-port", invoker_session="cosem-port",
+                                    i_mean_it=False)
+
+    assert act["refused"] is True
+    assert act["acted"] is False

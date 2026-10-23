@@ -82,3 +82,21 @@ def test_host_match_guard_for_a_reset_target():
     assert hr.is_reach_host_current("wingmen-core", holder_host="gzbai") is False
     # unknown holder -> fail-closed (do NOT reset when we cannot confirm the target)
     assert hr.is_reach_host_current("wingmen-core", holder_host=None) is False
+
+
+# ── ssh_target_for_host (bus #74293 FIX 2): generic gzb alias resolution for ANY fleet host
+# string, not just the hub's own orch_lease.holder_host -- reused by sre_lane_recycle.py's
+# cross-host worker-lane gates (a gzb-hosted lane like cosem-port, not the hub).
+def test_ssh_target_for_host_gzb_aliases_resolve_to_gzb():
+    assert hr.ssh_target_for_host("gzbai") == "gzb"
+    assert hr.ssh_target_for_host("gzb") == "gzb"
+    assert hr.ssh_target_for_host(GZB_IP) == "gzb"
+
+
+def test_ssh_target_for_host_local_or_unknown_is_none():
+    # the Mini's own canonical label, an unrecognized string, and a missing/None host all stay
+    # local/unknown -- NEVER guessed at as a remote target.
+    assert hr.ssh_target_for_host("Sheikhs-Mini") is None
+    assert hr.ssh_target_for_host("some-new-host-99") is None
+    assert hr.ssh_target_for_host(None) is None
+    assert hr.ssh_target_for_host("") is None

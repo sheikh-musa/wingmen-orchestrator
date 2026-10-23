@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -43,9 +44,11 @@ import handoff_compaction_policy as hcp  # noqa: E402  (SSOT staged handoff comp
 import context_truth as _ct  # noqa: E402  (Gap-1: ONE gauge source, shared with the dead-man)
 import handoff_find as _hf  # noqa: E402  (ONE newest-handoff definition, CAI-1392 C)
 import lane_recycle_deadman as _lrd  # noqa: E402  (bus #74293 facet 13: the sibling-ambiguous pane fallback)
+import hub_reach  # noqa: E402  (bus #74293 FIX 2: the shared gzb ssh-alias resolver)
 
 TMUX = os.environ.get("SRE_TMUX_BIN", "/usr/local/bin/tmux")
 _TMUX_TIMEOUT = 5
+_SSH_TIMEOUT = int(os.environ.get("SRE_SSH_TIMEOUT", "10"))
 
 # Spinner glyphs Claude-Code shows on its ACTIVE status line (mirrors panes.py).
 _SPINNER_GLYPHS = "✻✳✶✷✸✹✺✽❋⚹"
@@ -66,19 +69,32 @@ _CTX_FRESH_MIN = 30  # minutes: telemetry older than this can't prove current bl
 
 
 # ── gate computation — mechanical, fail-closed ────────────────────────────────
-def _raw_pane(session: str) -> "str | None":
+def _raw_pane(session: str, ssh_target: "str | None" = None) -> "str | None":
+    """The lane's pane text. LOCAL (ssh_target=None): the direct tmux capture-pane, unchanged.
+    REMOTE (ssh_target set, bus #74293 FIX 2): the SAME capture-pane invocation, read-only, run
+    over `ssh <ssh_target>` instead — the identical primitive hub_reach.py already documents for
+    the hub's own gzb reach ('ssh gzb tmux capture-pane -t orch -p'), here parameterized by the
+    lane's own session instead of the hub's. Any failure (unreachable host, dead ssh, no such
+    session) -> None, the same fail-closed shape as a local capture failure."""
     try:
-        r = subprocess.run([TMUX, "capture-pane", "-t", f"={session}:0.0", "-p", "-S", "-200"],
-                           capture_output=True, text=True, timeout=_TMUX_TIMEOUT)
+        if ssh_target:
+            remote_cmd = f"tmux capture-pane -t {shlex.quote('=' + session + ':0.0')} -p -S -200"
+            r = subprocess.run(["ssh", ssh_target, remote_cmd],
+                               capture_output=True, text=True, timeout=_SSH_TIMEOUT)
+        else:
+            r = subprocess.run([TMUX, "capture-pane", "-t", f"={session}:0.0", "-p", "-S", "-200"],
+                               capture_output=True, text=True, timeout=_TMUX_TIMEOUT)
         return r.stdout if r.returncode == 0 else None
     except Exception:
         return None
 
 
-def gate_idle(session: str) -> bool:
+def gate_idle(session: str, ssh_target: "str | None" = None) -> bool:
     """True iff the lane's pane is present AND not actively generating a turn.
-    Fail-closed: an unreadable pane (session gone, capture failed) is NOT idle."""
-    raw = _raw_pane(session)
+    Fail-closed: an unreadable pane (session gone, capture failed) is NOT idle.
+    ssh_target (bus #74293 FIX 2): when set, the pane is read cross-host (read-only ssh)
+    instead of a local tmux capture — see _raw_pane."""
+    raw = _raw_pane(session, ssh_target=ssh_target)
     if raw is None:
         return False
     lines = [ln for ln in raw.splitlines() if ln.strip()]
@@ -94,12 +110,27 @@ def gate_idle(session: str) -> bool:
     return True
 
 
-def gate_git_clean(worktree_path: "str | None") -> bool:
+def gate_git_clean(worktree_path: "str | None", ssh_target: "str | None" = None) -> bool:
     """True iff the lane's worktree has NO uncommitted changes. Fail-closed: a
     missing/unreadable worktree, or any git error, is NOT clean (a reset there
-    could discard uncommitted work)."""
+    could discard uncommitted work).
+
+    ssh_target (bus #74293 FIX 2): when set, worktree_path lives on the REMOTE host — status is
+    read via read-only ssh instead of a local os.path/git check (a local isdir check on a
+    remote-only path would always fail closed, but for the wrong reason; the ssh path lets this
+    gate actually PROVE remote cleanliness instead of just always refusing)."""
     if not worktree_path:
         return False
+    if ssh_target:
+        try:
+            remote_cmd = f"git -C {shlex.quote(worktree_path)} status --porcelain"
+            r = subprocess.run(["ssh", ssh_target, remote_cmd],
+                               capture_output=True, text=True, timeout=_SSH_TIMEOUT)
+            if r.returncode != 0:
+                return False
+            return r.stdout.strip() == ""
+        except Exception:
+            return False
     wt = os.path.expanduser(worktree_path)
     if not os.path.isdir(wt):
         return False
@@ -315,15 +346,21 @@ def compute_gates(conn, lane_row: dict, handoff_ref_epoch: "float | None" = None
     instance id and filters on sub_tag instead of the unattributable bare base. conn=None
     (several existing unit tests / the offline self-test) skips the check -- unattributable can
     only be PROVEN with a DB read, so it defaults to False (today's unchanged single-sibling
-    shape)."""
+    shape).
+
+    cross-host (bus #74293 FIX 2): lane_row['host'] resolves (via hub_reach.ssh_target_for_host)
+    to an ssh_target for a gzb-hosted lane, threaded into gate_idle/gate_git_clean so DETECTION
+    works cross-host too -- a lane_row with no 'host' key (every pre-existing caller) or a local
+    host resolves to ssh_target=None, i.e. today's unchanged local dispatch."""
     session = lane_row.get("tmux_session") or lane_row.get("lane")
     base = lane_row.get("base_agent_id") or lane_row.get("lane")
+    ssh_target = hub_reach.ssh_target_for_host(lane_row.get("host"))
     ambiguous = conn is not None and len(live_sessions_for_base(conn, base)) > 1
     ref = handoff_ref_epoch if handoff_ref_epoch is not None \
         else last_material_action_epoch(conn, base, session=session, sibling_ambiguous=ambiguous)
     return {
-        "idle": gate_idle(session) if session else False,
-        "git_clean": gate_git_clean(lane_row.get("worktree_path")),
+        "idle": gate_idle(session, ssh_target=ssh_target) if session else False,
+        "git_clean": gate_git_clean(lane_row.get("worktree_path"), ssh_target=ssh_target),
         "fresh_handoff": gate_fresh_handoff(base, lane_row.get("notes"), ref,
                                             sibling_ambiguous=ambiguous),
         "context_bloat": gate_context_bloat(conn, base, session=session),
@@ -427,16 +464,21 @@ def discover_lanes(conn, lane: "str | None" = None, per_instance: bool = False) 
     per_instance=True returns EVERY live sibling session for a multi-sibling base instead of
     collapsing to one -- only lane_proactive_recycle_nudge.py and lane_recycle_deadman.py pass
     this, now that their per-sibling state keying (state_key_for) makes evaluating each sibling
-    independently safe (those two tiers never recycle; they only message)."""
+    independently safe (those two tiers never recycle; they only message).
+
+    `host` (bus #74293 FIX 2): agent_status.host is now selected per row -- the ONLY place a
+    lane_row's host can come from, so compute_gates' cross-host ssh_target resolution and
+    main()'s armed-branch routing both key off THIS column. A row with host=None/unregistered
+    resolves hub_reach.ssh_target_for_host(None) -> None -> today's unchanged local dispatch."""
     singletons = sorted(fhb.SINGLETON_BODIES)
     ph = ",".join(["%s"] * len(singletons))
     if per_instance:
-        s_subq = ("SELECT base_agent_id, tmux_session FROM agent_status "
+        s_subq = ("SELECT base_agent_id, tmux_session, host FROM agent_status "
                   "WHERE tmux_session IS NOT NULL AND base_agent_id IS NOT NULL "
                   f"  AND base_agent_id NOT IN ({ph}) "
                   "  AND last_heartbeat > now() - interval '30 minutes'")
     else:
-        s_subq = ("SELECT DISTINCT ON (base_agent_id) base_agent_id, tmux_session "
+        s_subq = ("SELECT DISTINCT ON (base_agent_id) base_agent_id, tmux_session, host "
                   "FROM agent_status "
                   "WHERE tmux_session IS NOT NULL AND base_agent_id IS NOT NULL "
                   f"  AND base_agent_id NOT IN ({ph}) "
@@ -444,7 +486,7 @@ def discover_lanes(conn, lane: "str | None" = None, per_instance: bool = False) 
                   "ORDER BY base_agent_id, last_heartbeat DESC")
     q = ("SELECT COALESCE(l.lane, s.base_agent_id) AS lane, "
          "       l.worktree_path, l.branch, s.base_agent_id, l.desired_state, l.notes, "
-         "       s.tmux_session "
+         "       s.tmux_session, s.host "
          f"FROM ({s_subq}) s "
          "LEFT JOIN LATERAL (SELECT lane, worktree_path, branch, notes, desired_state "
          "                   FROM fleet_lanes fl WHERE fl.base_agent_id = s.base_agent_id "
@@ -564,6 +606,66 @@ def apply_lane_scope(lanes: list, exclude_prefixes: list) -> list:
             if not any(str(lr["base_agent_id"]).startswith(p) for p in exclude_prefixes)]
 
 
+_CROSS_HOST_NUDGE_PREFIX = "[sre-cross-host-recycle-nudge]"
+_CROSS_HOST_NUDGE_COOLDOWN_MIN = int(os.environ.get("SRE_CROSS_HOST_NUDGE_COOLDOWN_MIN", "30"))
+
+
+def cross_host_recycle_nudge_message(base: str, session: str, host: str, gates: dict,
+                                     reason: str) -> tuple:
+    """PURE: the (subject, body) of the non-destructive self-recycle nudge sent to a gzb-hosted
+    lane whose gates are confirmed permitted (bus #74293 FIX 2). The FORCING action (checkpoint
+    -> /clear -> reboot) is never driven cross-host — fleet doctrine keeps tmux-WRITE Mini-only
+    (hub_reach.py's own gzb remedy text) — so the lane itself decides and runs self_recycle.sh at
+    its own next seam, mirroring the proven lane_proactive_recycle_nudge.py shape."""
+    subject = (f"{_CROSS_HOST_NUDGE_PREFIX} {base}: confirmed idle+clean+bloated+fresh-handoff "
+              f"on {host} — self-recycle")
+    body = (
+        f"The SRE's CAI-681 gates confirm your lane (session {session}, host {host}) is idle, "
+        f"git-clean, context-bloated, and has a fresh handoff -- {gates}. On a Mini-hosted lane "
+        f"this would now be auto-recycled (checkpoint -> /clear -> reboot from handoff). The SRE "
+        f"cannot drive that cross-host (fleet doctrine keeps tmux-WRITE Mini-only; cross-host "
+        f"reach stays read-only), so YOU decide and act: run "
+        f"`scripts/self_recycle.sh --reset scripts/reset_lane.sh --handoff <your-handoff-path>` "
+        f"at your own next seam (your existing handoff already reads as fresh, so a bare "
+        f"self_recycle.sh with that path should be lossless). Reason: {reason}"
+    )
+    return subject, body
+
+
+def _cross_host_nudge_recently(conn, base: str,
+                               cooldown_min: int = _CROSS_HOST_NUDGE_COOLDOWN_MIN) -> bool:
+    """True iff a cross-host nudge was already sent to `base` within the cooldown window —
+    dedup against the 5-minute launchd cadence (dev.wingmen.sre-lane-recycle.plist) so a
+    not-yet-acted-on gzb lane isn't re-nudged every cycle."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM agent_messages WHERE from_agent = %s "
+            "  AND subject LIKE %s AND created_at > now() - make_interval(mins => %s) LIMIT 1",
+            [fhb.SRE_AGENT_ID, f"{_CROSS_HOST_NUDGE_PREFIX} {base}:%", cooldown_min])
+        return cur.fetchone() is not None
+
+
+def send_cross_host_recycle_nudge(conn, lane_row: dict, gates: dict, reason: str) -> bool:
+    """The cross-host FORCING-action fallback (bus #74293 FIX 2): post the non-destructive
+    self-recycle-nudge bus row instead of attempting any cross-host armed_recycle/reset_lane.sh
+    tmux-write (no such primitive exists, and fleet doctrine forbids it). Returns True iff a
+    nudge row was actually sent (False when skipped on cooldown)."""
+    base = lane_row.get("base_agent_id") or lane_row.get("lane")
+    session = lane_row.get("tmux_session") or lane_row.get("lane")
+    host = lane_row.get("host")
+    if _cross_host_nudge_recently(conn, base):
+        return False
+    subject, body = cross_host_recycle_nudge_message(base, session, host, gates, reason)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
+            " priority, requires_response, created_at) "
+            "VALUES (%s, %s, 'blocker', %s, %s, 'P2', false, now())",
+            [fhb.SRE_AGENT_ID, base, subject, body])
+    conn.commit()
+    return True
+
+
 def armed_recycle(conn, lane_row: dict, *, reason: str,
                   handoff_ref_epoch: "float | None" = None) -> dict:
     """The armed checkpoint-recycle ACTION on ONE specific lane_row, in-process. Re-verifies the
@@ -595,6 +697,26 @@ def armed_recycle(conn, lane_row: dict, *, reason: str,
     out = (r.stdout + r.stderr).strip()
     return {"recycled": r.returncode == 0, "rc": r.returncode, "session": p["session"],
             "boot": boot, "gates": p["gates"], "output": out}
+
+
+def _perform_armed_action(conn, lane_row: dict, p: dict, *, reason: str,
+                          handoff_ref_epoch: "float | None",
+                          invoker_agent: "str | None", invoker_session: "str | None",
+                          i_mean_it: bool) -> dict:
+    """The ARMED branch's single dispatch point (bus #74293 FIX 2): self-check guard first (op
+    #29023/#63326, unchanged), then route by host — a gzb-hosted lane gets the non-destructive
+    cross-host nudge (send_cross_host_recycle_nudge), everything else (local / unknown host,
+    today's unchanged default) gets armed_recycle exactly as before."""
+    if self_recycle_refused(invoker_agent, invoker_session, p["base"], p["session"],
+                            True, i_mean_it):
+        return {"acted": False, "refused": True}
+    ssh_target = hub_reach.ssh_target_for_host(lane_row.get("host"))
+    if ssh_target:
+        sent = send_cross_host_recycle_nudge(conn, lane_row, p["gates"], reason)
+        return {"acted": sent, "refused": False, "cross_host": True,
+                "host": lane_row.get("host"), "nudged": sent}
+    res = armed_recycle(conn, lane_row, reason=reason, handoff_ref_epoch=handoff_ref_epoch)
+    return {"acted": True, "refused": False, "cross_host": False, **res}
 
 
 def _resolve_armed(no_arm: bool, env_lane_arm: "str | None") -> bool:
@@ -697,19 +819,24 @@ def main() -> int:
         if not armed:
             print("            would recycle (disarmed — not touching it)")
             continue
-        # op#29023/#63326: a lane running this ARMED ON ITSELF must pass --i-mean-it — a bare
-        # self-invocation is refused so a "self-check" can never silently red-reset.
-        if self_recycle_refused(invoker_agent, invoker_session, p["base"], p["session"],
-                                armed, args.i_mean_it):
+        # ARMED + permitted: self-check guard (op#29023/#63326), then dispatch by host —
+        # cross-host (gzb) gets the non-destructive nudge, local/unknown gets armed_recycle
+        # (audit-before-clear + reset_lane.sh) exactly as before (bus #74293 FIX 2).
+        act = _perform_armed_action(conn, lr, p, reason=args.reason,
+                                    handoff_ref_epoch=args.handoff_after,
+                                    invoker_agent=invoker_agent, invoker_session=invoker_session,
+                                    i_mean_it=args.i_mean_it)
+        if act.get("refused"):
             print(f"            REFUSED: armed self-recycle of session {p['session']} by "
                   f"{invoker_agent or invoker_session} without --i-mean-it "
                   f"(op#29023/#63326 self-check guard)")
             continue
-        # ARMED + permitted: audit BEFORE clear (cond 4), then reset_lane.sh — via the shared
-        # armed_recycle action (re-verifies the floor at the moment of action).
-        res = armed_recycle(conn, lr, reason=args.reason, handoff_ref_epoch=args.handoff_after)
-        print(f"            reset_lane.sh rc={res.get('rc')} recycled={res.get('recycled')} "
-              f":: {(res.get('output') or '').splitlines()[-1:]}")
+        if act.get("cross_host"):
+            print(f"            cross-host ({act.get('host')}): "
+                  f"{'nudge sent' if act.get('nudged') else 'nudge skipped (cooldown)'}")
+        else:
+            print(f"            reset_lane.sh rc={act.get('rc')} recycled={act.get('recycled')} "
+                  f":: {(act.get('output') or '').splitlines()[-1:]}")
         acted += 1
     print(f"done — {acted} recycled, {len(lanes)-acted} left alone.")
     conn.close()

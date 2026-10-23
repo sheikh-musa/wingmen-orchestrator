@@ -30,7 +30,8 @@ def lanes_db(pg_dsn):
                 agent_id        text PRIMARY KEY,
                 base_agent_id   text,
                 tmux_session    text,
-                last_heartbeat  timestamptz
+                last_heartbeat  timestamptz,
+                host            text
             )
         """)
         cur.execute("""
