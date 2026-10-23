@@ -206,8 +206,56 @@ def pause_lane(session: str, apply: bool) -> Dict[str, str]:
     return {"session": session, "result": "OK", "detail": "desired_state=paused"}
 
 
+def check_hard_exclude_divergence(session: str, apply: bool) -> None:
+    """Best-effort, OBSERVATIONAL ONLY (orch-console Q5, bus #74588 — transition
+    period before HARD_EXCLUDE_LANES is deleted): compares this module's OLD
+    is_hard_excluded(session) verdict against what the NEW provider_policy +
+    provider_policy_lane_override gate (scripts/lib/provider_policy.assert_glm_allowed)
+    would decide for the 'zai' provider. Posts ONE loud warning to orch-console if
+    they disagree, or if the lane override itself is misconfigured (widens rather
+    than narrows). NEVER raises and NEVER changes the caller's actual decision —
+    the OLD check stays authoritative this cycle; this only surfaces drift so
+    HARD_EXCLUDE_LANES can be deleted once a clean cycle is observed."""
+    try:
+        from scripts.lib import provider_policy as pp
+        import psycopg
+        from scripts.bus_send import dburl
+        with psycopg.connect(dburl(os.environ)) as conn, conn.cursor() as cur:
+            cur.execute("SELECT client_key, allowed_providers, text_only FROM provider_policy")
+            cols = [d[0] for d in cur.description]
+            policy_rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur.execute("SELECT lane, allowed_providers, text_only FROM provider_policy_lane_override")
+            cols = [d[0] for d in cur.description]
+            override_rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        old_excluded = is_hard_excluded(session)
+        try:
+            pp.assert_glm_allowed(session, policy_rows=policy_rows, override_rows=override_rows)
+            new_excluded = False
+        except pp.ProviderNotAllowedError:
+            new_excluded = True
+        except pp.ProviderPolicyMisconfigured as e:
+            page(f"[provider-policy-divergence] {session}: lane override misconfigured", str(e), apply)
+            return
+        if old_excluded != new_excluded:
+            page(f"[provider-policy-divergence] {session}: old={old_excluded} new={new_excluded}",
+                 f"Transition-period warn-on-divergence (orch-console Q5, bus #74588) — "
+                 f"HARD_EXCLUDE_LANES (old, authoritative this cycle) and "
+                 f"provider_policy/provider_policy_lane_override (new) disagree on whether "
+                 f"{session!r} may use GLM: old says excluded={old_excluded}, new says "
+                 f"excluded={new_excluded}. Neither check blocked this flip. Investigate before "
+                 f"HARD_EXCLUDE_LANES is deleted.", apply)
+    except BaseException as e:  # noqa: BLE001 — observational only, must never block a real
+        # flip. BaseException (not Exception) deliberately: bus_send.dburl() raises
+        # SystemExit (not a plain Exception) when DATABASE_URL is unset, which this
+        # side-channel must swallow just as safely as any other lookup failure.
+        print(f"glm_peak_pause_resume: divergence check failed ({e!r}) — skipped, not blocking",
+              file=sys.stderr)
+
+
 def flip_back_to_glm(session: str, orch_dir: Path, apply: bool, run=subprocess.run,
-                      token_resolver=resolve_default_token) -> Dict[str, str]:
+                      token_resolver=resolve_default_token,
+                      divergence_check=check_hard_exclude_divergence) -> Dict[str, str]:
+    divergence_check(session, apply)
     if is_hard_excluded(session):
         return {"session": session, "result": "SKIPPED", "detail": "hard-excluded lane — never flips to GLM"}
     if not apply:
