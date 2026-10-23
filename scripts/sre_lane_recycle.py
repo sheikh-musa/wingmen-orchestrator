@@ -37,10 +37,12 @@ from pathlib import Path
 
 _ORCH_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ORCH_DIR / "scripts" / "lib"))
+sys.path.insert(0, str(_ORCH_DIR / "scripts"))
 import fleet_health_boundaries as fhb  # noqa: E402
 import handoff_compaction_policy as hcp  # noqa: E402  (SSOT staged handoff compaction)
 import context_truth as _ct  # noqa: E402  (Gap-1: ONE gauge source, shared with the dead-man)
 import handoff_find as _hf  # noqa: E402  (ONE newest-handoff definition, CAI-1392 C)
+import lane_recycle_deadman as _lrd  # noqa: E402  (bus #74293 facet 13: the sibling-ambiguous pane fallback)
 
 TMUX = os.environ.get("SRE_TMUX_BIN", "/usr/local/bin/tmux")
 _TMUX_TIMEOUT = 5
@@ -150,11 +152,21 @@ def _newest_handoff_mtime(base_agent_id: str, notes: "str | None") -> "float | N
         return None
 
 
-def gate_fresh_handoff(base_agent_id: str, notes: "str | None", last_action_epoch: "float | None") -> bool:
+def gate_fresh_handoff(base_agent_id: str, notes: "str | None", last_action_epoch: "float | None",
+                       sibling_ambiguous: bool = False) -> bool:
     """cond 2, LOAD-BEARING. True iff a handoff exists AND was written at/after
     the lane's last material action — so a /clear reconstitutes losslessly.
     Fail-closed: no handoff, or an indeterminable last action, or a handoff older
-    than the last action -> False (a stale handoff means the reset loses work)."""
+    than the last action -> False (a stale handoff means the reset loses work).
+
+    sibling_ambiguous (bus #74293, facet 13): handoff_find's glob matches purely on the
+    base's short name -- it carries NO per-instance marker at all. When >1 live session
+    shares this base, ANY sibling's freshest handoff write reads as fresh to EVERY sibling,
+    so this gate cannot prove the handoff belongs to THIS instance -> fail closed, same
+    '>1 live sibling -> unattributable' shape as gate_context_bloat's pane fallback (though
+    here there is no session-specific signal to fall back to, so the answer is simply False)."""
+    if sibling_ambiguous:
+        return False
     ho = _newest_handoff_mtime(base_agent_id, notes)
     if ho is None:
         return False
@@ -178,7 +190,23 @@ def last_material_action_epoch(conn, base_agent_id: str) -> "float | None":
         return None
 
 
-def latest_context_frac(conn, base_agent_id: str, window: int = _CTX_WINDOW) -> "float | None":
+def _pane_only_frac(session: str, window: int) -> "float | None":
+    """PANE-only context fraction for `session` -- the sibling-ambiguous fallback (bus #74293,
+    facet 13: cc_session_costs.cc_identity is written as the bare base for EVERY sibling, the
+    same structural gap lane_proactive_recycle_nudge._gauge_for_lane already found for the
+    nudge tier -- a multi-sibling base's 'freshest row' could belong to ANY sibling, not
+    necessarily this session's). No gauge input reaches resolve_lane_pct here at all -- a
+    sibling-ambiguous gauge must never leak in even as a tiebreak. The pane IS session-specific
+    (a real tmux capture-pane on the exact session string) so it stays trustworthy when the
+    gauge can't be; if the pane is also blind, this correctly returns None (unknown, not low)."""
+    pane_pct, pane_hint_k = _lrd._pane(session)
+    known, pct, _last_known, _reason = _lrd.resolve_lane_pct(
+        gauge_tokens=None, gauge_age_s=None, pane_pct=pane_pct, pane_hint_k=pane_hint_k, window=window)
+    return (pct / 100.0) if known and pct is not None else None
+
+
+def latest_context_frac(conn, base_agent_id: str, window: int = _CTX_WINDOW,
+                        session: "str | None" = None) -> "float | None":
     """Latest context fraction (0..1) for a lane, or None when it CANNOT be established.
 
     Gap-1 resolution (sre_lane_recycle.py:219, bus 37752): the measurable-or-not DECISION now
@@ -192,9 +220,20 @@ def latest_context_frac(conn, base_agent_id: str, window: int = _CTX_WINDOW) -> 
 
     op#14565 is preserved: freshness keys on COALESCE(ended_at, created_at) (the last-write time
     the auto-writer advances), so a long-lived bloated-but-un-recycled lane (old created_at, fresh
-    ended_at) still reads its bloat rather than falling to None."""
+    ended_at) still reads its bloat rather than falling to None.
+
+    `session` (bus #74293, facet 13): when >1 live tmux session shares this base, the
+    cc_session_costs row is UNATTRIBUTABLE -- it could belong to ANY sibling (cc_identity is
+    written as the bare base for every sibling, confirmed the same way
+    lane_proactive_recycle_nudge._gauge_for_lane found it for the nudge tier). Rather than trust
+    a row that might describe a different sibling's context entirely, fall back to a
+    session-specific pane probe (_pane_only_frac) -- same '>1 live sibling -> force
+    unattributable, re-measure via the pane' shape _gauge_for_lane already uses. A caller that
+    omits `session` (every pre-existing call site) keeps today's base-keyed behaviour exactly."""
     if conn is None:
         return None
+    if session and len(live_sessions_for_base(conn, base_agent_id)) > 1:
+        return _pane_only_frac(session, window)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -218,14 +257,15 @@ def latest_context_frac(conn, base_agent_id: str, window: int = _CTX_WINDOW) -> 
 
 
 def gate_context_bloat(conn, base_agent_id: str, hard: float = _CTX_HARD,
-                       window: int = _CTX_WINDOW) -> bool:
+                       window: int = _CTX_WINDOW, session: "str | None" = None) -> bool:
     """The operator's 'auto-recycle AT 80%' trigger. True iff FRESH telemetry proves
     the lane's context fraction >= hard. Fail-closed: no/stale/untrustworthy
     telemetry -> False (never recycle a lane we can't prove is bloated — that both
     matches 'at 80%' and never spends a lossless-but-not-free reset on a lane still
     early in its window). Reads cc_session_costs today; migrate to the SRE's
-    canonical per-lane pct once Gap-1 lands so the window lives in ONE place."""
-    frac = latest_context_frac(conn, base_agent_id, window)
+    canonical per-lane pct once Gap-1 lands so the window lives in ONE place.
+    `session` is threaded to latest_context_frac's sibling-ambiguity fallback (bus #74293)."""
+    frac = latest_context_frac(conn, base_agent_id, window, session=session)
     if frac is None:
         return False
     return frac >= hard
@@ -250,16 +290,25 @@ def compute_gates(conn, lane_row: dict, handoff_ref_epoch: "float | None" = None
     handoff mtime against. Default None -> use last_material_action_epoch (the autonomous
     detector's 'is an EXISTING handoff current?' question). The DRIVEN checkpoint path passes
     T_nudge instead, so a 'DONE' ack the lane posts AFTER writing its handoff cannot make a
-    genuinely-fresh handoff read as stale."""
+    genuinely-fresh handoff read as stale.
+
+    sibling-ambiguity (bus #74293, facet 13): when conn is available, checks whether >1 live
+    tmux session shares this lane's base -- if so, context_bloat falls back to a
+    session-specific pane probe (gate_context_bloat/latest_context_frac) and fresh_handoff
+    fails closed (no per-instance handoff marker exists to fall back to). conn=None (several
+    existing unit tests / the offline self-test) skips the check -- unattributable can only be
+    PROVEN with a DB read, so it defaults to False (today's unchanged single-sibling shape)."""
     session = lane_row.get("tmux_session") or lane_row.get("lane")
     base = lane_row.get("base_agent_id") or lane_row.get("lane")
     ref = handoff_ref_epoch if handoff_ref_epoch is not None \
         else last_material_action_epoch(conn, base)
+    ambiguous = conn is not None and len(live_sessions_for_base(conn, base)) > 1
     return {
         "idle": gate_idle(session) if session else False,
         "git_clean": gate_git_clean(lane_row.get("worktree_path")),
-        "fresh_handoff": gate_fresh_handoff(base, lane_row.get("notes"), ref),
-        "context_bloat": gate_context_bloat(conn, base),
+        "fresh_handoff": gate_fresh_handoff(base, lane_row.get("notes"), ref,
+                                            sibling_ambiguous=ambiguous),
+        "context_bloat": gate_context_bloat(conn, base, session=session),
     }
 
 
