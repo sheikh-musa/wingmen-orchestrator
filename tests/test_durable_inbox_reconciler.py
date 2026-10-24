@@ -1,0 +1,208 @@
+"""Tests for migration 117 (the additive durable-inbox schema) and its reconciler
+(Tier-1(b) janky-tools audit, op#33149).
+
+classify() is pure and DB-free. Everything else needs a real agent_messages
+table -- seeded on the shared ephemeral pg_dsn cluster (tests/conftest.py), same
+idiom as operator_ledger_db/reaper_db. NEVER the live substrate (op#22741).
+
+Review (bus #74738) flagged migration 117's whole additive premise -- that direct
+INSERT keeps working -- as untested, plus missing idempotency and ack coverage.
+Added below.
+"""
+import datetime as dt
+import pathlib
+import sys
+import uuid
+
+import psycopg
+import pytest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "scripts" / "lib"))
+import durable_inbox_reconciler as reconciler  # noqa: E402
+
+NOW = dt.datetime(2026, 10, 24, 12, 0, 0, tzinfo=dt.timezone.utc)
+
+MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parent.parent / "migrations"
+
+
+@pytest.fixture
+def durable_inbox_db(pg_dsn):
+    """Ephemeral Postgres carrying migration 117's schema (additive only --
+    the revoke that would make this the only write path was rejected on
+    review and removed from this PR, tracked as backlog#124). Schema is
+    dropped and recreated per-test on the shared
+    session-scoped cluster, same idiom as operator_ledger_db. pg_dsn is itself
+    a freshly-created ephemeral socket-only cluster (tests/conftest.py), so it
+    cannot resolve to the real substrate by construction."""
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP SCHEMA public CASCADE")
+        cur.execute("CREATE SCHEMA public")
+        for role in ("anon", "authenticated", "service_role"):
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+            if cur.fetchone() is None:
+                # Fixed literals from the tuple above, not external input --
+                # CREATE ROLE can't take a bind parameter for the role name.
+                cur.execute(f"CREATE ROLE {role}")
+        cur.execute("""
+            CREATE TABLE agent_messages (
+                id                 BIGSERIAL PRIMARY KEY,
+                from_agent         TEXT NOT NULL,
+                to_agent           TEXT NOT NULL,
+                message_type       TEXT NOT NULL,
+                subject            TEXT NOT NULL,
+                body               TEXT NOT NULL,
+                priority           TEXT NOT NULL,
+                requires_response  BOOLEAN NOT NULL DEFAULT false,
+                thread_id          UUID NOT NULL,
+                sub_tag            TEXT,
+                read_at            TIMESTAMPTZ,
+                responded_at       TIMESTAMPTZ,
+                response_ref       TEXT,
+                created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        migration_117 = (MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text()
+        cur.execute(migration_117)
+    conn = psycopg.connect(pg_dsn)
+    yield conn
+    conn.close()
+
+
+def _post(conn, **overrides):
+    args = dict(
+        from_agent="cc-paperclip-spike",
+        to_agent="orch-console",
+        message_type="update",
+        subject="test subject",
+        body="test body",
+        priority="P2",
+        requires_response=False,
+        thread_id=str(uuid.uuid4()),
+        sub_tag=None,
+    )
+    args.update(overrides)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM post_agent_message(%(from_agent)s, %(to_agent)s, "
+            "%(message_type)s, %(subject)s, %(body)s, %(priority)s, "
+            "%(requires_response)s, %(thread_id)s, %(sub_tag)s)",
+            args,
+        )
+        row = cur.fetchone()
+    conn.commit()
+    return row[0]
+
+
+def test_classify_never_delivered_is_pending():
+    assert reconciler.classify(delivered_at=None, acked_at=None, lease_expires_at=None, now=NOW) == "PENDING"
+
+
+def test_classify_delivered_and_acked_is_ok():
+    delivered = NOW - dt.timedelta(seconds=30)
+    acked = NOW - dt.timedelta(seconds=10)
+    lease = delivered + dt.timedelta(seconds=60)
+    assert reconciler.classify(delivered_at=delivered, acked_at=acked, lease_expires_at=lease, now=NOW) == "OK"
+
+
+def test_classify_delivered_not_acked_lease_not_expired_is_waiting():
+    delivered = NOW - dt.timedelta(seconds=10)
+    lease = delivered + dt.timedelta(seconds=60)
+    assert reconciler.classify(delivered_at=delivered, acked_at=None, lease_expires_at=lease, now=NOW) == "WAITING"
+
+
+def test_classify_delivered_not_acked_lease_expired_is_stuck():
+    delivered = NOW - dt.timedelta(seconds=120)
+    lease = delivered + dt.timedelta(seconds=60)
+    assert reconciler.classify(delivered_at=delivered, acked_at=None, lease_expires_at=lease, now=NOW) == "STUCK"
+
+
+def test_classify_acked_after_lease_expiry_is_still_ok():
+    delivered = NOW - dt.timedelta(seconds=120)
+    acked = NOW - dt.timedelta(seconds=5)
+    lease = delivered + dt.timedelta(seconds=60)
+    assert reconciler.classify(delivered_at=delivered, acked_at=acked, lease_expires_at=lease, now=NOW) == "OK"
+
+
+def test_find_stuck_messages_against_real_schema(durable_inbox_db):
+    stuck_id = _post(durable_inbox_db)
+    waiting_id = _post(durable_inbox_db)
+    pending_id = _post(durable_inbox_db)
+
+    with durable_inbox_db.cursor() as cur:
+        cur.execute("SELECT mark_delivered(%s, %s)", (stuck_id, -1))
+        cur.execute("SELECT mark_delivered(%s, %s)", (waiting_id, 3600))
+    durable_inbox_db.commit()
+
+    stuck = reconciler.find_stuck_messages(durable_inbox_db)
+    assert stuck_id in stuck
+    assert waiting_id not in stuck
+    assert pending_id not in stuck
+
+
+def test_find_stuck_messages_is_idempotent(durable_inbox_db):
+    stuck_id = _post(durable_inbox_db)
+    with durable_inbox_db.cursor() as cur:
+        cur.execute("SELECT mark_delivered(%s, %s)", (stuck_id, -1))
+    durable_inbox_db.commit()
+
+    first = reconciler.find_stuck_messages(durable_inbox_db)
+    second = reconciler.find_stuck_messages(durable_inbox_db)
+    assert first == second
+    assert stuck_id in first
+
+
+def test_direct_insert_still_works_after_migration_117(durable_inbox_db):
+    """The whole additive premise: migration 117 must never take away the
+    direct-INSERT path every current fleet writer (bus_send.py and every
+    lane) still uses today."""
+    with durable_inbox_db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO agent_messages "
+            "(from_agent, to_agent, message_type, subject, body, priority, "
+            " requires_response, thread_id) "
+            "VALUES ('x','y','update','direct write','b','P2', false, gen_random_uuid()) "
+            "RETURNING id"
+        )
+        (row_id,) = cur.fetchone()
+    durable_inbox_db.commit()
+    assert row_id is not None
+
+
+def test_migration_117_is_idempotent_on_rerun(pg_dsn):
+    """Re-applying 117 to a schema it has already been applied to must not
+    error -- ADD COLUMN IF NOT EXISTS / CREATE OR REPLACE FUNCTION / the
+    guarded ADD CONSTRAINT / REVOKE+GRANT are all re-run-safe by construction,
+    but that needs proving, not assuming."""
+    migration_117 = (MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text()
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP SCHEMA public CASCADE")
+        cur.execute("CREATE SCHEMA public")
+        for role in ("anon", "authenticated", "service_role"):
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+            if cur.fetchone() is None:
+                cur.execute(f"CREATE ROLE {role}")
+        cur.execute("""
+            CREATE TABLE agent_messages (
+                id BIGSERIAL PRIMARY KEY, from_agent TEXT NOT NULL, to_agent TEXT NOT NULL,
+                message_type TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL,
+                priority TEXT NOT NULL, requires_response BOOLEAN NOT NULL DEFAULT false,
+                thread_id UUID NOT NULL, sub_tag TEXT, read_at TIMESTAMPTZ,
+                responded_at TIMESTAMPTZ, response_ref TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        cur.execute(migration_117)
+        cur.execute(migration_117)  # re-run -- must not raise
+
+
+def test_ack_message_sets_acked_at(durable_inbox_db):
+    row_id = _post(durable_inbox_db)
+    with durable_inbox_db.cursor() as cur:
+        cur.execute("SELECT mark_delivered(%s, %s)", (row_id, 60))
+        cur.execute("SELECT ack_message(%s)", (row_id,))
+    durable_inbox_db.commit()
+
+    with durable_inbox_db.cursor() as cur:
+        cur.execute("SELECT acked_at FROM agent_messages WHERE id=%s", (row_id,))
+        (acked_at,) = cur.fetchone()
+    assert acked_at is not None
