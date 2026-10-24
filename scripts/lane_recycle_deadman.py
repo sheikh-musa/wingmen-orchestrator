@@ -30,6 +30,8 @@ _ORCH_DIR = Path(__file__).resolve().parent.parent
 if str(_ORCH_DIR) not in sys.path:
     sys.path.insert(0, str(_ORCH_DIR))
 
+from scripts import bus_send  # noqa: E402
+
 # Thresholds. HARD_PCT/SUSTAIN_S are the dead-man's page bar; they are DELIBERATELY above the
 # recycler's 80% fire bar — the dead-man only fires when the recycler has already had a chance
 # and failed to bring the lane down.
@@ -240,12 +242,8 @@ def _nudge(cur, conn, lane_display: str, lane_base: str, dry: bool) -> str:
     if _nudged_today(cur, lane_display):
         print(f"            already nudged {lane_display} today — deduped")
         return "deduped"
-    cur.execute(
-        "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
-        " priority, requires_response, created_at) "
-        "VALUES ('cc-fleet-health',%s,'blocker',%s,%s,'P1',false, now())",
-        [lane_base, subject, body])
-    conn.commit()
+    bus_send.send(from_agent="cc-fleet-health", to=lane_base, mtype="blocker",
+                  subject=subject, body=body, priority="P1", req=False)
     print(f"            NUDGED lane '{lane_base}': self-recycle")
     return "nudged"
 
@@ -258,12 +256,8 @@ def _page(cur, conn, lane: str, verdict: str, reason: str, dry: bool) -> str:
     if _paged_today(cur, lane, verdict):
         print(f"            already paged {lane}/{verdict} today — deduped")
         return "deduped"
-    cur.execute(
-        "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
-        " priority, requires_response, created_at) "
-        "VALUES ('cc-fleet-health','orch-console','blocker',%s,%s,'P1',false, now())",
-        [subject, body])
-    conn.commit()
+    bus_send.send(from_agent="cc-fleet-health", to="orch-console", mtype="blocker",
+                  subject=subject, body=body, priority="P1", req=False)
     print(f"            PAGED orch-console: {verdict}")
     return "paged"
 

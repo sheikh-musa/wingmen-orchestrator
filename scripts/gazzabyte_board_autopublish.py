@@ -64,19 +64,16 @@ def _degrade(reason: str) -> None:
     _log(f"DEGRADE: {reason}")
     try:
         sys.path.insert(0, str(ORCH))
-        import psycopg
+        from scripts import bus_send
         from nervous_system.nazim_bus_notify import _dsn
         body = (f"gazzabyte board auto-publisher DEGRADED — {reason}. "
                 f"share.wingmen.dev/r/{SLUG} may be STALE (op#11626 wants it never-stale). "
                 f"Publish manually until fixed: git fetch origin && "
                 f"git checkout origin/{BRANCH} -- {BOARD} && "
                 f"scripts/publish_share.sh {BOARD} {SLUG} \"{TITLE}\".")
-        with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response)"
-                " VALUES ('gazzabyte-autopublish','orch-console','blocker',%s,%s,'P1',true)",
-                (f"auto-publisher DEGRADED — gazzabyte-status may be stale ({reason[:60]})", body))
-            conn.commit()
+        bus_send.send(from_agent="gazzabyte-autopublish", to="orch-console", mtype="blocker",
+                      subject=f"auto-publisher DEGRADED — gazzabyte-status may be stale ({reason[:60]})",
+                      body=body, priority="P1", req=True, dsn=_dsn())
     except Exception as e:  # never let the alarm-bell itself take down the watcher
         _log(f"WARN: could not post degrade bus row: {e}")
 

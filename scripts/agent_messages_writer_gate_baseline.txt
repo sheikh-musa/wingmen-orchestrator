@@ -30,28 +30,31 @@ nervous_system/hub_self_recovery.py
 nervous_system/lane_watchdog.py
 nervous_system/lane_wedge_watchdog.py
 nervous_system/media_reaper.py
+# nervous_system/qwen_lane.py HELD: needs is_test=true, which post_agent_message's
+# RPC signature cannot express. Same RPC-signature gap as scripts/lane_drill_seed.py,
+# flagged to orch-console (2026-10-24).
 nervous_system/qwen_lane.py
 nervous_system/singleton_liveness.py
 nervous_system/wake_backstop_sweep.py
 nervous_system/weekly_limit_monitor.py
-ops/audit-chain-weekly/weekly_audit_chain_check.py
 scripts/adcda_fn_error_bus_watch.py
-scripts/adcda_port_watch.py
 scripts/address_variant_miss_watchdog.py
 scripts/agent_worktree_reaper.py
 scripts/auto_recycle_on_bloat.py
 scripts/channel_liveness_watchdog.py
-scripts/checkpoint_recycle_driver.py
 scripts/cisco_reconcile_watch.py
 scripts/client_channel_nodrop_watch.py
+# scripts/console_assign.py HELD (not in baseline removal batch): bus-row INSERT + the
+# operator_asks link/insert must commit in ONE transaction (script's own header: "no
+# orphan bus row"). bus_send.send() opens its own separate connection and commits
+# immediately, which would break that atomicity guarantee. Needs a deliberate call
+# (RPC-direct-on-existing-cursor vs. accepting the atomicity loss), not a mechanical
+# swap -- flagged to orch-console rather than guessed at (2026-10-24).
 scripts/console_assign.py
 scripts/context_health_watchdog.py
 scripts/deploy_provenance_watch.py
 scripts/disk_autoremediate.py
-scripts/file_history_prune.py
 scripts/fleet_health.py
-scripts/fleet_stall_watch.py
-scripts/gazzabyte_board_autopublish.py
 scripts/gazzabyte_request_nodrop_watch.py
 scripts/hub_bus_currency_monitor.py
 scripts/hub_self_recovery_staleness_watchdog.py
@@ -61,13 +64,16 @@ scripts/irsyad_pii_containment_monitor.py
 scripts/irsyad_shadow_watch.py
 scripts/irsyad_spin_worker.py
 scripts/irsyad_worker_reaper.py
+# scripts/lane_drill_seed.py HELD: needs is_test=true, which post_agent_message's
+# 9-column RPC signature (migration 117) cannot express. RPC-signature gap flagged to
+# orch-console (2026-10-24), not silently dropped.
 scripts/lane_drill_seed.py
 scripts/lane_proactive_recycle_nudge.py
-scripts/lane_recycle_deadman.py
-scripts/lib/reset_audit_row.py
 scripts/live_checkout_branch_watchdog.py
 scripts/memory_index_audit.py
-scripts/op11911_syed_trigger.py
+# scripts/opus_reprobe_storefront.py HELD: needs posted_by_identity override, which
+# post_agent_message's RPC signature cannot express. Same RPC-signature gap as
+# lane_drill_seed.py / nervous_system/qwen_lane.py, flagged to orch-console (2026-10-24).
 scripts/opus_reprobe_storefront.py
 scripts/pooler_breaker_snapshot.py
 scripts/priority_sla_watchdog.py
@@ -76,6 +82,5 @@ scripts/queue_age_watchdog.py
 scripts/repo_hygiene_sweep.py
 scripts/sentry_new_error_watch.py
 scripts/sre_lane_recycle.py
-scripts/sre_liveness_watchdog.py
 scripts/supervised_draft_deadman.py
 scripts/watchdog_tripwire_report.py

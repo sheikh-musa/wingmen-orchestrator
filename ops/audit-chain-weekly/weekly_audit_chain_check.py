@@ -27,6 +27,12 @@ Modes:
 Run: GOUMLYNE_RO_DATABASE_URL=... DATABASE_URL=... python3 weekly_audit_chain_check.py [--run]
 """
 import os, sys, json, hashlib, datetime
+from pathlib import Path
+
+_ORCH_DIR = Path(__file__).resolve().parent.parent.parent
+if str(_ORCH_DIR) not in sys.path:
+    sys.path.insert(0, str(_ORCH_DIR))
+from scripts import bus_send  # noqa: E402
 
 ORG = '73339164-7c1f-40ba-a093-33f1f292dd4c'   # irsyad silo (goumlyne), audit_chain_boundaries#1
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -143,7 +149,6 @@ def _git_sha():
 
 
 def emit_heartbeat(res):
-    import psycopg2
     clean = not res['new_forks']
     prio = 'P3' if clean else 'P1'
     subject = (f"audit-chain weekly: {res['rows']} rows walked, tip {res['tip']}, "
@@ -164,22 +169,12 @@ def emit_heartbeat(res):
         'ran_at': datetime.datetime.utcnow().isoformat() + 'Z',
         'git_sha': _git_sha(),
     }
-    conn = psycopg2.connect(_dsn('DATABASE_URL', 'DATABASE_URL'))
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            """INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body,
-                                           requires_response, priority)
-               VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-            ('audit-chain-runner', 'cc-irsyad-coord',
-             ('blocker' if not clean else 'update'),
-             subject, json.dumps(body), (not clean), prio))
-        mid = cur.fetchone()[0]
-        conn.commit()
-        cur.close()
-        return mid
-    finally:
-        conn.close()
+    mid, _thread = bus_send.send(
+        from_agent='audit-chain-runner', to='cc-irsyad-coord',
+        mtype=('blocker' if not clean else 'update'),
+        subject=subject, body=json.dumps(body), priority=prio, req=(not clean),
+        dsn=_dsn('DATABASE_URL', 'DATABASE_URL'))
+    return mid
 
 
 def main():

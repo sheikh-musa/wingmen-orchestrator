@@ -24,6 +24,11 @@ import sys
 import psycopg
 from dotenv import load_dotenv
 
+try:
+    from scripts import bus_send
+except ImportError:
+    import bus_send  # type: ignore
+
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 STALL_HOURS = int(os.environ.get("FLEET_STALL_HOURS", "8"))
@@ -118,11 +123,9 @@ def main():
                     f"These desired-up lanes heartbeat 'working' but have produced NOTHING for >{STALL_HOURS}h:\n\n"
                     f"{lines}\n\nACTION (hub, pen ii): re-nudge each so it drains its bus + resumes. "
                     "Cross-check: SELECT * FROM fleet_drain_freshness;")
-            cur.execute("""INSERT INTO agent_messages
-                             (from_agent,to_agent,thread_id,message_type,subject,body,requires_response,priority,is_test)
-                           VALUES ('orch-console','cc-orchestrator',gen_random_uuid(),'update',%s,%s,true,'P1',false)
-                           RETURNING id""", (subject, body))
-            alerted_id = cur.fetchone()[0]
+            alerted_id, _thread = bus_send.send(
+                from_agent="orch-console", to="cc-orchestrator", mtype="update",
+                subject=subject, body=body, priority="P1", req=True, dsn=DSN)
             cur.execute("UPDATE fleet_stall_state SET alerted_at=now() WHERE lane = ANY(%s)", (to_alert,))
 
         # recovery note (only for lanes we'd actually alerted before is unknown here; keep it simple: note recoveries)
@@ -131,11 +134,9 @@ def main():
             subject = f"Fleet recovery - {len(recovered)} lane(s) producing again: {', '.join(recovered)}"
             body = "fleet_stall_watch: these lanes are producing again and have cleared the stall list:\n\n" + \
                    "\n".join(f"- {l}" for l in recovered)
-            cur.execute("""INSERT INTO agent_messages
-                             (from_agent,to_agent,thread_id,message_type,subject,body,requires_response,priority,is_test)
-                           VALUES ('orch-console','cc-orchestrator',gen_random_uuid(),'update',%s,%s,false,'P2',false)
-                           RETURNING id""", (subject, body))
-            recovery_id = cur.fetchone()[0]
+            recovery_id, _thread = bus_send.send(
+                from_agent="orch-console", to="cc-orchestrator", mtype="update",
+                subject=subject, body=body, priority="P2", req=False, dsn=DSN)
 
         conn.commit()
         print(f"stalled now ({len(stalled)}): {sorted(stalled)}")

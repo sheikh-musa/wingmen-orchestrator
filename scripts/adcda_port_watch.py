@@ -47,6 +47,11 @@ from __future__ import annotations
 import os, subprocess, sys, pathlib, datetime
 import psycopg
 
+try:
+    from scripts import bus_send
+except ImportError:
+    import bus_send  # type: ignore
+
 ORCH = pathlib.Path.home() / "wingmen" / "orchestrator"
 ADCDA = pathlib.Path.home() / "wingmen" / "projects" / "cosem-adcda"
 STATE = ORCH / "logs" / "adcda_port_watch.state"
@@ -94,15 +99,10 @@ def _owner_has_any_registration(env, agent_id: str) -> bool:
 
 
 def _post_bus(env, to_agent, subject, body, priority="P2"):
-    dsn = env.get("DATABASE_URL")
-    with psycopg.connect(dsn) as c, c.cursor() as cur:
-        cur.execute("SELECT set_config('app.current_agent_id','orch-console',true)")
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response) "
-            "VALUES ('orch-console',%s,'update',%s,%s,%s,false) RETURNING id",
-            (to_agent, subject, body, priority))
-        rid = cur.fetchone()[0]
-        c.commit()
+    rid, _thread = bus_send.send(
+        from_agent="orch-console", to=to_agent, mtype="update",
+        subject=subject, body=body, priority=priority, req=False,
+        dsn=env.get("DATABASE_URL"))
     return rid
 
 
