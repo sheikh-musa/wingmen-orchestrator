@@ -976,3 +976,18 @@ def test_not_all_uncovered_never_pages_for_dsn(recorder, monkeypatch):
     for _ in range(w.ALL_UNCOVERED_MIN_POLLS + 2):
         w.run(mode=w.MODE_DETECT, alert=True, injected=[obs], lane_dirs={}, persist=True)
     assert recorder["page"] == []
+
+
+def test_deadman_gap_default_is_900_not_240(monkeypatch):
+    """bus #75107/#75141/#75196: an env override meant to raise this value has
+    repeatedly failed to reach the live spawned process (root cause not pinned
+    down). The code DEFAULT -- used when the env var is absent or the override
+    doesn't land -- must itself be the safe 900, not the old pre-#40262 240
+    that false-pages on every slow-but-healthy ~300-400s scan."""
+    monkeypatch.delenv("LANE_WEDGE_DEADMAN_GAP_SEC", raising=False)
+    import importlib
+    reloaded = importlib.reload(w)
+    try:
+        assert reloaded.DEADMAN_GAP_SEC == 900
+    finally:
+        importlib.reload(w)  # restore any monkeypatches later tests may rely on
