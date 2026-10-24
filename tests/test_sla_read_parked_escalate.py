@@ -16,13 +16,14 @@ w = importlib.import_module("scripts.priority_sla_watchdog")
 
 
 def row(to_agent="cc-orchestrator", priority="P1", rr=True, read=True,
-        responded=False, elapsed=90):
+        responded=False, elapsed=90, from_agent="orch-console"):
     return {
         "id": 1, "to_agent": to_agent, "priority": priority,
         "requires_response": rr,
         "read_at": "2026-08-11T07:28:00Z" if read else None,
         "responded_at": "2026-08-11T07:40:00Z" if responded else None,
         "elapsed_minutes": elapsed,
+        "from_agent": from_agent,
     }
 
 
@@ -51,6 +52,16 @@ def test_non_rr_row_is_not_a_target():
 
 def test_low_priority_is_not_a_target():
     assert w.read_parked_hub_targets([row(priority="P2", elapsed=999)], interim_min=60) == []
+
+
+def test_own_hub_wake_row_is_never_a_target():
+    """bus #75099: the watchdog's own '[sla-watchdog] WAKE: ...' row to a hub
+    session is requires_response=P1, gets read by the hub, and is never
+    responded_at'd (nobody "responds" to a wake notice) -- without this
+    exclusion it falls straight into this sweep's own selection criteria and
+    re-escalates itself (posting another identical wake row) forever."""
+    assert w.read_parked_hub_targets(
+        [row(from_agent="sla-watchdog", elapsed=90)], interim_min=60) == []
 
 
 def test_non_hub_agent_is_not_this_nets_job():
