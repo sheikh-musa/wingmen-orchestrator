@@ -23,6 +23,11 @@ import sys
 import json
 import pathlib
 
+try:
+    from scripts import bus_send
+except ImportError:
+    import bus_send  # type: ignore
+
 THRESHOLD = float(os.environ.get("OP11911_SYED_THRESHOLD", "90"))   # pct_7d
 STALE_MAX_MIN = float(os.environ.get("OP11911_STALE_MAX_MIN", "20"))
 STATE = pathlib.Path(os.environ.get(
@@ -52,14 +57,10 @@ def _save(d: dict) -> None:
     STATE.write_text(json.dumps(d, indent=2))
 
 
-def _wake_sre(subject: str, body: str, cur) -> None:
+def _wake_sre(subject: str, body: str) -> None:
     # P1 + requires_response -> lands on the SRE's wake floor (CAI-786).
-    cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-    cur.execute(
-        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-        " priority,requires_response,created_at) "
-        "VALUES ('cc-fleet-health','cc-fleet-health','update',%s,%s,'P1',true,now())",
-        (subject[:180], body))
+    bus_send.send(from_agent="cc-fleet-health", to="cc-fleet-health", mtype="update",
+                  subject=subject[:180], body=body, priority="P1", req=True, dsn=_dsn())
 
 
 def main() -> int:
@@ -77,7 +78,7 @@ def main() -> int:
                     "The op#11911 Syed-90% trigger could NOT read a Syed pct_7d from "
                     "pool_usage (row missing/null). The weekly-limit monitor may be "
                     "down. Check Syed usage BY HAND and decide the re-pause manually "
-                    "— do not assume <90%.", cur)
+                    "— do not assume <90%.")
                 st["stale_fired"] = True
                 _save(st)
                 c.commit()
@@ -90,7 +91,7 @@ def main() -> int:
                     f"op#11911 TRIGGER DEAD-MAN: Syed reading STALE ({age_min:.0f}m old)",
                     f"pool_usage Syed pct_7d is {age_min:.0f} min old (> {STALE_MAX_MIN:.0f}m) "
                     f"= the weekly monitor likely stopped refreshing it. Last value {pct:.0f}%. "
-                    f"Check Syed usage BY HAND; a frozen gauge must not hide a 90% crossing.", cur)
+                    f"Check Syed usage BY HAND; a frozen gauge must not hide a 90% crossing.")
                 st["stale_fired"] = True
                 _save(st)
                 c.commit()
@@ -107,7 +108,7 @@ def main() -> int:
                 f"(irsyad-prog1/irsyad/irsyad-prog2/irsyad-coord) via verified /model nudge; it excludes "
                 f"hub/cai/nazim/fleet-health by design. EXCLUDE cc-irsyad-b (irsyad-import) if it is still "
                 f"MID-TABUNG-WRITE (money write, Wan-approved) — flip it LAST once its write is done. Then "
-                f"verify the 7d climb slows + report to orch-console. See fleet-health-handoff-NOW.md.", cur)
+                f"verify the 7d climb slows + report to orch-console. See fleet-health-handoff-NOW.md.")
             st["fired"] = True
             _save(st)
             c.commit()
