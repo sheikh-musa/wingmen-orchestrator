@@ -13,6 +13,7 @@ conflated.
 from __future__ import annotations
 
 import json
+import pathlib
 import uuid
 
 import psycopg
@@ -72,6 +73,19 @@ def two_dsns(pg_dsn):
             "INSERT INTO agents (id, display_name) VALUES (%s, 'test'), (%s, 'test')",
             (watchdog.PAGE_FROM_AGENT, watchdog.PAGE_TO_AGENT),
         )
+        # bus_send.py posts through post_agent_message (backlog#124 step 2/4, bus
+        # #74863) rather than a raw INSERT -- this fixture's bus_dsn needs the real
+        # RPC, same as the real substrate's bus, or every page this watchdog sends
+        # fails with UndefinedFunction. service_role must exist first since 117's
+        # own GRANT EXECUTE targets it by name.
+        cur.execute("SELECT 1 FROM pg_roles WHERE rolname='service_role'")
+        if cur.fetchone() is None:
+            cur.execute("CREATE ROLE service_role")
+        migration_117 = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "migrations" / "117_durable_inbox_ack_additive.sql"
+        ).read_text()
+        cur.execute(migration_117)
     return silo_dsn, bus_dsn
 
 
