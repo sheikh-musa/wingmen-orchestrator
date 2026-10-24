@@ -189,9 +189,21 @@ REPEAT_WINDOW_SEC = _envint("LANE_WEDGE_REPEAT_WINDOW_SEC", 6 * 3600)
 ALL_UNCOVERED_MIN_POLLS = _envint("LANE_WEDGE_ALL_UNCOVERED_MIN_POLLS", 2)
 
 # Dead-man's-switch: a scan starting more than this long after the previous
-# heartbeat means the watchdog was down/stalled — page once. 4x the 60s cadence
-# tolerates a normal skipped run; a real outage is far larger.
-DEADMAN_GAP_SEC = _envint("LANE_WEDGE_DEADMAN_GAP_SEC", 240)
+# heartbeat means the watchdog was down/stalled — page once. DEADMAN 240->900
+# (#40262): scans intermittently take ~300-400s under load (start-to-start,
+# since launchd won't overlap a StartInterval job — the next scan can't even
+# START until the slow one finishes), so 240 false-paged on every slow-but-
+# healthy cycle. The DEFAULT here (not just a plist env override) is 900: an
+# env override that's supposed to raise this has repeatedly, reproducibly
+# failed to reach the live spawned process in practice (bus #75107/#75141/
+# #75196, 2026-10-24 — launchctl print showed 900 loaded, a bootout+bootstrap
+# reload was confirmed with a fresh pid, and it STILL paged citing 240s
+# afterward; root cause not conclusively pinned down despite ruling out a
+# duplicate job, a global `launchctl setenv`, and a stray --loop process) —
+# so the SAFE value must not depend on an env var actually landing. Override
+# via LANE_WEDGE_DEADMAN_GAP_SEC only to go LOWER for a deliberate tighter
+# test; never rely on it to raise this above the code default.
+DEADMAN_GAP_SEC = _envint("LANE_WEDGE_DEADMAN_GAP_SEC", 900)
 
 # Prune per-agent episode state / wedge history not seen for this long.
 STATE_TTL_SEC = _envint("LANE_WEDGE_STATE_TTL_SEC", 24 * 3600)
