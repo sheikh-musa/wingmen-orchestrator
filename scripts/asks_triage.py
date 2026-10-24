@@ -13,9 +13,18 @@ for the full rationale.
 Usage:
   asks_triage.py <id> ask  --summary "<one line>" [--delegated-to BODY]
                            [--committed-date ISO] [--outbound-msg-id ID]
+                           [--needs-musa on|off] [--musa-summary "<plain line>"]
   asks_triage.py <id> not
   asks_triage.py <id> done [--evidence "<bus/op ids>"]
                            [--committed-date ISO] [--outbound-msg-id ID]
+
+Migration 118 (orch-console bus #75387) adds the needs-Musa axis, orthogonal
+to the triage axis and usable with ANY action: --needs-musa on|off sets /
+clears needs_operator_decision (genuinely needs Musa's own decision/action —
+absent leaves it untouched, so a plain re-triage never silently drops the
+mark); --musa-summary writes operator_summary, the plain-language
+decision-first line the console /asks hero renders instead of the internal
+triage_summary (no agent code-names/hc#/op#).
 
 Actions:
   ask    a real, still-open request. Sets triage_state='ask',
