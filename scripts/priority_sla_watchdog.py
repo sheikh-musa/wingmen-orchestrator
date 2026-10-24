@@ -923,9 +923,13 @@ def read_parked_hub_targets(rows, *, interim_min: int = INTERIM_PARK_MIN,
     (the watermark is pinned to max(id) at enable-time), so un-hiding the suppressed
     backlog escalates ZERO of it; only stalls that cross the threshold GOING FORWARD
     page. Rows are dicts with keys id, to_agent, priority, requires_response, read_at,
-    responded_at, elapsed_minutes. A hub row NOT read is the existing 'hub not woken'
-    alarm (#16246); a normal lane is covered by the standard ladder — hub read-parked
-    gap only."""
+    responded_at, elapsed_minutes, from_agent. A hub row NOT read is the existing
+    'hub not woken' alarm (#16246); a normal lane is covered by the standard ladder —
+    hub read-parked gap only. from_agent='sla-watchdog' is excluded (bus #75099): this
+    sweep has no equivalent of the unread/unresponded sweep's own self-row exclusion
+    (line ~360), so the watchdog's own hub bus-wake row (always requires_response P1,
+    read by the hub, never responded_at'd since nobody "responds" to a wake notice)
+    was falling straight into this path and re-escalating itself forever."""
     out = []
     for r in rows:
         elapsed = r.get("elapsed_minutes") or 0
@@ -934,6 +938,7 @@ def read_parked_hub_targets(rows, *, interim_min: int = INTERIM_PARK_MIN,
                 and r.get("requires_response")
                 and r.get("read_at") is not None
                 and r.get("responded_at") is None
+                and r.get("from_agent") != "sla-watchdog"
                 and interim_min <= elapsed <= interim_max
                 and (r.get("id") or 0) > watermark_id):
             out.append(r)
@@ -943,14 +948,15 @@ def read_parked_hub_targets(rows, *, interim_min: int = INTERIM_PARK_MIN,
 def _fetch_read_parked_hub(conn):
     """The read-parked-hub rows from the DB (impure). Bounded to the recent window
     (created within interim_max) so it never replays history; the pure predicate
-    re-checks both bounds as defense-in-depth."""
+    re-checks both bounds (and the from_agent exclusion, bus #75099) as defense-in-depth."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, to_agent, priority, requires_response, read_at, responded_at, "
+            "SELECT id, to_agent, from_agent, priority, requires_response, read_at, responded_at, "
             "  (EXTRACT(epoch FROM (now()-created_at))/60.0)::int AS elapsed_minutes "
             "FROM agent_messages "
             "WHERE to_agent = ANY(%s) AND priority IN ('P0','P1') AND requires_response "
             "  AND read_at IS NOT NULL AND responded_at IS NULL AND is_test IS NOT TRUE "
+            "  AND from_agent != 'sla-watchdog' "
             "  AND created_at > now() - make_interval(mins => %s)",
             (list(HUB_SESSIONS.keys()), INTERIM_PARK_MAX))
         cols = [d[0] for d in cur.description]
