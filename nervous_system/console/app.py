@@ -2216,8 +2216,14 @@ def _make_handler(feedloop: "_FeedLoop"):
                         "answered": len(answered_rows),
                         "board_status": _tally(open_rows, "board_status"),
                         "topics": _tally(open_rows + answered_rows, "topic"),
+                        # cc-quality #75389 follow-up: match the client hero's
+                        # needsMusa() exactly — waiting_on_operator OR the
+                        # migration-118 needs_operator_decision flag, so the
+                        # server count and the hero can never disagree.
                         "needs_musa": sum(
-                            1 for r in open_rows if r.get("waiting_on_operator")),
+                            1 for r in open_rows
+                            if r.get("waiting_on_operator")
+                            or r.get("needs_operator_decision")),
                     }
                     auth.audit(self._client(), path, "200")
                     return self._json(200, _jsonable({

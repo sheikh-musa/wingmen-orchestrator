@@ -66,6 +66,16 @@ def server(monkeypatch, tmp_path):
              "wait_kind": "build_time", "status": "pending",
              "board_status": "in_progress", "topic": "other",
              "updated_age_s": 20, "asked_age_s": 20},
+            # migration 118: flagged-for-Musa WITHOUT waiting_on_operator —
+            # the 24-shortlist shape (only 4/24 had waiting_on_operator=true).
+            # No operator_summary here: fallback path (hero renders text).
+            {"id": 4, "text": "flagged item", "delegated_to": "cc-cosem",
+             "ask_surface": "operator", "waiting_on_operator": False,
+             "needs_operator_decision": True, "operator_summary": None,
+             "chase_by": None, "deferred_reason": None, "committed_date": None,
+             "wait_kind": "external_wait", "status": "waiting_on_musa",
+             "board_status": "truly_outstanding", "topic": "cosem",
+             "updated_age_s": 15, "asked_age_s": 15},
         ],
     )
     monkeypatch.setattr(
@@ -156,7 +166,7 @@ def test_api_asks_board_shape(server):
     # P1 (op#33598): the board payload is {open, answered, counts} — coarse
     # board_status + topic derived LIVE from operator_asks, never a snapshot.
     assert set(body) == {"open", "answered", "counts"}
-    assert [a["id"] for a in body["open"]] == [1, 2]
+    assert [a["id"] for a in body["open"]] == [1, 2, 4]
     assert body["open"][0]["wait_kind"] == "external_wait"
     assert body["open"][0]["status"] == "waiting_on_musa"
     assert body["open"][0]["board_status"] == "truly_outstanding"
@@ -166,11 +176,18 @@ def test_api_asks_board_shape(server):
     assert [a["id"] for a in body["answered"]] == [3]
     assert body["answered"][0]["board_status"] == "recently_answered"
     c = body["counts"]
-    assert c["open"] == 2
+    assert c["open"] == 3
     assert c["answered"] == 1
-    assert c["board_status"] == {"truly_outstanding": 1, "in_progress": 1}
+    assert c["board_status"] == {"truly_outstanding": 2, "in_progress": 1}
     assert c["topics"]["infra"] == 2      # one open + the answered row
-    assert c["needs_musa"] == 1           # the waiting_on_operator row
+    assert c["topics"]["cosem"] == 1
+    # cc-quality #75389 follow-up: server count must match the client hero's
+    # needsMusa() (waiting_on_operator OR needs_operator_decision) — row 1
+    # (waiting) + row 4 (flagged), NOT just the waiting rows.
+    assert c["needs_musa"] == 2
+    # both new columns pass straight through to the payload
+    assert body["open"][2]["needs_operator_decision"] is True
+    assert "operator_summary" in body["open"][2]
 
 
 def test_asks_page_serves(server):

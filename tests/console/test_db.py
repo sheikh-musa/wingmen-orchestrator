@@ -177,3 +177,24 @@ def test_fetch_fleet_asks_annotates_topic(monkeypatch):
     ])
     rows = db.fetch_fleet_asks()
     assert [r["topic"] for r in rows] == ["adcda-schedule", "irsyad", "other"]
+
+
+# --- P1 blocker (orch-console bus #75387): needs-Musa flag + plain-language line ---
+
+def test_fleet_asks_query_selects_needs_musa_columns():
+    """Migration 118 columns must reach the board payload: the flag drives the
+    hero set (client needsMusa() ORs it) and operator_summary is the plain-
+    language line the hero renders instead of internal triage_summary."""
+    sql, _ = db.build_fleet_asks_query()
+    assert "a.needs_operator_decision" in sql
+    assert "a.operator_summary" in sql
+
+
+def test_fleet_asks_query_pins_needs_musa_rows_to_top():
+    """Flagged rows are hero rows — they must sort to the top alongside
+    waiting_on_operator rows, not sit buried under fleet-internal ordering."""
+    sql, _ = db.build_fleet_asks_query()
+    assert (
+        "CASE WHEN a.waiting_on_operator OR a.needs_operator_decision THEN 0 "
+        "ELSE 1 END"
+    ) in sql

@@ -842,7 +842,18 @@ def build_fleet_asks_query() -> Tuple[str, list]:
     different column from the thread-derived `status` above, whose own
     'in_progress' means "delegate opened the mail" — same word, different axis;
     `committed_date` ships alongside so the sparse-dating reality (8 of 282 open
-    asks dated at the 2026-10-25 reconcile) is visible, not hidden."""
+    asks dated at the 2026-10-25 reconcile) is visible, not hidden.
+
+    Migration 118 (orch-console bus #75387): `needs_operator_decision` is the
+    structured flag for "genuinely needs Musa's own decision/action" (the
+    2026-10-25 reconcile's 24-item shortlist — NOT derivable from any existing
+    column: only 4/24 had waiting_on_operator=true), maintained going forward
+    via scripts/asks_triage.py. `operator_summary` is the plain-language,
+    decision-first line the Needs-Musa hero renders INSTEAD of triage_summary —
+    the hero is the one Musa-facing surface, so it must carry no agent
+    code-names/saga text (the other tabs stay fleet-internal). Both OR into
+    wait_kind/status/ordering alongside waiting_on_operator so flagged rows pin
+    to the top and read as external waits."""
     sql = (
         "WITH latest AS ("
         "  SELECT DISTINCT ON (thread_id) "
@@ -857,11 +868,13 @@ def build_fleet_asks_query() -> Tuple[str, list]:
         "       ELSE '(awaiting triage)' END AS text, "
         "  a.delegated_to, "
         "  a.ask_surface, a.waiting_on_operator, a.chase_by, a.deferred_reason, a.committed_date, "
-        "  CASE WHEN a.waiting_on_operator THEN 'external_wait' ELSE 'build_time' END AS wait_kind, "
+        "  a.needs_operator_decision, a.operator_summary, "
+        "  CASE WHEN a.waiting_on_operator OR a.needs_operator_decision "
+        "THEN 'external_wait' ELSE 'build_time' END AS wait_kind, "
         "  CASE WHEN a.delegated_to IS NOT NULL AND a.committed_date IS NOT NULL "
         "THEN 'in_progress' ELSE 'truly_outstanding' END AS board_status, "
         "  CASE "
-        "    WHEN a.waiting_on_operator                              THEN 'waiting_on_musa' "
+        "    WHEN a.waiting_on_operator OR a.needs_operator_decision     THEN 'waiting_on_musa' "
         "    WHEN a.thread_id IS NULL                                THEN 'on_nazim' "
         "    WHEN l.from_agent <> 'orch-console' "
         "         AND l.to_agent = 'orch-console' "
@@ -877,7 +890,8 @@ def build_fleet_asks_query() -> Tuple[str, list]:
         "WHERE a.closed_at IS NULL "
         "  AND a.triage_state = 'ask' "
         "ORDER BY "
-        "  CASE WHEN a.waiting_on_operator THEN 0 ELSE 1 END, "
+        "  CASE WHEN a.waiting_on_operator OR a.needs_operator_decision THEN 0 "
+        "ELSE 1 END, "
         "  COALESCE(a.delegated_to, 'zzz_unassigned'), "
         "  COALESCE(l.created_at, a.created_at) DESC "
         "LIMIT 400"

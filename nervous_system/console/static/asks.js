@@ -121,6 +121,25 @@
     '</div>';
   }
 
+  function heroCard(a) {
+    // Needs-Musa hero card (orch-console bus #75387): the ONE Musa-facing
+    // surface on this page. Decision-first operator_summary (migration 118),
+    // never the fleet-internal triage text, and NO lane code-names — so no
+    // delegated_to, no status tag. Meta is dates only (asked/due/chase), the
+    // parts Musa can act on. Other tabs keep askCard's internal detail.
+    var line = a.operator_summary || a.text;
+    var parts = ['<span class="aage">asked ' + esc(fmtAge(a.asked_age_s)) + ' ago</span>'];
+    var due = a.committed_date ? "due " + fmtDate(a.committed_date) : "";
+    var chase = a.chase_by ? "decide by " + fmtDate(a.chase_by) : "";
+    var bits = [due, chase].filter(Boolean).join(" · ");
+    if (bits) parts.push('<span>' + esc(bits) + '</span>');
+    return '<div class="ask needs" data-ask="' + a.id + '">' +
+      '<div class="abody"><div class="atxt">' + esc(line) + '</div>' +
+        '<div class="ameta">' + parts.join('<span class="adot">·</span>') + '</div></div>' +
+      '<span class="surf musa">needs you</span>' +
+    '</div>';
+  }
+
   function render(payload) {
     lastPayload = payload;
     var heroEl = $("hero"), tabsEl = $("tabs"), chipsEl = $("chips"), groupsEl = $("groups"), sub = $("sub");
@@ -142,7 +161,7 @@
     // hero: the brief's FLAG — needs Musa's OWN decision, pinned + unmissable
     heroEl.innerHTML = musa.length
       ? '<div class="hero"><div class="hero-h">Needs Musa <span class="n">' + musa.length + '</span></div>' +
-          musa.map(askCard).join("") + '</div>'
+          musa.map(heroCard).join("") + '</div>'
       : "";
 
     // tabs: the brief's coarse STATUS axis (live counts from the server)
@@ -245,6 +264,7 @@
       splitByBoardStatus: splitByBoardStatus,
       topicCounts: topicCounts,
       needsMusa: needsMusa,
+      heroCard: heroCard,
     };
   }
 })();

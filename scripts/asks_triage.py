@@ -100,12 +100,22 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--triaged-by", default=None,
                      help="override triaged_by identity (default: auto-resolve fail-closed "
                           "via CC_BASE_AGENT_ID/AGENT_ID — see agent_identity.resolve_agent_id)")
+    ap.add_argument("--needs-musa", choices=("on", "off"), default=None,
+                     help="migration 118 flag, tri-state: 'on' sets "
+                          "needs_operator_decision (genuinely needs Musa's own "
+                          "decision/action), 'off' clears it, ABSENT leaves it "
+                          "untouched (a plain re-triage never silently drops the mark)")
+    ap.add_argument("--musa-summary", default=None,
+                     help="operator_summary — the plain-language, decision-first line "
+                          "the Needs-Musa hero renders instead of triage_summary "
+                          "(no agent code-names/hc#/op#; orch-console bus #75387)")
     return ap
 
 
 def triage(item_id: int, action: str, *, summary: str | None = None,
            delegated_to: str | None = None, evidence: str | None = None,
            committed_date: str | None = None, outbound_msg_id: int | None = None,
+           needs_musa: str | None = None, musa_summary: str | None = None,
            dsn: str | None = None, triaged_by: str | None = None) -> int:
     if action == "ask" and not (summary and summary.strip()):
         raise ValueError("--summary is required for action=ask")
@@ -142,10 +152,15 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                     "  triage_state = 'done', closed_at = now(), closed_reason = 'done', "
                     "  triage_evidence_ref = %s, triaged_at = now(), triaged_by = %s, "
                     "  committed_date = COALESCE(%s, committed_date), "
-                    "  outbound_msg_id = COALESCE(%s, outbound_msg_id) "
+                    "  outbound_msg_id = COALESCE(%s, outbound_msg_id), "
+                    # migration 118: needs-musa axis rides along on any action
+                    "  needs_operator_decision = CASE WHEN %s = 'on' THEN true "
+                    "WHEN %s = 'off' THEN false ELSE needs_operator_decision END, "
+                    "  operator_summary = COALESCE(%s, operator_summary) "
                     "WHERE id = %s AND closed_at IS NULL"
                 )
-                params = (evidence, triaged_by, committed_date, outbound_msg_id, item_id)
+                params = (evidence, triaged_by, committed_date, outbound_msg_id,
+                          needs_musa, needs_musa, musa_summary, item_id)
             elif action == "ask":
                 # committed_date/outbound_msg_id are optional here: a plain "in
                 # progress" triage (neither given) leaves an EXISTING chase_by
@@ -163,13 +178,18 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                     "  triaged_at = now(), triaged_by = %(triaged_by)s, "
                     "  committed_date = COALESCE(%(cd)s::timestamptz, committed_date), "
                     "  outbound_msg_id = COALESCE(%(ob)s, outbound_msg_id), "
+                    # migration 118: needs-musa axis rides along on any action
+                    "  needs_operator_decision = CASE WHEN %(nm)s = 'on' THEN true "
+                    "WHEN %(nm)s = 'off' THEN false ELSE needs_operator_decision END, "
+                    "  operator_summary = COALESCE(%(ms)s, operator_summary), "
                     "  chase_by = CASE WHEN %(cd)s::timestamptz IS NOT NULL "
                     "                  THEN GREATEST(COALESCE(chase_by, %(cd)s::timestamptz), %(cd)s::timestamptz) "
                     "                  WHEN chase_by IS NULL THEN now() + interval '24 hours' "
                     "                  ELSE chase_by END "
                     "WHERE id = %(id)s",
                     {"summary": summary, "delegated_to": delegated_to, "triaged_by": triaged_by,
-                     "cd": committed_date, "ob": outbound_msg_id, "id": item_id},
+                     "cd": committed_date, "ob": outbound_msg_id, "id": item_id,
+                     "nm": needs_musa, "ms": musa_summary},
                 )
                 return cur.rowcount
             else:  # not
@@ -177,10 +197,14 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                     "UPDATE operator_asks SET "
                     "  triage_state = 'not_an_ask', closed_at = now(), closed_reason = 'not_a_request', "
                     "  chase_by = NULL, "
-                    "  triaged_at = now(), triaged_by = %s "
+                    "  triaged_at = now(), triaged_by = %s, "
+                    # migration 118: needs-musa axis rides along on any action
+                    "  needs_operator_decision = CASE WHEN %s = 'on' THEN true "
+                    "WHEN %s = 'off' THEN false ELSE needs_operator_decision END, "
+                    "  operator_summary = COALESCE(%s, operator_summary) "
                     "WHERE id = %s AND closed_at IS NULL"
                 )
-                params = (triaged_by, item_id)
+                params = (triaged_by, needs_musa, needs_musa, musa_summary, item_id)
 
             cur.execute(sql, params)
             return cur.rowcount
@@ -192,6 +216,7 @@ def main(argv=None) -> int:
         n = triage(args.id, args.action, summary=args.summary,
                    delegated_to=args.delegated_to, evidence=args.evidence,
                    committed_date=args.committed_date, outbound_msg_id=args.outbound_msg_id,
+                   needs_musa=args.needs_musa, musa_summary=args.musa_summary,
                    triaged_by=args.triaged_by)
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"error: {type(e).__name__}: {e}\n")

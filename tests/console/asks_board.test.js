@@ -89,4 +89,35 @@ assert.strictEqual(api.needsMusa({ waiting_on_operator: true }), true);
 assert.strictEqual(api.needsMusa({ needs_operator_decision: true }), true);
 assert.strictEqual(api.needsMusa({ waiting_on_operator: false }), false);
 
+// --- P1 blocker (orch-console bus #75387): hero renders the plain-language
+// operator_summary, NOT internal triage text — only the Needs-Musa hero must
+// be Musa-readable; the other tabs keep fleet-internal text (askCard).
+const heroA = {
+  id: 9, text: "Ring-2 pool-workers OOM soak PASS@MemoryMax2048M",  // internal saga text
+  operator_summary: "Decide what the events dashboard should track.",
+  delegated_to: "cc-cosem-1", waiting_on_operator: false,
+  needs_operator_decision: true, ask_surface: "operator",
+  updated_age_s: 10, asked_age_s: 10, committed_date: null, chase_by: null,
+};
+const heroB = {
+  id: 10, text: "plain triage line", operator_summary: null,
+  delegated_to: null, waiting_on_operator: true,
+  ask_surface: "operator", updated_age_s: 5, asked_age_s: 5,
+  committed_date: null, chase_by: null,
+};
+
+assert.ok(api.heroCard, "heroCard must be exported");
+// decision-first line wins; no lane code-name (delegated_to) leaks into the hero card
+const ha = api.heroCard(heroA);
+assert.ok(ha.indexOf(heroA.operator_summary) !== -1, "hero renders operator_summary");
+assert.ok(ha.indexOf(heroA.text) === -1, "hero hides internal triage text when summary present");
+assert.ok(ha.indexOf("cc-cosem-1") === -1, "no lane code-name in the hero card");
+// fallback: unsummarised needs-Musa row still renders (its sanitized text)
+const hb = api.heroCard(heroB);
+assert.ok(hb.indexOf("plain triage line") !== -1, "hero falls back to text when no summary");
+// escape hostile summary text (same esc() discipline as askCard)
+const hEvil = api.heroCard(Object.assign({}, heroA, { operator_summary: "<img src=x onerror=alert(1)>" }));
+assert.ok(hEvil.indexOf("<img") === -1, "operator_summary is escaped");
+console.log("heroCard: " + "ok");
+
 console.log("asks_board.test.js OK");
