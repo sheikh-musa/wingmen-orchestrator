@@ -344,6 +344,19 @@ _cc_text_busy() {
   # ('(shift+tab…)' w/o thinking/tokens) don't false-trip. Fail-CLOSED: a false-busy
   # costs a retry; a false-idle re-drives/clobbers a working body.
   printf '%s\n' "${1-}" | tail -12 | LC_ALL=C grep -qE '^[^[:space:]].*\(.*(thinking|tokens)' && return 0
+  # FOREGROUND SHELL TOOL CALL (bus #75212/#75230/#75232, 2026-10-24, caught by
+  # orch-console pane-probing cc-paperclip-spike mid test-run): a lane with an
+  # actively-running Bash tool call shows NEITHER 'esc to interrupt' nor a
+  # thinking-spinner parenthetical -- the status line instead reads
+  # '✻ Cooked for 4m 29s · done 10:36 PM · 1 shell still running', and the very
+  # bottom bar reads '... · 1 shell · ...'. Neither of the two checks above
+  # matches that shape, so a lane running a long test/build suite read as
+  # IDLE -- the exact false-wedge class that nearly got a healthy, actively-
+  # working lane destructively recycled. Same col-0 + tail-12 convention; "N
+  # shell(s) still running" is the specific, load-bearing phrase (the bottom
+  # bar's bare "N shell" is NOT used here -- it can persist briefly after a
+  # shell just finished, which would needlessly widen the busy window).
+  printf '%s\n' "${1-}" | tail -12 | LC_ALL=C grep -qE '^[^[:space:]].*[0-9]+ shells? still running' && return 0
   return 1
 }
 
