@@ -177,7 +177,7 @@ def wired(monkeypatch):
     logged = []
     monkeypatch.setattr(hsr, "log_event",
                          lambda cur, **kw: logged.append(kw) or 1)
-    monkeypatch.setattr(hsr, "_page_observation", lambda cur, **kw: None)
+    monkeypatch.setattr(hsr, "_page_observation", lambda **kw: None)
     return {"logged": logged, "conn": fake_conn}
 
 
@@ -298,7 +298,7 @@ def test_evaluate_rate_limited_flood_suppressed_after_first_window_log(monkeypat
     monkeypatch.setattr(hsr, "rate_limit_state_logged", lambda cur, since: already["v"])
 
     paged = []
-    monkeypatch.setattr(hsr, "_page_observation", lambda cur, **kw: paged.append(kw))
+    monkeypatch.setattr(hsr, "_page_observation", lambda **kw: paged.append(kw))
 
     for i in range(30):
         hsr.evaluate(busy=False, menu=False, composer_empty=False, mode="act")
@@ -319,7 +319,7 @@ def test_evaluate_ceiling_reached_flood_suppressed_after_first_window_log(monkey
     monkeypatch.setattr(hsr, "ceiling_state_logged",
                          lambda cur, triggering_row_id, pending_kind: already["v"])
     paged = []
-    monkeypatch.setattr(hsr, "_page_observation", lambda cur, **kw: paged.append(kw))
+    monkeypatch.setattr(hsr, "_page_observation", lambda **kw: paged.append(kw))
 
     for i in range(30):
         hsr.evaluate(busy=False, menu=False, composer_empty=False, mode="act")

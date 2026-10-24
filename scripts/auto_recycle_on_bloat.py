@@ -36,6 +36,7 @@ import os
 import socket
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass
 
 from scripts import context_health_watchdog as chw
@@ -367,6 +368,17 @@ def select_escalates(watched):
     return [w for w in watched if w[4].verdict == "SINGLETON-ESCALATE" and w[3] == "IDLE_EMPTY"]
 
 
+def _post_on_cursor(cur, from_agent, to_agent, subject, body, priority) -> None:
+    """RPC on the EXISTING cursor/connection (backlog#124, bus #74939), not
+    bus_send.py's send() -- send() opens its OWN separate connection and would commit
+    each WARN independently, breaking the single-commit-at-the-end batch both
+    warn_escalate()/warn_console() rely on (today: all WARNs in one pass land
+    together or not at all)."""
+    cur.execute(
+        "SELECT * FROM post_agent_message(%s, %s, 'update', %s, %s, %s, false, %s, %s, %s, %s)",
+        (from_agent, to_agent, subject, body, priority, str(uuid.uuid4()), None, False, None))
+
+
 def warn_escalate(escalates) -> int:
     """STAGE-1 (op#28437, Musa's invisibility gap — sibling of warn_console). NON-DESTRUCTIVE.
     For each SINGLETON-ESCALATE lane at a clean idle (pane >= PANE_FIRE_K but NOT a resolved
@@ -416,10 +428,7 @@ def warn_escalate(escalates) -> int:
                     if STAGE1_WARN_DRY:
                         print(f"[auto-recycle STAGE-1 ESCALATE-WARN DRY] would page {to_agent} :: {subject}")
                     else:
-                        cur.execute(
-                            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
-                            "VALUES (%s,%s,'update',%s,%s,false,'P2')",
-                            (bnd.SRE_AGENT_ID, to_agent, subject, body))
+                        _post_on_cursor(cur, bnd.SRE_AGENT_ID, to_agent, subject, body, "P2")
                     sent += 1
             if not STAGE1_WARN_DRY:
                 c.commit()
@@ -471,10 +480,7 @@ def warn_console(fires) -> int:
                     if STAGE1_WARN_DRY:
                         print(f"[auto-recycle STAGE-1 WARN DRY] would page {to_agent} :: {subject}")
                     else:
-                        cur.execute(
-                            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
-                            "VALUES (%s,%s,'update',%s,%s,false,'P2')",
-                            (bnd.SRE_AGENT_ID, to_agent, subject, body))
+                        _post_on_cursor(cur, bnd.SRE_AGENT_ID, to_agent, subject, body, "P2")
                     sent += 1
             if not STAGE1_WARN_DRY:
                 c.commit()

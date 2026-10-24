@@ -42,6 +42,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -57,6 +58,7 @@ sys.path.insert(0, str(ORCH))
 from scripts.lib import fleet_health_lease  # noqa: E402
 from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 from scripts.lib.console_alive import console_alive  # noqa: E402  (audit-20261006 item 4)
+from scripts import bus_send  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Config — all overridable via environment (launchd EnvironmentVariables).
@@ -547,26 +549,17 @@ def renudge(agent: str, n: int, lanes: dict[str, str], dry: bool, conn=None, row
         if dry or conn is None:
             return ("bus-wake:%s" % agent, True)
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO agent_messages
-                       (from_agent, to_agent, message_type, subject, body,
-                        requires_response, priority, is_test)
-                       VALUES ('sla-watchdog', %s, 'blocker', %s, %s, true, 'P1', false)""",
-                    (agent,
-                     "[sla-watchdog] WAKE: %s has %d over-SLA unread/unresponded high-priority message(s)" % (agent, n),
-                     "You have over-SLA unread or unresponded P0/P1 bus message(s). Please check "
+            bus_send.send(
+                from_agent="sla-watchdog", to=agent, mtype="blocker",
+                subject="[sla-watchdog] WAKE: %s has %d over-SLA unread/unresponded high-priority message(s)" % (agent, n),
+                body="You have over-SLA unread or unresponded P0/P1 bus message(s). Please check "
                      "your inbox and act/respond. (Automated SLA wake — the VPS agent_wake_subscriber "
                      "fires on this row; the watchdog does not track its own rows, so this will not "
-                     "recur once you drain them.)"))
-            conn.commit()
+                     "recur once you drain them.)",
+                priority="P1", req=True)
             return ("bus-wake:%s" % agent, True)
         except Exception as e:
             log("hub bus-wake failed (%s): %s" % (agent, e))
-            try:
-                conn.rollback()
-            except Exception:
-                pass
             return ("bus-wake:%s" % agent, False)
     if agent in lanes:
         lane = lanes[agent]
@@ -688,15 +681,12 @@ def escalate_internally(v: dict, nudges: int) -> bool:
         body = (f"[console-dead-redirect] orch-console has no fresh heartbeat — routed to "
                 f"you instead (audit-20261006 item 4, bus#54648).\n\n{body}")
     try:
-        import psycopg
         dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
-        with psycopg.connect(dsn, connect_timeout=15) as conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
-                "priority, requires_response) VALUES ('sla-watchdog',%s,'blocker',%s,%s,%s,%s)",
-                (to_agent, f"SLA stall: {v['agent']} #{v['message_id']} ({v['priority']}, "
-                 f"{v['elapsed_minutes']}m)", body, priority, requires_response))
-            conn.commit()
+        bus_send.send(
+            from_agent="sla-watchdog", to=to_agent, mtype="blocker",
+            subject=f"SLA stall: {v['agent']} #{v['message_id']} ({v['priority']}, "
+                    f"{v['elapsed_minutes']}m)",
+            body=body, priority=priority, req=requires_response, dsn=dsn)
         return True
     except Exception as e:                 # noqa: BLE001
         log(f"internal escalation failed ({e}) — falling through to operator page")
@@ -733,15 +723,17 @@ def ensure_identity(conn) -> None:
 
 
 def audit(conn, subject: str, body: str, priority: str = "P3") -> None:
+    # RPC send() can't set read_at at insert time (not an RPC param) -- this audit
+    # row self-marks read so it never shows up as an unread violation to the SLA
+    # watchdog itself (or anything else counting unread mail). Insert via the
+    # sanctioned path, then a follow-up UPDATE on the returned id to preserve that
+    # exact behavior (backlog#124, bus #74939).
     try:
+        mid, _thread = bus_send.send(from_agent="sla-watchdog", to="cc-orchestrator",
+                                      mtype="update", subject=subject[:200], body=body,
+                                      priority=priority, req=False)
         with conn.cursor() as cur:
-            cur.execute(
-                """INSERT INTO agent_messages
-                   (from_agent, to_agent, message_type, subject, body,
-                    requires_response, priority, read_at)
-                   VALUES('sla-watchdog','cc-orchestrator','update',%s,%s,false,%s,now())""",
-                (subject[:200], body, priority),
-            )
+            cur.execute("UPDATE agent_messages SET read_at=now() WHERE id=%s", (mid,))
         conn.commit()
     except Exception as e:
         log(f"audit-insert-failed: {e}")
@@ -1145,13 +1137,8 @@ def _send_aged_repage(conn, owner: str, row: dict) -> bool:
     try:
         if not dry_identity_guard(conn):
             return False
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-                "  requires_response,priority,is_test) "
-                "VALUES ('cc-fleet-health',%s,%s,%s,%s,false,'P1',false)",
-                (owner, PAGE_MESSAGE_TYPE, subj, body))
-        conn.commit()
+        bus_send.send(from_agent="cc-fleet-health", to=owner, mtype=PAGE_MESSAGE_TYPE,
+                       subject=subj, body=body, priority="P1", req=False)
         log(f"aged-rr-repage SENT #{mid} -> {owner} ({row.get('elapsed_minutes')}m)")
         return True
     except Exception as e:
@@ -1348,13 +1335,8 @@ def _send_captured_triage_page(conn, owner: str, target: dict) -> bool:
     try:
         if not dry_identity_guard(conn):
             return False
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-                "  requires_response,priority,is_test) "
-                "VALUES ('cc-fleet-health',%s,%s,%s,%s,false,'P1',false)",
-                (owner, PAGE_MESSAGE_TYPE, subj, body))
-        conn.commit()
+        bus_send.send(from_agent="cc-fleet-health", to=owner, mtype=PAGE_MESSAGE_TYPE,
+                       subject=subj, body=body, priority="P1", req=False)
         log(f"captured-triage SENT oldest#{oldest_id} count={count} -> {owner}")
         return True
     except Exception as e:
@@ -1410,12 +1392,15 @@ def _send_asks_chase(conn, owner: str, row: dict, recipient_resolution=None) -> 
     try:
         if not dry_identity_guard(conn):
             return False
+        # RPC on the EXISTING conn (backlog#124, bus #74939), not bus_send.send() --
+        # this function's `conn` is a deliberate DI seam its own tests inspect
+        # (conn.executed/conn.committed), and send() would open a separate connection,
+        # leaving the injected conn untouched.
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-                "  requires_response,priority,is_test) "
-                "VALUES ('cc-fleet-health',%s,%s,%s,%s,false,'P1',false)",
-                (owner, PAGE_MESSAGE_TYPE, subj, body))
+                "SELECT * FROM post_agent_message('cc-fleet-health', %s, %s, %s, %s, "
+                "'P1', false, %s, %s, %s, %s)",
+                (owner, PAGE_MESSAGE_TYPE, subj, body, str(uuid.uuid4()), None, False, None))
         conn.commit()
         log(f"asks-chase SENT ask#{aid} -> {owner}")
         return True
@@ -1549,12 +1534,13 @@ def _send_client_ask_chase(conn, owner: str, row: dict, recipient_resolution=Non
     try:
         if not dry_identity_guard(conn):
             return False
+        # RPC on the EXISTING conn (backlog#124, bus #74939), not bus_send.send() --
+        # same DI-seam reasoning as _send_asks_chase.
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-                "  requires_response,priority,is_test) "
-                "VALUES ('cc-fleet-health',%s,%s,%s,%s,false,'P1',false)",
-                (owner, PAGE_MESSAGE_TYPE, subj, body))
+                "SELECT * FROM post_agent_message('cc-fleet-health', %s, %s, %s, %s, "
+                "'P1', false, %s, %s, %s, %s)",
+                (owner, PAGE_MESSAGE_TYPE, subj, body, str(uuid.uuid4()), None, False, None))
         conn.commit()
         log(f"client-asks-chase SENT ask#{aid} -> {owner}")
         return True
@@ -1596,12 +1582,14 @@ def send_client_ask_chase_summary(conn, sent: list) -> bool:
     try:
         if not dry_identity_guard(conn):
             return False
+        # RPC on the EXISTING conn (backlog#124, bus #74939), not bus_send.send() --
+        # same DI-seam reasoning as _send_asks_chase.
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-                "  requires_response,priority,is_test) "
-                "VALUES ('cc-fleet-health','orch-console',%s,%s,%s,false,'P2',false)",
-                (PAGE_MESSAGE_TYPE, payload["subject"], payload["body"]))
+                "SELECT * FROM post_agent_message('cc-fleet-health', 'orch-console', %s, "
+                "%s, %s, 'P2', false, %s, %s, %s, %s)",
+                (PAGE_MESSAGE_TYPE, payload["subject"], payload["body"],
+                 str(uuid.uuid4()), None, False, None))
         conn.commit()
         log(f"client-asks-chase SUMMARY sent -> orch-console ({len(sent)} ask(s))")
         return True

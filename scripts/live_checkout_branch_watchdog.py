@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 _ORCH_DIR = Path(__file__).resolve().parent.parent
@@ -111,10 +112,12 @@ def _alert(cur, conn, current_branch, age_s, dry: bool) -> str:
     if dry:
         print(f"    WOULD-ALERT orch-console: {subject}")
         return "would-alert"
+    # RPC on the EXISTING cursor/connection (backlog#124, bus #74939), not bus_send.send() --
+    # keeps this on the one connection run() already holds, no need to churn a second one
+    # for a single-shot alert.
     cur.execute(
-        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,"
-        " requires_response,created_at) VALUES "
-        "('cc-fleet-health','orch-console','blocker',%s,%s,'P1',false, now())", [subject, body])
+        "SELECT * FROM post_agent_message('cc-fleet-health','orch-console','blocker',%s,%s,"
+        "'P1',false,%s,%s,%s,%s)", [subject, body, str(uuid.uuid4()), None, False, None])
     conn.commit()
     print(f"    ALERTED orch-console: {subject}")
     return "alerted"

@@ -237,7 +237,7 @@ def test_client_ask_chase_pages_only_the_owner_not_console(monkeypatch):
 
     class FakeCursor:
         def execute(self, sql, params=None):
-            if "INSERT INTO agent_messages" in sql:
+            if "post_agent_message" in sql:
                 sent_to.append(params[0])
 
         def __enter__(self):
@@ -265,7 +265,7 @@ def test_client_ask_chase_owner_is_orch_console_deduplicates_to_one_send(monkeyp
 
     class FakeCursor:
         def execute(self, sql, params=None):
-            if "INSERT INTO agent_messages" in sql:
+            if "post_agent_message" in sql:
                 sent_to.append(params[0])
 
         def __enter__(self):

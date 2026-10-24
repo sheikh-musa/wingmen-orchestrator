@@ -71,6 +71,7 @@ _ORCH_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ORCH_ROOT not in sys.path:
     sys.path.insert(0, _ORCH_ROOT)
 from scripts.lib import hub_reach  # noqa: E402
+from scripts import bus_send  # noqa: E402
 
 HUB_AGENT = "cc-orchestrator"
 HUB_TMUX = "orch"
@@ -268,7 +269,7 @@ def log_event(cur, *, mode: str, action: str, pending_kind, triggering_row_id, d
     return cur.fetchone()[0]
 
 
-def _page_observation(cur, *, action: str, detail: str) -> None:
+def _page_observation(*, action: str, detail: str) -> None:
     """One low-priority, non-flooding bus row per genuine, newly-logged detection
     (in ANY mode) — 'silence is never the outcome of an action' per the original
     proposal, and the observe-first evidence needs a human to actually SEE it land,
@@ -278,13 +279,16 @@ def _page_observation(cur, *, action: str, detail: str) -> None:
     noise. Raises on failure — the caller (evaluate()) is responsible for isolating
     this from the already-committed audit row (audit #43169 finding 4: this used to
     share a transaction with the audit INSERT, so a failed page here aborted the
-    whole transaction and silently discarded the audit row too)."""
-    cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (HUB_AGENT,))
-    cur.execute(
-        "INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body,requires_response) "
-        "VALUES (%s,'orch-console','update','P3',%s,%s,false)",
-        (HUB_AGENT, f"hub-self-recovery: {action}", detail),
-    )
+    whole transaction and silently discarded the audit row too).
+
+    backlog#124 (bus #74939): posts via bus_send.send() on its OWN connection now,
+    not the caller's cursor — a strictly better fit for the isolation #43169
+    already required (a failed page can no longer touch evaluate()'s transaction
+    at all, not even via the try/rollback it still wraps this call in)."""
+    bus_send.send(
+        from_agent=HUB_AGENT, to="orch-console", mtype="update",
+        subject=f"hub-self-recovery: {action}", body=detail, priority="P3",
+        req=False, dsn=_dsn())
 
 
 # --------------------------------------------------------------------------- #
@@ -367,7 +371,7 @@ def evaluate(*, busy: bool, menu: bool, composer_empty: bool, mode: str) -> dict
             # a page is even attempted — a failed page must never be able to roll
             # back or otherwise destroy a detection that already happened.
             try:
-                _page_observation(cur, action=action, detail=result["reason"])
+                _page_observation(action=action, detail=result["reason"])
                 conn.commit()
             except Exception:  # noqa: BLE001 — the audit row above is already committed;
                 # a paging failure (e.g. agent_messages RLS/connectivity) is best-effort

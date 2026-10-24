@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -194,12 +195,17 @@ def _send_queue_page(conn, target: dict) -> bool:
         f"Re-pages every {REPAGE_EVERY_MIN}m until claimed. (Closes the op#20774 gap: rows sat 8.5-12h unpaged.)")
     try:
         with conn.cursor() as cur:
+            # RPC on the EXISTING cursor/connection (backlog#124, bus #74939), not
+            # bus_send.py's send() -- send() opens its OWN connection and would commit
+            # each owner's page independently, breaking the all-or-nothing batch this
+            # function's own contract requires ("Returns True only if ALL owner rows
+            # committed").
             for owner in target.get("owners", OWNERS):
                 cur.execute(
-                    "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-                    "  requires_response,priority,is_test) "
-                    "VALUES ('cc-fleet-health',%s,%s,%s,%s,false,%s,false)",
-                    (owner, PAGE_MESSAGE_TYPE, subj, body, pr))
+                    "SELECT * FROM post_agent_message('cc-fleet-health', %s, %s, %s, %s, "
+                    "%s, false, %s, %s, %s, %s)",
+                    (owner, PAGE_MESSAGE_TYPE, subj, body, pr, str(uuid.uuid4()), None,
+                     False, None))
         conn.commit()
         log(f"queue-age PAGED #{tid} ({pr}, {age}m) -> {','.join(target.get('owners', OWNERS))}")
         return True

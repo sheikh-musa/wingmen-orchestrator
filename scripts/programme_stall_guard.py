@@ -39,6 +39,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+try:
+    from scripts import bus_send
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import bus_send
 
 STATE = ROOT / "state" / "programme_stall_guard.json"
 OPEN_STATUSES = ("in_progress", "needs_you")
@@ -207,14 +213,8 @@ def check(dry_run: bool) -> int:
         subject_bits.append(f"{len(corrupt_due)} checkpoint(s) with an invalid payload")
     subject = "STALLED BY CONSTRUCTION: " + "; ".join(subject_bits)
 
-    import psycopg  # noqa: WPS433
-    with psycopg.connect(_dsn(), connect_timeout=20) as conn:
-        conn.execute(
-            """INSERT INTO agent_messages
-                 (from_agent, to_agent, message_type, subject, body, requires_response, priority)
-               VALUES (%s, 'orch-console', 'blocker', %s, %s, true, 'P1')""",
-            (FROM_AGENT, subject, body),
-        )
+    bus_send.send(from_agent=FROM_AGENT, to="orch-console", mtype="blocker",
+                   subject=subject, body=body, priority="P1", req=True, dsn=_dsn())
     for p in due:
         state[str(p["id"])] = now.isoformat()
     for c in corrupt_due:

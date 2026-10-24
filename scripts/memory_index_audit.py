@@ -35,6 +35,7 @@ import os
 import pathlib
 import re
 import sys
+import uuid
 
 PROJECTS = pathlib.Path.home() / ".claude" / "projects"
 INDEX = "MEMORY.md"
@@ -520,19 +521,23 @@ def _dispatch_alerts(problems: list, connect=None, dsn: "str | None" = None) -> 
                     for to, ps in by_to.items():
                         hard_ps = [p for p in ps if p["tier"] == "hard"]
                         adv_ps = [p for p in ps if p["tier"] == "advisory"]
+                        # Both calls go through post_agent_message() directly on this cursor
+                        # (backlog#124, bus #74939), not a raw INSERT -- autocommit=True means
+                        # each one already commits independently, so there's no batching to
+                        # preserve, just the sanctioned write path.
                         if hard_ps:  # any hard flag -> the loud SRE page
                             subj, body = _hard_body(hard_ps, rmap)
                             cur.execute(
-                                "INSERT INTO agent_messages (from_agent,to_agent,message_type,"
-                                "subject,body,priority,requires_response) VALUES "
-                                "('orch-console',%s,'question',%s,%s,'P2',true)", (to, subj, body))
+                                "SELECT * FROM post_agent_message('orch-console',%s,'question',"
+                                "%s,%s,'P2',true,%s,%s,%s,%s)",
+                                (to, subj, body, str(uuid.uuid4()), None, False, None))
                             print(f"posted HARD page to {to}: {subj}")
                         if adv_ps:  # advisory -> owner (or SRE fallback)
                             subj, body = _advisory_body(to, adv_ps, is_fallback=(to == SRE_AGENT))
                             cur.execute(
-                                "INSERT INTO agent_messages (from_agent,to_agent,message_type,"
-                                "subject,body,priority,requires_response) VALUES "
-                                "('cc-fleet-health',%s,'update',%s,%s,'P3',false)", (to, subj, body))
+                                "SELECT * FROM post_agent_message('cc-fleet-health',%s,'update',"
+                                "%s,%s,'P3',false,%s,%s,%s,%s)",
+                                (to, subj, body, str(uuid.uuid4()), None, False, None))
                             print(f"posted ADVISORY to {to}: {subj}")
         _save_alert_state(new_state)
     except Exception as exc:  # noqa: BLE001 — the alarm must never take down the checker

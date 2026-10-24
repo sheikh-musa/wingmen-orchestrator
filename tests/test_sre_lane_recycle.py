@@ -871,6 +871,9 @@ def test_cross_host_nudge_recently_false_when_no_prior_row():
 
 def test_send_cross_host_recycle_nudge_inserts_when_not_on_cooldown(monkeypatch):
     monkeypatch.setattr(slr, "_cross_host_nudge_recently", lambda conn, base, **kw: False)
+    sent_calls = []
+    monkeypatch.setattr(slr.bus_send, "send",
+                         lambda **kw: (sent_calls.append(kw), (1, "fake-thread"))[1])
     conn = _CaptureConn(None)
     lane_row = {"base_agent_id": "cc-cosem-port", "tmux_session": "cosem-port", "host": "gzbai"}
 
@@ -878,11 +881,9 @@ def test_send_cross_host_recycle_nudge_inserts_when_not_on_cooldown(monkeypatch)
         conn, lane_row, {"idle": True}, "SRE auto-recycle: wedged/bloated lane")
 
     assert sent is True
-    assert conn.commits == 1
-    sql, params = conn.cur.calls[-1]
-    assert "INSERT INTO agent_messages" in sql
-    assert params[0] == slr.fhb.SRE_AGENT_ID
-    assert params[1] == "cc-cosem-port"
+    assert len(sent_calls) == 1
+    assert sent_calls[0]["from_agent"] == slr.fhb.SRE_AGENT_ID
+    assert sent_calls[0]["to"] == "cc-cosem-port"
 
 
 def test_send_cross_host_recycle_nudge_skips_on_cooldown(monkeypatch):

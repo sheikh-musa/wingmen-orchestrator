@@ -112,7 +112,9 @@ class _FakeCur:
         self.last = None
     def execute(self, sql, params=None):
         self.last = (sql, params)
-        if sql.lstrip().upper().startswith("INSERT"):
+        # _page_session_deaf calls post_agent_message() directly on this cursor
+        # (backlog#124, bus #74939), not a raw INSERT.
+        if sql.lstrip().upper().startswith("INSERT") or "post_agent_message" in sql:
             self.inserts.append((sql, params))
     def fetchone(self):
         return None
@@ -124,7 +126,7 @@ def test_session_deaf_page_writes_p1_to_both_recipients():
     assert sent == len(m.RECIPIENTS) == 2
     assert len(cur.inserts) == 2
     for sql, params in cur.inserts:
-        assert "INSERT INTO agent_messages" in sql
+        assert "post_agent_message" in sql
         assert "'P1'" in sql                       # session-deaf pages at P1 (operator may be unheard)
         assert params[2].startswith("HUB SESSION-DEAF:")   # subject dedup marker
         assert params[0] == m.SRE_FROM

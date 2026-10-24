@@ -39,6 +39,7 @@ from pathlib import Path
 _ORCH_DIR = Path(__file__).resolve().parent.parent
 if str(_ORCH_DIR) not in sys.path:
     sys.path.insert(0, str(_ORCH_DIR))
+from scripts import bus_send  # noqa: E402
 
 # thresholds (env-overridable) — match the shape locked with the hub (38569/38580): 6 / 8min.
 ERROR_STORM = int(os.environ.get("CHANLIVE_ERROR_STORM", "6"))       # consec_errors >= this -> wedged
@@ -155,11 +156,8 @@ def _alert(cur, conn, row: dict, verdict: str, reason: str, dry: bool) -> str:
     if _alerted_today(cur, ck, host, verdict):
         print(f"    already alerted {ck}@{host}/{verdict} today — deduped")
         return "deduped"
-    cur.execute(
-        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,"
-        " requires_response,created_at) VALUES "
-        "('cc-fleet-health','orch-console','blocker',%s,%s,'P1',false, now())", [subject, body])
-    conn.commit()
+    bus_send.send(from_agent="cc-fleet-health", to="orch-console", mtype="blocker",
+                   subject=subject, body=body, priority="P1", req=False)
     print(f"    ALERTED orch-console: {ck}@{host} {verdict}")
     return "alerted"
 

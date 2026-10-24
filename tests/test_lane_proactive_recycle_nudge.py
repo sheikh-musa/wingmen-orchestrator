@@ -139,7 +139,9 @@ class _WireCur:
 
     def execute(self, sql, params=None):
         self._last_sql = sql
-        if sql.strip().upper().startswith("INSERT"):
+        # _send_nudge calls post_agent_message() directly on this cursor (backlog#124,
+        # bus #74939), not a raw INSERT -- same params shape (to_agent, subject, body, ...).
+        if sql.strip().upper().startswith("INSERT") or "post_agent_message" in sql:
             self.inserts.append(params)
         self._is_dedup = "make_interval" in sql and "SELECT 1" in sql
 
