@@ -536,3 +536,27 @@ def test_check_required_assertions_case_insensitive_drop_function():
 
 def test_check_required_assertions_ok_with_assertions_present():
     am.check_required_assertions("REVOKE ...", [{"kind": "dropped", "fn": "public.f()"}])  # must not raise
+
+
+def test_check_required_assertions_ignores_revoke_mentioned_only_in_a_comment():
+    # PR#490 CI false positive (migration 118): a migration's own explanatory
+    # comment describing WHY it does NOT contain a REVOKE/DROP FUNCTION --
+    # using those exact words in prose -- must never trip this gate. Only an
+    # actual executable REVOKE/DROP FUNCTION statement should.
+    body = (
+        "-- No -- assert: line needed -- this file contains no REVOKE/DROP FUNCTION\n"
+        "-- (that convention trigger). This migration does NOT revoke anything.\n"
+        "GRANT INSERT ON agent_messages TO bus_writer;\n"
+    )
+    am.check_required_assertions(body, [])  # must not raise
+
+
+def test_check_required_assertions_still_catches_a_real_revoke_alongside_comments():
+    # the fix must not blind the gate to a genuine bare REVOKE just because
+    # unrelated comment lines also happen to mention the word.
+    body = (
+        "-- this migration does NOT revoke anything else, only the one grant below\n"
+        "REVOKE INSERT ON agent_messages FROM service_role;\n"
+    )
+    with pytest.raises(am.Refuse, match="CAI-RESP-1397"):
+        am.check_required_assertions(body, [])
