@@ -217,10 +217,19 @@ LOOP_INTERVAL_SEC = _envint("LANE_WEDGE_LOOP_INTERVAL_SEC", 60)
 # by the SINGLETON registry below with their own sanctioned recovery tools; this
 # list only filters the tmux-lane discovery so they are not ALSO treated as
 # generic lanes.
+# The default below mirrors the deployed plist's LANE_WEDGE_EXCLUDE (2026-10-24,
+# bus #75101-#75106/#75252) rather than a bare minimum -- today's lane-wedge
+# env-delivery saga (PR#495: DEADMAN_GAP_SEC's override demonstrably failed to
+# reach the live process for reasons never pinned down) means an env var on
+# THIS daemon cannot be trusted alone to deliver a safe value; the code default
+# must already be the real list. "bayanqa" (bare, no "-bot" suffix) is the
+# literal tmux session name actually observed tripping COVERAGE-GAP -- kept
+# alongside "bayanqa-bot" since either name may be the real one on a given day.
 EXCLUDE_SESSIONS = {
     s.strip() for s in os.environ.get(
         "LANE_WEDGE_EXCLUDE",
-        "nazim,orch,orchestrator,infra").split(",") if s.strip()
+        "nazim,cai,fleet-health,orch,orchestrator,infra,adcda,cosem-video,"
+        "bayanqa,bayanqa-bot,encoder,mizan-redirect").split(",") if s.strip()
 }
 
 # Which singleton bodies to monitor via Signal A (bus-only). Configurable so the
