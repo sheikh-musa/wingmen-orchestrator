@@ -1,0 +1,43 @@
+==========================================================================================
+SECTION A -- scripts/sre_lane_recycle.py (the REAL destructive executor;
+  armed = dropping --no-arm on dev.wingmen.sre-lane-recycle.plist / CTX_WD_LANE_ARM=1)
+==========================================================================================
+[PASS] A1 busy pane ('esc to interrupt') -> gate_idle local
+[PASS] A2 animating spinner (no literal esc-to-interrupt line) -> gate_idle local
+[PASS] A3a single passive capture of an idle-looking pane reads True (documented limitation, not a false pass)
+[PASS] A3b armed_recycle's plan() re-verify-at-fire-time catches a lane that is actually busy (ghost-composer window closed by re-verification, not by gate_idle alone) -- SRE lane red-reset gate 'idle' is not verified True (got False) — fail-closed (CAI-RESP-681 cond 1/2: idle + git-clean + FRESH handoff, all mechanically confirmed; if it can't be confirmed, no reset).
+[PASS] A4 dirty worktree -> gate_git_clean local
+[PASS] A5 no handoff file -> gate_fresh_handoff fails closed
+[PASS] A6 idle+clean+fresh-handoff but context_bloat=False -> plan() refuses (never recycles a merely-idle, non-bloated lane)
+[PASS] A7 singleton 'cc-fleet-health' structurally refused even with all gates green
+[PASS] A7 singleton 'cai' structurally refused even with all gates green
+[PASS] A7 singleton 'orch-console' structurally refused even with all gates green
+[PASS] A7 singleton 'cc-orchestrator' structurally refused even with all gates green
+[PASS] A8 cross-host busy lane -> gate_idle(ssh_target='gzb') False, dispatched over ssh -- ['ssh', 'gzb', 'tmux capture-pane -t =cosem-port:0.0 -p -S -200']
+[PASS] A9 cross-host idle-safe lane on 'gzb' -> nudge path taken, armed_recycle (the forcing tmux-write action) NEVER called -- {'acted': True, 'refused': False, 'cross_host': True, 'host': 'gzb', 'nudged': True}
+
+==========================================================================================
+SECTION A-CITED -- already-green, REAL-gate tests covering facets not re-derived above
+==========================================================================================
+  tests/test_discover_lanes_session_consistency.py::test_returned_lane_matches_the_chosen_session_not_an_arbitrary_sibling
+    -> 2 live siblings of one base, one FRESHER than the other; discover_lanes() against
+       a REAL disposable Postgres schema returns the freshest sibling's OWN lane+session,
+       never glues a different (possibly-busy) sibling's identity onto the chosen session.
+  tests/test_sre_lane_recycle.py::test_perform_armed_action_remote_host_sends_nudge_not_armed_recycle
+    -> same cross-host routing as A9 above, as a committed regression test.
+  tests/test_sre_lane_recycle.py::test_gate_idle_remote_ssh_failure_fails_closed
+    -> an unreachable gzb host fails gate_idle CLOSED (never treated as idle-by-default).
+
+==========================================================================================
+SECTION B -- scripts/auto_recycle_on_bloat.py (AUTO_RECYCLE_STAGE1_WARN; NON-destructive pager)
+==========================================================================================
+[PASS] B1 tier_eligible('cc-fleet-health') -> False (singleton)
+[PASS] B2 tier_eligible('cc-totally-unknown-lane') -> False (fail-closed, not in worker_bases)
+[PASS] B3 fresh re-read 35% (< 88% fire threshold) after a 90% detect -> SELF-COMPACTED, never WOULD-FIRE
+[PASS] B4 pane >= fire bar (700k) but oracle=ACTIVE_TURN (busy) -> GATED, not WOULD-FIRE
+[PASS] B4b pane >= fire bar but oracle verdict UNSURE (ambiguous/ghost probe) -> GATED, never WOULD-FIRE
+[PASS] B5 (positive control) pane >= fire bar (700k) and oracle=IDLE_EMPTY -> WOULD-FIRE
+[PASS] B6 auto_recycle_on_bloat.py source calls armed_recycle() NOWHERE and invokes subprocess.run exactly ONCE total (read-only 'tmux ls' session enumeration) -- AUTO_RECYCLE_STAGE1_WARN=1 can only post a page, never recycle a session -- subprocess.run occurrences=1
+
+==========================================================================================
+TOTAL: 20 passed, 0 failed

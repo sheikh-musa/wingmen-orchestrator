@@ -1,0 +1,20 @@
+SRE lane-recycle — DETECT-ONLY (disarmed) — trigger=>=80% context — scope=worker-only (excluding cc-irsyad,cc-cosem,cc-shipforge,cc-storefront) — 9/19 lane(s) · 2026-10-24T13:24:37.567044+00:00
+  [skip] cc-bariq               ctx=  ?% session=bariq gates={'idle': True, 'git_clean': False, 'fresh_handoff': False, 'context_bloat': False}
+            reason: SRE lane red-reset is force-DISARMED (CAI-RESP-681 cond 5) — refusing. The carve-out is standing-armed by default (CAI-RESP-1382); this run was explicitly disarmed (--no-arm / CTX_WD_LANE_ARM=0).
+  [skip] cc-coffeemedia         ctx=  ?% session=coffeemedia gates={'idle': True, 'git_clean': False, 'fresh_handoff': False, 'context_bloat': False}
+            reason: SRE lane red-reset is force-DISARMED (CAI-RESP-681 cond 5) — refusing. The carve-out is standing-armed by default (CAI-RESP-1382); this run was explicitly disarmed (--no-arm / CTX_WD_LANE_ARM=0).
+  [skip] cc-ffsfulfilment       ctx=  ?% session=cc-ffsfulfilment gates={'idle': True, 'git_clean': True, 'fresh_handoff': False, 'context_bloat': False}
+            reason: SRE lane red-reset is force-DISARMED (CAI-RESP-681 cond 5) — refusing. The carve-out is standing-armed by default (CAI-RESP-1382); this run was explicitly disarmed (--no-arm / CTX_WD_LANE_ARM=0).
+  [skip] cc-hc95-broker         ctx=  ?% session=hc95-broker gates={'idle': True, 'git_clean': True, 'fresh_handoff': False, 'context_bloat': False}
+            reason: SRE lane red-reset is force-DISARMED (CAI-RESP-681 cond 5) — refusing. The carve-out is standing-armed by default (CAI-RESP-1382); this run was explicitly disarmed (--no-arm / CTX_WD_LANE_ARM=0).
+  [skip] cc-mamadah             ctx=  ?% session=mamadah gates={'idle': True, 'git_clean': False, 'fresh_handoff': False, 'context_bloat': False}
+            reason: SRE lane red-reset is force-DISARMED (CAI-RESP-681 cond 5) — refusing. The carve-out is standing-armed by default (CAI-RESP-1382); this run was explicitly disarmed (--no-arm / CTX_WD_LANE_ARM=0).
+  [skip] cc-oeh                 ctx=  ?% session=oeh gates={'idle': True, 'git_clean': True, 'fresh_handoff': False, 'context_bloat': False}
+            reason: SRE lane red-reset is force-DISARMED (CAI-RESP-681 cond 5) — refusing. The carve-out is standing-armed by default (CAI-RESP-1382); this run was explicitly disarmed (--no-arm / CTX_WD_LANE_ARM=0).
+  [skip] cc-paperclip-spike     ctx=  ?% session=cc-paperclip-spike gates={'idle': True, 'git_clean': False, 'fresh_handoff': False, 'context_bloat': False}
+            reason: SRE lane red-reset is force-DISARMED (CAI-RESP-681 cond 5) — refusing. The carve-out is standing-armed by default (CAI-RESP-1382); this run was explicitly disarmed (--no-arm / CTX_WD_LANE_ARM=0).
+  [skip] cc-scholar             ctx=  ?% session=scholar gates={'idle': True, 'git_clean': False, 'fresh_handoff': False, 'context_bloat': False}
+            reason: SRE lane red-reset is force-DISARMED (CAI-RESP-681 cond 5) — refusing. The carve-out is standing-armed by default (CAI-RESP-1382); this run was explicitly disarmed (--no-arm / CTX_WD_LANE_ARM=0).
+  [skip] cc-substrate           ctx= 18% session=substrate-cleanup gates={'idle': False, 'git_clean': False, 'fresh_handoff': False, 'context_bloat': False}
+            reason: SRE lane red-reset is force-DISARMED (CAI-RESP-681 cond 5) — refusing. The carve-out is standing-armed by default (CAI-RESP-1382); this run was explicitly disarmed (--no-arm / CTX_WD_LANE_ARM=0).
+done — 0 recycled, 9 left alone.
