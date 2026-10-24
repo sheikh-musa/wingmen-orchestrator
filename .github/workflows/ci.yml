@@ -91,6 +91,16 @@ jobs:
             python scripts/check_additive_migration.py "$f"
           done
 
+      - name: Agent-messages writer gate (backlog#124, bus #74885/#74906)
+        # Enforce-in-code gate: fails CI on any NEW raw `INSERT INTO
+        # agent_messages` outside the sanctioned helper (bus_send.py's
+        # send()). The baseline tracks pre-existing debt only -- same shape
+        # and shrink-only contract as tests/ci_known_failing.txt -- so this
+        # gates new bypasses TODAY without red-lining every PR over the ~55
+        # scripts not yet migrated. Migration 119 (the revoke) does not
+        # release until the baseline file is empty.
+        run: python scripts/agent_messages_writer_gate.py . --baseline scripts/agent_messages_writer_gate_baseline.txt
+
       - name: Bootstrap ephemeral schema (cp#83/backlog#68)
         # Brings up a throwaway local pg17 cluster, replays schema.sql +
         # supabase/migrations/*.sql + migrations/*.sql against it, and appends
