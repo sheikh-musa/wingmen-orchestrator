@@ -235,6 +235,24 @@ def test_python_helper_reads_a_running_shell_plural_as_busy():
     assert pb.is_busy_text(SHELL_RUNNING_PLURAL_PANE) is True
 
 
+def test_a_plain_idle_pane_still_reads_idle_after_the_shell_marker_fix():
+    # orch-console's re-arm bar (bus #75238): prove the NEGATIVE branch too, not just that
+    # a shell-running pane now reads busy -- a marker broad enough to catch "shell" anywhere
+    # would blind the watchdog to real wedges. A genuinely idle pane (no "shell" text at all)
+    # must still read idle, in both helpers.
+    assert _busy("some output\n" + IDLE_FOOTER) is False
+    assert pb.is_busy_text("some output\n" + IDLE_FOOTER) is False
+    # Also pin the near-miss case directly: the STANDING bottom-bar "N shell" marker (present
+    # whenever any shell session exists, even a long-finished one) must NOT alone trip busy --
+    # only "shells? still running" is load-bearing. This is deliberately not yet a real pane
+    # capture (the bypass-permissions bar always shows "N shell" once any shell has ever run in
+    # the session) -- if the live fleet shows this bar when NO shell is running, that indicates
+    # the marker still needs the "still running" qualifier it already has.
+    idle_with_old_shell_mention = "some output\n  ⏵⏵ bypass permissions on · 1 shell · ↓ to manage\n"
+    assert _busy(idle_with_old_shell_mention) is False
+    assert pb.is_busy_text(idle_with_old_shell_mention) is False
+
+
 # The LIVE pane_busy(session) path must keep the op#11774 LIVENESS gate: a thinking spinner that
 # ANIMATES (timer ticks between two captures) is busy; a FROZEN one is stale (so a dead 'thinking'
 # pane can still be recycled instead of blocking self_recycle to MAX_WAIT). This is the case a
