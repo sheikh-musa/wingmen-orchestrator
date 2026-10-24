@@ -1096,7 +1096,8 @@ def test_bloat_nudge_is_addressed_to_the_body_not_the_operator():
                                    dsn="postgres://fake")
     assert ok is True
     sql, params = log[0]
-    assert "agent_messages" in sql and "insert" in sql.lower()
+    assert "post_agent_message" in sql.lower(), (
+        "must go through the sanctioned RPC (backlog#124), not a raw INSERT")
     assert "cc-fleet-health" in params, "the nudge must be addressed to the bloated body itself"
 
 

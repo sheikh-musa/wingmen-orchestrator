@@ -45,6 +45,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ORCH = Path(os.path.expanduser("~/wingmen/orchestrator"))
+sys.path.insert(0, str(ORCH))
+from scripts import bus_send  # noqa: E402
+
 STATE_FILE = ORCH / "logs" / "address_variant_miss_watchdog_state.json"
 LOG_FILE = ORCH / "logs" / "address_variant_miss_watchdog.log"
 
@@ -182,15 +185,8 @@ def _page(conn, miss: dict) -> bool:
         f"to_agent IN (base, instance), not base alone."
     )
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-                "  requires_response,priority,is_test) "
-                "VALUES ('cc-fleet-health','orch-console',%s,%s,%s,false,'P2',false)",
-                (PAGE_MESSAGE_TYPE, subj, body),
-            )
-        conn.commit()
+        bus_send.send(from_agent="cc-fleet-health", to="orch-console", mtype=PAGE_MESSAGE_TYPE,
+                       subject=subj, body=body, priority="P2", req=False, dsn=_dsn())
         log(f"PAGED {instance_id} (base={base_id}, unread={miss['unread_count']})")
         return True
     except Exception as e:

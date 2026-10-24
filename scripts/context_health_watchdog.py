@@ -69,6 +69,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
@@ -1002,13 +1003,17 @@ def _bus_nudge_self_recycle(agent: str, pct: int, connect=None, dsn: Optional[st
         f"from your 'waiting', which is exactly why the decision is yours."
     )
     try:
+        # RPC on the injected connect()/cursor (backlog#124, bus #74939), not
+        # bus_send.py's send() -- send() would open its OWN real connection and bypass
+        # the `connect` DI seam this function's tests rely on (fake connect/cursor, no
+        # real DB). No atomicity requirement here (one independent write); the seam is
+        # purely for testability.
         with connect(dsn) as conn, conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
-                "priority, requires_response, is_test) VALUES (%s, %s, 'update', %s, %s, 'P2', false, false)",
+                "SELECT * FROM post_agent_message(%s, %s, 'update', %s, %s, 'P2', false, %s, %s, %s, %s)",
                 ("cc-fleet-health", agent,
                  f"You are at ~{pct}% — deliberate self-recycle beats letting it auto-compact (your call)",
-                 body),
+                 body, str(uuid.uuid4()), None, False, None),
             )
             conn.commit()
         return True

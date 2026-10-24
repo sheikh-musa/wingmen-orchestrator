@@ -55,6 +55,11 @@ load_dotenv(ROOT / ".env")
 
 from nervous_system import tg_out  # noqa: E402  (after load_dotenv, by design)
 
+_ORCH_ROOT = str(ROOT)
+if _ORCH_ROOT not in sys.path:
+    sys.path.insert(0, _ORCH_ROOT)
+from scripts import bus_send  # noqa: E402
+
 CHANNEL = "gazzabyte-irsyad"
 # NRIC/BC shape: a prefix letter (S/T/F/G/M), 7 digits, a checksum letter.
 _NRIC_RE = re.compile(r"[STFGM]\d{7}[A-Z]", re.IGNORECASE)
@@ -82,14 +87,10 @@ def compose(page_url: str | None, description: str | None) -> str:
 def _alert_console(dsn: str, text: str) -> None:
     """Fail-loud: bus a P1 blocker to orch-console. Best-effort, never raises."""
     try:
-        with psycopg.connect(dsn, connect_timeout=20) as conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,"
-                "requires_response,subject,body) VALUES "
-                "('bug-report-poller','orch-console','blocker','P1',true,%s,%s)",
-                ("bug-report channel poller: send failure", text),
-            )
-            conn.commit()
+        bus_send.send(
+            from_agent="bug-report-poller", to="orch-console", mtype="blocker",
+            subject="bug-report channel poller: send failure", body=text,
+            priority="P1", req=True, dsn=dsn)
     except Exception as exc:  # noqa: BLE001 — alerting must never crash the poller
         print(f"WARN: could not alert console: {exc}", file=sys.stderr)
 

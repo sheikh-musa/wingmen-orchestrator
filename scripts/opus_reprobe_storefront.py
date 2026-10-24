@@ -16,7 +16,7 @@ memory), so a cc-fleet-health reset does not drop the deadline. Idempotent + ded
 state flags. Run by launchd dev.wingmen.opus-reprobe every ~30 min.
 """
 from __future__ import annotations
-import json, os, sys, time, urllib.request, urllib.error
+import json, os, sys, time, urllib.request, urllib.error, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -65,11 +65,16 @@ def _opus_comfortably_servable() -> bool:
 
 
 def _post(cur, to_agent: str, subject: str, body: str, priority: str = "P2") -> None:
+    # RPC on the EXISTING cursor/connection (backlog#124, bus #74939), not
+    # bus_send.py's send() -- send() opens its OWN separate connection and would
+    # commit each row independently, breaking the single-commit-at-the-end batch
+    # the deadline-escalation loop in main() relies on (today: all 3 escalation rows
+    # land together or not at all).
     cur.execute(
-        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-        "requires_response,priority,posted_by_identity) "
-        "VALUES ('cc-fleet-health',%s,'update',%s,%s,false,%s,'cc-fleet-health')",
-        (to_agent, subject, body, priority))
+        "SELECT * FROM post_agent_message('cc-fleet-health', %s, 'update', %s, %s, "
+        "%s, false, %s, %s, %s, %s)",
+        (to_agent, subject, body, priority, str(uuid.uuid4()), None, False,
+         "cc-fleet-health"))
 
 
 def main() -> int:

@@ -45,6 +45,7 @@ import sys
 import time
 import urllib.request
 import urllib.error
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -385,13 +386,19 @@ def _emit_bus(subject: str, body: str, priority: str,
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     if not dsn:
         raise RuntimeError("no DATABASE_URL for bus alert")
+    # RPC on our own cursor (backlog#124, bus #74939), not bus_send.py's send() --
+    # post_agent_message has no responded_at param, and this alert is deliberately
+    # pre-stamped responded_at=now() at insert time (never re-creates the SLA
+    # false-stall flood), so the RPC insert and the responded_at UPDATE must commit
+    # together in the same transaction.
     with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
         cur.execute(
-            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-            " priority,requires_response,responded_at) "
-            "VALUES ('cc-fleet-health',%s,'update',%s,%s,%s,false,now())",
-            (to_agent, subject[:180], body, priority))
+            "SELECT * FROM post_agent_message('cc-fleet-health', %s, 'update', %s, %s, "
+            "%s, false, %s, %s, %s, %s)",
+            (to_agent, subject[:180], body, priority, str(uuid.uuid4()), None, False, None))
+        row_id, _thread_id = cur.fetchone()
+        cur.execute("UPDATE agent_messages SET responded_at=now() WHERE id=%s", (row_id,))
         c.commit()
 
 

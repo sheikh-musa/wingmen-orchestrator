@@ -16,10 +16,10 @@ import sys
 
 from substrate_dsn import dsn_from_env_file
 
-
-def _connect(dsn):
-    import psycopg
-    return psycopg.connect(dsn)
+try:
+    from scripts import bus_send
+except ImportError:
+    import bus_send  # type: ignore
 
 
 def main(argv=None) -> int:
@@ -46,12 +46,8 @@ def main(argv=None) -> int:
             f"Reason: {a.reason}")
     try:
         dsn = dsn_from_env_file()
-        with _connect(dsn) as conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
-                "priority, requires_response) VALUES (%s, %s, 'update', %s, %s, 'P2', false)",
-                (a.by, a.by, subject, body))
-            conn.commit()
+        bus_send.send(from_agent=a.by, to=a.by, mtype="update",
+                      subject=subject, body=body, priority="P2", req=False, dsn=dsn)
     except Exception as e:  # noqa: BLE001 — fail LOUD, caller aborts
         print(f"reset_audit_row: FAILED to write audit row: {e!r}", file=sys.stderr)
         return 1

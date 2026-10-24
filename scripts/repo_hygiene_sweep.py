@@ -191,17 +191,17 @@ def main() -> int:
         # day?"). Orch drains this + acts; the operator only hears a hygiene item
         # if orch judges it genuinely his call.
         try:
-            import os as _os, psycopg
+            import os as _os
             from dotenv import load_dotenv
+            try:
+                from scripts import bus_send
+            except ImportError:
+                import bus_send
             load_dotenv(str(ORCH / ".env"))
             dsn = _os.environ.get("DATABASE_URL") or _os.environ.get("SUPABASE_DB_URL")
-            with psycopg.connect(dsn, connect_timeout=10) as c, c.cursor() as cur:
-                cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
-                cur.execute(
-                    "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
-                    "VALUES ('cc-orchestrator','cc-orchestrator','update',%s,%s,false,'P2')",
-                    (f"[repo-hygiene] {len(alertable)} issue(s) — orch action", body))
-                c.commit()
+            bus_send.send(from_agent="cc-orchestrator", to="cc-orchestrator", mtype="update",
+                          subject=f"[repo-hygiene] {len(alertable)} issue(s) — orch action",
+                          body=body, priority="P2", req=False, dsn=dsn)
         except Exception as e:
             log(f"bus post failed: {e}")
     else:

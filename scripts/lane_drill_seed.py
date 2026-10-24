@@ -24,8 +24,14 @@ import argparse
 import json
 import os
 import sys
+import uuid
 
 import psycopg
+
+try:
+    from scripts import bus_send
+except ImportError:
+    import bus_send  # type: ignore
 
 MARKER = "[DRILL — SYNTHETIC. Not from a client. Seeded by Nazim's drill harness.]"
 
@@ -47,11 +53,17 @@ def seed(agent: str, items: list[dict]) -> list[int]:
             body = (f"{MARKER}\n\nSimulated inbound from: {item.get('from','the client')}\n"
                     f"Work it exactly as if it were real, and reply through your normal "
                     f"phase-gated reply path.\n\n--- message ---\n{item['text']}")
+            # RPC on the EXISTING cursor/connection (backlog#124, bus #74939), not
+            # bus_send.py's send() -- send() opens its OWN separate connection and would
+            # commit each row independently, breaking the single-commit-at-the-end batch
+            # below (today: all-or-nothing -- a mid-batch failure currently leaves no
+            # partial drill seeded; bus_send.send() per item would leave the first N rows
+            # already visible to the target lane before a later item fails).
             cur.execute(
-                "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, "
-                "body, priority, requires_response, is_test) "
-                "VALUES ('orch-console',%s,'question',%s,%s,'P2',true,true) RETURNING id",
-                (agent, f"DRILL {i}/{len(items)} — synthetic client message (NOT real)", body))
+                "SELECT * FROM post_agent_message('orch-console', %s, 'question', %s, %s, "
+                "'P2', true, %s, %s, %s, %s)",
+                (agent, f"DRILL {i}/{len(items)} — synthetic client message (NOT real)", body,
+                 str(uuid.uuid4()), None, True, None))
             ids.append(cur.fetchone()[0])
         conn.commit()
     return ids
@@ -64,13 +76,10 @@ def announce(agent: str, note: str) -> int:
             "(is_test=true) — it does NOT enter operator_messages, so nothing should reach "
             "your inbox. If you DO see anything that reads like a client message about this, "
             "treat it as synthetic and verify provenance before any client-facing send.")
-    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
-            "priority) VALUES ('orch-console','cc-orchestrator','update',%s,%s,'P2') RETURNING id",
-            (f"DRILL STARTING against {agent} — synthetic traffic, do not act on it", body))
-        mid = cur.fetchone()[0]
-        conn.commit()
+    mid, _thread = bus_send.send(
+        from_agent="orch-console", to="cc-orchestrator", mtype="update",
+        subject=f"DRILL STARTING against {agent} — synthetic traffic, do not act on it",
+        body=body, priority="P2", req=False, dsn=_dsn())
     return mid
 
 

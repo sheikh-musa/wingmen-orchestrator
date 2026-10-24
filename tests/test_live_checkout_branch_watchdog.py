@@ -82,7 +82,9 @@ class _Cur:
         return False
 
     def execute(self, sql, params=None):
-        if sql.strip().upper().startswith("INSERT"):
+        # _alert() calls post_agent_message() directly on this cursor (backlog#124,
+        # bus #74939), not a raw INSERT -- params[0] is still subject, params[1] still body.
+        if sql.strip().upper().startswith("INSERT") or "post_agent_message" in sql:
             self.inserts.append(params)
 
 

@@ -39,6 +39,7 @@ sys.path.insert(0, str(_ORCH_DIR / "scripts"))
 sys.path.insert(0, str(_ORCH_DIR / "scripts" / "lib"))
 import sre_lane_recycle as slr            # noqa: E402
 import fleet_health_boundaries as fhb     # noqa: E402
+import bus_send                           # noqa: E402
 
 # A lossless handoff is prose with task state + SHAs; a near-empty file is a stub, not a
 # restore point. Fail-closed under this floor (never recycle onto a stub handoff).
@@ -343,13 +344,8 @@ def run(args, conn) -> dict:
         return r.returncode
 
     def post_note_fn(_conn, _base):
-        with _conn.cursor() as cur:
-            cur.execute("SELECT set_config('app.current_agent_id',%s,true)", [fhb.SRE_AGENT_ID])
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-                "requires_response,priority) VALUES (%s,%s,'update',%s,%s,true,'P2')",
-                [fhb.SRE_AGENT_ID, _base, _NOTE_SUBJECT, _NOTE_BODY])
-        _conn.commit()
+        bus_send.send(from_agent=fhb.SRE_AGENT_ID, to=_base, mtype="update",
+                      subject=_NOTE_SUBJECT, body=_NOTE_BODY, priority="P2", req=True)
 
     def recycle_fn(_base, _session, t_nudge):
         # Recycle the EXACT discovered lane_row IN-PROCESS (no CLI re-discovery, which would

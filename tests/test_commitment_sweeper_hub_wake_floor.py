@@ -37,6 +37,15 @@ class _FakeCursor:
         elif "INSERT INTO agent_messages" in q:
             self.inserts.append(params)
             self._last = [{"id": 999}]
+        elif "post_agent_message" in q:
+            # _notify() now calls the RPC directly on this cursor (backlog#124).
+            # params: (from_agent, to_agent, subject, body, priority,
+            # requires_response, thread_id, sub_tag, is_test, posted_by_identity).
+            # Re-order to the old (from_agent,to_agent,subject,body,
+            # requires_response,priority) shape so the existing assertion holds.
+            from_agent, to_agent, subject, body, priority, requires_response = params[:6]
+            self.inserts.append((from_agent, to_agent, subject, body, requires_response, priority))
+            self._last = [{"id": 999}]
         else:
             self._last = []
 

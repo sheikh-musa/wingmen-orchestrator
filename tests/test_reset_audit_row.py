@@ -16,41 +16,31 @@ sys.path.insert(0, str(_ROOT / "scripts" / "lib"))
 import reset_audit_row as rar  # noqa: E402
 
 
-class _FakeCur:
-    def __init__(self, log): self.log = log
-    def execute(self, sql, params=None): self.log.append((sql, params))
-    def __enter__(self): return self
-    def __exit__(self, *a): return False
-
-
-class _FakeConn:
-    def __init__(self, log): self.log = log; self.committed = False
-    def cursor(self): return _FakeCur(self.log)
-    def commit(self): self.committed = True
-    def __enter__(self): return self
-    def __exit__(self, *a): return False
+def _capture(monkeypatch, dsn="postgres://f"):
+    calls = []
+    monkeypatch.setattr(rar, "dsn_from_env_file", lambda: dsn)
+    def fake_send(**kw):
+        calls.append(kw)
+        return (1, "thread")
+    monkeypatch.setattr(rar.bus_send, "send", fake_send)
+    return calls
 
 
 def test_writes_self_addressed_audit_row_and_commits(monkeypatch):
-    log, conns = [], []
-    monkeypatch.setattr(rar, "dsn_from_env_file", lambda: "postgres://file-first")
-    def fake_connect(dsn):
-        assert dsn == "postgres://file-first", "must use the FILE-first DSN"
-        c = _FakeConn(log); conns.append(c); return c
-    monkeypatch.setattr(rar, "_connect", fake_connect)
+    calls = _capture(monkeypatch, dsn="postgres://file-first")
     rc = rar.main(["--by", "cc-fleet-health", "--base", "cc-storefront", "--session", "storefront",
                    "--handoff", "/abs/h.md", "--reason", "bloat 832k"])
-    assert rc == 0 and conns[0].committed
-    sql, params = [x for x in log if "INSERT" in x[0]][0]
-    assert "agent_messages" in sql
-    assert params[0] == "cc-fleet-health" and params[1] == "cc-fleet-health"  # self-addressed
-    assert "cc-storefront" in params[2] and "/abs/h.md" in params[3] and "bloat 832k" in params[3]
+    assert rc == 0
+    kw = calls[0]
+    assert kw["dsn"] == "postgres://file-first", "must use the FILE-first DSN"
+    assert kw["from_agent"] == "cc-fleet-health" and kw["to"] == "cc-fleet-health"  # self-addressed
+    assert "cc-storefront" in kw["subject"] and "/abs/h.md" in kw["body"] and "bloat 832k" in kw["body"]
 
 
 def test_db_failure_is_nonzero(monkeypatch):
     monkeypatch.setattr(rar, "dsn_from_env_file", lambda: "postgres://x")
-    def boom(dsn): raise RuntimeError("pooler down")
-    monkeypatch.setattr(rar, "_connect", boom)
+    def boom(**kw): raise RuntimeError("pooler down")
+    monkeypatch.setattr(rar.bus_send, "send", boom)
     assert rar.main(["--by", "cc-fleet-health", "--base", "cc-quality", "--session", "quality",
                      "--handoff", "/h", "--reason", "r"]) != 0
 
@@ -62,28 +52,21 @@ def test_missing_dsn_is_nonzero(monkeypatch):
                      "--handoff", "/h", "--reason", "r"]) != 0
 
 
-def _capture(monkeypatch):
-    log = []
-    monkeypatch.setattr(rar, "dsn_from_env_file", lambda: "postgres://f")
-    monkeypatch.setattr(rar, "_connect", lambda dsn: _FakeConn(log))
-    return log
-
-
 def test_forced_reset_is_flagged_in_subject_and_body(monkeypatch):
-    log = _capture(monkeypatch)
+    calls = _capture(monkeypatch)
     rc = rar.main(["--by", "cc-fleet-health", "--base", "cc-storefront", "--session", "storefront",
                    "--handoff", "/h", "--reason", "r", "--forced-gates", "busy,queued",
                    "--busy-reason", "foreground turn in progress ('esc to interrupt')"])
     assert rc == 0
-    _, params = [x for x in log if "INSERT" in x[0]][0]
-    assert "FORCED" in params[2]
-    assert "force=true" in params[3] and "busy,queued" in params[3]
-    assert "esc to interrupt" in params[3]
+    kw = calls[0]
+    assert "FORCED" in kw["subject"]
+    assert "force=true" in kw["body"] and "busy,queued" in kw["body"]
+    assert "esc to interrupt" in kw["body"]
 
 
 def test_unforced_reset_says_force_false(monkeypatch):
-    log = _capture(monkeypatch)
+    calls = _capture(monkeypatch)
     assert rar.main(["--by", "cc-fleet-health", "--base", "cc-quality", "--session", "quality",
                      "--handoff", "/h", "--reason", "r"]) == 0
-    _, params = [x for x in log if "INSERT" in x[0]][0]
-    assert "FORCED" not in params[2] and "force=false" in params[3]
+    kw = calls[0]
+    assert "FORCED" not in kw["subject"] and "force=false" in kw["body"]

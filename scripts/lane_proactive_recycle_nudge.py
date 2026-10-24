@@ -40,6 +40,7 @@ import argparse
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 _ORCH_DIR = Path(__file__).resolve().parent.parent
@@ -175,12 +176,16 @@ def _nudged_recently(cur, lane: str, cooldown_min: int = COOLDOWN_MIN) -> bool:
 def _send_nudge(cur, conn, lane_base: str, subject: str, body: str) -> None:
     """Insert the proactive nudge to the LANE (to_agent = base_agent_id, the deliverable id its wake
     subscriber listens on). P2 (proactive/softer than the dead-man's P1 backstop nudge). Benign,
-    reversible message-send; never touches the lane's state."""
+    reversible message-send; never touches the lane's state.
+
+    RPC on the EXISTING cursor/connection (backlog#124, bus #74939) rather than opening a second
+    connection via bus_send.send() -- this is already the single open connection for the whole
+    run() loop, and each nudge already commits independently right after, so there's no batching
+    to preserve, just no reason to churn an extra connection per lane."""
     cur.execute(
-        "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
-        " priority, requires_response, created_at) "
-        "VALUES ('cc-fleet-health', %s, 'blocker', %s, %s, 'P2', false, now())",
-        [lane_base, subject, body])
+        "SELECT * FROM post_agent_message('cc-fleet-health', %s, 'blocker', %s, %s, 'P2', "
+        "false, %s, %s, %s, %s)",
+        [lane_base, subject, body, str(uuid.uuid4()), None, False, None])
     conn.commit()
 
 

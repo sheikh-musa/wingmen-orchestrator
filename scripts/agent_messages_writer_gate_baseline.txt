@@ -1,0 +1,51 @@
+# Known pre-existing raw-INSERT bypasses of scripts/bus_send.py's send()
+# (backlog#124 final step, orch-console ruling bus #74885/#74906). Confirmed
+# via scripts/agent_messages_writer_gate.py against this repo on 2026-10-24
+# (55 files; 54 from the original audit, bus #74880/#74896, plus
+# nervous_system/lane_watchdog.py -- a real gap in that original manual grep,
+# caught only once this gate existed).
+#
+# Listed here (not just un-gated) so CI can enforce the gate TODAY against
+# any NEW bypass without red-lining every PR over debt that predates the
+# gate -- same shape and contract as tests/ci_known_failing.txt:
+#
+# This list must only ever SHRINK. When a script here is migrated onto the
+# shared sanctioned path (bus_send.py's send(), or the thin lib it and the
+# daemons both import -- console's ruling part 3), delete its line in the
+# SAME PR as the migration so the gate starts enforcing it again.
+#
+# Migration 120 (the revoke, renumbered from 119 -- PR#490 CI finding) does
+# not release until this file is EMPTY --
+# `agent_messages_writer_gate.py --require-complete` is that check (console's
+# coordination gate, bus #74885 part 5).
+#
+# Sequencing (console's ruling, bus #74906 part 2): ONE-SHOTS first (lowest
+# risk), then WATCHDOGS (launchd-cycled, a broken one fails its next
+# invocation -- detectable), then DAEMONS last (need the restart-gate check,
+# catch A, built first -- a long-running process keeps its old in-memory code
+# until restarted, so "source migrated" != "safe").
+#
+# ONE-SHOTS: migrated (bus #74937/#74952). WATCHDOGS: migrated (bus #74954 GO,
+# 2026-10-24). DAEMONS (bus #75001 GO, 2026-10-24): catch A (the restart-gate
+# check, scripts/daemon_restart_gate.py) built first, then the 2 non-irsyad
+# daemons (nervous_system/lane_wedge_watchdog.py, nervous_system/wake_backstop_
+# sweep.py -- both have a genuine unbounded `while True: ...time.sleep(...)`
+# in main(), confirmed by reading main(), not just grepping "while True")
+# migrated onto the sanctioned path. What's left below is ONLY the 6
+# irsyad-owned daemons, carved out for cc-irsyad-coord -- not mine to touch.
+# Their swap is gated on PR#490-merged + coord reviewing all 7 diffs +
+# cc-fleet-health bouncing shadow_watch (the other 5 self-refresh) -- console's
+# ruling, bus #75001 part 3.
+#
+# Migration 120's release (console's, bus #75001) needs BOTH: (i) this file
+# EMPTY (--require-complete green fleet-wide) AND (ii) daemon_restart_gate.py
+# confirming every LIVE daemon writer (wake_backstop_sweep + irsyad
+# shadow_watch bounced) is actually RUNNING the migrated code, not just
+# source-clean.
+
+scripts/irsyad_autoscaler.py
+scripts/irsyad_confirm_executor.py
+scripts/irsyad_pii_containment_monitor.py
+scripts/irsyad_shadow_watch.py
+scripts/irsyad_spin_worker.py
+scripts/irsyad_worker_reaper.py
