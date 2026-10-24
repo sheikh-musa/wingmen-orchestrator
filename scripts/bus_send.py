@@ -697,12 +697,14 @@ def send(
     if not thread:
         thread = str(uuid.uuid4())
 
+    # backlog#124 step 2/4 (bus #74863): post THROUGH the RPC, never a raw INSERT --
+    # this is the fleet-wide cutover that must be live everywhere before migration
+    # 118's enforcement revoke (direct INSERT -> service_role) can safely apply.
+    # Same 9 columns, same order, as the INSERT this replaces -- post_agent_message's
+    # signature was audited against this exact call shape (bus #74860) before being
+    # written.
     cur.execute(
-        """INSERT INTO agent_messages
-             (from_agent, to_agent, message_type, subject, body,
-              priority, requires_response, thread_id, sub_tag)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-           RETURNING id, thread_id""",
+        "SELECT * FROM post_agent_message(%s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (from_agent, to, mtype, subject, body, priority, req, thread, sub_tag),
     )
     row_id, thread_id = cur.fetchone()
