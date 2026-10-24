@@ -610,16 +610,15 @@ def _page(free_before, free_after, summary, *, loud=True):
     banner = header + "\n  " + "\n  ".join(lines)
     print(banner, file=sys.stderr, flush=True)
     try:
-        import psycopg2
+        try:
+            from scripts import bus_send
+        except ImportError:
+            import bus_send  # type: ignore
         dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
         if dsn:
-            c = psycopg2.connect(dsn)
-            cur = c.cursor()
-            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-            cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-                           VALUES ('cc-fleet-health','orch-console',%s,%s,%s,%s)""",
-                        (mtype, priority, subject, "\n".join(lines)))
-            c.commit()
+            bus_send.send(from_agent="cc-fleet-health", to="orch-console", mtype=mtype,
+                          subject=subject, body="\n".join(lines), priority=priority,
+                          req=False, dsn=dsn)
     except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already stands
         print(f"[disk-autoremediate] WARN bus-page failed ({e}); banner stands", file=sys.stderr)
 

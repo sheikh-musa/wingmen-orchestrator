@@ -63,6 +63,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 from nervous_system import ingest as _ingest  # reuse _download_media (retry+backoff already built in)
+from scripts import bus_send
 
 CONSOLE = "orch-console"
 FROM_AGENT = "media-reaper"
@@ -93,15 +94,14 @@ def _dsn() -> str | None:
     return os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 
 
-def _notify(cur, subject: str, body: str, priority: str = "P2") -> int:
-    cur.execute(
-        """INSERT INTO agent_messages
-             (from_agent, to_agent, message_type, subject, body, requires_response, priority)
-           VALUES (%s, %s, 'update', %s, %s, true, %s)
-           RETURNING id""",
-        (FROM_AGENT, CONSOLE, subject[:300], body, priority),
-    )
-    return cur.fetchone()["id"]
+def _notify(subject: str, body: str, priority: str = "P2") -> int:
+    # Each call site already commits this independently of its neighboring writes
+    # (no shared-transaction requirement), so bus_send.send()'s own connection is a
+    # transparent swap (backlog#124, bus #74939).
+    mid, _thread = bus_send.send(
+        from_agent=FROM_AGENT, to=CONSOLE, mtype="update", subject=subject[:300],
+        body=body, priority=priority, req=True, dsn=_dsn())
+    return mid
 
 
 def _token_for_tag(cur, tag: str) -> tuple[str, str] | None:
@@ -171,15 +171,11 @@ def reap(fire: bool) -> int:
                           f"with this channel_tag, or its token env var is unset on this host")
                     if fire and age > ESCALATE_AFTER:
                         _notify(
-                            cur, f"MEDIA #{row['id']} UNRESOLVABLE: no token for tag {row['tag']!r}",
+                            f"MEDIA #{row['id']} UNRESOLVABLE: no token for tag {row['tag']!r}",
                             f"operator_messages #{row['id']} (tag={row['tag']}, kind={row['media_kind']}, "
                             f"age={age}) cannot be retried — no bot_channels row matches this "
                             f"channel_tag, or its token_env_key is unset on THIS host. file_id is "
                             f"still safe in the row; this just needs the right host/token to retry.")
-                        conn.commit()  # cc-quality obs-3: sibling escalation branch (STILL FAILING,
-                                       # below) already commits its _notify insert; this branch
-                                       # didn't, leaving the page uncommitted until some later
-                                       # write on this connection happened to flush it.
                         escalated += 1
                     continue
 
@@ -200,13 +196,12 @@ def reap(fire: bool) -> int:
                     print(f"[retry-failed] #{row['id']} — {type(e).__name__}: {e}")
                     if age > ESCALATE_AFTER:
                         _notify(
-                            cur, f"MEDIA #{row['id']} STILL FAILING after {age}",
+                            f"MEDIA #{row['id']} STILL FAILING after {age}",
                             f"operator_messages #{row['id']} (tag={row['tag']}, kind="
                             f"{row['media_kind']}) has been retriable for {age} and still "
                             f"won't download: {type(e).__name__}: {e}. file_id/file_unique_id "
                             f"are intact in the row for a manual getFile if this is a dead file_id "
                             f"(Telegram file_ids expire eventually) rather than a transient CDN issue.")
-                        conn.commit()
                         escalated += 1
                     continue
 

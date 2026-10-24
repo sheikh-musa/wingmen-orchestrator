@@ -20,6 +20,9 @@ from datetime import datetime, timezone
 import psycopg
 from dotenv import load_dotenv
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from scripts import bus_send  # noqa: E402
+
 load_dotenv("/Users/sheikhmusa/wingmen/orchestrator/.env")
 
 DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
@@ -157,25 +160,10 @@ def main(window: str) -> int:
 
         body = "\n".join(body_lines)
 
-        cur.execute(
-            """
-            INSERT INTO agent_messages
-              (thread_id, from_agent, to_agent, message_type, subject, body,
-               requires_response, is_test, sub_tag, priority)
-            VALUES (%s, 'cc-orchestrator', 'cai', %s, %s, %s,
-                    %s, false, 'cc-orchestrator-2', %s)
-            RETURNING id
-            """,
-            (
-                THREAD_ID,
-                msg_type,
-                subject,
-                body,
-                bool(non_probe_hard_kills),
-                priority,
-            ),
-        )
-        msg_id = cur.fetchone()[0]
+        msg_id, _thread = bus_send.send(
+            from_agent="cc-orchestrator", to="cai", mtype=msg_type, subject=subject,
+            body=body, priority=priority, req=bool(non_probe_hard_kills),
+            thread=THREAD_ID, sub_tag="cc-orchestrator-2", dsn=DSN)
         print(f"tripwire +{window} report sent: msg #{msg_id} priority={priority}")
         return 0
 

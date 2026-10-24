@@ -44,6 +44,7 @@ import datetime as _dt
 import os
 import pathlib
 import sys
+import uuid
 
 import psycopg
 from psycopg.rows import dict_row
@@ -130,12 +131,16 @@ def _notify(cur, to_agent: str, subject: str, body: str, priority: str = "P1",
     action item, never advisory-only, so it must clear the hub's wake floor (P0/P1 AND
     requires_response) whenever it's addressed there — #44508 landed P1 + rr=FALSE and sat
     unseen for ~14h because that combination falls under the floor."""
+    # RPC on the EXISTING cursor/connection (backlog#124, bus #74939), not
+    # bus_send.py's send() -- send() opens its OWN separate connection and would
+    # commit independently of the held_commitments UPDATE that follows each call,
+    # and of every other commitment in this sweep's batch (sweep() commits the
+    # whole due-list together, or rolls all of it back on dry-run/failure).
     cur.execute(
-        """INSERT INTO agent_messages
-             (from_agent, to_agent, message_type, subject, body, requires_response, priority)
-           VALUES (%s, %s, 'update', %s, %s, %s, %s)
-           RETURNING id""",
-        (FROM_AGENT, to_agent, subject[:300], body, requires_response, priority),
+        """SELECT * FROM post_agent_message(%s, %s, 'update', %s, %s, %s, %s,
+                                             %s, %s, %s, %s)""",
+        (FROM_AGENT, to_agent, subject[:300], body, priority, requires_response,
+         str(uuid.uuid4()), None, False, None),
     )
     return cur.fetchone()["id"]
 

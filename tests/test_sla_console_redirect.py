@@ -11,8 +11,6 @@ that picks orch-console vs. its console_alive()-gated hub (cc-orchestrator) fall
 """
 from __future__ import annotations
 
-import psycopg
-
 from scripts import priority_sla_watchdog as s
 
 
@@ -24,37 +22,6 @@ def _violation(agent: str = "cc-cosem-platform", priority: str = "P1") -> dict:
         "elapsed_minutes": 33,
         "subject": "gate request: residency",
     }
-
-
-class _CaptureCursor:
-    def __init__(self, store):
-        self.store = store
-
-    def execute(self, sql, params=None):
-        self.store.append((sql, params))
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-
-class _CaptureConn:
-    def __init__(self, store):
-        self.store = store
-
-    def cursor(self):
-        return _CaptureCursor(self.store)
-
-    def commit(self):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
 
 
 # ── _internal_path_alive: now a pure "is there a non-circular internal party" check ──
@@ -69,53 +36,53 @@ def test_internal_path_alive_true_for_any_other_recipient():
 
 
 # ── escalate_internally: console_alive()-gated routing ────────────────────────────────
+# escalate_internally takes no injected conn -- it's a standalone write with no
+# atomicity requirement, so it correctly uses bus_send.send() (backlog#124, bus
+# #74939). Mock send() directly rather than psycopg.connect, which send() never
+# reaches first (it resolves its own DSN before opening a connection).
 
 def test_escalate_internally_targets_console_when_alive(monkeypatch):
-    store = []
+    sent = []
     monkeypatch.setattr(s, "console_alive", lambda: True)
-    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _CaptureConn(store))
+    monkeypatch.setattr(s.bus_send, "send", lambda **kw: (sent.append(kw), (1, "t"))[1])
     ok = s.escalate_internally(_violation(priority="P1"), nudges=2)
     assert ok is True
-    sql, params = next(p for p in store if "INSERT INTO agent_messages" in p[0])
-    to_agent, subject, body, priority, rr = params
-    assert to_agent == "orch-console"
-    assert priority == "P1"          # the violation's own priority, unchanged
-    assert rr is False
-    assert "console-dead-redirect" not in body
+    kw = sent[0]
+    assert kw["to"] == "orch-console"
+    assert kw["priority"] == "P1"          # the violation's own priority, unchanged
+    assert kw["req"] is False
+    assert "console-dead-redirect" not in kw["body"]
 
 
 def test_escalate_internally_redirects_to_hub_when_console_dead(monkeypatch):
-    store = []
+    sent = []
     monkeypatch.setattr(s, "console_alive", lambda: False)
-    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _CaptureConn(store))
+    monkeypatch.setattr(s.bus_send, "send", lambda **kw: (sent.append(kw), (1, "t"))[1])
     ok = s.escalate_internally(_violation(priority="P1"), nudges=2)
     assert ok is True
-    sql, params = next(p for p in store if "INSERT INTO agent_messages" in p[0])
-    to_agent, subject, body, priority, rr = params
-    assert to_agent == "cc-orchestrator"
-    assert rr is True
-    assert "audit-20261006" in body
-    assert "stall" in body.lower()   # original context preserved
+    kw = sent[0]
+    assert kw["to"] == "cc-orchestrator"
+    assert kw["req"] is True
+    assert "audit-20261006" in kw["body"]
+    assert "stall" in kw["body"].lower()   # original context preserved
 
 
 def test_escalate_internally_never_downgrades_a_p0_violation_on_redirect(monkeypatch):
-    store = []
+    sent = []
     monkeypatch.setattr(s, "console_alive", lambda: False)
-    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _CaptureConn(store))
+    monkeypatch.setattr(s.bus_send, "send", lambda **kw: (sent.append(kw), (1, "t"))[1])
     s.escalate_internally(_violation(priority="P0"), nudges=0)
-    _, params = next(p for p in store if "INSERT INTO agent_messages" in p[0])
-    assert params[3] == "P0"         # never downgraded to P1
+    assert sent[0]["priority"] == "P0"     # never downgraded to P1
 
 
 def test_escalate_internally_console_alive_exception_fails_toward_hub_redirect(monkeypatch):
-    store = []
+    sent = []
 
     def boom():
         raise RuntimeError("db blip")
 
     monkeypatch.setattr(s, "console_alive", boom)
-    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _CaptureConn(store))
+    monkeypatch.setattr(s.bus_send, "send", lambda **kw: (sent.append(kw), (1, "t"))[1])
     ok = s.escalate_internally(_violation(), nudges=0)
     assert ok is True
-    _, params = next(p for p in store if "INSERT INTO agent_messages" in p[0])
-    assert params[0] == "cc-orchestrator"
+    assert sent[0]["to"] == "cc-orchestrator"

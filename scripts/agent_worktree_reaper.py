@@ -250,17 +250,13 @@ def _page(summary, removed, errors):
     banner = "🔴 AGENT-WORKTREE REAPER ERRORS\n  " + "\n  ".join(lines)
     print(banner, file=sys.stderr, flush=True)
     try:
-        import psycopg2
         dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
         if dsn:
-            c = psycopg2.connect(dsn)
-            cur = c.cursor()
-            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-            cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-                           VALUES ('cc-fleet-health','orch-console','blocker','P1',
-                           'agent-worktree reaper hit removal errors',%s)""",
-                        ("\n".join(lines),))
-            c.commit()
+            sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+            from scripts import bus_send
+            bus_send.send(from_agent="cc-fleet-health", to="orch-console", mtype="blocker",
+                           subject="agent-worktree reaper hit removal errors",
+                           body="\n".join(lines), priority="P1", req=False, dsn=dsn)
     except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already stands
         print(f"[agent-wt-reaper] WARN bus-page failed ({e}); banner stands", file=sys.stderr)
 

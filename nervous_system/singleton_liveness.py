@@ -48,6 +48,7 @@ _ORCH_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ORCH_ROOT not in sys.path:
     sys.path.insert(0, _ORCH_ROOT)
 from scripts.lib import hub_reach  # noqa: E402
+from scripts import bus_send  # noqa: E402
 
 # same-host protected singletons to check, agent:tmux-session (env-overridable). Excludes
 # self (cc-fleet-health) and the cross-host hub (cc-orchestrator, no local session).
@@ -254,13 +255,10 @@ def _page(agent, hb_age_s, dry_run, recipient):
         log(f"DRY-RUN would page {recipient}: 🔴 SINGLETON DEAD: {agent} — needs boot")
         return
     try:
-        import psycopg2
-        c = _connect(); cur = c.cursor()
-        cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-        cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-                       VALUES ('cc-fleet-health',%s,'blocker','P1',%s,%s)""",
-                    (recipient, f"🔴 SINGLETON DEAD: {agent} — no tmux/process, needs boot", body))
-        c.commit(); cur.close(); c.close()
+        bus_send.send(
+            from_agent="cc-fleet-health", to=recipient, mtype="blocker",
+            subject=f"🔴 SINGLETON DEAD: {agent} — no tmux/process, needs boot",
+            body=body, priority="P1", req=False, dsn=_dsn())
         log(f"paged {recipient}: {agent} DEAD")
     except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already fired
         log(f"WARN page failed ({e}); stderr banner stands")
@@ -370,15 +368,9 @@ def page_wedged_alive(agent, hb_age_s=None, dry_run=False, recipient=None, holde
         log(f"DRY-RUN would page {recipient}: {subject}")
         return
     try:
-        c = _connect()
-        cur = c.cursor()
-        cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-        cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-                       VALUES ('cc-fleet-health',%s,'blocker','P2',%s,%s)""",
-                    (recipient, subject, body))
-        c.commit()
-        cur.close()
-        c.close()
+        bus_send.send(
+            from_agent="cc-fleet-health", to=recipient, mtype="blocker",
+            subject=subject, body=body, priority="P2", req=False, dsn=_dsn())
         log(f"paged {recipient}: {agent} WEDGED-alive (needs cross-host ssh nudge)")
     except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already fired
         log(f"WARN wedged-alive page failed ({e}); stderr banner stands")
@@ -428,14 +420,10 @@ def main(argv=None) -> int:
     except Exception as e:  # dead-man's-switch: a probe failure PAGES loud, never silent
         print(f"🔴 SINGLETON-LIVENESS PROBE FAILED ({type(e).__name__}): {e}", file=sys.stderr, flush=True)
         try:
-            import psycopg2
-            c = _connect(); cur = c.cursor()
-            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-            cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-                           VALUES ('cc-fleet-health','orch-console','blocker','P2',
-                           'singleton-liveness monitor PROBE FAILED — not watching singletons',%s)""",
-                        (f"{type(e).__name__}: {e}",))
-            c.commit(); cur.close(); c.close()
+            bus_send.send(
+                from_agent="cc-fleet-health", to="orch-console", mtype="blocker",
+                subject="singleton-liveness monitor PROBE FAILED — not watching singletons",
+                body=f"{type(e).__name__}: {e}", priority="P2", req=False, dsn=_dsn())
         except Exception:
             pass
         return 1

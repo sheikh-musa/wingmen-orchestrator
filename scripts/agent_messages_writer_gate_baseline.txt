@@ -23,45 +23,32 @@
 # invocation -- detectable), then DAEMONS last (need the restart-gate check,
 # catch A, built first -- a long-running process keeps its old in-memory code
 # until restarted, so "source migrated" != "safe").
+#
+# ONE-SHOTS: migrated (bus #74937/#74952). WATCHDOGS: migrated (bus #74954 GO
+# -> this batch, 2026-10-24) -- all 33 non-daemon, non-irsyad files confirmed
+# one-shot (launchd-cycled main(), no unbounded while-loop) and moved onto the
+# sanctioned path (send() or RPC-direct-on-existing-cursor where a batch/DI
+# atomicity contract required it). What's left below is ONLY:
+#   (a) the 6 irsyad-owned daemons, carved out for cc-irsyad-coord -- not mine
+#       to touch;
+#   (b) 2 genuine DAEMONS found while auditing the WATCHDOGS bucket for
+#       restart-gate shape (console's ask, bus #74954 reminder 1): both have
+#       an unbounded `while True: ... time.sleep(...)` in main() with no exit
+#       (confirmed by reading main(), not just grepping "while True" --
+#       several OTHER files' while-loops turned out to be BOUNDED polling
+#       helpers with their own deadline, not daemons, and were migrated
+#       normally). These 2 need catch A (the restart-gate check) built first,
+#       per the sequencing above, before migrating:
+#         nervous_system/lane_wedge_watchdog.py  (main(), line ~2024)
+#         nervous_system/wake_backstop_sweep.py  (main(), line ~1150; its own
+#           docstring at line ~541 calls itself "a long-lived `while True`
+#           loop")
 
-nervous_system/bug_report_channel_poll.py
-nervous_system/commitment_sweeper.py
-nervous_system/hub_self_recovery.py
-nervous_system/lane_watchdog.py
 nervous_system/lane_wedge_watchdog.py
-nervous_system/media_reaper.py
-nervous_system/singleton_liveness.py
 nervous_system/wake_backstop_sweep.py
-nervous_system/weekly_limit_monitor.py
-scripts/adcda_fn_error_bus_watch.py
-scripts/address_variant_miss_watchdog.py
-scripts/agent_worktree_reaper.py
-scripts/auto_recycle_on_bloat.py
-scripts/channel_liveness_watchdog.py
-scripts/cisco_reconcile_watch.py
-scripts/client_channel_nodrop_watch.py
-scripts/context_health_watchdog.py
-scripts/deploy_provenance_watch.py
-scripts/disk_autoremediate.py
-scripts/fleet_health.py
-scripts/gazzabyte_request_nodrop_watch.py
-scripts/hub_bus_currency_monitor.py
-scripts/hub_self_recovery_staleness_watchdog.py
 scripts/irsyad_autoscaler.py
 scripts/irsyad_confirm_executor.py
 scripts/irsyad_pii_containment_monitor.py
 scripts/irsyad_shadow_watch.py
 scripts/irsyad_spin_worker.py
 scripts/irsyad_worker_reaper.py
-scripts/lane_proactive_recycle_nudge.py
-scripts/live_checkout_branch_watchdog.py
-scripts/memory_index_audit.py
-scripts/pooler_breaker_snapshot.py
-scripts/priority_sla_watchdog.py
-scripts/programme_stall_guard.py
-scripts/queue_age_watchdog.py
-scripts/repo_hygiene_sweep.py
-scripts/sentry_new_error_watch.py
-scripts/sre_lane_recycle.py
-scripts/supervised_draft_deadman.py
-scripts/watchdog_tripwire_report.py

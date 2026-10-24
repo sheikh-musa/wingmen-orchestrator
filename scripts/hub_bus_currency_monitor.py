@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 
 HUB_AGENT = "cc-orchestrator"
 STALE_HOURS = float(os.environ.get("HUB_BUS_STALE_HOURS", "2.5"))   # unread older than this ⇒ bus-stale
@@ -196,9 +197,12 @@ def _page(cur, unread_count: int, oldest_unread_age_s: float, reason: str, oldes
         if DRY:
             print(f"[hub-bus-monitor DRY] would page {to_agent} :: {subject}")
         else:
+            # RPC on the EXISTING cursor (backlog#124, bus #74939), not bus_send.send() --
+            # this loop pages ALL RECIPIENTS before run_once()'s ONE c.commit() after it
+            # returns; send()'s own connection would break that all-recipients-together batch.
             cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
-                "VALUES (%s,%s,'update',%s,%s,false,'P2')", (SRE_FROM, to_agent, subject, body))
+                "SELECT * FROM post_agent_message(%s,%s,'update',%s,%s,'P2',false,%s,%s,%s,%s)",
+                (SRE_FROM, to_agent, subject, body, str(uuid.uuid4()), None, False, None))
         sent += 1
     return sent
 
@@ -308,9 +312,11 @@ def _page_session_deaf(cur, last_activity_age_s: float, reason: str) -> int:
         if DRY:
             print(f"[hub-session DRY] would page {to_agent} :: {subject}")
         else:
+            # RPC on the EXISTING cursor (backlog#124, bus #74939) -- same batch reason as
+            # _page() above.
             cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
-                "VALUES (%s,%s,'update',%s,%s,false,'P1')", (SRE_FROM, to_agent, subject, body))
+                "SELECT * FROM post_agent_message(%s,%s,'update',%s,%s,'P1',false,%s,%s,%s,%s)",
+                (SRE_FROM, to_agent, subject, body, str(uuid.uuid4()), None, False, None))
         sent += 1
     return sent
 

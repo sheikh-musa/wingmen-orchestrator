@@ -176,13 +176,12 @@ def _save_alert_to_disk(subject, body):
 
 def _db_insert(subject, body):
     """One attempt at the normal bus page. Raises on failure (caller decides what to do)."""
-    import psycopg
-    with psycopg.connect(_dsn(), connect_timeout=15) as c, c.cursor() as cur:
-        cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-        cur.execute("INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response,created_at)"
-                    " VALUES ('cc-fleet-health','cc-fleet-health','update',%s,%s,'P1',true,now())",
-                    (subject[:180], body))
-        c.commit()
+    try:
+        from scripts import bus_send
+    except ImportError:
+        import bus_send
+    bus_send.send(from_agent="cc-fleet-health", to="cc-fleet-health", mtype="update",
+                   subject=subject[:180], body=body, priority="P1", req=True, dsn=_dsn())
 
 
 def _bot_fallback(subject, body):

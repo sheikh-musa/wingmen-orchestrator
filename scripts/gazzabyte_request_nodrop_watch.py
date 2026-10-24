@@ -154,13 +154,13 @@ def evaluate(latest, now, state, nudge_s=NUDGE_S, escalate_s=ESCALATE_S, re_nudg
 
 
 def _bus(dsn: str, action: dict) -> None:
-    with psycopg2.connect(dsn) as c, c.cursor() as cur:
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
-            "priority, requires_response) VALUES ('gazzabyte-nodrop-watch',%s,%s,%s,%s,%s,true)",
-            (action["to"], action["type"], action["subject"][:200], action["body"], action["priority"]),
-        )
-        c.commit()
+    try:
+        from scripts import bus_send
+    except ImportError:
+        import bus_send  # type: ignore
+    bus_send.send(from_agent="gazzabyte-nodrop-watch", to=action["to"], mtype=action["type"],
+                  subject=action["subject"][:200], body=action["body"], priority=action["priority"],
+                  req=True, dsn=dsn)
 
 
 def main() -> int:

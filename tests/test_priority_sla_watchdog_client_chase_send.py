@@ -38,6 +38,8 @@ class _FakeConn:
 
 
 def test_send_client_ask_chase_accepts_decimal_created_epoch():
+    # _send_client_ask_chase posts via the RPC on its OWN injected conn (a deliberate
+    # DI seam, backlog#124/bus #74939), not bus_send.send() -- observe conn.executed.
     conn = _FakeConn()
     row = {
         "id": 654,
@@ -47,11 +49,12 @@ def test_send_client_ask_chase_accepts_decimal_created_epoch():
     }
     ok = s._send_client_ask_chase(conn, "cosem-port", row)
     assert ok is True
-    assert conn.committed is True
-    # one insert to the owning lane only -- console is no longer CC'd per-ask,
+    # one post to the owning lane only -- console is no longer CC'd per-ask,
     # it gets a periodic summary instead (bus#67841/#67965, same day)
-    insert_sqls = [p for sql, p in conn.executed if "INSERT INTO agent_messages" in sql]
-    assert len(insert_sqls) == 1
+    posts = [p for sql, p in conn.executed if "post_agent_message" in sql]
+    assert len(posts) == 1
+    assert posts[0][0] == "cosem-port"
+    assert conn.committed is True
 
 
 def test_send_client_ask_chase_handles_missing_created_epoch():

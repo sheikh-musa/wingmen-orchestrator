@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 
 RECIPIENTS = ("orch-console", "cc-fleet-health")  # Nazim relays to operator; SRE owns the loop
 SRE_FROM = "cc-fleet-health"
@@ -119,9 +120,12 @@ def _page(cur, last_tick_age_s: "float | None", reason: str, last_tick_reason: "
         if DRY:
             print(f"[hsr-staleness DRY] would page {to_agent} :: {subject}")
         else:
+            # RPC on the EXISTING cursor (backlog#124, bus #74939), not bus_send.send() --
+            # this loop pages ALL RECIPIENTS before run_once()'s ONE c.commit() after it
+            # returns; send()'s own connection would break that all-recipients-together batch.
             cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
-                "VALUES (%s,%s,'update',%s,%s,false,'P2')", (SRE_FROM, to_agent, subject, body))
+                "SELECT * FROM post_agent_message(%s,%s,'update',%s,%s,'P2',false,%s,%s,%s,%s)",
+                (SRE_FROM, to_agent, subject, body, str(uuid.uuid4()), None, False, None))
         sent += 1
     return sent
 

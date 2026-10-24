@@ -45,6 +45,7 @@ import context_truth as _ct  # noqa: E402  (Gap-1: ONE gauge source, shared with
 import handoff_find as _hf  # noqa: E402  (ONE newest-handoff definition, CAI-1392 C)
 import lane_recycle_deadman as _lrd  # noqa: E402  (bus #74293 facet 13: the sibling-ambiguous pane fallback)
 import hub_reach  # noqa: E402  (bus #74293 FIX 2: the shared gzb ssh-alias resolver)
+import bus_send  # noqa: E402
 
 TMUX = os.environ.get("SRE_TMUX_BIN", "/usr/local/bin/tmux")
 _TMUX_TIMEOUT = 5
@@ -374,13 +375,9 @@ def audit_before_clear(conn, base_agent_id: str, session: str, gates: dict, reas
     body = (f"SRE LANE RED-RESET (CAI-RESP-681) — recycling worker lane "
             f"'{base_agent_id}' (session {session}). Gates verified: {gates}. "
             f"Reason: {reason}")
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
-            "VALUES (%s,%s,%s,%s,%s,false,'P2')",
-            [fhb.SRE_AGENT_ID, fhb.SRE_AGENT_ID, "update",
-             f"SRE recycled lane {base_agent_id} (gated, CAI-681)", body])
-    conn.commit()
+    bus_send.send(from_agent=fhb.SRE_AGENT_ID, to=fhb.SRE_AGENT_ID, mtype="update",
+                   subject=f"SRE recycled lane {base_agent_id} (gated, CAI-681)",
+                   body=body, priority="P2", req=False)
 
 
 # ── plan / execute ────────────────────────────────────────────────────────────
@@ -656,13 +653,8 @@ def send_cross_host_recycle_nudge(conn, lane_row: dict, gates: dict, reason: str
     if _cross_host_nudge_recently(conn, base):
         return False
     subject, body = cross_host_recycle_nudge_message(base, session, host, gates, reason)
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
-            " priority, requires_response, created_at) "
-            "VALUES (%s, %s, 'blocker', %s, %s, 'P2', false, now())",
-            [fhb.SRE_AGENT_ID, base, subject, body])
-    conn.commit()
+    bus_send.send(from_agent=fhb.SRE_AGENT_ID, to=base, mtype="blocker",
+                   subject=subject, body=body, priority="P2", req=False)
     return True
 
 

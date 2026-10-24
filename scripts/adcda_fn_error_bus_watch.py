@@ -44,6 +44,11 @@ import json
 import subprocess
 from pathlib import Path
 
+try:
+    from scripts import bus_send
+except ImportError:
+    import bus_send  # type: ignore
+
 _ORCH = Path(__file__).resolve().parent.parent
 
 # ── tunables ─────────────────────────────────────────────────────────────────
@@ -209,18 +214,10 @@ def _save_state(st: dict) -> None:
     tmp.replace(STATE_PATH)
 
 
-def _pg():
-    import psycopg2
-    return psycopg2.connect(os.environ["DATABASE_URL"])
-
-
 def _post_bus(mtype: str, priority: str, subject: str, body: str) -> None:
-    with _pg() as conn, conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response) "
-            "VALUES ('cc-fleet-health','orch-console',%s,%s,%s,%s,false)",
-            (mtype, subject, body, priority))
-        conn.commit()
+    bus_send.send(
+        from_agent="cc-fleet-health", to="orch-console", mtype=mtype, subject=subject,
+        body=body, priority=priority, req=False, dsn=os.environ["DATABASE_URL"])
 
 
 def _fire_row(key: str, detail: dict) -> tuple:
