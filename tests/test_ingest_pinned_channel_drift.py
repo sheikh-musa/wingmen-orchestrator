@@ -12,10 +12,14 @@ touches DATABASE_URL / any live silo.
 """
 from __future__ import annotations
 
+import pathlib
+
 import psycopg
 import pytest
 
 from nervous_system import ingest
+
+MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parent.parent / "migrations"
 
 
 @pytest.fixture
@@ -73,6 +77,16 @@ def drift_dsn(pg_dsn, monkeypatch):
             "INSERT INTO agents (id, display_name) VALUES (%s, 'test'), (%s, 'test')",
             (ingest.PAGE_FROM_AGENT, ingest.PAGE_TO_AGENT),
         )
+        # bus_send.py posts through post_agent_message (backlog#124 step 2/4, bus
+        # #74863), not a raw INSERT -- this harness needs the real RPC, same as the
+        # live substrate, or every page this watchdog sends fails with
+        # UndefinedFunction. service_role must exist first since 117's own GRANT
+        # EXECUTE targets it by name.
+        cur.execute("SELECT 1 FROM pg_roles WHERE rolname='service_role'")
+        if cur.fetchone() is None:
+            cur.execute("CREATE ROLE service_role")
+        migration_117 = (MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text()
+        cur.execute(migration_117)
     return pg_dsn
 
 
