@@ -325,8 +325,15 @@ def parse_assert_lines(sql_text: str) -> list[dict]:
 
 
 def check_required_assertions(body: str, assertions: list[dict]) -> None:
-    """CAI-RESP-1397 #5: a REVOKE or DROP FUNCTION with zero assertions refuses."""
-    if _REQUIRES_ASSERT_RE.search(body) and not assertions:
+    """CAI-RESP-1397 #5: a REVOKE or DROP FUNCTION with zero assertions refuses.
+
+    Scans comment-stripped text only (same strip_sql_comments() already used by
+    check_dry_run_sequence_safety for the identical reason) -- otherwise a
+    migration's own explanatory prose about why it does NOT contain a
+    REVOKE/DROP FUNCTION (e.g. "this file contains no REVOKE/DROP FUNCTION")
+    false-trips this gate on the words alone (PR#490 CI false positive on
+    migration 118's split-rationale comment)."""
+    if _REQUIRES_ASSERT_RE.search(strip_sql_comments(body)) and not assertions:
         raise Refuse(
             "revoke/drop migration without post-apply assertions — CAI-RESP-1397 #5. "
             "Add a '-- assert: no_execute|search_path|dropped ...' header line for "
