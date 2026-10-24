@@ -66,7 +66,9 @@ def two_dsns(pg_dsn):
                  message_type text NOT NULL, subject text, body text, priority text,
                  requires_response boolean NOT NULL DEFAULT false,
                  thread_id uuid, created_at timestamptz NOT NULL DEFAULT now(),
-                 sub_tag text
+                 sub_tag text,
+                 is_test boolean NOT NULL DEFAULT false,
+                 posted_by_identity text
                )"""
         )
         cur.execute(
@@ -77,15 +79,20 @@ def two_dsns(pg_dsn):
         # #74863) rather than a raw INSERT -- this fixture's bus_dsn needs the real
         # RPC, same as the real substrate's bus, or every page this watchdog sends
         # fails with UndefinedFunction. service_role must exist first since 117's
-        # own GRANT EXECUTE targets it by name.
+        # own GRANT EXECUTE targets it by name. 118 (bus #74939) is ALSO required --
+        # bus_send.send() unconditionally calls the 11-param RPC 118 creates, so a
+        # 117-only schema's 9-param function makes every send() call fail the same
+        # way (a real, pre-existing gap this fixture never kept pace with; caught
+        # only once CI's bootstrap first ran the Test step past migration apply,
+        # PR#490).
         cur.execute("SELECT 1 FROM pg_roles WHERE rolname='service_role'")
         if cur.fetchone() is None:
             cur.execute("CREATE ROLE service_role")
-        migration_117 = (
-            pathlib.Path(__file__).resolve().parent.parent
-            / "migrations" / "117_durable_inbox_ack_additive.sql"
-        ).read_text()
+        migrations_dir = pathlib.Path(__file__).resolve().parent.parent / "migrations"
+        migration_117 = (migrations_dir / "117_durable_inbox_ack_additive.sql").read_text()
         cur.execute(migration_117)
+        migration_118 = (migrations_dir / "118_post_agent_message_optional_params.sql").read_text()
+        cur.execute(migration_118)
     return silo_dsn, bus_dsn
 
 
