@@ -8,8 +8,6 @@
 		<string>/Users/sheikhmusa</string>
 		<key>LANE_WEDGE_DEADMAN_GAP_SEC</key>
 		<string>900</string>
-		<key>LANE_WEDGE_EXCLUDE</key>
-		<string>nazim,cai,fleet-health,orch,orchestrator,infra,adcda,cosem-video,bayanqa,bayanqa-bot,encoder,mizan-redirect</string>
 		<key>LANE_WEDGE_PERSIST_DRY</key>
 		<string>1</string>
 		<key>PATH</key>
