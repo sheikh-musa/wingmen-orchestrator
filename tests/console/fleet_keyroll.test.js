@@ -204,10 +204,12 @@ ok("fc-v64 (Musa op#20716): model chip — proc is plain, boot/registry get '~',
   assert.strictEqual(mdlChip(undefined, "proc"), "");
   assert.strictEqual(mdlChip("", "boot"), "");
   const p = mdlChip("claude-opus-4-8", "proc");
-  assert(p.indexOf('class="tok mdl"') >= 0 && p.indexOf(">opus-4-8<") >= 0 && p.indexOf("~") < 0, p);
+  // fc-v75: the spine now also carries a per-family colour class (e.g. "mdl-opus") —
+  // assert the base class is present and "approx" is ABSENT, not the exact full string.
+  assert(p.indexOf('class="tok mdl') >= 0 && p.indexOf("approx") < 0 && p.indexOf(">opus-4-8<") >= 0 && p.indexOf("~") < 0, p);
   assert(p.indexOf('title="model (live process)"') >= 0, p);
   const b = mdlChip("claude-sonnet-5", "boot");
-  assert(b.indexOf('class="tok mdl approx"') >= 0 && b.indexOf(">~sonnet-5<") >= 0 && b.indexOf("declared at boot") >= 0, b);
+  assert(b.indexOf('class="tok mdl') >= 0 && b.indexOf("approx") >= 0 && b.indexOf(">~sonnet-5<") >= 0 && b.indexOf("declared at boot") >= 0, b);
   const g = mdlChip("claude-fable-5-1", "registry");
   assert(g.indexOf(">~fable-5-1<") >= 0 && g.indexOf("registry default") >= 0, g);
   assert(mdlChip(null, "proc").indexOf("null") < 0);
