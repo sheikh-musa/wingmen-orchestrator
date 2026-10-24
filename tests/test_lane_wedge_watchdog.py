@@ -991,3 +991,20 @@ def test_deadman_gap_default_is_900_not_240(monkeypatch):
         assert reloaded.DEADMAN_GAP_SEC == 900
     finally:
         importlib.reload(w)  # restore any monkeypatches later tests may rely on
+
+
+def test_exclude_sessions_default_covers_bayanqa_and_encoder(monkeypatch):
+    """bus #75101-#75106/#75252: bayanqa and encoder (gzb media/bot/encoder
+    services, not CC lanes) kept tripping COVERAGE-GAP as UNMAPPED every cycle.
+    Same class of risk as the deadman-gap env-delivery saga (PR#495) -- don't
+    trust LANE_WEDGE_EXCLUDE alone to deliver the real exclude list; the code
+    DEFAULT must already include every name actually observed in the fleet."""
+    monkeypatch.delenv("LANE_WEDGE_EXCLUDE", raising=False)
+    import importlib
+    reloaded = importlib.reload(w)
+    try:
+        for name in ("bayanqa", "bayanqa-bot", "encoder", "mizan-redirect",
+                     "cai", "fleet-health", "adcda", "cosem-video"):
+            assert name in reloaded.EXCLUDE_SESSIONS, name
+    finally:
+        importlib.reload(w)
