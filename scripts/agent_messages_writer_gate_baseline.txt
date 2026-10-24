@@ -30,10 +30,6 @@ nervous_system/hub_self_recovery.py
 nervous_system/lane_watchdog.py
 nervous_system/lane_wedge_watchdog.py
 nervous_system/media_reaper.py
-# nervous_system/qwen_lane.py HELD: needs is_test=true, which post_agent_message's
-# RPC signature cannot express. Same RPC-signature gap as scripts/lane_drill_seed.py,
-# flagged to orch-console (2026-10-24).
-nervous_system/qwen_lane.py
 nervous_system/singleton_liveness.py
 nervous_system/wake_backstop_sweep.py
 nervous_system/weekly_limit_monitor.py
@@ -57,17 +53,9 @@ scripts/irsyad_pii_containment_monitor.py
 scripts/irsyad_shadow_watch.py
 scripts/irsyad_spin_worker.py
 scripts/irsyad_worker_reaper.py
-# scripts/lane_drill_seed.py HELD: needs is_test=true, which post_agent_message's
-# 9-column RPC signature (migration 117) cannot express. RPC-signature gap flagged to
-# orch-console (2026-10-24), not silently dropped.
-scripts/lane_drill_seed.py
 scripts/lane_proactive_recycle_nudge.py
 scripts/live_checkout_branch_watchdog.py
 scripts/memory_index_audit.py
-# scripts/opus_reprobe_storefront.py HELD: needs posted_by_identity override, which
-# post_agent_message's RPC signature cannot express. Same RPC-signature gap as
-# lane_drill_seed.py / nervous_system/qwen_lane.py, flagged to orch-console (2026-10-24).
-scripts/opus_reprobe_storefront.py
 scripts/pooler_breaker_snapshot.py
 scripts/priority_sla_watchdog.py
 scripts/programme_stall_guard.py
