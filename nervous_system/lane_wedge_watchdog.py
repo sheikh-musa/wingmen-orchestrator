@@ -103,6 +103,7 @@ from scripts.lib import fleet_health_lease  # noqa: E402
 from scripts.lib import orch_lease  # noqa: E402  (reuse _me() host-label shape)
 from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 from scripts.lib import pane_busy  # noqa: E402  (footer-scoped busy check)
+from scripts import bus_send  # noqa: E402  (sanctioned agent_messages writer, backlog#124)
 # CAI-786 wake predicate — the ONE source of "would this row wake the recipient",
 # reused here so the hub's page gate applies the exact CAI-451 narrow floor.
 from nervous_system import agent_wake  # noqa: E402
@@ -903,21 +904,21 @@ def _emit_bus_alert(text: str) -> None:
     re-creates the SLA-watchdog false-stall flood (#12486/#13168). Raises on
     failure so the caller can be LOUD — a page that fails silently is worse than
     none (dead-man's-switch)."""
-    connect = _pg_connect()
     dsn = _dsn()
+    connect = _pg_connect()
     if connect is None or not dsn:
         raise RuntimeError("no DB driver / DSN — cannot emit bus alert")
+    # RPC send() can't pre-stamp responded_at at insert time (not an RPC param) --
+    # post via the sanctioned path, then a follow-up UPDATE to preserve the exact
+    # behavior (requires_response=false + responded_at stamped so this awareness
+    # alert never re-creates the SLA false-stall flood) -- backlog#124, bus #74954.
+    mid, _thread = bus_send.send(from_agent="cc-fleet-health", to="orch-console",
+                                 mtype="update", subject=_alert_subject(text), body=text,
+                                 priority="P1", req=False, dsn=dsn)
     conn = connect(dsn, connect_timeout=15)
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-            cur.execute(
-                "INSERT INTO agent_messages "
-                "(from_agent, to_agent, message_type, subject, body, priority, "
-                " requires_response, responded_at) "
-                "VALUES ('cc-fleet-health', 'orch-console', 'update', %s, %s, 'P1', "
-                " false, now())",
-                (_alert_subject(text), text))
+            cur.execute("UPDATE agent_messages SET responded_at=now() WHERE id=%s", (mid,))
         conn.commit()
     finally:
         try:

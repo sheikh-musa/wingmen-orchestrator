@@ -403,26 +403,31 @@ class _FakeConn:
 def test_emit_bus_alert_writes_attributable_row_to_orch_console(monkeypatch):
     """The alert path emits an agent_messages row FROM cc-fleet-health TO
     orch-console (the SRE's sanctioned channel) — carrying the alert text, and
-    requires_response=false so it never re-triggers the SLA false-stall flood."""
+    requires_response=false so it never re-triggers the SLA false-stall flood.
+
+    _emit_bus_alert posts via bus_send.send() (backlog#124, bus #74954; no
+    injected conn, no atomicity requirement), then a follow-up UPDATE on its OWN
+    connection (_pg_connect()) to pre-stamp responded_at, which send()'s RPC has
+    no param for."""
     sink = []
     conn = _FakeConn(sink)
     monkeypatch.setattr(w, "_pg_connect", lambda: (lambda dsn, **kw: conn))
     monkeypatch.setattr(w, "_dsn", lambda: "postgres://fake")
+    sent = []
+    monkeypatch.setattr(w.bus_send, "send", lambda **kw: (sent.append(kw), (777, "t"))[1])
 
     w._emit_bus_alert("⚠️ lane 'irsyad' looks wedged — idle but not draining its inbox\nmore detail")
 
     assert conn.committed and conn.closed
-    # the INSERT is the last statement (first sets the identity for the trigger)
-    insert_sql, params = sink[-1]
-    assert "INSERT INTO agent_messages" in insert_sql
-    assert "'cc-fleet-health'" in insert_sql and "'orch-console'" in insert_sql
-    assert " false, now()" in insert_sql          # requires_response=false, responded stamped
-    subject, body = params
-    assert subject.startswith("[wedge-watchdog] lane 'irsyad'")   # icon stripped, titled
-    assert "looks wedged" in body                 # full alert text preserved
-    # identity is set in the SAME transaction (agents table has no trigger)
-    assert any("set_config('app.current_agent_id','cc-fleet-health'" in s.replace(" ", "")
-               for s, _ in sink)
+    kw = sent[0]
+    assert kw["to"] == "orch-console" and kw["from_agent"] == "cc-fleet-health"
+    assert kw["req"] is False
+    assert kw["subject"].startswith("[wedge-watchdog] lane 'irsyad'")   # icon stripped, titled
+    assert "looks wedged" in kw["body"]                 # full alert text preserved
+    # the follow-up UPDATE stamps responded_at on the id send() returned
+    update_sql, params = sink[-1]
+    assert "UPDATE agent_messages" in update_sql and "responded_at=now()" in update_sql
+    assert params == (777,)
 
 
 def test_page_off_hostpath_uses_bus_not_nazim_send(monkeypatch):
