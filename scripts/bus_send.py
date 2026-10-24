@@ -698,11 +698,11 @@ def send(
 
     # backlog#124 step 2/4 (bus #74863): post THROUGH the RPC, never a raw INSERT --
     # this is the fleet-wide cutover that must be live everywhere before migration
-    # 118's enforcement revoke (direct INSERT -> service_role) can safely apply.
+    # 120's enforcement revoke (direct INSERT -> service_role) can safely apply.
     # Same 9 columns, same order, as the INSERT this replaces -- post_agent_message's
     # signature was audited against this exact call shape (bus #74860) before being
-    # written. is_test/posted_by_identity are migration 120's trailing optional params
-    # (backlog#124, bus #74939) -- defaults (False/None) reproduce the pre-120 RPC
+    # written. is_test/posted_by_identity are migration 118's trailing optional params
+    # (backlog#124, bus #74939) -- defaults (False/None) reproduce the pre-118 RPC
     # exactly for every caller that doesn't pass them.
     cur.execute(
         "SELECT * FROM post_agent_message(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
