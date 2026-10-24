@@ -40,6 +40,8 @@ _AGENT_MESSAGES_SCHEMA = """
         requires_response  BOOLEAN NOT NULL DEFAULT false,
         thread_id          UUID NOT NULL,
         sub_tag            TEXT,
+        is_test            BOOLEAN NOT NULL DEFAULT false,
+        posted_by_identity TEXT,
         read_at            TIMESTAMPTZ,
         responded_at       TIMESTAMPTZ,
         response_ref       TEXT,
@@ -179,10 +181,13 @@ _WORK_ITEM_SCHEMA = """
 
 
 def _setup_base_and_118(cur):
-    """Schema + role bootstrap, migration 117, then ONLY 118 (the additive half).
-    Shared by both fixtures below -- enforced_db just applies 119 on top."""
+    """Schema + role bootstrap, migration 117, then 120 (RPC optional-params
+    extension -- must apply BEFORE 118, see 120's own header), then ONLY 118 (the
+    additive half). Shared by both fixtures below -- enforced_db just applies 119
+    on top."""
     migration_117 = (MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text()
     migration_118 = (MIGRATIONS_DIR / "118_durable_inbox_enforce_bus_writer.sql").read_text()
+    migration_120 = (MIGRATIONS_DIR / "120_post_agent_message_optional_params.sql").read_text()
 
     cur.execute("DROP SCHEMA public CASCADE")
     cur.execute("CREATE SCHEMA public")
@@ -202,6 +207,7 @@ def _setup_base_and_118(cur):
 
     cur.execute(_AGENT_MESSAGES_SCHEMA)
     cur.execute(migration_117)
+    cur.execute(migration_120)
     cur.execute(_WORK_ITEM_SCHEMA)
 
     # Today's real starting grants (Supabase's blanket default-ACL on the live

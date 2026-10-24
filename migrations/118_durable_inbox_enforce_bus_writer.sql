@@ -45,6 +45,15 @@
 --
 -- Safe to merge and apply as soon as this is green -- it changes nothing about who can
 -- already write to agent_messages, only adds a second, narrower-privileged path.
+--
+-- SEQUENCING UPDATE (migration 120, backlog#124, bus #74939): post_agent_message's
+-- signature below targets the 11-param version migration 120 creates, not the
+-- original 9-param one from 117 -- 120 is designed to apply to the live substrate
+-- BEFORE this migration (120's own header explains why), so by the time 118 actually
+-- runs, the 9-param signature no longer exists. If 118 is ever applied BEFORE 120 for
+-- any reason, this ALTER FUNCTION line will fail to resolve (the 9-param function
+-- still exists then) -- that failure is a correct, loud signal to apply 120 first,
+-- not a bug to silently work around.
 
 DO $$
 BEGIN
@@ -60,6 +69,6 @@ GRANT USAGE ON SEQUENCE agent_messages_id_seq TO bus_writer;
 GRANT SELECT, INSERT, UPDATE ON work_item TO bus_writer;
 GRANT INSERT ON work_item_audit TO bus_writer;
 
-ALTER FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text) OWNER TO bus_writer;
+ALTER FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text) OWNER TO bus_writer;
 ALTER FUNCTION mark_delivered(bigint,integer) OWNER TO bus_writer;
 ALTER FUNCTION ack_message(bigint) OWNER TO bus_writer;
