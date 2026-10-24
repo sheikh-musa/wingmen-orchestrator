@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """daemon_restart_gate -- "catch A" for backlog#124's DAEMONS bucket (orch-console
-ruling, bus #74954/#75001). Migration 119's release is gated on confirming every
+ruling, bus #74954/#75001). Migration 120's release (renumbered from 119 -- PR#490
+CI finding) is gated on confirming every
 LIVE agent_messages-writing daemon is actually RUNNING its migrated code, not just
 that the source is clean -- a long-running process keeps its old in-memory code
 until restarted, so "source migrated" != "safe" (console's own framing).

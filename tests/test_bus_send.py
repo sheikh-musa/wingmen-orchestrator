@@ -393,9 +393,9 @@ def test_send_sub_tag_defaults_to_none(monkeypatch):
 
 def test_send_posts_through_the_rpc_not_a_raw_insert(monkeypatch):
     # backlog#124 step 2/4 (bus #74863): the fleet-wide cutover that must land
-    # BEFORE migration 118's enforcement revoke can safely apply -- send() must
+    # BEFORE migration 120's enforcement revoke can safely apply -- send() must
     # call post_agent_message(), never INSERT INTO agent_messages directly, or
-    # every writer still on the old path breaks the instant 118 ships.
+    # every writer still on the old path breaks the instant 120 ships.
     cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
     row_id, thread_id = bs.send(
         "cc-substrate", "orch-console", "update", "status",

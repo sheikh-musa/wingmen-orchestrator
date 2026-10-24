@@ -223,7 +223,7 @@ def test_finding_not_on_the_baseline_still_fails_even_with_a_baseline_given(tmp_
 
 
 def test_require_complete_flag_fails_even_on_baseline_listed_findings(tmp_path):
-    """The RELEASE check migration 119 actually needs (console's ruling,
+    """The RELEASE check migration 120 actually needs (console's ruling,
     bus #74885/#74906): not 'nothing new', but 'truly zero, fleet-wide'."""
     _write(tmp_path, "scripts/not_yet_migrated.py", """
         cur.execute("INSERT INTO agent_messages (from_agent) VALUES ('x')")

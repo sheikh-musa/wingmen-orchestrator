@@ -1,5 +1,5 @@
 """lane_drill_seed.py (backlog#124, bus #74939): seed() now calls post_agent_message()
-directly on its existing cursor (migration 120's is_test param) instead of a raw INSERT,
+directly on its existing cursor (migration 118's is_test param) instead of a raw INSERT,
 preserving the single-commit-at-the-end batch across all drill items. These tests run
 the real SQL against a real ephemeral Postgres -- the risk worth catching here is a
 positional-argument mistake in the direct RPC call, which py_compile can't see.
@@ -19,7 +19,7 @@ MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parent.parent / "migrations"
 @pytest.fixture
 def db(pg_dsn, monkeypatch):
     migration_117 = (MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text()
-    migration_120 = (MIGRATIONS_DIR / "120_post_agent_message_optional_params.sql").read_text()
+    migration_120 = (MIGRATIONS_DIR / "118_post_agent_message_optional_params.sql").read_text()
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP SCHEMA public CASCADE")
         cur.execute("CREATE SCHEMA public")
