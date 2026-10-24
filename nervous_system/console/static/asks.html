@@ -110,6 +110,19 @@
   .empty{color:var(--faint);text-align:center;padding:40px 0;font:13px var(--mono)}
   .stamp{color:var(--faint);text-align:center;margin-top:18px;font:11px var(--mono)}
   .err{color:var(--rose);text-align:center;padding:20px 0;font:12px var(--mono)}
+
+  /* ── P1 (op#33598): coarse STATUS tabs + TOPIC chips ── */
+  .tabs{display:flex;gap:8px;margin:14px 0 0;flex-wrap:wrap}
+  .tab{border:1px solid var(--hair-2);background:var(--surface);color:var(--dim);
+    font:600 12px/1 var(--sans);padding:9px 12px;border-radius:999px;cursor:pointer}
+  .tab:active{background:var(--surface-2)}
+  .tab.on{color:var(--txt);border-color:rgba(138,166,255,.5);background:var(--indigo-soft)}
+  .tab .n{font:11px var(--mono);color:var(--faint);margin-left:2px}
+  .chips{display:flex;gap:6px;margin:10px 0 2px;flex-wrap:wrap}
+  .chip{border:1px solid var(--hair);background:var(--surface-2);color:var(--dim);
+    font:11px/1 var(--mono);padding:7px 10px;border-radius:999px;cursor:pointer}
+  .chip:active{background:var(--surface-3)}
+  .chip.on{color:var(--txt);border-color:rgba(55,211,154,.45);background:var(--jade-soft)}
 </style>
 </head>
 <body>
@@ -118,13 +131,15 @@
     <div class="top">
       <a class="back" href="/">‹ Fleet</a>
       <h1>Asks board</h1>
-      <span id="build" class="build"><span class="d"></span>fc-v79</span>
+      <span id="build" class="build"><span class="d"></span>fc-v80</span>
       <button id="refresh" class="refresh">↻</button>
     </div>
     <div id="sub" class="sub">Loading ground-truth…</div>
   </header>
   <div id="freshbar" class="freshbar" style="display:none"><span class="g"></span><span id="freshTxt"></span></div>
   <div id="hero"></div>
+  <div id="tabs" class="tabs"></div>
+  <div id="chips" class="chips"></div>
   <div id="groups"></div>
   <div id="stamp" class="stamp"></div>
 </div>

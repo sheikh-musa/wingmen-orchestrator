@@ -111,3 +111,69 @@ def test_pane_context_query_pane_k_age_degrades_when_absent():
     sql, _ = db.build_pane_context_query(60, with_pane_k_at=False)
     assert "NULL::int AS pane_k_age_s" in sql
     assert "now() - pane_k_at" not in sql
+
+
+# ---------------------------------------------------------------------------
+# P1 asks-board (op#33598, console-revamp lane): the brief's coarse STATUS
+# grouping (truly-outstanding / in-progress owned+dated / recently-answered),
+# the closed-side answered query, and the TOPIC mapping (one tunable place).
+# ---------------------------------------------------------------------------
+
+
+def test_fleet_asks_query_selects_board_status_and_dates():
+    sql, _ = db.build_fleet_asks_query()
+    assert "AS board_status" in sql
+    # in_progress = owned AND dated; every other open ask = truly_outstanding
+    assert ("WHEN a.delegated_to IS NOT NULL AND a.committed_date IS NOT NULL "
+            "THEN 'in_progress'") in sql
+    assert "'truly_outstanding'" in sql
+    # the board surfaces the dating reality, not just the derived status
+    assert "a.committed_date" in sql
+    assert "a.chase_by" in sql
+
+
+def test_recently_answered_query_shape():
+    sql, params = db.build_recently_answered_query()
+    assert sql.lstrip().upper().startswith("SELECT")
+    for bad in ("UPDATE", "DELETE", "INSERT"):
+        assert bad not in sql.upper()
+    assert "a.closed_at IS NOT NULL" in sql
+    assert "a.triage_state = 'done'" in sql
+    assert f"interval '{db.RECENTLY_ANSWERED_DAYS} days'" in sql
+    assert "ORDER BY a.closed_at DESC" in sql
+    assert "LIMIT" in sql
+    # display text never falls back to the raw captured ask (op#61107 rule)
+    assert "(awaiting triage)" in sql
+    assert params == []
+
+
+def test_topic_for_adcda_schedule_beats_cosem_owner():
+    # adcda-schedule is a TOPIC distinct from cosem even when the work rides a
+    # cosem-* lane: keyword evidence anywhere beats the cosem owner prefix.
+    assert db.topic_for("cc-cosem-adcda-1", "Schedule editor: batch start rule") == "adcda-schedule"
+    assert db.topic_for(None, "Fold ORBAT into Trainee Overview") == "adcda-schedule"
+    assert db.topic_for("cc-cosem-platform-2", "ADCDA trainer list namelist IDs") == "adcda-schedule"
+
+
+def test_topic_for_owner_prefixes():
+    assert db.topic_for("cc-cosem-platform-2", "re-platform scope") == "cosem"
+    assert db.topic_for("cc-irsyad-coord", "fee field on enrolment") == "irsyad"
+    assert db.topic_for("cc-substrate-1", "logs consolidation") == "infra"
+    assert db.topic_for("cc-fleet-health", "watchdog lease renewal") == "infra"
+    # MUIS is the irsyad school's parent body — keyword beats the console owner
+    assert db.topic_for("orch-console", "MUIS CEO email") == "irsyad"
+
+
+def test_topic_for_other_when_nothing_matches():
+    assert db.topic_for("cc-oeh", "Search Console ownership") == "other"
+    assert db.topic_for(None, "") == "other"
+
+
+def test_fetch_fleet_asks_annotates_topic(monkeypatch):
+    monkeypatch.setattr(db, "_query", lambda sql, params: [
+        {"id": 1, "text": "ADCDA batch start rule", "delegated_to": "cc-cosem-adcda-1"},
+        {"id": 2, "text": "Tabung Jumaat PDF download", "delegated_to": "cc-irsyad-coord"},
+        {"id": 3, "text": "unmatched thing", "delegated_to": "cc-oeh"},
+    ])
+    rows = db.fetch_fleet_asks()
+    assert [r["topic"] for r in rows] == ["adcda-schedule", "irsyad", "other"]

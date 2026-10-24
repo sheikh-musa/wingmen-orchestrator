@@ -2206,9 +2206,25 @@ def _make_handler(feedloop: "_FeedLoop"):
                     # ask, every surface, status derived live (see db.py's own
                     # build_fleet_asks_query comment). No PII columns on this
                     # table; nothing to redact (same as /api/lanes).
-                    rows = db.fetch_fleet_asks()
+                    # P1 (op#33598): payload is {open, answered, counts} — the
+                    # brief's coarse board_status axis + topic grouping + the
+                    # closed-side recently-answered view, all live reads.
+                    open_rows = db.fetch_fleet_asks()
+                    answered_rows = db.fetch_recently_answered()
+                    counts = {
+                        "open": len(open_rows),
+                        "answered": len(answered_rows),
+                        "board_status": _tally(open_rows, "board_status"),
+                        "topics": _tally(open_rows + answered_rows, "topic"),
+                        "needs_musa": sum(
+                            1 for r in open_rows if r.get("waiting_on_operator")),
+                    }
                     auth.audit(self._client(), path, "200")
-                    return self._json(200, _jsonable(rows))
+                    return self._json(200, _jsonable({
+                        "open": open_rows,
+                        "answered": answered_rows,
+                        "counts": counts,
+                    }))
 
                 if path == "/api/docs":
                     # Catalog of all fleet docs, grouped by repo/vertical.
@@ -3507,6 +3523,15 @@ def _jsonable(obj):
     if isinstance(obj, (str, int, float, bool)) or obj is None:
         return obj
     return str(obj)
+
+
+def _tally(rows, key):
+    """Count rows by row[key] (None -> 'other') for the asks-board counts."""
+    out = {}
+    for r in rows:
+        k = r.get(key) or "other"
+        out[k] = out.get(k, 0) + 1
+    return out
 
 
 def make_server(

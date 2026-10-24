@@ -834,7 +834,15 @@ def build_fleet_asks_query() -> Tuple[str, list]:
     raw captured text" rule (cc-quality #61117: 2/268 open rows had a NULL
     triage_summary, both ask_surface='client-channel', so a COALESCE-to-ask fallback
     was surfacing raw client-captured text on the board). An untriaged row instead
-    shows a neutral '(awaiting triage)' placeholder."""
+    shows a neutral '(awaiting triage)' placeholder.
+
+    P1 board additions (op#33598, console-revamp lane): `board_status` is the
+    brief's COARSE axis — in_progress = open AND owned AND dated (delegated_to +
+    committed_date), truly_outstanding = every other open ask. Deliberately a
+    different column from the thread-derived `status` above, whose own
+    'in_progress' means "delegate opened the mail" — same word, different axis;
+    `committed_date` ships alongside so the sparse-dating reality (8 of 282 open
+    asks dated at the 2026-10-25 reconcile) is visible, not hidden."""
     sql = (
         "WITH latest AS ("
         "  SELECT DISTINCT ON (thread_id) "
@@ -848,8 +856,10 @@ def build_fleet_asks_query() -> Tuple[str, list]:
         "  CASE WHEN a.triage_summary IS NOT NULL THEN a.triage_summary "
         "       ELSE '(awaiting triage)' END AS text, "
         "  a.delegated_to, "
-        "  a.ask_surface, a.waiting_on_operator, a.chase_by, a.deferred_reason, "
+        "  a.ask_surface, a.waiting_on_operator, a.chase_by, a.deferred_reason, a.committed_date, "
         "  CASE WHEN a.waiting_on_operator THEN 'external_wait' ELSE 'build_time' END AS wait_kind, "
+        "  CASE WHEN a.delegated_to IS NOT NULL AND a.committed_date IS NOT NULL "
+        "THEN 'in_progress' ELSE 'truly_outstanding' END AS board_status, "
         "  CASE "
         "    WHEN a.waiting_on_operator                              THEN 'waiting_on_musa' "
         "    WHEN a.thread_id IS NULL                                THEN 'on_nazim' "
@@ -877,7 +887,99 @@ def build_fleet_asks_query() -> Tuple[str, list]:
 
 def fetch_fleet_asks() -> List[dict]:
     sql, params = build_fleet_asks_query()
-    return _query(sql, params)
+    return _annotate_topic(_query(sql, params))
+
+
+# --- P1 asks-board: answered side + TOPIC mapping (op#33598) ------------------
+
+RECENTLY_ANSWERED_DAYS = 7
+RECENTLY_ANSWERED_LIMIT = 200
+
+# Topic grouping (brief: adcda-schedule / infra / cosem / irsyad / other).
+# ONE tunable place — adjust the mapping HERE, never per-row. Tuned against the
+# 2026-10-25 reconcile report's own section heuristics (owner prefixes carry most
+# of the signal; keywords catch unowned/oddly-owned rows).
+_TOPIC_KEYWORDS = {
+    "irsyad": ("irsyad", "tabung", "jumaat", "muis", "enrolment", "dms",
+               "paynow", "giro"),
+    "adcda-schedule": ("adcda", "orbat", "trainer", "trainee", "batch",
+                       "attendance", "namelist", "schedule editor"),
+}
+# cc-irsyad owner runs BEFORE adcda keywords: "Batch B (TKB)" is irsyad (Tabung
+# Keluarga) even though 'batch' is otherwise an adcda-schedule keyword.
+_TOPIC_OWNER_EARLY = (
+    ("cc-irsyad", "irsyad"),
+)
+# ...and adcda keywords run before THESE: an adcda ask riding a cosem-platform
+# lane still files as adcda-schedule. Infra owners are unambiguous; the cosem
+# split sends adcda lanes → adcda-schedule, the rest → cosem.
+_TOPIC_OWNER_RULES = (
+    ("cc-substrate", "infra"),
+    ("cc-fleet-health", "infra"),
+    ("cc-orchestrator", "infra"),
+    ("orch-console", "infra"),
+    ("cc-cosem-adcda", "adcda-schedule"),
+    ("cc-cosem", "cosem"),
+)
+
+
+def topic_for(delegated_to, text) -> str:
+    """Map one asks-board row to its TOPIC.
+
+    Precedence: irsyad keywords → cc-irsyad owner → adcda keywords → remaining
+    owner prefixes → 'other'. MUIS is keyworded irsyad (the school's parent
+    body) so it wins over the orch-console owner prefix."""
+    t = (text or "").lower()
+    owner = delegated_to or ""
+    for kw in _TOPIC_KEYWORDS["irsyad"]:
+        if kw in t:
+            return "irsyad"
+    for prefix, topic in _TOPIC_OWNER_EARLY:
+        if owner.startswith(prefix):
+            return topic
+    for kw in _TOPIC_KEYWORDS["adcda-schedule"]:
+        if kw in t:
+            return "adcda-schedule"
+    for prefix, topic in _TOPIC_OWNER_RULES:
+        if owner.startswith(prefix):
+            return topic
+    return "other"
+
+
+def _annotate_topic(rows: List[dict]) -> List[dict]:
+    for r in rows:
+        r["topic"] = topic_for(r.get("delegated_to"), r.get("text") or "")
+    return rows
+
+
+def build_recently_answered_query() -> Tuple[str, list]:
+    """Recently-ANSWERED side of the P1 asks board: closed `done` rows, newest
+    first. The anti-drop promise cuts both ways — an answered ask should be
+    VISIBLE as answered, live, not taken on anyone's word. Capped because bulk
+    auto-triage closes hundreds per week (545 'done' in the 7d to 2026-10-25);
+    same never-raw-captured-text rule as the open side."""
+    sql = (
+        "SELECT a.id, "
+        "  CASE WHEN a.triage_summary IS NOT NULL THEN a.triage_summary "
+        "       ELSE '(awaiting triage)' END AS text, "
+        "  a.delegated_to, a.ask_surface, a.committed_date, a.chase_by, "
+        "  'recently_answered' AS board_status, "
+        "  a.closed_at, "
+        "  round(extract(epoch FROM (now() - a.closed_at)))::int AS answered_age_s, "
+        "  round(extract(epoch FROM (now() - a.created_at)))::int AS asked_age_s "
+        "FROM operator_asks a "
+        "WHERE a.closed_at IS NOT NULL "
+        "  AND a.triage_state = 'done' "
+        f"  AND a.closed_at > now() - interval '{RECENTLY_ANSWERED_DAYS} days' "
+        "ORDER BY a.closed_at DESC "
+        f"LIMIT {RECENTLY_ANSWERED_LIMIT}"
+    )
+    return sql, []
+
+
+def fetch_recently_answered() -> List[dict]:
+    sql, params = build_recently_answered_query()
+    return _annotate_topic(_query(sql, params))
 
 
 def build_inbox_backlog_query() -> Tuple[str, list]:
