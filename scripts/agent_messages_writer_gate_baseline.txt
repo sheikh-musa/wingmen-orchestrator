@@ -44,13 +44,6 @@ scripts/auto_recycle_on_bloat.py
 scripts/channel_liveness_watchdog.py
 scripts/cisco_reconcile_watch.py
 scripts/client_channel_nodrop_watch.py
-# scripts/console_assign.py HELD (not in baseline removal batch): bus-row INSERT + the
-# operator_asks link/insert must commit in ONE transaction (script's own header: "no
-# orphan bus row"). bus_send.send() opens its own separate connection and commits
-# immediately, which would break that atomicity guarantee. Needs a deliberate call
-# (RPC-direct-on-existing-cursor vs. accepting the atomicity loss), not a mechanical
-# swap -- flagged to orch-console rather than guessed at (2026-10-24).
-scripts/console_assign.py
 scripts/context_health_watchdog.py
 scripts/deploy_provenance_watch.py
 scripts/disk_autoremediate.py
