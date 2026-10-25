@@ -23,6 +23,11 @@ one facet, rest is review) · 🔴 no hook (review-time only — the real gap).
 | **7** | **Deployment completeness** — merged≠live; read origin/main not local; rename-of-a-DB-match-string needs a live data migration + UPSERT-orphan cleanup; verify var in RUNNING process env | `deployment-completeness-lens`, `deploy-state-read-origin-main-not-local-checkout` | review-time only | 🔴 (candidate playbook) |
 | **8** | **Test rigor** — lint:all + full unit suite BOTH blocking; run the DESTRUCTIVE branch; enumerate full domain not a sample; verify computed value is RENDERED; prove live not static | `audit-bar-includes-lint-gates`, `cosem-adcda-archive-async-job`, `verify-computed-value-is-rendered`, `weekFailed-flag-drop` | CI (per-repo), not fleet-uniform | 🟡 |
 | **9** | **Bus / attribution hygiene** — `bus_send.py` not raw INSERT; `--reply-to` mandatory (atomic responded_at); verify-then-stamp, never blind-stamp | `use-bus-send-py-not-raw-insert`, `reply-to-omission-recurs` | `bus_send.py` WARN-mode (soft) | 🟡 |
+| **10** | **Operator-facing list/table UI** — any list of actionable rows ships bulk actions by default (select-all + multi-select + bulk action w/ count + confirm); build for real volume not one row (what-if-100); obvious operator actions + empty/loading/error states present | `frontend-ux-completeness-bulk-actions`, op#33974 (ADCDA 33-rows-33-clicks), `render-pack-every-refusal-and-role`, `mobile-first-screenshot-standing-rule-op27086` | review-time only (heuristic WARN-lint candidate) | 🔴 **→ PLAYBOOK 07** |
+
+> **Row 10 added post-approval** (op#33974 Musa IHSAN flag → orch-console #76194) — a NEW
+> class beyond the original substrate/data/security inventory: review-time-only, caught
+> reactively (Musa himself), the exact "followed-by-default vs caught-reactively" gap.
 
 ## Proposed canonical set (the "small set")
 Not one-per-row — consolidate. Proposed **6 canonical playbooks**:
@@ -32,14 +37,15 @@ Not one-per-row — consolidate. Proposed **6 canonical playbooks**:
 4. **Ship-to-live completeness** (rows 7, 8) — merged≠live + the test-rigor bar.
 5. **Secrets & transcript hygiene** (row 3) — mostly 🟢 already; playbook documents the contract the hooks enforce + the residual.
 6. **Framework footguns** (row 6 + future) — use-server/SSR + the next framework trap we catch twice.
+7. **Frontend UX-completeness** (row 10, added op#33974) — operator-scale actions: bulk-by-default + what-if-100. Review-time lens + heuristic WARN-lint.
 
 Bus/attribution hygiene (row 9) is process, not a build op — it stays in CLAUDE.md
 + the `bus_send.py` WARN, not a playbook.
 
 ## The real gap this track closes
-Rows 1–3 are already hook-enforced (the rigor "survives a reset"). Rows **4–7 are
-🔴 review-time only** — caught when a reviewer happens to be in the loop, missed
-when not. That is precisely the "followed-by-default vs caught-reactively" problem
+Rows 1–3 are already hook-enforced (the rigor "survives a reset"). Rows **4–7 and
+10 are 🔴 review-time only** — caught when a reviewer happens to be in the loop,
+missed when not (row 10 was caught by the *operator*, not a reviewer — the worst case). That is precisely the "followed-by-default vs caught-reactively" problem
 op#32734 names. The playbooks make the rigor discoverable; the **to-build hooks
 for rows 4–7** are where this track adds enforcement that doesn't exist today —
 each shipped as its own reviewed+tested PR, prioritized by the risk column.
