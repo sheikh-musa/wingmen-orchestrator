@@ -966,6 +966,12 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
 # injection.
 IDLE_UNREAD_NUDGE_AGE_S = int(os.environ.get("IDLE_UNREAD_NUDGE_AGE_S", "900"))    # 15 min
 IDLE_UNREAD_WARN_AGE_S = int(os.environ.get("IDLE_UNREAD_WARN_AGE_S", "1800"))     # 30 min
+# Minimum time between warns for the SAME agent, regardless of id-set churn (cc-fleet-health,
+# 2026-10-25) -- the prior exact-frozenset dedup re-fired every time the unread id-set changed
+# at all, which on a busy lane accumulating new mail every few minutes meant a fresh warn every
+# ~2min instead of the intended "occasional doorbell." See
+# idle-unread-warn-dedup-defeated-by-id-set-churn for the incident.
+IDLE_UNREAD_WARN_COOLDOWN_S = int(os.environ.get("IDLE_UNREAD_WARN_COOLDOWN_S", "1200"))  # 20 min
 
 # The from_agent the sweep stamps on its OWN nudge rows. ONE source so the self-feed exclusion
 # below (idle_unread_sweep) can never drift from what _default_nudge actually posts — a mismatch
@@ -1044,6 +1050,7 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
                       nudge=_default_nudge, warn=_default_warn_fleet_health, now_dt=None,
                       nudge_age_s: int = IDLE_UNREAD_NUDGE_AGE_S,
                       warn_age_s: int = IDLE_UNREAD_WARN_AGE_S,
+                      warn_cooldown_s: int = IDLE_UNREAD_WARN_COOLDOWN_S,
                       nudged_seen=None, warned_seen=None,
                       is_offline_stale=_is_offline_stale, mark=_mark_skipped) -> dict:
     """For each recipient (is_wake_eligible_recipient — never a human/operator, the hub only
@@ -1051,7 +1058,9 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
     never nudged here) whose pane is IDLE (never busy — 'esc to interrupt') but has directed
     row(s) unread past nudge_age_s: nudge it ONCE per distinct unread-id-set via the normal
     doorbell, naming the ids. If the SAME situation persists past warn_age_s, warn
-    cc-fleet-health ONCE per distinct id-set. A recipient with no live LOCAL session is a
+    cc-fleet-health, but no more than once per warn_cooldown_s per agent regardless of id-set
+    churn (a busy lane accumulating new unread mail every few minutes must not re-page every
+    tick just because one more id crossed the threshold). A recipient with no live LOCAL session is a
     different watchdog's job (dead/foreign-host) — skipped here, never nudged.
 
     AUTO-QUIESCE (orch-console #54066 cc-irsyad-2 + #54081 cc-quality-1, 2026-10-06): before
@@ -1123,13 +1132,25 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
             nudged_seen[agent] = ids_key
             nudged.append(agent)
 
+        # TIME-COOLDOWN DEDUP (cc-fleet-health, 2026-10-25): the prior exact-frozenset-equality
+        # dedup re-fired on ANY id-set churn -- a new unread row joining was enough to reset it,
+        # even though the underlying situation (this agent has stale unread mail) hadn't
+        # materially changed. Observed live: cc-cosem-platform-4 re-warned every ~2min as its
+        # unread set grew 1->2->3 while it was genuinely busy the whole time. Fix: warn at most
+        # once per warn_cooldown_s per agent, independent of exactly which ids are in the set;
+        # drop the memory once the agent fully drains (warn_ids empty) so a later fresh batch
+        # warns promptly rather than waiting out a stale cooldown. See
+        # idle-unread-warn-dedup-defeated-by-id-set-churn for the full incident history.
         warn_ids = sorted(rid for rid, ca in genuine if ca is not None and _age_s(ca) >= warn_age_s)
         if warn_ids:
-            wkey = frozenset(warn_ids)
-            if warned_seen.get(agent) != wkey:
+            last_warned_at = warned_seen.get(agent)
+            due = last_warned_at is None or (now_dt - last_warned_at).total_seconds() >= warn_cooldown_s
+            if due:
                 warn(agent, warn_ids)
-                warned_seen[agent] = wkey
+                warned_seen[agent] = now_dt
                 warned.append(agent)
+        else:
+            warned_seen.pop(agent, None)
 
     return {"nudged": nudged, "warned": warned, "skipped_busy": skipped_busy,
             "skipped_dead": skipped_dead, "auto_quiesced": auto_quiesced,

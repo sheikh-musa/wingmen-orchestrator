@@ -264,14 +264,51 @@ def test_warn_dedupes_across_sweeps():
     assert len(warned) == 1
 
 
-def test_warn_fires_again_when_a_new_id_crosses_30min():
+def test_warn_does_not_refire_within_cooldown_when_a_new_id_joins():
+    """Exact-set-equality dedup used to re-fire on ANY id-set churn, including a new unread
+    row simply joining -- live incident 2026-10-25 (cc-cosem-platform-4): a busy, genuinely
+    non-stuck lane accumulated new unread mail every few minutes and got re-paged every ~2min
+    as a result, even though nothing about the underlying situation had changed. A new id
+    crossing 30min within the SAME cooldown window must NOT trigger a second warn."""
     nudged, warned, nudge, warn = _collector()
     seen_w = {}
     kw1 = dict(resolve_session=lambda a: "sess", pane_busy=lambda s: False,
               nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen=seen_w)
     wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 2000)], **kw1)
     wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 2000), _row(2, "cc-oeh", 1900)], **kw1)
-    assert len(warned) == 2 and warned[1] == ("cc-oeh", (1, 2))
+    assert len(warned) == 1
+
+
+def test_warn_fires_again_after_cooldown_elapses():
+    nudged, warned, nudge, warn = _collector()
+    seen_w = {}
+    kw = dict(resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+              nudge=nudge, warn=warn, nudged_seen={}, warned_seen=seen_w)
+    wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 2000)], now_dt=_NOW, **kw)
+    later = _NOW + timedelta(seconds=wbs.IDLE_UNREAD_WARN_COOLDOWN_S + 1)
+    age_at_later = 2000 + wbs.IDLE_UNREAD_WARN_COOLDOWN_S + 1
+    wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", age_at_later)], now_dt=later, **kw)
+    assert len(warned) == 2
+
+
+def test_warn_cooldown_clears_once_no_remaining_row_is_warn_worthy():
+    """Once the warn-worthy row resolves and the agent's only remaining unread row is too
+    young to warn about yet, the cooldown memory clears -- so the NEXT row that genuinely
+    crosses warn_age_s warns promptly instead of inheriting a stale cooldown from an
+    unrelated, already-resolved incident."""
+    nudged, warned, nudge, warn = _collector()
+    seen_w = {}
+    kw = dict(resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+              nudge=nudge, warn=warn, nudged_seen={}, warned_seen=seen_w)
+    wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 2000)], now_dt=_NOW, **kw)
+    assert len(warned) == 1
+    # row 1 resolved (no longer unread); a new row 2 is old enough to nudge (>900s) but not
+    # yet old enough to warn about (<1800s) -- reaches the warn block with warn_ids empty.
+    wbs.idle_unread_sweep(rows=[_row(2, "cc-oeh", 1000)], now_dt=_NOW + timedelta(seconds=1), **kw)
+    assert "cc-oeh" not in seen_w
+    soon_after = _NOW + timedelta(seconds=10)
+    wbs.idle_unread_sweep(rows=[_row(2, "cc-oeh", 2000)], now_dt=soon_after, **kw)
+    assert len(warned) == 2
 
 
 # ---- delivery uses the normal doorbell, never raw send-keys ----
