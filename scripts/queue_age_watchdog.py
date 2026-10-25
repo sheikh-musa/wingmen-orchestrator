@@ -60,8 +60,9 @@ PAGE_FLOORS = {"P1": P1_AFTER_MIN, "P2": P2_AFTER_MIN}
 OWNERS = [a.strip() for a in os.environ.get(
     "QUEUE_AGE_OWNERS", "cc-orchestrator,orch-console").split(",") if a.strip()]
 
-# Pool queues to scan. coord_dispatch_queue is the named target; message_queue /
-# anchor_queue are NOT pool-claimable (TG buffer / retry queue) so they are out of scope.
+# Pool queues to scan. coord_dispatch_queue is the named target; message_queue is
+# NOT pool-claimable (TG buffer) so it is out of scope. (anchor_queue was also out
+# of scope here before its migration-081 drop -- no longer exists, nothing to name.)
 # Allowlist-validated identifiers (no SQL injection); extend via env for a future queue.
 QUEUE_TABLES = [t.strip() for t in os.environ.get(
     "QUEUE_AGE_TABLES", "coord_dispatch_queue").split(",") if t.strip()]
