@@ -125,14 +125,19 @@ const hEvil = api.heroCard(Object.assign({}, heroA, { operator_summary: "<img sr
 assert.ok(hEvil.indexOf("<img") === -1, "operator_summary is escaped");
 console.log("heroCard: " + "ok");
 
-// --- fc-v82 (orch-console bus 76226): one-tap token setup + typed fallback.
-// The token may arrive in a FRAGMENT (#t=...) — fragments never leave the
-// browser (no server logs, no link-preview fetches, no referrers), which is
-// why the deep link is fragment-only, never a query param.
+// --- fc-v82/fc-v83 (orch-console bus 76226/76254): one-tap token setup + typed
+// fallback. The token may arrive in a FRAGMENT (#t=...) — fragments never leave
+// the browser (no server logs, no link-preview fetches, no referrers), which is
+// why the deep link is fragment-only, never a query param. Floor is 8 chars =
+// the REAL Mini-console CONSOLE_TOKEN's length (fc-v82 shipped a 24-char floor
+// copied from the hosted console's SEPARATE bearer and rejected the production
+// token outright — bus 76254; this lock exists so that never recurs).
 const TOK = "wingmen-console-token-0123456789abcdef";
+const REAL = "w1ngmen8";  // 8 chars — the production token's actual length class
 assert.ok(api.tokenFromHash, "tokenFromHash must be exported");
 assert.strictEqual(api.tokenFromHash("#t=" + TOK), TOK, "reads a #t= fragment");
-assert.strictEqual(api.tokenFromHash("#t=short"), null, "rejects a <24-char fragment (hosted-console floor)");
+assert.strictEqual(api.tokenFromHash("#t=" + REAL), REAL, "accepts the real-length (8-char) production token");
+assert.strictEqual(api.tokenFromHash("#t=1234567"), null, "rejects a <8-char fragment (junk, e.g. #t=true)");
 assert.strictEqual(api.tokenFromHash("#x=" + TOK), null, "ignores non-token fragments");
 assert.strictEqual(api.tokenFromHash(""), null, "no hash -> null");
 assert.strictEqual(api.tokenFromHash("#t=" + TOK + "%23x"), TOK + "%23x", "percent-encoding stays part of the token (no decode)");
@@ -156,6 +161,17 @@ console.log("tokenFromHash: ok");
   assert.strictEqual(JSON.stringify(wrote), JSON.stringify([["console_token", TOK]]),
     "valid #t= persists the token exactly once");
   assert.strictEqual(stripped.length, 1, "fragment stripped exactly once");
+})();
+// flow: the REAL-length token rides the deep link too (the fc-v82 defect: the
+// production 8-char token was floor-rejected — this is the regression lock)
+(function () {
+  const wrote = [];
+  loadAsks({
+    localStorage: { getItem() { return null; }, setItem(k, v) { wrote.push([k, v]); }, removeItem() {} },
+    location: { hash: "#t=" + REAL, reload() {}, href: "", pathname: "/" },
+  });
+  assert.strictEqual(JSON.stringify(wrote), JSON.stringify([["console_token", REAL]]),
+    "8-char production-token deep link persists (fc-v82 regression lock)");
 })();
 // flow: a bad fragment never writes anything
 (function () {
