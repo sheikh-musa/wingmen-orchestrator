@@ -11,4 +11,11 @@
 set -uo pipefail
 cd /home/gazzai/wingmen/orchestrator || exit 1
 set -a; . /dev/shm/wingmen-secrets/.env 2>/dev/null; set +a
+# lane_wedge_watchdog.py's own docstring says "the scheduled --alert run sets
+# [LANE_WEDGE_PERSIST_DRY=1]" but this script never did -- a detect-only (--alert,
+# no --arm) run's `persist` flag stayed False, so save_state() never ran and the
+# once-per-episode COVERAGE-GAP dedup (coverage_gap_episode) saw an empty `warned`
+# set EVERY tick, re-paging orch-console every 7 minutes for any unmapped session
+# instead of once per episode (orch-console bus #76401, 2026-10-25).
+export LANE_WEDGE_PERSIST_DRY=1
 exec /home/gazzai/wingmen/orchestrator/.venv/bin/python3 nervous_system/lane_wedge_watchdog.py --once --alert
