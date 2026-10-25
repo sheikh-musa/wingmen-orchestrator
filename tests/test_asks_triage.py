@@ -386,3 +386,74 @@ def test_client_channel_ask_with_committed_date_extends_chase_by(operator_ledger
     assert committed_date is not None
     assert ob == outbound_id
     assert chase_by >= committed_date
+
+
+# --- migration 118: needs-Musa flag + plain-language operator_summary --------
+# (orch-console bus #75387: the seed path, and the go-forward maintenance path —
+# asks_triage.py sets/unsets the flag and writes the Musa-readable line.)
+
+def test_parser_accepts_needs_musa_flags():
+    args = at.build_parser().parse_args(
+        ["12", "ask", "--summary", "one line", "--needs-musa", "on",
+         "--musa-summary", "Decide the events-dashboard scope."]
+    )
+    assert args.needs_musa == "on"
+    assert args.musa_summary == "Decide the events-dashboard scope."
+
+
+def test_parser_needs_musa_defaults_to_untouched():
+    args = at.build_parser().parse_args(["12", "ask", "--summary", "one line"])
+    assert args.needs_musa is None
+    assert args.musa_summary is None
+
+
+def test_triage_ask_sets_needs_musa_flag_and_summary(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    n = at.triage(
+        rid, "ask", summary="internal triage line", dsn=operator_ledger_db,
+        needs_musa="on", musa_summary="Decide the zone-sharing model.",
+    )
+    assert n == 1
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT needs_operator_decision, operator_summary "
+            "FROM operator_asks WHERE id=%s", (rid,))
+        assert cur.fetchone() == (True, "Decide the zone-sharing model.")
+
+
+def test_triage_ask_without_needs_musa_leaves_flag_untouched(operator_ledger_db):
+    # tri-state: absent flag = don't touch, so a plain re-triage can never
+    # silently clear a Musa decision-pending mark (same COALESCE discipline
+    # as delegated_to).
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+        with c.cursor() as cur:
+            cur.execute(
+                "UPDATE operator_asks SET needs_operator_decision=true "
+                "WHERE id=%s", (rid,))
+        c.commit()
+    at.triage(rid, "ask", summary="internal triage line", dsn=operator_ledger_db)
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT needs_operator_decision FROM operator_asks WHERE id=%s", (rid,))
+        assert cur.fetchone() == (True,)
+
+
+def test_triage_ask_needs_musa_off_clears_flag(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+        with c.cursor() as cur:
+            cur.execute(
+                "UPDATE operator_asks SET needs_operator_decision=true "
+                "WHERE id=%s", (rid,))
+        c.commit()
+    at.triage(rid, "ask", summary="internal triage line", dsn=operator_ledger_db,
+              needs_musa="off")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT needs_operator_decision FROM operator_asks WHERE id=%s", (rid,))
+        assert cur.fetchone() == (False,)
