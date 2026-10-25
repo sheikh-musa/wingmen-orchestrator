@@ -35,22 +35,27 @@ function makeEl() {
   };
 }
 
-function loadAsks() {
+function loadAsks(opts) {
+  opts = opts || {};
+  const store = opts.localStorage ||
+    { getItem() { return null; }, setItem() {}, removeItem() {} };
+  const loc = Object.assign(
+    { reload() {}, href: "", pathname: "/" }, opts.location || {});
   const documentStub = {
     getElementById() { return makeEl(); }, querySelector() { return null; }, querySelectorAll() { return []; },
     createElement() { return makeEl(); }, addEventListener() {}, removeEventListener() {},
     documentElement: makeEl(), body: makeEl(), readyState: "complete",
   };
   const windowStub = {
-    addEventListener() {}, removeEventListener() {}, location: { reload() {}, href: "", pathname: "/" },
+    addEventListener() {}, removeEventListener() {}, location: loc,
     scrollY: 0, devicePixelRatio: 1,
     matchMedia() { return { matches: false, addEventListener() {}, addListener() {} }; },
     navigator: { serviceWorker: { register() { return Promise.resolve(); } }, userAgent: "test" },
   };
   const sandbox = {
     window: windowStub, document: documentStub,
-    localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
-    navigator: windowStub.navigator, location: windowStub.location,
+    localStorage: store, navigator: windowStub.navigator, location: loc,
+    history: opts.history || { replaceState() {} },
     fetch() { return new Promise(function () {}); },
     setInterval() { return 0; }, clearInterval() {}, setTimeout() { return 0; }, clearTimeout() {},
     requestAnimationFrame() { return 0; }, cancelAnimationFrame() {},
@@ -119,5 +124,57 @@ assert.ok(hb.indexOf("plain triage line") !== -1, "hero falls back to text when 
 const hEvil = api.heroCard(Object.assign({}, heroA, { operator_summary: "<img src=x onerror=alert(1)>" }));
 assert.ok(hEvil.indexOf("<img") === -1, "operator_summary is escaped");
 console.log("heroCard: " + "ok");
+
+// --- fc-v82 (orch-console bus 76226): one-tap token setup + typed fallback.
+// The token may arrive in a FRAGMENT (#t=...) — fragments never leave the
+// browser (no server logs, no link-preview fetches, no referrers), which is
+// why the deep link is fragment-only, never a query param.
+const TOK = "wingmen-console-token-0123456789abcdef";
+assert.ok(api.tokenFromHash, "tokenFromHash must be exported");
+assert.strictEqual(api.tokenFromHash("#t=" + TOK), TOK, "reads a #t= fragment");
+assert.strictEqual(api.tokenFromHash("#t=short"), null, "rejects a <24-char fragment (hosted-console floor)");
+assert.strictEqual(api.tokenFromHash("#x=" + TOK), null, "ignores non-token fragments");
+assert.strictEqual(api.tokenFromHash(""), null, "no hash -> null");
+assert.strictEqual(api.tokenFromHash("#t=" + TOK + "%23x"), TOK + "%23x", "percent-encoding stays part of the token (no decode)");
+console.log("tokenFromHash: ok");
+
+// flow: a valid #t= fragment persists BEFORE the token is read (one tap from
+// Telegram -> localStorage), and the fragment is stripped via
+// history.replaceState so it never lingers in the URL bar / history entry.
+(function () {
+  const wrote = [];
+  const store = {
+    getItem(k) { return wrote.length && k === "console_token" ? wrote[wrote.length - 1][1] : null; },
+    setItem(k, v) { wrote.push([k, v]); }, removeItem() {},
+  };
+  const stripped = [];
+  loadAsks({
+    localStorage: store,
+    location: { hash: "#t=" + TOK, reload() {}, href: "/asks#t=" + TOK, pathname: "/asks" },
+    history: { replaceState() { stripped.push(arguments); } },
+  });
+  assert.strictEqual(JSON.stringify(wrote), JSON.stringify([["console_token", TOK]]),
+    "valid #t= persists the token exactly once");
+  assert.strictEqual(stripped.length, 1, "fragment stripped exactly once");
+})();
+// flow: a bad fragment never writes anything
+(function () {
+  const wrote = [];
+  loadAsks({
+    localStorage: { getItem() { return null; }, setItem(k, v) { wrote.push([k, v]); }, removeItem() {} },
+    location: { hash: "#t=short", reload() {}, href: "", pathname: "/" },
+  });
+  assert.strictEqual(wrote.length, 0, "short/garbage fragment writes nothing");
+})();
+console.log("tokenFromHash flow: ok");
+
+assert.ok(api.unlockHtml, "unlockHtml must be exported");
+const uh = api.unlockHtml();
+assert.ok(uh.indexOf('type="password"') !== -1, "typed strip uses a password input");
+assert.ok(uh.indexOf('id="tkn"') !== -1, "input id=tkn");
+assert.ok(uh.indexOf('id="tknGo"') !== -1, "save button id=tknGo");
+assert.ok(uh.indexOf('autocomplete="off"') !== -1, "autofill off");
+assert.ok(uh.indexOf("prompt(") === -1, "never window.prompt (iOS PWA suppresses it)");
+console.log("unlockHtml: ok");
 
 console.log("asks_board.test.js OK");

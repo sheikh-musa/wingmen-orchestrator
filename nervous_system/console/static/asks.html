@@ -110,6 +110,15 @@
   .empty{color:var(--faint);text-align:center;padding:40px 0;font:13px var(--mono)}
   .stamp{color:var(--faint);text-align:center;margin-top:18px;font:11px var(--mono)}
   .err{color:var(--rose);text-align:center;padding:20px 0;font:12px var(--mono)}
+  /* fc-v82 (bus 76226): paste-once token strip — shown when there is no token
+     or the one on record was refused; lanes.html's "paste token (written
+     once)" convention, iOS-safe (typed flow, never window.prompt). */
+  .unlock{max-width:400px;margin:28px auto;padding:18px 16px;border:1px solid var(--hair);border-radius:var(--r);background:var(--panel)}
+  .uh{font:12px/1.6 var(--mono);color:var(--faint);margin-bottom:12px}
+  .tknrow{display:flex;gap:8px}
+  .tknrow input{flex:1;min-width:0;font:14px var(--mono);padding:11px 12px;border-radius:var(--r);border:1px solid var(--hair);background:var(--surface);color:var(--txt)}
+  .tknrow input.bad{border-color:var(--rose)}
+  .tkngo{font:12px var(--mono);padding:0 16px;border-radius:var(--r);border:1px solid var(--hair);background:var(--surface);color:var(--txt);cursor:pointer}
 
   /* ── P1 (op#33598): coarse STATUS tabs + TOPIC chips ── */
   .tabs{display:flex;gap:8px;margin:14px 0 0;flex-wrap:wrap}
@@ -131,7 +140,7 @@
     <div class="top">
       <a class="back" href="/">‹ Fleet</a>
       <h1>Asks board</h1>
-      <span id="build" class="build"><span class="d"></span>fc-v81</span>
+      <span id="build" class="build"><span class="d"></span>fc-v82</span>
       <button id="refresh" class="refresh">↻</button>
     </div>
     <div id="sub" class="sub">Loading ground-truth…</div>
