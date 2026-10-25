@@ -147,6 +147,44 @@ def test_sweep_passes_stable_representative_row_id_per_agent():
     assert seen["cc-quality"] == 2, "must key to the oldest (min id) fresh row, stably"
 
 
+def test_sweep_skips_wake_for_row_resolved_in_the_snapshot_to_wake_gap_73747():
+    # The race (bus #73747/#73751): by the time the wake loop runs, the rep row has
+    # already gone read_at/skipped_at NOT NULL (e.g. the realtime doorbell delivered it
+    # and the lane replied in the gap between the snapshot and here). The final recheck
+    # must drop this target WITHOUT ever calling wake() for it.
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True, "session": agent}
+    rows = [_row("cc-quality", 1)]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, resolved_ids=lambda ids: {1})
+    assert calls == []
+    assert res["woke"] == [] and res["targets"] == []
+
+
+def test_sweep_still_wakes_when_recheck_finds_nothing_resolved():
+    # The recheck must not suppress a legitimate wake when nothing resolved in the gap.
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True, "session": agent}
+    rows = [_row("cc-quality", 1)]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, resolved_ids=lambda ids: set())
+    assert calls == ["cc-quality"]
+    assert res["woke"] == ["cc-quality"]
+
+
+def test_sweep_recheck_only_drops_the_resolved_agent_others_unaffected():
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True, "session": agent}
+    rows = [_row("cc-quality", 1), _row("cc-finance-1", 2)]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, resolved_ids=lambda ids: {1})
+    assert calls == ["cc-finance-1"]
+    assert res["woke"] == ["cc-finance-1"]
+
+
 def test_sweep_quiesces_when_nothing_rotting():
     res = wbs.sweep_once(rows=[], wake=lambda *a, **k: {"woke": True})
     assert res["targets"] == [] and res["woke"] == []

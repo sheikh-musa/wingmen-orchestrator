@@ -227,6 +227,28 @@ def _deliveries_of(row_id) -> "int | None":
         return None
 
 
+def _default_resolved_ids(ids) -> set:
+    """Row ids among `ids` that have gone read_at IS NOT NULL OR skipped_at IS NOT NULL
+    as of RIGHT NOW — the final pre-wake recheck (bus #73747/#73751). Mirrors _SWEEP_SQL's
+    OWN resolution predicate exactly (never a narrower one), so this can only drop a target
+    whose representative row _fetch_rows itself would no longer select on a fresh pass — it
+    cannot suppress a wake _fetch_rows would still consider live. Closes the fetch-then-wake
+    race: sweep_once snapshots rows once at pass-start, then spends real time (a DB round
+    trip per target for liveness/pause/cap checks) before firing wake() off that snapshot; if
+    the realtime doorbell independently delivers + the lane replies in that gap, the row is
+    already resolved and must not drive a second, now-spurious wake. Empty/no-DSN -> empty
+    set (fail toward waking, same posture as every other liveness helper in this module)."""
+    ids = [i for i in (ids or []) if i is not None]
+    if not ids or not _DSN:
+        return set()
+    with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM agent_messages WHERE id = ANY(%s) "
+            "AND (read_at IS NOT NULL OR skipped_at IS NOT NULL)",
+            (ids,))
+        return {row[0] for row in cur.fetchall()}
+
+
 def is_capped(r, now_dt, cap_age_s: int, deliveries=_deliveries_of,
               cap_deliveries: int = WAKE_SWEEP_CAP_DELIVERIES) -> bool:
     """(B) True iff the row has had >= cap_deliveries VERIFIED deliveries (primary, attempt-
@@ -607,7 +629,8 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                deliveries=_deliveries_of, cap_deliveries: int = WAKE_SWEEP_CAP_DELIVERIES,
                agent_host_rows=_agent_host_rows, this_host=None,
                pending_rows=None, pending_ids=None, clear_pending=clear_pending,
-               is_offline_stale=_is_offline_stale) -> dict:
+               is_offline_stale=_is_offline_stale,
+               resolved_ids=_default_resolved_ids) -> dict:
     """One pass. FRESH (under-cap) rotting rows drive a wake of each eligible recipient (the
     doorbell backstop). A row PAST cap_age_s is a give-up candidate. ONLY backstop-eligible
     recipients (should_backstop_wake — never a human/operator or a P3/test row) are classified;
@@ -728,6 +751,15 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
             continue
         if a not in rep_row or rid < rep_row[a]:
             rep_row[a] = rid
+    # FINAL RECHECK (bus #73747/#73751): close the fetch-then-wake race. targets/rep_row
+    # were computed off the pass-start snapshot; everything since (quiet-switch + the per-
+    # target liveness/pause work above) took real time, during which the realtime doorbell
+    # may have already delivered the SAME row and the lane already replied. Drop any target
+    # whose representative row is no longer in _fetch_rows' own "still open" set — never
+    # fire a wake for a row that a fresh fetch would no longer select.
+    gone = resolved_ids(list(rep_row.values()))
+    if gone:
+        targets = [a for a in targets if rep_row.get(a) not in gone]
     results = {a: wake(a, reason="backstop-sweep", dry_run=dry_run, now=now, row_id=rep_row.get(a))
                for a in targets}
     woke = [a for a, r in results.items() if isinstance(r, dict) and r.get("woke")]
