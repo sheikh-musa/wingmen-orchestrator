@@ -156,10 +156,55 @@ def test_new_priorities_query_excludes_suppressed_pattern():
 
 def test_autoack_suppressed_updates_only_the_suppressed_pattern_and_returns_count():
     cur = _FakeCursor(7)  # rowcount
-    n = nbn._autoack_suppressed(_FakeConn(cur))
+    n = nbn._autoack_suppressed(_FakeConn(cur), scholar_healthy=lambda c: True)
     sql, params = cur.calls[0]
     assert sql.strip().startswith("UPDATE agent_messages SET read_at=now()")
     assert "read_at IS NULL" in sql
     assert nbn._WAKE_SUPPRESS_SQL in sql
     assert params == nbn._WAKE_SUPPRESS_PARAMS
     assert n == 7
+
+
+# ---- scholar-health gate on the auto-ack (orch-console #76351): the auto-ack must
+# NEVER mask a genuine scholar-down event -- only act while cc-scholar reads as
+# confirmed-healthy, and fail toward LEAVING the row unread on any uncertainty. ----
+def test_autoack_is_noop_when_scholar_not_confirmed_healthy():
+    cur = _FakeCursor(999)  # would be the rowcount if the UPDATE ran
+    n = nbn._autoack_suppressed(_FakeConn(cur), scholar_healthy=lambda c: False)
+    assert n == 0
+    assert cur.calls == [], "no UPDATE must be issued when scholar isn't confirmed healthy"
+
+
+def test_scholar_confirmed_healthy_true_on_fresh_working_heartbeat():
+    import datetime as dt
+    now = dt.datetime(2026, 10, 26, 0, 0, 0, tzinfo=dt.timezone.utc)
+    cur = _FakeCursor([("working", now - dt.timedelta(seconds=90))])
+    assert nbn._scholar_confirmed_healthy(_FakeConn(cur), now=now) is True
+
+
+def test_scholar_confirmed_healthy_false_when_status_offline():
+    import datetime as dt
+    now = dt.datetime(2026, 10, 26, 0, 0, 0, tzinfo=dt.timezone.utc)
+    cur = _FakeCursor([("offline", now)])
+    assert nbn._scholar_confirmed_healthy(_FakeConn(cur), now=now) is False
+
+
+def test_scholar_confirmed_healthy_false_when_heartbeat_stale():
+    import datetime as dt
+    now = dt.datetime(2026, 10, 26, 0, 0, 0, tzinfo=dt.timezone.utc)
+    stale = now - dt.timedelta(seconds=nbn._SCHOLAR_LIVENESS_GRACE_S + 1)
+    cur = _FakeCursor([("working", stale)])
+    assert nbn._scholar_confirmed_healthy(_FakeConn(cur), now=now) is False
+
+
+def test_scholar_confirmed_healthy_false_when_no_matching_row():
+    cur = _FakeCursor([])
+    assert nbn._scholar_confirmed_healthy(_FakeConn(cur)) is False
+
+
+def test_scholar_confirmed_healthy_false_on_db_error():
+    class _BoomCursor(_FakeCursor):
+        def execute(self, *a, **k):
+            raise RuntimeError("connection reset")
+
+    assert nbn._scholar_confirmed_healthy(_FakeConn(_BoomCursor([]))) is False

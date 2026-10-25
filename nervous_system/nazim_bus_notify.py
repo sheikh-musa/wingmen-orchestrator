@@ -44,19 +44,23 @@ for _t in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux",
 TMUX = TMUX or "tmux"
 
 # STOPGAP (bus #75459/#75469/#75470, 2026-10-24, with cc-fleet-health's explicit
-# go — option 2): suppress the WAKE ONLY (not the row — it still lands durably in
-# the inbox and shows on the next reconcile) for the recurring bayanqa/encoder
-# COVERAGE-GAP whose emitter fleet-health has ruled out every known Mini source for
-# (canonical file, all 5 stale worktree copies overwritten+verified, pg_cron,
-# duplicate launchd, stray --loop, launchctl setenv). Scoped to this EXACT pattern
-# so ANY other coverage-gap (different sessions) still wakes me normally.
-# REVERSIBLE: delete _WAKE_SUPPRESS and the two "AND NOT (...)" clauses below once
-# fleet-health finds and kills the source (its writeup: foreground-shell-busy-
-# marker-gap-20261024.md). UPDATE 2026-10-25/26: root cause FOUND (bus #76244/
-# #76245) -- bayanqa/encoder are real, intentional tmux sessions for the gzb-hosted
-# 'scholar' lane, not a mystery emitter. This stopgap is now likely removable once
-# the real fix (teach the coverage-gap check scholar's session names) lands; left
-# in place pending that.
+# go — option 2): suppress the WAKE for the recurring bayanqa/encoder COVERAGE-GAP.
+# ORIGINALLY wake-only (row stays unread, surfaces on the next reconcile);
+# _autoack_suppressed below (bus #76351) now ALSO marks the row read, but ONLY
+# while cc-scholar reads as confirmed-healthy -- see its docstring. If scholar
+# itself looks stale/offline, the row is left unread exactly as originally
+# designed, so a genuine scholar-down event still reaches the slower generic
+# unread-count backstop.
+# Ruled out as a Mini-local emitter (canonical file, all 5 stale worktree copies
+# overwritten+verified, pg_cron, duplicate launchd, stray --loop, launchctl
+# setenv) BEFORE the real root cause landed. Scoped to this EXACT pattern so ANY
+# other coverage-gap (different sessions) still wakes me normally.
+# ROOT CAUSE FOUND 2026-10-25/26 (bus #76244/#76245): bayanqa/encoder are real,
+# intentional tmux sessions for the gzb-hosted 'scholar' lane, not a mystery
+# emitter. REVERSIBLE: delete _WAKE_SUPPRESS and the "AND NOT (...)" clauses below
+# once the real fix (teach the coverage-gap check scholar's session names) lands
+# and is verified quiet; left in place pending that (orch-console's call as the
+# stopgap's owner).
 # NB: the LIKE patterns are BOUND PARAMETERS, never inlined — psycopg3 parses the
 # query text for %-placeholders, so a literal '%' in the SQL string throws
 # ProgrammingError ("got '%C'"). Passing them as params is both %-safe and
@@ -65,6 +69,13 @@ TMUX = TMUX or "tmux"
 _WAKE_SUPPRESS_SQL = ("from_agent=%s AND subject ILIKE %s "
                       "AND body ILIKE %s AND body ILIKE %s")
 _WAKE_SUPPRESS_PARAMS = ("cc-fleet-health", "%COVERAGE-GAP%", "%bayanqa%", "%encoder%")
+# orch-console #76351: the auto-ack below (added after the WAKE-only comment above
+# was written, hence the mismatch) marks the suppressed-pattern row READ outright --
+# but that EXACT pattern also matches a genuine scholar-lane-DOWN event, which would
+# then never surface. Gate the auto-ack on a CONFIRMED-healthy read of cc-scholar;
+# any uncertainty fails toward LEAVING the row unread (so the slower generic
+# unread-count backstop still catches a real outage) rather than toward masking it.
+_SCHOLAR_LIVENESS_GRACE_S = 600  # 10 min
 
 
 def _dsn() -> str:
@@ -146,14 +157,50 @@ def _nudge(n_new: int, n_need: int, priorities=(), *, pane_busy=_default_pane_bu
     return True
 
 
-def _autoack_suppressed(conn) -> int:
+def _scholar_confirmed_healthy(conn, now=None) -> bool:
+    """True ONLY on a confident read that cc-scholar (the gzb-hosted lane whose tmux
+    sessions are literally named bayanqa/encoder) is alive and not flagged offline.
+    Any uncertainty -- DB error, no matching row, a stale heartbeat, an explicit
+    'offline' status -- returns False. _autoack_suppressed treats False as "do not
+    mask this row"; the fail direction is always toward SURFACING a possible real
+    scholar-down event (orch-console #76351), never toward silently swallowing one."""
+    import datetime as _dt
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status, last_heartbeat FROM agent_status "
+                        "WHERE agent_id='cc-scholar-1' OR base_agent_id='cc-scholar'")
+            rows = cur.fetchall()
+    except Exception:  # noqa: BLE001 — unreadable -> don't mask
+        return False
+    if not rows:
+        return False
+    for status, hb in rows:
+        if status == "offline":
+            return False
+        if hb is None:
+            return False
+        try:
+            if (now - hb).total_seconds() > _SCHOLAR_LIVENESS_GRACE_S:
+                return False
+        except Exception:  # noqa: BLE001 — un-ageable -> don't mask
+            return False
+    return True
+
+
+def _autoack_suppressed(conn, scholar_healthy=_scholar_confirmed_healthy) -> int:
     """Mark the suppressed-pattern rows (the bayanqa/encoder COVERAGE-GAP) read as
     they arrive so they never sit UNREAD. This stops BOTH this daemon's nudge AND the
     separate generic '[wake] new inbox item' backstop (which fires on unread COUNT,
     not on this daemon) from waking the console every ~7min on noise whose emitter
     fleet-health owns the (still-unfound) source hunt for. Scoped to the EXACT
     pattern — a genuinely different coverage-gap stays unread and still wakes me.
+    ONLY acts while cc-scholar reads as confirmed-healthy (#76351) -- if scholar
+    itself looks stale/offline/unreadable, this is a no-op and the row is LEFT
+    unread, so a genuine scholar-down event still reaches the generic backstop.
     Reversible with the rest of the stopgap. Params are bound, never inlined."""
+    if not scholar_healthy(conn):
+        return 0
     with conn.cursor() as cur:
         cur.execute("UPDATE agent_messages SET read_at=now() "
                     "WHERE to_agent='orch-console' AND read_at IS NULL "
