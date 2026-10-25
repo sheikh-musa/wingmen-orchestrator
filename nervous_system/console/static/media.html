@@ -6,18 +6,37 @@
 <meta name="robots" content="noindex,nofollow" />
 <meta name="color-scheme" content="dark" />
 <title>Fleet Screenshots</title>
+<link rel="manifest" href="/manifest.json" />
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico" />
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
 <style>
-  :root {
-    --bg: #0b0e14; --panel: #131722; --panel-2: #1a2030; --line: #232a3a;
-    --txt: #d7dce5; --dim: #8a93a6; --accent: #5b8cff; --good: #3ecf8e;
-    --warn: #f0b429; --bad: #ff6b6b; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-    --tap: 44px;
+  /* fc-v84 (op#33598 #586): media joins the Calm Command system — same tokens,
+     header chrome and card language as lanes/asks. DOM/ids unchanged (media.js
+     owns token/connect/main); only additive markup is the build badge. */
+  :root{
+    --bg:#090b10; --bg-2:#0c0f16;
+    --surface:#12161e; --surface-2:#171c26; --surface-3:#1d2430;
+    --hair:rgba(255,255,255,.06); --hair-2:rgba(255,255,255,.10);
+    --txt:#e8ebf1; --dim:#949cac; --faint:#5c6472;
+    --jade:#37d39a; --jade-soft:rgba(55,211,154,.13);
+    --indigo:#8aa6ff; --indigo-soft:rgba(138,166,255,.14);
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+    --r-lg:18px; --r:14px; --r-sm:10px;
+    --shadow:0 1px 0 rgba(255,255,255,.045) inset, 0 10px 30px -12px rgba(0,0,0,.7);
+    --tap:44px;
   }
-  * { box-sizing: border-box; }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html, body { height: 100%; }
   body {
-    margin: 0; background: var(--bg); color: var(--txt);
-    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0; color: var(--txt);
+    font:15px/1.5 var(--sans); letter-spacing:-.01em;
+    -webkit-font-smoothing:antialiased;
+    background:
+      radial-gradient(120% 60% at 50% -8%, rgba(55,211,154,.06), transparent 60%),
+      radial-gradient(90% 50% at 50% 0%, rgba(138,166,255,.05), transparent 55%),
+      linear-gradient(180deg,var(--bg-2),var(--bg) 40%);
+    background-attachment:fixed;
     display: flex; flex-direction: column;
     height: 100vh; height: 100dvh;
     -webkit-text-size-adjust: 100%;
@@ -25,38 +44,47 @@
   }
   header {
     flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
-    padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+    padding: 11px 16px 13px;
+    background:linear-gradient(180deg,rgba(12,15,22,.92),rgba(9,11,16,.72));
+    backdrop-filter:saturate(140%) blur(14px);-webkit-backdrop-filter:saturate(140%) blur(14px);
+    border-bottom: 1px solid var(--hair);
   }
-  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
-  header .navlink { font: 13px/1 var(--mono); color: var(--accent); text-decoration: none; font-weight: 600; }
-  header .navlink:active { opacity: .7; }
+  header h1 { font-size:19px; margin:0; font-weight:700; letter-spacing:-.02em; }
+  header .navlink { font:600 15px/1 var(--sans); color:var(--dim); text-decoration:none; }
+  header .navlink:active { color:var(--txt); }
+  .build { margin-left:auto; font:11px/1 var(--mono); color:var(--faint);
+    padding:5px 9px; border-radius:999px; background:var(--surface); border:1px solid var(--hair); white-space:nowrap }
+  .build .d{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--jade);
+    margin-right:5px;box-shadow:0 0 6px var(--jade);vertical-align:middle}
   .token-row { width: 100%; display: flex; gap: 8px; align-items: center; }
   .token-row input {
-    flex: 1; min-width: 0; background: var(--panel-2); border: 1px solid var(--line);
-    color: var(--txt); border-radius: 8px; padding: 0 12px; height: var(--tap);
+    flex: 1; min-width: 0; background: var(--surface-2); border: 1px solid var(--hair);
+    color: var(--txt); border-radius: var(--r); padding: 0 12px; height: 38px;
     font: 13px var(--mono);
   }
   button {
-    background: var(--accent); border: 0; color: #fff; border-radius: 8px;
-    padding: 0 16px; height: var(--tap); font-size: 14px; font-weight: 600; cursor: pointer;
-    white-space: nowrap; flex: none;
+    background: var(--surface-2); border: 1px solid var(--hair); color: var(--txt);
+    border-radius: var(--r); padding: 0 16px; height: 38px;
+    font: 600 12px/1 var(--mono); cursor: pointer; white-space: nowrap; flex: none;
   }
-  button:active { transform: translateY(1px); }
-  button.ghost { background: var(--panel-2); border: 1px solid var(--line); color: var(--txt); font-weight: 500; }
+  button:active { background: var(--surface-3); }
+  button.ghost { background: transparent; }
 
   main { flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch; }
 
   .repo-head {
-    position: sticky; top: 0; z-index: 1; background: var(--bg);
-    padding: 12px 14px 6px; font: 11px var(--mono); font-weight: 700; text-transform: uppercase;
-    letter-spacing: .6px; color: var(--accent); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 1;
+    background: linear-gradient(180deg, var(--bg), rgba(9,11,16,.88));
+    backdrop-filter:saturate(140%) blur(10px);-webkit-backdrop-filter:saturate(140%) blur(10px);
+    padding: 14px 16px 8px; font: 700 10px/1 var(--mono); text-transform: uppercase;
+    letter-spacing:.12em; color: var(--faint); border-bottom: 1px solid var(--hair);
   }
   .repo-head .count { color: var(--dim); font-weight: 500; }
-  .empty { padding: 28px 16px; color: var(--dim); font-size: 14px; text-align: center; }
+  .empty { padding: 40px 16px; color: var(--faint); font:13px var(--mono); text-align: center; }
   .search { width: 100%; }
   .search input {
-    width: 100%; background: var(--panel-2); border: 1px solid var(--line); color: var(--txt);
-    border-radius: 8px; padding: 0 12px; height: 38px; font: 13px var(--mono);
+    width: 100%; background: var(--surface-2); border: 1px solid var(--hair); color: var(--txt);
+    border-radius: var(--r); padding: 0 12px; height: 38px; font: 13px var(--mono);
   }
 
   /* ---- thumbnail grid ---- */
@@ -66,15 +94,16 @@
   }
   .card {
     display: flex; flex-direction: column; text-decoration: none; color: inherit;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+    background: var(--surface); border: 1px solid var(--hair-2); border-radius: var(--r-sm);
+    overflow: hidden; box-shadow: var(--shadow);
   }
-  .card:active { background: var(--panel-2); }
+  .card:active { background: var(--surface-2); }
   .thumb {
-    width: 100%; aspect-ratio: 4 / 3; background: var(--panel-2); object-fit: cover;
+    width: 100%; aspect-ratio: 4 / 3; background: var(--surface-2); object-fit: cover;
     display: block; color: var(--dim); font: 11px var(--mono);
   }
   .thumb.pdf { display: flex; align-items: center; justify-content: center; font-size: 13px; }
-  .card .cap { padding: 7px 9px; font: 11px var(--mono); color: var(--dim); overflow-wrap: anywhere; }
+  .card .cap { padding: 7px 9px; font: 11px var(--mono); color: var(--faint); overflow-wrap: anywhere; }
   .card .cap .nm { color: var(--txt); display: block; margin-bottom: 2px; overflow-wrap: anywhere; }
 
   /* ---- lightbox viewer ---- */
@@ -83,16 +112,17 @@
     display: flex; flex-direction: column;
   }
   .lb .bar {
-    flex: none; display: flex; align-items: center; gap: 10px; padding: 10px 14px;
-    border-bottom: 1px solid var(--line); background: var(--panel);
+    flex: none; display: flex; align-items: center; gap: 10px; padding: 11px 16px 13px;
+    border-bottom: 1px solid var(--hair);
+    background:linear-gradient(180deg,rgba(12,15,22,.92),rgba(9,11,16,.72));
+    backdrop-filter:saturate(140%) blur(14px);-webkit-backdrop-filter:saturate(140%) blur(14px);
   }
-  .lb .bar .crumb { font: 11px var(--mono); color: var(--dim); overflow-wrap: anywhere; flex: 1; }
+  .lb .bar .crumb { font: 11px var(--mono); color: var(--faint); overflow-wrap: anywhere; flex: 1; }
   .lb .body { flex: 1; min-height: 0; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 10px; }
   .lb img { max-width: 100%; max-height: 100%; object-fit: contain; }
   .lb iframe { width: 100%; height: 100%; border: 0; background: #fff; }
 
   @media (min-width: 760px) {
-    body { font-size: 15px; }
     .token-row { width: auto; margin-left: auto; }
     .token-row input { width: 240px; flex: none; height: 34px; }
     button { height: 34px; }
@@ -104,6 +134,7 @@
   <h1>Fleet Screenshots</h1>
   <a class="navlink" href="/">&larr; Console</a>
   <a class="navlink" href="/docs">Docs</a>
+  <span id="build" class="build"><span class="d"></span>fc-v84</span>
   <div class="token-row">
     <input id="token" type="password" inputmode="text" placeholder="operator token" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
     <button id="connect">Connect</button>
