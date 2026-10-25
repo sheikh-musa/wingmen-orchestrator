@@ -402,6 +402,17 @@ def library_caches_candidates(root):
         return []
 
 
+#  Standing exemption (Nazim #64900, 2026-10-12): e2e lanes run webkit/chromium nightly,
+#  so clearing this just re-downloads within hours (pure churn) AND disrupts an in-flight
+#  e2e/render run if cleared mid-use. Never a clear candidate regardless of disk pressure --
+#  the "page above 90% sustained" escalation for genuine emergencies lives in the severity
+#  tier elsewhere in this file, not in this function deciding to delete it. Confirmed live
+#  2026-10-26 (bus #76283, cc-console-revamp-1): this exemption was documented but never
+#  actually implemented here, so disk_autoremediate wiped it ~every 5min and killed
+#  console-deploy render gates 5x in one day before being root-caused.
+_LIBRARY_CACHES_EXEMPT = {"ms-playwright"}
+
+
 def _reclaim_library_caches(dry_run):
     """Clear ~/Library/Caches entries (Apple-blessed regenerable, per orch-console's own
     dig, bus #73708). Several subdirs are TCC/SIP-protected even for the owning user
@@ -414,6 +425,9 @@ def _reclaim_library_caches(dry_run):
     or escalate into a false disk-emergency page (see page_severity's error/floor split)."""
     freed = 0
     for d in library_caches_candidates(LIBRARY_CACHES_ROOT):
+        if d.name in _LIBRARY_CACHES_EXEMPT:
+            log(f"    library-caches {d} exempt (standing rule, Nazim #64900) — skipped")
+            continue
         try:
             sz = _dir_size(d) if d.is_dir() else d.stat().st_size
         except OSError:
