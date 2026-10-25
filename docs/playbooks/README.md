@@ -23,9 +23,15 @@ cc-substrate owns coherence-SSOT (#73169). Both gate through orch-console.
 | [PB-04](04-playbook-ship-to-live.md) | Ship-to-live completeness + test bar | P1 | **checklist / CI** (not a pre-tool hook); partial `deploy_safety_guard.sh` | ready |
 | [PB-05](05-playbook-secrets-transcript.md) | Secrets & transcript hygiene | P1 | `secrets_transcript_guard` + `secrets_output_scanner` **🟢 existing** | ready |
 | [PB-06](06-playbook-framework-footguns.md) | Framework footguns (use-server/SSR …) | P1 | **static lint** (the one clean hook-able RED row) — TO-BUILD | ready; lint planned |
+| [PB-07](07-playbook-frontend-ux-completeness.md) | Frontend UX-completeness (operator-scale actions) | P1 | **review-recipe lens** (🔴 review-time) + `frontend_bulk_action_lint.py` **heuristic WARN-lint, TO-BUILD** | ready; lens live, lint planned |
+
+> **PB-07 added post-approval** (op#33974 Musa IHSAN flag → orch-console #76194):
+> a NEW class — frontend UX-completeness — not in the original substrate/data/security
+> inventory. Review-time dimension (like PB-03's adequacy checks), landing as a
+> standing review lens + a heuristic WARN-lint candidate, not a fail-closed hook.
 
 See [00-INVENTORY.md](00-INVENTORY.md) for the full inventory + the mapping from
-~60 scattered memories / CLAUDE.md rules / hooks into these 6, and
+~60 scattered memories / CLAUDE.md rules / hooks into these canonical playbooks, and
 [TEMPLATE.md](TEMPLATE.md) for the authoring contract.
 
 ## How a lane discovers a playbook (enforced, 3 layers — Layer A works everywhere)
