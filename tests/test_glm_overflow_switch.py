@@ -140,12 +140,19 @@ def _stub_env(monkeypatch, glm_wk, lanes):
     monkeypatch.setattr(g, "save_state", lambda s: None)
 
 
+def _glm_calls(calls):
+    """_stub_env's musa 7d=90.0 ALSO legitimately trips the separate musa-syed-move check
+    below (own independent trigger, same threshold value) -- filter it out when a test's
+    intent is specifically the GLM-page gate, not that unrelated standing check."""
+    return [c for c in calls if "op#33932" not in c]
+
+
 def test_empty_glm_is_log_only_no_page(monkeypatch):
     """GLM over threshold but ZERO lanes on GLM = nothing to protect -> log-only, no P1+RR page."""
     calls = _spy_page(monkeypatch)
     _stub_env(monkeypatch, glm_wk=97.2, lanes=[])
     rc = g.main(["--apply"])
-    assert calls == [], f"should NOT page when 0 lanes on GLM, but paged: {calls}"
+    assert _glm_calls(calls) == [], f"should NOT page when 0 lanes on GLM, but paged: {calls}"
     assert rc == 0
 
 
@@ -154,5 +161,57 @@ def test_lane_on_glm_still_pages(monkeypatch):
     calls = _spy_page(monkeypatch)
     _stub_env(monkeypatch, glm_wk=97.2, lanes=["cosem-exams"])
     rc = g.main(["--apply"])
-    assert len(calls) == 1, f"should page when a lane is on GLM, got {calls}"
+    assert len(_glm_calls(calls)) == 1, f"should page when a lane is on GLM, got {calls}"
     assert rc == 0
+
+
+# ── Musa op#33932: standing 90% -> brains-to-Syed page, independent of GLM state ──
+def _stub_musa_only(monkeypatch, musa_7d, musa_5h=7.0, state=None):
+    monkeypatch.setattr(g, "read_glm", lambda: {"wk": 10.0, "5h": 5.0, "wk_reset": "r", "5h_reset": "r"})
+    monkeypatch.setattr(g, "read_musa", lambda: {"7d": musa_7d, "5h": musa_5h, "idle": 0.0})
+    monkeypatch.setattr(g, "lanes_to_switch", lambda od, fn: [])
+    monkeypatch.setattr(g, "load_state", lambda: {} if state is None else state)
+    monkeypatch.setattr(g, "save_state", lambda s: state.update(s) if state is not None else None)
+
+
+def test_musa_syed_move_pages_at_90pct(monkeypatch):
+    calls = _spy_page(monkeypatch)
+    state = {}
+    _stub_musa_only(monkeypatch, musa_7d=90.0, state=state)
+    rc = g.main(["--apply"])
+    assert len(calls) == 1 and "op#33932" in calls[0]
+    assert state.get("page_musa_syed_move")
+    assert rc == 0
+
+
+def test_musa_syed_move_does_not_page_below_90pct(monkeypatch):
+    calls = _spy_page(monkeypatch)
+    _stub_musa_only(monkeypatch, musa_7d=89.9)
+    g.main(["--apply"])
+    assert calls == []
+
+
+def test_musa_syed_move_respects_cooldown(monkeypatch):
+    calls = _spy_page(monkeypatch)
+    state = {"page_musa_syed_move": g.dt.datetime.now(g.dt.timezone.utc).timestamp()}
+    _stub_musa_only(monkeypatch, musa_7d=95.0, state=state)
+    g.main(["--apply"])
+    assert calls == [], "should not re-page within the cooldown window"
+
+
+def test_musa_syed_move_fires_again_after_cooldown(monkeypatch):
+    calls = _spy_page(monkeypatch)
+    stale = g.dt.datetime.now(g.dt.timezone.utc).timestamp() - g.PAGE_COOLDOWN_S - 1
+    state = {"page_musa_syed_move": stale}
+    _stub_musa_only(monkeypatch, musa_7d=95.0, state=state)
+    g.main(["--apply"])
+    assert len(calls) == 1
+
+
+def test_musa_syed_move_dry_run_does_not_persist_state(monkeypatch):
+    calls = _spy_page(monkeypatch)
+    state = {}
+    _stub_musa_only(monkeypatch, musa_7d=90.0, state=state)
+    g.main([])  # no --apply
+    assert len(calls) == 1
+    assert "page_musa_syed_move" not in state
