@@ -7,6 +7,22 @@
 // already familiar with "Your asks" on /fleet recognizes this instantly.
 (function () {
   "use strict";
+  // fc-v82 (orch-console bus 76226): one-tap setup. The token may arrive in a
+  // FRAGMENT (#t=<token>) — fragments never leave the browser (no server
+  // logs, no link-preview fetches, no referrers), which is why the deep link
+  // is fragment-only and never a query param. Applied BEFORE the token is
+  // read, then stripped via history.replaceState so it doesn't linger in the
+  // URL bar or history entry.
+  function tokenFromHash(hash) {
+    var m = /^#t=([^#&\s]{24,})$/.exec(String(hash == null ? "" : hash));
+    return m ? m[1] : null;
+  }
+  var deepTok = tokenFromHash(location.hash);
+  if (deepTok) {
+    try { localStorage.setItem("console_token", deepTok); } catch (e) {}
+    if (typeof history !== "undefined" && history.replaceState)
+      history.replaceState(null, "", location.pathname + location.search);
+  }
   var token = localStorage.getItem("console_token") || "";
   function authHeaders() { return token ? { Authorization: "Bearer " + token } : {}; }
   function $(id) { return document.getElementById(id); }
@@ -27,6 +43,38 @@
       var d = new Date(s);
       return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
     } catch (e) { return ""; }
+  }
+
+  // fc-v82 typed fallback (orch-console bus 76226): if there is no token (or
+  // the one on record is refused), show a paste-once strip instead of telling
+  // the operator to go use devtools — iOS has none. Same shape as lanes.html's
+  // "paste OAuth token (written once)" convention; NEVER window.prompt (iOS
+  // suppresses it in a standalone PWA — see asks.html's own typed-confirm
+  // note at its action layer).
+  function unlockHtml(msg) {
+    return '<div class="unlock">' +
+      '<div class="uh">' + esc(msg || "This board needs its access token — paste it once and this device remembers it.") + '</div>' +
+      '<div class="tknrow">' +
+        '<input id="tkn" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="console token" />' +
+        '<button id="tknGo" class="tkngo" type="button">save</button>' +
+      '</div></div>';
+  }
+  function showUnlock(msg) {
+    var sub = $("sub"), groups = $("groups");
+    if (sub) sub.textContent = "Token required.";
+    if (groups) { groups.innerHTML = unlockHtml(msg); bindUnlock(); }
+  }
+  function bindUnlock() {
+    var go = $("tknGo"), inp = $("tkn");
+    if (!go || !inp) return;
+    function save() {
+      var v = String(inp.value || "").trim();
+      if (v.length < 24) { inp.classList.add("bad"); return; }  // same floor tokenFromHash enforces
+      try { localStorage.setItem("console_token", v); } catch (e) {}
+      location.reload();
+    }
+    go.addEventListener("click", save);
+    inp.addEventListener("keydown", function (ev) { if (ev && ev.key === "Enter") save(); });
   }
 
   // ── P1 board axes (op#33598) — pure helpers, exported for the Node test ──
@@ -226,13 +274,14 @@
 
   function load() {
     var sub = $("sub");
+    if (!token) { showUnlock(); return Promise.resolve(); }  // fc-v82: paste-once strip instead of a 401 round-trip
     if (sub && !sub.dataset.loaded) sub.textContent = "Loading ground-truth…";
     var ctrl = new AbortController();
     var to = setTimeout(function () { ctrl.abort(); }, 8000);
     return fetch("/api/asks-board", { headers: authHeaders(), signal: ctrl.signal })
       .then(function (r) {
         clearTimeout(to);
-        if (r.status === 401) { if (sub) sub.textContent = "Unauthorized — set a breakglass token in localStorage('console_token')."; return null; }
+        if (r.status === 401) { showUnlock("That token was refused — paste the current console token."); return null; }
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.json();
       })
@@ -265,6 +314,8 @@
       topicCounts: topicCounts,
       needsMusa: needsMusa,
       heroCard: heroCard,
+      tokenFromHash: tokenFromHash,
+      unlockHtml: unlockHtml,
     };
   }
 })();
