@@ -96,3 +96,70 @@ def test_default_pane_busy_wires_to_shared_pane_busy_definition():
     # a reimplementation. An unreadable/nonexistent session reads as NOT busy (the
     # "unreadable -> deliver, never silently drop" contract).
     assert nbn._default_pane_busy("definitely-not-a-real-tmux-session-xyz") is False
+
+
+# ---- bayanqa/encoder COVERAGE-GAP wake-suppression stopgap (bus #75459/#75469/
+# #75470, folded into #445's PR per orch-console #76339 so trunk == live checkout,
+# no uncommitted drift). Pure query-construction checks via a fake cursor that
+# records what SQL + params each call issued -- no real DB. ----
+class _FakeCursor:
+    def __init__(self, result):
+        self._result = result
+        self.calls = []
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+
+    def fetchone(self):
+        return self._result.pop(0) if isinstance(self._result, list) else self._result
+
+    def fetchall(self):
+        return self._result
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    @property
+    def rowcount(self):
+        return self._result
+
+
+class _FakeConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def cursor(self):
+        return self._cursor
+
+    def commit(self):
+        pass
+
+
+def test_state_max_id_query_excludes_suppressed_pattern():
+    cur = _FakeCursor([(42,), (0,)])
+    nbn._state(_FakeConn(cur))
+    sql, params = cur.calls[0]
+    assert "NOT" in sql and nbn._WAKE_SUPPRESS_SQL in sql
+    assert params == nbn._WAKE_SUPPRESS_PARAMS
+
+
+def test_new_priorities_query_excludes_suppressed_pattern():
+    cur = _FakeCursor([])
+    nbn._new_priorities(_FakeConn(cur), since_id=100)
+    sql, params = cur.calls[0]
+    assert "NOT" in sql and nbn._WAKE_SUPPRESS_SQL in sql
+    assert params == (100, *nbn._WAKE_SUPPRESS_PARAMS)
+
+
+def test_autoack_suppressed_updates_only_the_suppressed_pattern_and_returns_count():
+    cur = _FakeCursor(7)  # rowcount
+    n = nbn._autoack_suppressed(_FakeConn(cur))
+    sql, params = cur.calls[0]
+    assert sql.strip().startswith("UPDATE agent_messages SET read_at=now()")
+    assert "read_at IS NULL" in sql
+    assert nbn._WAKE_SUPPRESS_SQL in sql
+    assert params == nbn._WAKE_SUPPRESS_PARAMS
+    assert n == 7
