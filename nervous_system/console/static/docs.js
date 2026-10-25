@@ -7,13 +7,29 @@
 (function () {
   "use strict";
 
+  // fc-v84 consistency pass (op#33598 #586, orch-console bus 76323): the token
+  // may arrive as a #t=<token> FRAGMENT — same one-tap deep link as asks.js
+  // (fc-v82/83): fragments never leave the browser (no server logs, no
+  // link-preview fetches, no referrers), persisted BEFORE the token is read,
+  // then history.replaceState strips it from the URL bar/history. Floor is
+  // 8 chars = the REAL CONSOLE_TOKEN length class (bus 76254).
+  function tokenFromHash(hash) {
+    var m = /^#t=([^#&\s]{8,})$/.exec(String(hash == null ? "" : hash));
+    return m ? m[1] : null;
+  }
+  var deepTok = tokenFromHash(location.hash);
+  if (deepTok) {
+    try { localStorage.setItem("console_token", deepTok); } catch (e) {}
+    if (typeof history !== "undefined" && history.replaceState)
+      history.replaceState(null, "", location.pathname + location.search);
+  }
   var token = localStorage.getItem("console_token") || sessionStorage.getItem("console_token") || "";
 
   var $ = function (id) { return document.getElementById(id); };
   function authHeaders() { return { Authorization: "Bearer " + token }; }
   function esc(s) {
     return String(s == null ? "" : s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
   function fmtDate(iso) {
     if (!iso) return "";
@@ -144,4 +160,8 @@
 
   if (token) { $("token").value = token; }
   render();
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { tokenFromHash: tokenFromHash, esc: esc };
+  }
 })();
