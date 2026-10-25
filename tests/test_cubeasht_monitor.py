@@ -235,6 +235,134 @@ def test_runner_offline_only_while_reachable():
     assert kinds(s) == []
 
 
+# ---------------------------------------------------------------- 2 runners (orch-console #58379)
+
+R1 = "cubeasht-orchestrator"
+R2 = "cubeasht-orchestrator-2"
+
+
+def _rs(s1, s2, b1=False, b2=False):
+    rs = [{"name": R1, "status": s1, "busy": b1}, {"name": R2, "status": s2, "busy": b2}]
+    return {"runners": rs, "runner": dict(rs[0])}
+
+
+WIN30 = (30, 25, 20, 15, 10, 5, 0)
+
+
+def test_runners_from_api_label_filter_and_summary():
+    lab = [{"name": "self-hosted"}, {"name": "cubeasht"}, {"name": "win-wsl"}]
+    data = {"total_count": 3, "runners": [
+        {"name": R2, "status": "offline", "busy": False, "labels": lab},
+        {"name": "gzb-runner", "status": "online", "busy": True, "labels": [{"name": "self-hosted"}]},
+        {"name": R1, "status": "online", "busy": True, "labels": lab}]}
+    rs = cm.runners_from_api(data)
+    assert rs == [{"name": R1, "status": "online", "busy": True},
+                  {"name": R2, "status": "offline", "busy": False}]  # sorted, label-filtered
+    assert cm.runner_summary(rs) == {"name": R1, "status": "online", "busy": True}
+    # nobody carries the label: summary says not_registered (CI cannot run)
+    assert cm.runners_from_api({"runners": []}) == []
+    assert cm.runner_summary([])["status"] == "not_registered"
+    with pytest.raises(cm.MonitorError):
+        cm.runners_from_api({"message": "Bad credentials"})
+
+
+def test_wsl_probe_records_every_runner_unit():
+    two = WSL_REAL.replace(
+        "runner_service=active\n",
+        "runner_service=active\n"
+        "runner_unit=actions.runner.sheikh-musa-wingmen-orchestrator.cubeasht-orchestrator-2.service=inactive\n"
+        "runner_unit=actions.runner.sheikh-musa-wingmen-orchestrator.cubeasht-orchestrator.service=active\n")
+    w = cm.parse_wsl_output(two)
+    assert w["runner_service"] == "active"
+    assert w["runner_services"] == {
+        "actions.runner.sheikh-musa-wingmen-orchestrator.cubeasht-orchestrator-2.service": "inactive",
+        "actions.runner.sheikh-musa-wingmen-orchestrator.cubeasht-orchestrator.service": "active"}
+    assert "runner_services" not in cm.parse_wsl_output(WSL_REAL) or \
+        cm.parse_wsl_output(WSL_REAL)["runner_services"] == {}
+
+
+def test_two_runners_all_offline_pages_p1():
+    fs = cm.evaluate_alerts([_ok(m, **_rs("offline", "offline")) for m in WIN30], T0)
+    assert [f["kind"] for f in fs] == ["runner_offline"]
+    f = fs[0]
+    assert f["key"] == "cubeasht:runner_offline" and f["priority"] == "P1" and f["req"] is True
+    assert f["offline"] == [R1, R2]
+    subj, body = cm.render_page(f)
+    assert "all 2" in subj.lower() and R2 in body
+
+
+def test_two_runners_one_offline_pages_degraded_p2():
+    fs = cm.evaluate_alerts([_ok(m, **_rs("online", "offline")) for m in WIN30], T0)
+    assert [f["kind"] for f in fs] == ["runner_degraded"]
+    f = fs[0]
+    assert f["key"] == "cubeasht:runner_degraded" and f["priority"] == "P2"
+    assert f["offline"] == [R2] and f["online"] == [R1]
+    subj, body = cm.render_page(f)
+    assert "1/2" in subj and body.startswith("TL;DR:") and "WHAT TO DO" in body
+    # which runner is down may change mid-window: still degraded throughout
+    flip = [_ok(m, **_rs("online", "offline")) for m in (30, 25, 20)] + \
+           [_ok(m, **_rs("offline", "online")) for m in (15, 10, 5, 0)]
+    assert kinds(flip) == ["runner_degraded"]
+
+
+def test_two_runners_degraded_needs_30_min_and_reachability():
+    assert kinds([_ok(m, **_rs("online", "offline")) for m in (20, 15, 10, 5, 0)]) == []
+    blip = [_ok(m, **_rs("online", "offline")) for m in (30, 25, 20, 15, 10, 5)] + \
+           [_ok(0, **_rs("online", "online"))]
+    assert kinds(blip) == []
+    asleep = [_ok(m, **_rs("online", "offline")) for m in (30, 25, 20)] + [_down(m) for m in (15, 10, 5, 0)]
+    assert "runner_degraded" not in kinds(asleep) and "runner_offline" not in kinds(asleep)
+    assert kinds([_ok(m, **_rs("online", "online")) for m in WIN30]) == []
+
+
+def test_two_runners_degraded_then_all_offline_is_not_double_paged():
+    # mixed window (degraded 15 min, then both offline 15 min): neither condition held for 30 min
+    s = [_ok(m, **_rs("online", "offline")) for m in (30, 25, 20)] + \
+        [_ok(m, **_rs("offline", "offline")) for m in (15, 10, 5, 0)]
+    assert kinds(s) == []
+
+
+def test_all_runners_unregistered_counts_as_offline():
+    s = [_ok(m, runners=[], runner={"name": R1, "status": "not_registered", "busy": False}) for m in WIN30]
+    assert kinds(s) == ["runner_offline"]
+
+
+def test_send_page_uses_finding_priority(monkeypatch):
+    calls = []
+    import scripts.bus_send as bs
+    monkeypatch.setattr(bs, "send", lambda **kw: calls.append(kw) or (7, "t"))
+    f = cm.evaluate_alerts([_ok(m, **_rs("online", "offline")) for m in WIN30], T0)[0]
+    assert cm._send_page(f) == 7
+    assert calls[0]["priority"] == "P2" and calls[0]["req"] is False
+    f = cm.evaluate_alerts([_ok(m, **_rs("offline", "offline")) for m in WIN30], T0)[0]
+    cm._send_page(f)
+    assert calls[1]["priority"] == "P1" and calls[1]["req"] is True
+    assert all(c["from_agent"] == "cc-fleet-health" and c["to"] == "orch-console" for c in calls)
+
+
+# ---------------------------------------------------------------- WSL page-cache picture
+
+def test_vmmem_minus_wsl_used_derived():
+    ps = cm.parse_ps_output(PS_REAL)  # vmmem_ws_bytes 2599096320 -> 2479 MB
+    m = cm.build_metrics(ps, cm.parse_wsl_output(WSL_REAL), RUNNER)  # wsl used 1328 MB
+    assert m["vmmem_minus_wsl_used_mb"] == 2479 - 1328
+    assert cm.build_metrics(ps, None, RUNNER)["vmmem_minus_wsl_used_mb"] is None
+    ps2 = dict(ps); ps2.pop("vmmem_ws_bytes"); ps2["vmmem_error"] = "no vmmem"
+    assert cm.build_metrics(ps2, cm.parse_wsl_output(WSL_REAL), RUNNER)["vmmem_minus_wsl_used_mb"] is None
+
+
+def test_ram_alert_body_mentions_wsl_cache():
+    cache = dict(ram_used_pct=95.0, vmmem_ws_mb=12493, vmmem_minus_wsl_used_mb=10752,
+                 wsl={"runner_service": "active", "mem_used_mb": 1741})
+    f = cm.evaluate_alerts([_ok(m, **cache) for m in (15, 10, 5, 0)], T0)[0]
+    assert f["kind"] == "ram" and f["vmmem_minus_wsl_used_mb"] == 10752
+    body = cm.render_page(f)[1]
+    assert "~10.5 GB is WSL cache" in body and "12.2 GB" in body
+    # no vmmem data: no cache line, still renders
+    f = cm.evaluate_alerts([_ok(m, ram_used_pct=95.0) for m in (15, 10, 5, 0)], T0)[0]
+    assert "WSL cache" not in cm.render_page(f)[1]
+
+
 def test_render_every_kind_has_tldr_and_one_line_subject():
     samples = ([_ok(m, gpu_temp_c=90.0, nvme_temp_c=75.0, ram_used_pct=95.0, disk_c_free_pct=5.0,
                     cpu_temp_c=90.0, cpu_temp_source="librehardwaremonitor") for m in (15, 10, 5, 0)])
@@ -297,6 +425,19 @@ def test_summary_math():
     assert "cpu_temp_c" not in out  # no source yet
     samples[0]["metrics"]["cpu_temp_c"] = 60.0
     assert cm.summarize(samples, day)["cpu_temp_c"] == {"min": 60.0, "avg": 60.0, "max": 60.0, "n": 1}
+
+
+def test_summary_ci_busy_is_any_runner_busy():
+    base = datetime(2026, 10, 7, 1, 0, tzinfo=timezone.utc)
+    def s(h, load, b1, b2):
+        m = {"reachable": True, "cpu_load_pct": load, **_rs("online", "online", b1, b2)}
+        return {"ts": base + timedelta(hours=h), "ok": True, "error": None, "metrics": m}
+    # runner 1 idle but runner 2 busy -> CI busy (the legacy `runner` field alone would say idle)
+    out = cm.summarize([s(0, 10, False, False), s(1, 70, False, True), s(2, 90, True, True)],
+                       date(2026, 10, 7))
+    assert out["ci_busy_samples"] == 2
+    assert out["cpu_load_pct"]["ci_busy"] == {"min": 70.0, "avg": 80.0, "max": 90.0, "n": 2}
+    assert out["cpu_load_pct"]["ci_idle"] == {"min": 10.0, "avg": 10.0, "max": 10.0, "n": 1}
 
 
 def test_summary_timezone_cut():
