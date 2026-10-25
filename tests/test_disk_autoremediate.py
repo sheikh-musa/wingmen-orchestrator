@@ -369,6 +369,31 @@ def test_reclaim_library_caches_skips_permission_denied_without_raising(tmp_path
     assert freed >= 1024
 
 
+# ---- ms-playwright standing exemption (Nazim #64900, confirmed live-broken bus #76283) ----
+def test_reclaim_library_caches_exempts_ms_playwright_on_apply(tmp_path, monkeypatch):
+    root = tmp_path / "Caches"
+    exempt = root / "ms-playwright"
+    removable = root / "Homebrew"
+    for d in (exempt, removable):
+        d.mkdir(parents=True)
+        (d / "blob").write_bytes(b"x" * 4096)
+    monkeypatch.setattr(dar, "LIBRARY_CACHES_ROOT", root)
+    freed = dar._reclaim_library_caches(dry_run=False)
+    assert exempt.exists() and (exempt / "blob").exists(), "ms-playwright must never be cleared"
+    assert not removable.exists(), "a genuinely removable entry must still be reclaimed"
+    assert freed >= 4096
+
+
+def test_reclaim_library_caches_exempts_ms_playwright_on_dry_run(tmp_path, monkeypatch):
+    root = tmp_path / "Caches"
+    exempt = root / "ms-playwright"
+    exempt.mkdir(parents=True)
+    (exempt / "blob").write_bytes(b"x" * 4096)
+    monkeypatch.setattr(dar, "LIBRARY_CACHES_ROOT", root)
+    freed = dar._reclaim_library_caches(dry_run=True)
+    assert freed == 0, "ms-playwright must not even be counted as a reclaimable candidate"
+
+
 def test_reclaim_library_caches_skips_nonempty_dir_race_without_raising(tmp_path, monkeypatch):
     # bus #73901 live incident: com.apple.python raised OSError(ENOTEMPTY) from rmtree
     # (a TOCTOU race -- something wrote into the cache dir mid-sweep), which was NOT a
