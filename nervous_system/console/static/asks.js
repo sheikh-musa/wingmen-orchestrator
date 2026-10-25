@@ -7,14 +7,17 @@
 // already familiar with "Your asks" on /fleet recognizes this instantly.
 (function () {
   "use strict";
-  // fc-v82 (orch-console bus 76226): one-tap setup. The token may arrive in a
-  // FRAGMENT (#t=<token>) — fragments never leave the browser (no server
-  // logs, no link-preview fetches, no referrers), which is why the deep link
-  // is fragment-only and never a query param. Applied BEFORE the token is
+  // fc-v82/fc-v83 (orch-console bus 76226/76254): one-tap setup. The token may
+  // arrive in a FRAGMENT (#t=<token>) — fragments never leave the browser (no
+  // server logs, no link-preview fetches, no referrers), which is why the deep
+  // link is fragment-only and never a query param. Applied BEFORE the token is
   // read, then stripped via history.replaceState so it doesn't linger in the
-  // URL bar or history entry.
+  // URL bar or history entry. Floor is 8 chars = this console's REAL
+  // CONSOLE_TOKEN length class (fc-v82 shipped 24 — copied from the hosted
+  // console's SEPARATE bearer — and rejected the production token outright;
+  // bus 76254).
   function tokenFromHash(hash) {
-    var m = /^#t=([^#&\s]{24,})$/.exec(String(hash == null ? "" : hash));
+    var m = /^#t=([^#&\s]{8,})$/.exec(String(hash == null ? "" : hash));
     return m ? m[1] : null;
   }
   var deepTok = tokenFromHash(location.hash);
@@ -69,7 +72,7 @@
     if (!go || !inp) return;
     function save() {
       var v = String(inp.value || "").trim();
-      if (v.length < 24) { inp.classList.add("bad"); return; }  // same floor tokenFromHash enforces
+      if (v.length < 8) { inp.classList.add("bad"); return; }  // same floor tokenFromHash enforces (real token length class, bus 76254)
       try { localStorage.setItem("console_token", v); } catch (e) {}
       location.reload();
     }
