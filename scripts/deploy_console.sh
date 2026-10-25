@@ -62,9 +62,13 @@ LB=$(grep 'id="build"' "$STATIC/lanes.html" | grep -oE 'fc-v[0-9]+' | tail -1)
 # op#61107: asks.html joined the gated set (its own page, lanes.html pattern) —
 # same hardcoded-badge convention as lanes.html, so it gets the same check.
 AB=$(grep 'id="build"' "$STATIC/asks.html" | grep -oE 'fc-v[0-9]+' | tail -1)
-echo "  [1/4] version-sync: sw.js=$SW fleet.js=$FL lanes.html=$LB asks.html=$AB"
-{ [ -n "$SW" ] && [ "$SW" = "$FL" ] && [ "$SW" = "$LB" ] && [ "$SW" = "$AB" ]; } || \
-  fail "version constants OUT OF SYNC (sw=$SW fleet=$FL lanes=$LB asks=$AB) — bump all four in sync." 3
+# fc-v84: docs.html + media.html joined the gated set (Calm Command pass, op#33598
+# #586) — same hardcoded-badge convention, so they get the same check.
+DB=$(grep 'id="build"' "$STATIC/docs.html" | grep -oE 'fc-v[0-9]+' | tail -1)
+MB=$(grep 'id="build"' "$STATIC/media.html" | grep -oE 'fc-v[0-9]+' | tail -1)
+echo "  [1/4] version-sync: sw.js=$SW fleet.js=$FL lanes.html=$LB asks.html=$AB docs.html=$DB media.html=$MB"
+{ [ -n "$SW" ] && [ "$SW" = "$FL" ] && [ "$SW" = "$LB" ] && [ "$SW" = "$AB" ] && [ "$SW" = "$DB" ] && [ "$SW" = "$MB" ]; } || \
+  fail "version constants OUT OF SYNC (sw=$SW fleet=$FL lanes=$LB asks=$AB docs=$DB media=$MB) — bump all six in sync." 3
 
 # ---- GATE 2: tests ----
 echo "  [2/4] console tests..."
