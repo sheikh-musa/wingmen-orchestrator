@@ -215,7 +215,9 @@ def lane_nudge_message(miss: dict) -> str:
         f"oldest since {miss['oldest_unread_created_at']} — your inbox reader "
         f"looks like it's filtering to_agent=eq.{miss['base_agent_id']} only. "
         f"Check your inbox filter matches to_agent IN (base, instance), not "
-        f"base alone (bus #51166 regression class), then drain the backlog."
+        f"base alone (bus #51166 regression class) — run "
+        f"`python3 scripts/lib/my_inbox.py` (the ONE sanctioned base+instance "
+        f"inbox reader) instead of a hand-rolled query, then drain the backlog."
     )
 
 
