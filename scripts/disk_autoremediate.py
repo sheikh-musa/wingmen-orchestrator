@@ -10,7 +10,7 @@ stays below a hard floor after reclaim (or a reclaimer errors). It NEVER touches
 data or operator-held paths.
 
 DISCIPLINE (CLAUDE.md §2):
-  - Reversible: every reclaimer target regenerates (npm/brew caches, .next/cache, file-history
+  - Reversible: every reclaimer target regenerates (npm/brew caches, .next build output, file-history
     undo snapshots). Never a real work file.
   - Dead-man / fail-loud: a reclaimer failure is logged LOUDLY and recorded, never silently
     swallowed; if free stays below the floor OR any reclaimer errored, it PAGES. Reclaimers are
@@ -131,11 +131,18 @@ def _dir_size(path: pathlib.Path) -> int:
     return total
 
 
-# ---- .next/cache candidate scan (pure-ish; fs read only) -----------------------
+# ---- .next candidate scan (pure-ish; fs read only) -----------------------------
 def next_cache_candidates(root, exclude, older_than_s, now):
-    """Return `.next/cache` dirs under root/<project>/** that are (a) NOT in an excluded
-    project and (b) older than `older_than_s` (mtime) — an active build touches its cache,
-    so a fresh mtime spares it. Best-effort: unreadable entries skipped, never crashes."""
+    """Return whole `.next` build-output dirs under root/<project>/** that are (a) NOT in an
+    excluded project and (b) older than `older_than_s` (mtime) — an active build touches its
+    cache, so a fresh mtime spares it. Best-effort: unreadable entries skipped, never crashes.
+
+    WIDENED (orch-console bus #76559, 2026-10-26): used to take only the nested `.next/cache`
+    subdir, missing the rest of `.next` (static/server compiled output) -- the bulk of what
+    orch-console hand-reclaimed (3.6GB) during the 2026-10-26 disk emergency this reclaimer
+    should have caught on its own. The WHOLE `.next` dir is equally regenerable (`next build`
+    recreates it start to finish), so take it all, not just the cache subdir. Pruning the walk
+    (`dns[:] = []`) once matched avoids descending into a dir we're already taking wholesale."""
     root = pathlib.Path(root)
     out = []
     try:
@@ -144,7 +151,8 @@ def next_cache_candidates(root, exclude, older_than_s, now):
         return out
     for dp, dns, _fn in walker:
         p = pathlib.Path(dp)
-        if p.name == "cache" and p.parent.name == ".next":
+        if p.name == ".next":
+            dns[:] = []  # don't descend into a dir we're taking wholesale
             try:
                 project = p.relative_to(root).parts[0]
             except (ValueError, IndexError):
@@ -253,7 +261,7 @@ def _reclaim_next_cache(dry_run):
             freed += sz
             continue
         if _lsof_in_use(d):  # KILL-TIME re-verify — skip if a build is using it
-            log(f"    .next/cache {d} in use (lsof) — skipped")
+            log(f"    .next {d} in use (lsof) — skipped")
             continue
         try:
             shutil.rmtree(d)
