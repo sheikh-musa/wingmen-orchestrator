@@ -1,4 +1,4 @@
--- 118_post_agent_message_optional_params.sql
+-- 119_post_agent_message_optional_params.sql
 -- ledger: silo=tscuymavysscrvoberrr
 -- (orchestrator substrate)
 -- assert: dropped public.post_agent_message(text,text,text,text,text,text,boolean,uuid,text)
@@ -11,7 +11,7 @@
 -- is_test=true (the first two) and a fixed posted_by_identity literal (the third) --
 -- through migration 117's 9-param post_agent_message. Console's ruling: EXTEND the
 -- RPC with both as OPTIONAL, DEFAULTED trailing params rather than leave these 3 on
--- a permanent raw-INSERT bypass (a permanent bypass would mean migration 120's revoke
+-- a permanent raw-INSERT bypass (a permanent bypass would mean migration 121's revoke
 -- can never safely apply to them -- defeats the whole migration).
 --
 -- WHY DROP + CREATE, NOT CREATE OR REPLACE: Postgres identifies a function by name
@@ -41,26 +41,31 @@
 --                                                    since the trigger's guard is
 --                                                    `IF NEW.posted_by_identity IS NULL`.
 --
--- SEQUENCING / RENUMBERED (PR#490 CI finding, backlog#124): this file was
+-- SEQUENCING / RENUMBERED TWICE (PR#490 CI findings, backlog#124): this file was
 -- originally numbered 120 (applying AFTER the bus_writer-enforcement migration,
 -- then numbered 118) with an explicit "must apply BEFORE 118 on the live
 -- substrate" header note -- that silently broke CI's automated bootstrap, which
 -- replays migrations/*.sql in plain filename order and has no notion of a
 -- manual override, so the enforcement migration ran first against the
--- then-still-9-param function and failed. Renumbered to 118 (and the
--- enforcement/revoke migrations shifted to 119/120) so filename order IS
--- dependency order for every file in this set -- no cross-file sequencing note
--- needed anymore. Content is otherwise unchanged from the original 120:
--- migration 119 (the enforcement migration, formerly 118)'s
--- `ALTER FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text)
--- OWNER TO bus_writer` targets the OLD 9-param signature, which THIS migration
--- drops, and 119's text already targets the new 11-param signature instead.
--- mark_delivered/ack_message are untouched by this migration; 119's ALTER
--- FUNCTION statements for those two are unaffected. No ownership change happens
--- here: DROP+CREATE naturally leaves the new function owned by whichever role
--- applies this migration (the same admin/superuser role that applied 117
--- originally) -- 119 is still what moves ownership to bus_writer, just against
--- the new signature.
+-- then-still-9-param function and failed. First renumber: to 118 (enforcement/
+-- revoke shifted to 119/120) so filename order IS dependency order. Second
+-- renumber (orch-console bus #76518, found on GO-gate verify): the base branch
+-- fable/substrate-safe-fixes had separately merged its OWN, unrelated
+-- migrations/118_operator_asks_needs_musa.sql in the meantime -- a logical
+-- number collision (same ordinal, two different migrations) even though git
+-- reported the merge as clean (the filenames differed, so no text conflict).
+-- Rebased onto that base and shifted this whole set again: this file 118->119,
+-- enforcement 119->120, revoke 120->121. Content is otherwise unchanged from
+-- the original: migration 120 (the enforcement migration, formerly 118 then
+-- 119)'s `ALTER FUNCTION post_agent_message(text,text,text,text,text,text,
+-- boolean,uuid,text) OWNER TO bus_writer` targets the OLD 9-param signature,
+-- which THIS migration drops, and 120's text already targets the new 11-param
+-- signature instead. mark_delivered/ack_message are untouched by this
+-- migration; 120's ALTER FUNCTION statements for those two are unaffected. No
+-- ownership change happens here: DROP+CREATE naturally leaves the new function
+-- owned by whichever role applies this migration (the same admin/superuser
+-- role that applied 117 originally) -- 120 is still what moves ownership to
+-- bus_writer, just against the new signature.
 --
 -- TDD'd against an isolated local Postgres, never this substrate (tests/test_post_
 -- agent_message_optional_params.sql -- see tests/test_post_agent_message_optional_
@@ -102,10 +107,10 @@ END;
 $fn$;
 
 COMMENT ON FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text) IS
-    'Durable acked inbox posting RPC (migration 117), extended (migration 118, '
+    'Durable acked inbox posting RPC (migration 117), extended (migration 119, '
     'backlog#124) with 2 optional trailing params so is_test/posted_by_identity '
     'callers can move off raw INSERT without a lossy behavior change. A 9-arg call '
-    'defaults both to the exact pre-118 behavior.';
+    'defaults both to the exact pre-119 behavior.';
 
 REVOKE EXECUTE ON FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text) TO service_role;

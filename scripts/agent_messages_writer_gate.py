@@ -4,7 +4,7 @@ step (orch-console ruling, bus #74885/#74906 part 4).
 
 Fails on any raw `INSERT INTO agent_messages` found in production code
 outside the sanctioned helper (bus_send.py's send(), which posts through
-post_agent_message -- PR #490). This is migration 120's release gate: console
+post_agent_message -- PR #490). This is migration 121's release gate: console
 releases the revoke ONLY when this reports zero bypasses fleet-wide. It is a
 gate, not a one-time audit, so it must run in CI (and pre-push) and stay green
 as new scripts are added -- a report can go stale the day after it's written;
@@ -164,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
                               "script is migrated.")
     parser.add_argument("--require-complete", action="store_true",
                          help="Fail on ANY finding, including baseline-listed ones -- the "
-                              "actual release check for migration 120 (console's ruling, bus "
+                              "actual release check for migration 121 (console's ruling, bus "
                               "#74885/#74906): not 'nothing new', but 'truly zero, fleet-wide'.")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
@@ -190,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
                   "found outside the sanctioned helper (bus_send.py's send()).")
         if args.require_complete and known_findings:
             print("agent_messages_writer_gate: --require-complete set and the baseline is "
-                  "non-empty -- migration 120 does not release until this is zero.")
+                  "non-empty -- migration 121 does not release until this is zero.")
             return 1
         return 0
 

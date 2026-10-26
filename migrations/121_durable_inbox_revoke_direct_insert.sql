@@ -1,20 +1,23 @@
--- 120_durable_inbox_revoke_direct_insert.sql
+-- 121_durable_inbox_revoke_direct_insert.sql
 -- ledger: silo=tscuymavysscrvoberrr
 -- (orchestrator substrate)
 -- assert: no_table_privilege service_role public.agent_messages INSERT
 -- assert: no_sequence_privilege service_role public.agent_messages_id_seq USAGE
 --
--- RENUMBERED from 119 to 120 (PR#490 CI finding, backlog#124): see
--- 118_post_agent_message_optional_params.sql's header -- only the number
--- changed, this file's content and ordering requirement (last) are unchanged.
+-- RENUMBERED TWICE (PR#490 CI findings, backlog#124): first 119->120, then
+-- (orch-console bus #76518: base branch separately merged its own, unrelated
+-- migrations/118_operator_asks_needs_musa.sql -- a logical number collision)
+-- 120->121. See 119_post_agent_message_optional_params.sql's header -- only
+-- the numbers changed, this file's content and ordering requirement (last)
+-- are unchanged.
 --
 -- Durable acked inbox, final step (backlog#124, Tier-1(b) janky-tools audit op#33149).
--- THE breaking change: makes migration 119's additive RPC the ONLY write path by
--- revoking direct INSERT (+ the id sequence) from service_role. Split out of 119
--- itself (orch-console ruling, bus #74885) because 119 physically bundling this
+-- THE breaking change: makes migration 120's additive RPC the ONLY write path by
+-- revoking direct INSERT (+ the id sequence) from service_role. Split out of 120
+-- itself (orch-console ruling, bus #74885) because 120 physically bundling this
 -- revoke with its own safe-additive half meant the only thing stopping an accidental
 -- apply was a comment, not structure -- fragile against a routine apply-latest or the
--- DDL coverage watchdog. 119 is additive-only and safe to apply any time once merged;
+-- DDL coverage watchdog. 120 is additive-only and safe to apply any time once merged;
 -- THIS file is the one that breaks every writer still doing a raw
 -- `INSERT INTO agent_messages` outside the sanctioned RPC path.
 --
@@ -22,10 +25,10 @@
 -- is released ONLY when the enforce-in-code grep gate (backlog#124 ruling part 4)
 -- reports zero raw-INSERT bypasses fleet-wide, across the ~50 scripts/daemons found
 -- independently writing to agent_messages outside bus_send.py (bus #74880/#74885).
--- Do not apply this ahead of that gate going green, no matter how long 119 has been
+-- Do not apply this ahead of that gate going green, no matter how long 120 has been
 -- live without incident -- "nothing broke yet" is not the gate.
 --
--- Self-defeat check (NOT re-litigated here, already proven by migration 119's own
+-- Self-defeat check (NOT re-litigated here, already proven by migration 120's own
 -- design + TDD suite, bus #74738/#74741/#74860/#74863): the three posting RPCs are
 -- owned by the dedicated bus_writer role, distinct from service_role, so this revoke
 -- cannot kill their own internal writes the way the original, rejected draft did.

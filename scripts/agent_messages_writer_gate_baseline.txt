@@ -14,8 +14,8 @@
 # daemons both import -- console's ruling part 3), delete its line in the
 # SAME PR as the migration so the gate starts enforcing it again.
 #
-# Migration 120 (the revoke, renumbered from 119 -- PR#490 CI finding) does
-# not release until this file is EMPTY --
+# Migration 121 (the revoke, originally numbered 119, renumbered twice on
+# two separate PR#490 findings) does not release until this file is EMPTY --
 # `agent_messages_writer_gate.py --require-complete` is that check (console's
 # coordination gate, bus #74885 part 5).
 #
@@ -37,7 +37,7 @@
 # cc-fleet-health bouncing shadow_watch (the other 5 self-refresh) -- console's
 # ruling, bus #75001 part 3.
 #
-# Migration 120's release (console's, bus #75001) needs BOTH: (i) this file
+# Migration 121's release (console's, bus #75001) needs BOTH: (i) this file
 # EMPTY (--require-complete green fleet-wide) AND (ii) daemon_restart_gate.py
 # confirming every LIVE daemon writer (wake_backstop_sweep + irsyad
 # shadow_watch bounced) is actually RUNNING the migrated code, not just

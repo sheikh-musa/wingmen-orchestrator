@@ -79,8 +79,8 @@ def two_dsns(pg_dsn):
         # #74863) rather than a raw INSERT -- this fixture's bus_dsn needs the real
         # RPC, same as the real substrate's bus, or every page this watchdog sends
         # fails with UndefinedFunction. service_role must exist first since 117's
-        # own GRANT EXECUTE targets it by name. 118 (bus #74939) is ALSO required --
-        # bus_send.send() unconditionally calls the 11-param RPC 118 creates, so a
+        # own GRANT EXECUTE targets it by name. 119 (bus #74939) is ALSO required --
+        # bus_send.send() unconditionally calls the 11-param RPC 119 creates, so a
         # 117-only schema's 9-param function makes every send() call fail the same
         # way (a real, pre-existing gap this fixture never kept pace with; caught
         # only once CI's bootstrap first ran the Test step past migration apply,
@@ -91,8 +91,8 @@ def two_dsns(pg_dsn):
         migrations_dir = pathlib.Path(__file__).resolve().parent.parent / "migrations"
         migration_117 = (migrations_dir / "117_durable_inbox_ack_additive.sql").read_text()
         cur.execute(migration_117)
-        migration_118 = (migrations_dir / "118_post_agent_message_optional_params.sql").read_text()
-        cur.execute(migration_118)
+        migration_119 = (migrations_dir / "119_post_agent_message_optional_params.sql").read_text()
+        cur.execute(migration_119)
     return silo_dsn, bus_dsn
 
 

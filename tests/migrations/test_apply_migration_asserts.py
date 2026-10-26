@@ -539,7 +539,7 @@ def test_check_required_assertions_ok_with_assertions_present():
 
 
 def test_check_required_assertions_ignores_revoke_mentioned_only_in_a_comment():
-    # PR#490 CI false positive (migration 119, formerly numbered 118): a migration's own explanatory
+    # PR#490 CI false positive (migration 120, formerly numbered 118 then 119): a migration's own explanatory
     # comment describing WHY it does NOT contain a REVOKE/DROP FUNCTION --
     # using those exact words in prose -- must never trip this gate. Only an
     # actual executable REVOKE/DROP FUNCTION statement should.
