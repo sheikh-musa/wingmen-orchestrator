@@ -56,3 +56,17 @@ The frozen `_status-payload.json` behind the PNGs + DOM assertion contains **471
 ## Bottom line
 
 Clear the code (`e9110cbd0664d37d`) on correctness/security/token-gating/derivation. Hold the deploy until: (1) migration 120 is gated + applied live alongside 119, and (2) the render evidence is regenerated against both-migrations-applied. The MEDIUM `LIMIT` item should be tracked before volume approaches 600. Aesthetic sign-off remains with orch-console.
+
+---
+
+## CLEARANCE ADDENDUM — 2026-10-26 (both blockers verified cleared). Ran on claude-opus-4-8.
+
+Re-verified live after cc-console-revamp's fix (bus 77133 → my 77124). **Both deploy blockers are cleared — the PASS now clears to deploy.**
+
+- **BLOCKER 1 cleared.** `pg_policies` on `held_commitments` now shows `held_commitments_console_ro` — `cmd=SELECT`, `roles={console_readonly}`, `qual=true`, no `with_check`. With the 119 GRANT + this SELECT policy, `console_readonly` reads all open commitments; my earlier 0-of-110 reproduction is gone. Migration 120 gated (77113) + applied/ledgered ~14:27Z.
+- **BLOCKER 2 cleared.** Evidence refreshed through the console role against the both-migrations DB and committed at `aa9a363`: payload now **484 items = 110 commitment + 374 ask**, 354 overdue — the commitments half and all breaches are present. Verified `aa9a363` touches **only** `reports/` (payload + both re-rendered PNGs + this file), so the console content hash is byte-identical and the PASS still covers exactly what ships.
+- **MINOR 2 resolved.** Confirmed via `information_schema`: neither `operator_asks` nor `held_commitments` has an `is_test` column, so the filter correctly lives only on the `agent_messages` CTE (matches `fetch_fleet_asks`).
+- **MINOR 1 accepted.** `held_commitments.title` is agent-authored/curated by construction (committing agent/sweeper writes the title, not raw captured channel text) — low never-raw risk; accepted on that basis.
+- **MEDIUM (`LIMIT 600`) — accepted, NOT fixed this cycle, TRACKED.** Non-blocking at live total 484; any `db.py` edit would move the content hash against this PASS (freeze discipline). Must be carried into the next console cycle before volume approaches 600.
+
+**Verdict: PASS — cleared to deploy.** Aesthetic sign-off remains orch-console's.
