@@ -11,6 +11,12 @@ mkdir -p "$OUT"
 set -a; source .env 2>/dev/null; set +a
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 [ -x "$CHROME" ] || { echo "render: Chrome not found at $CHROME" >&2; exit 2; }
+# Playwright browsers: default to the reclaimer-exempt store (PR#504 kept the
+# ~/wingmen/.playwright copy; ~/Library/Caches/ms-playwright keeps getting
+# PARTIALLY wiped — outer dirs survive, inner executables vanish, so
+# p.chromium.launch() fails with "Executable doesn't exist" mid-gate. Respects
+# an explicit PLAYWRIGHT_BROWSERS_PATH override.
+export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/wingmen/.playwright}"
 H="http://100.83.21.34:8787"
 STATIC="$PWD/nervous_system/console/static"
 TOK="${CONSOLE_TOKEN:-}"
