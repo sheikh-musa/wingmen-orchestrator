@@ -38,6 +38,7 @@ their absence, not a redesign.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 
 from .ddl_detect import is_ddl_shaped
 from .protocol import ErrorCode
@@ -79,15 +80,43 @@ SILO_ALIASES = {
 # first, and do not rely on provisioning alone to keep real refs out of reach.
 ALLOWED_PROJECT_REFS = {SILO_ALIASES["qa"]}
 
+# BOUNDED OVERRIDE (op#34322/#76985/#76989, 2026-10-26, orch-console gate) —
+# THIS is the step-(c)-shaped amendment the comment above anticipated: a
+# reviewed, wall-clock-gated, auto-expiring exception, never a live hand-edit
+# of ALLOWED_PROJECT_REFS itself. check_project_ref optionally takes a single
+# extra ref + its own expiry (loaded once at daemon boot from env, see
+# exec_broker_daemon.py) and re-checks the current time on EVERY call, so the
+# exception reverts BY CONSTRUCTION the moment it expires — no second root
+# action needed to disarm, only to arm. Missing/None/expired means inert:
+# falls through to ALLOWED_PROJECT_REFS-only behavior, identical to before
+# this override existed.
 
-def check_project_ref(project_ref: str) -> None:
+
+def check_project_ref(
+    project_ref: str,
+    *,
+    override_ref: "str | None" = None,
+    override_expires_at: "datetime | None" = None,
+    now: "datetime | None" = None,
+) -> None:
     """§4.1 — exact-string allowlist. QA-only for milestone (a); see
-    ALLOWED_PROJECT_REFS's comment before widening this."""
-    if project_ref not in ALLOWED_PROJECT_REFS:
-        raise BrokerValidationError(
-            ErrorCode.BAD_PROJECT_REF,
-            f"project_ref {project_ref!r} is not on the broker's current allowlist",
-        )
+    ALLOWED_PROJECT_REFS's comment before widening this. A still-live bounded
+    override (override_ref + override_expires_at, both required and
+    unexpired) additionally allows that ONE exact ref — see the module-level
+    comment above ALLOWED_PROJECT_REFS."""
+    if project_ref in ALLOWED_PROJECT_REFS:
+        return
+    if (
+        override_ref is not None
+        and override_expires_at is not None
+        and project_ref == override_ref
+        and (now if now is not None else datetime.now(timezone.utc)) < override_expires_at
+    ):
+        return
+    raise BrokerValidationError(
+        ErrorCode.BAD_PROJECT_REF,
+        f"project_ref {project_ref!r} is not on the broker's current allowlist",
+    )
 
 
 def _needles_for_silo(project_ref: str) -> set[str]:
