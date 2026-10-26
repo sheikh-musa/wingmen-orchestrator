@@ -15,6 +15,21 @@
 #      own SO_PEERCRED allowlist re-checks it.
 #   2. ExecStart's path below is a PLACEHOLDER — fill in the real deployed
 #      path to this checkout's scripts/exec_broker_daemon.py on gzb.
+#
+# DRIFT NOTE (orch-console, PR#513 arm, 2026-10-26, bus #77098): the paths
+# below are NOT what's actually installed on gzb. The real unit was
+# provisioned by hand (2026-10-23) with a hand-copied code tree, not a git
+# checkout, and does NOT track this file automatically:
+#   EnvironmentFile = /opt/irsyad-exec-broker/broker.env   (NOT /etc/irsyad-exec-broker/env)
+#   ExecStart        = runs from /opt/irsyad-exec-broker/scripts/ using its OWN
+#                       .venv under /opt — NOT /home/gazzai/wingmen-orchestrator
+# Practical upshot: editing broker.env (or this tracked file) alone does
+# nothing for the live daemon — the real deployed scripts/ under /opt must be
+# updated/sha256-verified directly, or the live daemon silently keeps running
+# old code while the config *looks* armed. Treat this tracked unit as a
+# reference spec, not a reflection of /opt's current contents, until console
+# (sole gzb-root holder) reconciles /opt to track this file via git/deploy,
+# or this comment is updated again after that happens.
 [Unit]
 Description=Wingmen hc#95 exec-broker — token-behind-vault mgmt-API broker (gzb)
 After=network-online.target wingmen-fetch-secrets.service
