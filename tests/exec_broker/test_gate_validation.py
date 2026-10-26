@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,64 @@ def test_check_project_ref_rejects_unknown_ref():
     with pytest.raises(BrokerValidationError) as exc:
         check_project_ref("some-other-ref")
     assert exc.value.code == ErrorCode.BAD_PROJECT_REF
+
+
+# --- bounded override (op#34322/#76985/#76989) -----------------------------
+
+_NOW = datetime(2026, 10, 26, 12, 0, 0, tzinfo=timezone.utc)
+_GOUMLYNE = "goumlynecruxrlmzlntp"
+
+
+def test_check_project_ref_override_allows_within_expiry():
+    check_project_ref(
+        _GOUMLYNE,
+        override_ref=_GOUMLYNE,
+        override_expires_at=_NOW + timedelta(hours=1),
+        now=_NOW,
+    )  # no raise
+
+
+def test_check_project_ref_override_denies_after_expiry():
+    with pytest.raises(BrokerValidationError) as exc:
+        check_project_ref(
+            _GOUMLYNE,
+            override_ref=_GOUMLYNE,
+            override_expires_at=_NOW - timedelta(seconds=1),
+            now=_NOW,
+        )
+    assert exc.value.code == ErrorCode.BAD_PROJECT_REF
+
+
+def test_check_project_ref_override_denies_a_different_ref():
+    # An active override for goumlyne must not accidentally widen ceayj too.
+    with pytest.raises(BrokerValidationError) as exc:
+        check_project_ref(
+            "ceayjeamtmcyzzvqflus",
+            override_ref=_GOUMLYNE,
+            override_expires_at=_NOW + timedelta(hours=1),
+            now=_NOW,
+        )
+    assert exc.value.code == ErrorCode.BAD_PROJECT_REF
+
+
+def test_check_project_ref_override_inert_when_absent():
+    # Exactly the pre-override call shape — every existing caller/test above.
+    with pytest.raises(BrokerValidationError):
+        check_project_ref(_GOUMLYNE)
+
+
+def test_check_project_ref_override_inert_when_only_ref_given_no_expiry():
+    with pytest.raises(BrokerValidationError):
+        check_project_ref(_GOUMLYNE, override_ref=_GOUMLYNE, now=_NOW)
+
+
+def test_check_project_ref_qa_still_allowed_regardless_of_unrelated_override():
+    check_project_ref(
+        "oovskwogvefnznfowjky",
+        override_ref=_GOUMLYNE,
+        override_expires_at=_NOW - timedelta(hours=1),  # already expired
+        now=_NOW,
+    )  # no raise -- QA was never dependent on the override
 
 
 def test_require_gate_noop_for_dml():

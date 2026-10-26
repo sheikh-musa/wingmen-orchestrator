@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
@@ -93,7 +94,11 @@ class FakeDb:
         return self.cursor_obj.vault_rows
 
 
-def _make_server(tmp_path, allowed_uids, db=None, mgmt_api_fn=None, peer_uid_val=TEST_UID):
+def _make_server(
+    tmp_path, allowed_uids, db=None, mgmt_api_fn=None, peer_uid_val=TEST_UID,
+    uid_override=None, uid_override_expires_at=None,
+    ref_override=None, ref_override_expires_at=None,
+):
     # NOT tmp_path -- pytest's tmp_path is often >104 bytes deep, which overflows
     # AF_UNIX's sun_path limit (104 on macOS/BSD, 108 on Linux) and makes bind()
     # fail silently inside the daemon thread. A fresh shallow mkdtemp() stays short.
@@ -107,6 +112,10 @@ def _make_server(tmp_path, allowed_uids, db=None, mgmt_api_fn=None, peer_uid_val
         token="test-token",
         mgmt_api_fn=mgmt_api_fn or (lambda *a, **k: []),
         peer_uid_fn=lambda conn: peer_uid_val,
+        uid_override=uid_override,
+        uid_override_expires_at=uid_override_expires_at,
+        ref_override=ref_override,
+        ref_override_expires_at=ref_override_expires_at,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -326,3 +335,75 @@ def test_success_path_commits_before_the_mgmt_api_call(tmp_path):
     })
     assert resp == {"status": "ok", "rows": []}
     assert db.conn.commits == 3
+
+
+# --- bounded override (op#34322/#76985/#76989/#76998), end-to-end ----------
+
+_FUTURE = datetime.now(timezone.utc) + timedelta(hours=1)
+_PAST = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+
+def test_ref_override_allows_non_qa_ref_within_expiry_end_to_end(tmp_path):
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [],
+        ref_override="goumlynecruxrlmzlntp", ref_override_expires_at=_FUTURE,
+    )
+    resp = _send(sock_path, {
+        "project_ref": "goumlynecruxrlmzlntp", "guarded_sql": "select 1", "reason": "",
+        "gate_id": None, "caller": "c", "exec_ledger_id": "e",
+    })
+    assert resp == {"status": "ok", "rows": []}
+
+
+def test_ref_override_denies_after_expiry_end_to_end(tmp_path):
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db,
+        ref_override="goumlynecruxrlmzlntp", ref_override_expires_at=_PAST,
+    )
+    resp = _send(sock_path, {
+        "project_ref": "goumlynecruxrlmzlntp", "guarded_sql": "select 1", "reason": "",
+        "gate_id": None, "caller": "c", "exec_ledger_id": "e",
+    })
+    assert resp["error"]["code"] == "BAD_PROJECT_REF"
+
+
+def test_ref_override_does_not_widen_an_unrelated_ref_end_to_end(tmp_path):
+    # An active override for goumlyne must not accidentally widen ceayj too.
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db,
+        ref_override="goumlynecruxrlmzlntp", ref_override_expires_at=_FUTURE,
+    )
+    resp = _send(sock_path, {
+        "project_ref": "ceayjeamtmcyzzvqflus", "guarded_sql": "select 1", "reason": "",
+        "gate_id": None, "caller": "c", "exec_ledger_id": "e",
+    })
+    assert resp["error"]["code"] == "BAD_PROJECT_REF"
+
+
+def test_uid_override_allows_unlisted_uid_within_expiry_end_to_end(tmp_path):
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID + 1}), db=db, mgmt_api_fn=lambda *a, **k: [],
+        uid_override=frozenset({TEST_UID}), uid_override_expires_at=_FUTURE,
+    )
+    resp = _send(sock_path, {
+        "project_ref": "oovskwogvefnznfowjky", "guarded_sql": "select 1", "reason": "",
+        "gate_id": None, "caller": "c", "exec_ledger_id": "e",
+    })
+    assert resp == {"status": "ok", "rows": []}
+
+
+def test_uid_override_denies_after_expiry_end_to_end(tmp_path):
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID + 1}), db=db,
+        uid_override=frozenset({TEST_UID}), uid_override_expires_at=_PAST,
+    )
+    resp = _send(sock_path, {
+        "project_ref": "oovskwogvefnznfowjky", "guarded_sql": "select 1", "reason": "",
+        "gate_id": None, "caller": "c", "exec_ledger_id": "e",
+    })
+    assert resp["error"]["code"] == "ACL_DENIED"
