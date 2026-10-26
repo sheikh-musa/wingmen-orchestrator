@@ -42,6 +42,12 @@ AGENT_ID="cc-fleet-health"   # exact — singleton SRE node, never a sub-tag
 
 # .env (DSN, OAuth token) lives in the orchestrator; the SRE shares the substrate.
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+# GAC ISOLATION (op#29348 prod-wall gap, 2026-10-26): .env also carries
+# GOOGLE_APPLICATION_CREDENTIALS for cosem-adcda-specific tooling -- `set -a`
+# auto-exports it straight into this singleton's own process env, same gap
+# found live on cc-quality. The SRE has no cosem-adcda business -- unset
+# immediately, same idiom as ANTHROPIC_API_KEY below.
+unset GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_PROJECT
 # OAuth account resolution — precedence: explicit OVERRIDE (a live re-token via
 # switch_singleton_token.sh) > durable pointer (.fleet-health_default_token, the
 # reversible per-body default; op#11326 fleet flip) > .env. Applied AFTER the .env

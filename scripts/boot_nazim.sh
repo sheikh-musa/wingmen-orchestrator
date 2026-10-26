@@ -17,6 +17,13 @@ set -a
 # shellcheck disable=SC1091
 source "$ORCH_DIR/.env"
 set +a
+# GAC ISOLATION (op#29348 prod-wall gap, 2026-10-26): .env also carries
+# GOOGLE_APPLICATION_CREDENTIALS for cosem-adcda-specific tooling -- the
+# source above auto-exports it straight into this process's env too. Console
+# has no standing cosem-adcda GCP business (its prod-ops role is Postgres via
+# write_dsn.env below); a one-off genuine need should export this explicitly
+# at the point of use, not sit ambient for the whole session. Unset here.
+unset GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_PROJECT
 
 # CAI-1225: source the RESTRICTED write-DSN store (the live-write GOUMLYNE/ceayj DSNs are
 # NOT in the shared .env — lanes/auditors never see them). Only console/cai boots + the 2

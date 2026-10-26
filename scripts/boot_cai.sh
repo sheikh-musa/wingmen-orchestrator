@@ -44,6 +44,12 @@ AGENT_ID="cai"   # exact — singleton strategic node, never a sub-tag
 
 # .env (DSN etc.) lives in the orchestrator; cai shares the substrate.
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+# GAC ISOLATION (op#29348 prod-wall gap, 2026-10-26): .env also carries
+# GOOGLE_APPLICATION_CREDENTIALS for cosem-adcda-specific tooling -- `set -a`
+# auto-exports it straight into this singleton's own process env, same gap
+# found live on cc-quality. cai is governance, not ops, and has no cosem-adcda
+# business -- unset immediately, same idiom as ANTHROPIC_API_KEY below.
+unset GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_PROJECT
 
 # CAI-1225: source the RESTRICTED write-DSN store (the live-write GOUMLYNE/ceayj DSNs are
 # NOT in the shared .env — lanes/auditors never see them). Only console/cai boots + the 2
