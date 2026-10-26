@@ -68,6 +68,17 @@ set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
 # needs it for. Unset immediately after the .env source, same idiom as
 # ANTHROPIC_API_KEY below.
 unset GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_PROJECT
+# ZDOTDIR ISOLATION (op#29348 round 3, 2026-10-26, bus #77152/#77123): the
+# unset above only cleans THIS process's own env. zsh unconditionally
+# re-sources ~/.zshenv for every invocation it spawns (interactive or `-c`,
+# regardless of parent env), so every later Bash-tool subshell picks the
+# operator's real secrets (GH_TOKEN, GOOGLE_APPLICATION_CREDENTIALS,
+# CLAUDE_CODE_OAUTH_TOKEN) straight back off disk. Point ZDOTDIR at a
+# tracked, secret-free filtered copy instead -- carries forward the
+# non-secret bits (PATH/JAVA_HOME/ANDROID_HOME) lanes actually need, without
+# ever reaching the real ~/.zshenv/~/.zshrc. Does NOT touch the operator's
+# own dotfiles or his own interactive shell sessions.
+export ZDOTDIR="$ORCH_DIR/deploy/agent-zdotdir"
 # OAuth account resolution — precedence: explicit OVERRIDE (live re-token) > durable
 # pointer (.quality_default_token, reversible per-body default; op#11326 fleet flip,
 # revert = `rm .quality_default_token`) > .env. FAIL-SAFE: absent pointer -> .env.

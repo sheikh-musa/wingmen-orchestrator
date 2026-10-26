@@ -24,6 +24,17 @@ set +a
 # write_dsn.env below); a one-off genuine need should export this explicitly
 # at the point of use, not sit ambient for the whole session. Unset here.
 unset GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_PROJECT
+# ZDOTDIR ISOLATION (op#29348 round 3, 2026-10-26, bus #77152/#77123): the
+# unset above only cleans THIS process's own env. zsh unconditionally
+# re-sources ~/.zshenv for every invocation it spawns (interactive or `-c`,
+# regardless of parent env), so every later Bash-tool subshell picks the
+# operator's real secrets (GH_TOKEN, GOOGLE_APPLICATION_CREDENTIALS,
+# CLAUDE_CODE_OAUTH_TOKEN) straight back off disk. Point ZDOTDIR at a
+# tracked, secret-free filtered copy instead -- carries forward the
+# non-secret bits (PATH/JAVA_HOME/ANDROID_HOME) lanes actually need, without
+# ever reaching the real ~/.zshenv/~/.zshrc. Does NOT touch the operator's
+# own dotfiles or his own interactive shell sessions.
+export ZDOTDIR="$ORCH_DIR/deploy/agent-zdotdir"
 
 # CAI-1225: source the RESTRICTED write-DSN store (the live-write GOUMLYNE/ceayj DSNs are
 # NOT in the shared .env — lanes/auditors never see them). Only console/cai boots + the 2
