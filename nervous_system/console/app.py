@@ -2093,6 +2093,14 @@ def _make_handler(feedloop: "_FeedLoop"):
             if path in ("/asks", "/asks/"):
                 return self._serve_static("asks.html", path)
 
+            # STATUS VIEW ("nothing goes dark", bus 77019 Phase 1): ONE live
+            # view of every open item across the two anti-drop ledgers, each
+            # tagged with the waiting party + overdue state. Same open-SPA-shell
+            # tier as /asks; the page fetches /api/status-board with the stored
+            # bearer token (header-only, never the URL).
+            if path in ("/status", "/status/"):
+                return self._serve_static("status.html", path)
+
             if path.startswith("/static/"):
                 name = path[len("/static/"):]
                 return self._serve_static(name, path)
@@ -2229,6 +2237,26 @@ def _make_handler(feedloop: "_FeedLoop"):
                     return self._json(200, _jsonable({
                         "open": open_rows,
                         "answered": answered_rows,
+                        "counts": counts,
+                    }))
+
+                if path == "/api/status-board":
+                    # "nothing goes dark" Phase 1 (bus 77019): ONE live view of
+                    # every OPEN item across both anti-drop ledgers (open
+                    # operator_asks + open held_commitments). db.py derives the
+                    # waiting-party/overdue axes per read — never stored, so
+                    # they can't go stale. Read-only; no PII columns beyond
+                    # what /api/asks-board already exposes (same tables).
+                    rows = db.fetch_status_board()
+                    counts = {
+                        "total": len(rows),
+                        "overdue": sum(1 for r in rows if r.get("overdue")),
+                        "by_party": _tally(rows, "waiting_party"),
+                        "by_kind": _tally(rows, "kind"),
+                    }
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, _jsonable({
+                        "items": rows,
                         "counts": counts,
                     }))
 

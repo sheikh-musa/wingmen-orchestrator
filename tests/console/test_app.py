@@ -88,6 +88,38 @@ def server(monkeypatch, tmp_path):
              "answered_age_s": 30, "asked_age_s": 40},
         ],
     )
+    # "nothing goes dark" status board (bus 77019): rows already carry the
+    # DERIVED axes (waiting_party/overdue — unit-tested in test_status_board);
+    # this stub pins the ENDPOINT contract: passthrough + counts, darkest-first.
+    monkeypatch.setattr(
+        db, "fetch_status_board",
+        lambda: [
+            {"kind": "ask", "id": 11, "title": "Silent client ask",
+             "owner": "cc-irsyad", "status": "in_progress",
+             "waiting_party": "client", "client_name": None,
+             "due_at": None,
+             "last_update_at": "2026-10-26T00:00:00+00:00",
+             "last_update_age_s": 13 * 3600,
+             "overdue": True, "overdue_reason": "quiet",
+             "source": "operator_asks#11"},
+            {"kind": "commitment", "id": 637, "title": "Monthly billing sweep",
+             "owner": "cc-irsyad-coord", "status": "pending",
+             "waiting_party": "operator", "client_name": None,
+             "due_at": "2026-10-25T00:00:00+00:00",
+             "last_update_at": "2026-10-26T11:50:00+00:00",
+             "last_update_age_s": 600,
+             "overdue": True, "overdue_reason": "past_due",
+             "source": "held_commitments#637"},
+            {"kind": "ask", "id": 12, "title": "Fresh operator ask",
+             "owner": "orch-console", "status": "waiting_on_musa",
+             "waiting_party": "operator", "client_name": None,
+             "due_at": None,
+             "last_update_at": "2026-10-26T11:00:00+00:00",
+             "last_update_age_s": 3600,
+             "overdue": False, "overdue_reason": None,
+             "source": "operator_asks#12"},
+        ],
+    )
     srv = console_app.make_server(host="127.0.0.1", port=0)
     port = srv.server_address[1]
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -197,6 +229,45 @@ def test_asks_page_serves(server):
     assert r.status_code == 200
     assert "Asks board" in r.text
     r2 = httpx.get(server + "/static/asks.js", timeout=5)
+    assert r2.status_code == 200
+
+
+def test_api_status_board_requires_auth(server):
+    r = httpx.get(server + "/api/status-board", timeout=5)
+    assert r.status_code == 401
+
+
+def test_api_status_board_shape(server):
+    # "nothing goes dark" (bus 77019, Phase 1): ONE live view of every open
+    # item (open asks + open held_commitments) with the waiting-party axis.
+    r = httpx.get(server + "/api/status-board", headers=H(), timeout=5)
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"items", "counts"}
+    items = body["items"]
+    # darkest first: the two overdue rows above the fresh one
+    assert [i["overdue"] for i in items] == [True, True, False]
+    assert items[0]["waiting_party"] == "client"
+    assert items[0]["kind"] == "ask"
+    assert items[1]["overdue_reason"] == "past_due"
+    assert items[2]["overdue_reason"] is None
+    # provenance for every row — anti-dark means every item is traceable
+    assert all(i["source"].startswith(("operator_asks#", "held_commitments#"))
+               for i in items)
+    c = body["counts"]
+    assert c["total"] == 3
+    assert c["overdue"] == 2
+    assert c["by_party"] == {"operator": 2, "client": 1}
+    assert c["by_kind"] == {"ask": 2, "commitment": 1}
+
+
+def test_status_page_serves(server):
+    # Same open-SPA-shell tier as /asks: page shell pre-auth, bearer only in
+    # the /api/status-board header (never the URL).
+    r = httpx.get(server + "/status", timeout=5)
+    assert r.status_code == 200
+    assert "Nothing goes dark" in r.text
+    r2 = httpx.get(server + "/static/status.js", timeout=5)
     assert r2.status_code == 200
 
 
