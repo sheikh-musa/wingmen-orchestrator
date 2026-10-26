@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # render_console_pages.sh <out-dir> — render the console's fleet.html + lanes.html
-# + asks.html with REAL /api data into PNGs, so a human/agent can EYEBALL them
-# before deploy. Used by scripts/deploy_console.sh's render gate (op#12457 —
-# verify in code, not by promise). Fail (non-zero) if a page won't render — a
-# page that errors on render must never ship.
+# + asks.html + status.html with REAL /api data into PNGs, so a human/agent can
+# EYEBALL them before deploy. Used by scripts/deploy_console.sh's render gate
+# (op#12457 — verify in code, not by promise). Fail (non-zero) if a page won't
+# render — a page that errors on render must never ship.
 set -euo pipefail
 OUT="${1:?usage: render_console_pages.sh <out-dir>}"
 cd "$HOME/wingmen/orchestrator"
@@ -20,6 +20,8 @@ TOK="${CONSOLE_TOKEN:-}"
 curl -s -H "Authorization: Bearer $TOK" "$H/api/fleet" > "$OUT/_fleet.json" 2>/dev/null || echo '{}' > "$OUT/_fleet.json"
 curl -s -H "Authorization: Bearer $TOK" "$H/api/token-truth" > "$OUT/_tt.json" 2>/dev/null || echo '{}' > "$OUT/_tt.json"
 curl -s -H "Authorization: Bearer $TOK" "$H/api/asks-board" > "$OUT/_asks.json" 2>/dev/null || echo '[]' > "$OUT/_asks.json"
+# fc-v85 (bus 77019): the "nothing goes dark" status view joins the render set.
+curl -s -H "Authorization: Bearer $TOK" "$H/api/status-board" > "$OUT/_status.json" 2>/dev/null || echo '{"items":[],"counts":{}}' > "$OUT/_status.json"
 SWVER=$(grep -oE 'const VERSION = "fc-v[0-9]+"' "$STATIC/sw.js" | grep -oE 'fc-v[0-9]+')
 
 render() { # $1 page-basename (fleet|lanes)  $2 primary-data-json  $3 route
@@ -58,8 +60,9 @@ PY
   echo "  rendered ${page} -> $OUT/${page}.png ($(stat -f%z "$OUT/${page}.png") bytes)"
 }
 
-echo "[render_console_pages] rendering fleet + lanes + asks with live data ($SWVER)..."
+echo "[render_console_pages] rendering fleet + lanes + asks + status with live data ($SWVER)..."
 render fleet "$OUT/_fleet.json" "/"      || exit 1
 render lanes "$OUT/_tt.json"    "/lanes" || exit 1
 render asks  "$OUT/_asks.json"  "/asks"  || exit 1
-echo "[render_console_pages] OK — eyeball: $OUT/fleet.png + $OUT/lanes.png + $OUT/asks.png"
+render status "$OUT/_status.json" "/status" || exit 1
+echo "[render_console_pages] OK — eyeball: $OUT/fleet.png + $OUT/lanes.png + $OUT/asks.png + $OUT/status.png"
