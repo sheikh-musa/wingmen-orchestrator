@@ -171,6 +171,13 @@ _KNOWN_NON_PROTECTION_FILES = {
     # does not flag it today -- carried over here so nobody re-adds it to
     # _KNOWN_HARDCODED_LIST_FILES from stale memory of that inventory.
     "scripts/switch_singleton_token.sh",
+    # A fixed 3-target list for ONE op ticket (op#33932: which singletons must
+    # already be on Syed before the standing Musa>=90% page stands down), not
+    # a protected/singleton-membership test -- verified by reading the call
+    # site (2026-10-25): importing protected_agent_ids() here would silently
+    # widen the ground-truth check to every registry member instead of these
+    # 3 specific move targets, changing the condition it checks.
+    "scripts/glm_overflow_switch.py",
 }
 
 # Deliberately surgical, not broad: a QUOTED-literal token (so prose like

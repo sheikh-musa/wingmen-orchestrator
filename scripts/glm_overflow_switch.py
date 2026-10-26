@@ -222,6 +222,44 @@ def stamp_lane_note(session: str, text: str) -> None:
                     (f" | {text}", session))
 
 
+# op#33932 (bus #76389/#76399, 2026-10-25): the standing Musa>=90% page above has NO
+# awareness of whether the move it asks for has already happened -- just a 1h cooldown
+# -- so once the move IS done it keeps re-paging every hour until Musa's weekly reset,
+# purely because the >=90% CONDITION outlives the ACTION (orch-console #76399: "the
+# condition is not the same as the action being undone"). Ground-truth check instead of
+# a sticky "executed" flag on purpose: a flag can go stale exactly the way op#13183's did
+# (status stayed 'executed' from August while .fleet-health_default_token had quietly
+# drifted back to Musa) -- reading the actual current state self-corrects if the move
+# is ever genuinely undone, with no one having to remember to re-arm anything.
+OP33932_SYED_FP = "582043088eae"
+OP33932_DB_TARGETS = ("cc-fleet-health", "orch-console", "cc-quality")
+OP33932_CAI_POINTER = ORCH_DIR / ".cai_default_token"
+
+
+def _op33932_already_moved() -> bool:
+    """True iff the op#33932 singleton targets are confirmed on Syed right now. Fails
+    SAFE on any read error (DB down, file missing, etc.) -> False, so an unreadable
+    ground truth can never silently swallow a real still-pending move; the caller's
+    existing cooldown-gated page is the fallback."""
+    try:
+        import psycopg2
+        from dotenv import load_dotenv
+        load_dotenv(ORCH_DIR / ".env")
+        with psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=5) as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT agent_id FROM agent_status WHERE agent_id = ANY(%s) AND auth_fp = %s",
+                (list(OP33932_DB_TARGETS), OP33932_SYED_FP))
+            moved = {r[0] for r in cur.fetchall()}
+        if moved != set(OP33932_DB_TARGETS):
+            return False
+    except Exception:
+        return False
+    try:
+        return Path(OP33932_CAI_POINTER.read_text().strip()).name == "syed-oauth-token"
+    except OSError:
+        return False
+
+
 def page(subject: str, body: str, apply: bool) -> None:
     if not apply:
         print(f"[DRY] would page orch-console: {subject}")
@@ -271,7 +309,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     # NOT act (no token switch here) -- pages orch-console at P1+RR to execute the
     # brains-to-Syed move via switch_singleton_token.sh. Own cooldown key so it never
     # double-fires every 5min once Musa is over the line.
-    if musa["7d"] >= MUSA_SYED_MOVE_PCT:
+    if musa["7d"] >= MUSA_SYED_MOVE_PCT and _op33932_already_moved():
+        print(f"  musa-syed-move: Musa 7d {musa['7d']:.0f}% >= {MUSA_SYED_MOVE_PCT:.0f}% "
+              f"but already executed (ground-truth verified on Syed) -- standing down, not paging")
+    elif musa["7d"] >= MUSA_SYED_MOVE_PCT:
         last_syed_page = state.get("page_musa_syed_move", 0)
         if now.timestamp() - last_syed_page >= PAGE_COOLDOWN_S:
             print(f"  musa-syed-move: Musa 7d {musa['7d']:.0f}% >= {MUSA_SYED_MOVE_PCT:.0f}% -- paging")
