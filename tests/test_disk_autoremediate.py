@@ -179,11 +179,11 @@ def test_run_reclaimers_dry_run_passes_flag_through():
 # ---- next_cache_candidates(): held-path exclusion + age gate -------------------
 def test_next_cache_candidates_excludes_held_paths(tmp_path):
     root = tmp_path / "projects"
-    keep = root / "cosem-video-pipeline" / "build" / ".next" / "cache"
-    take = root / "ihsanos" / ".next" / "cache"
+    keep = root / "cosem-video-pipeline" / "build" / ".next"
+    take = root / "ihsanos" / ".next"
     for d in (keep, take):
-        d.mkdir(parents=True)
-        (d / "blob").write_bytes(b"x" * 1024)
+        (d / "cache").mkdir(parents=True)
+        (d / "cache" / "blob").write_bytes(b"x" * 1024)
     old = time.time() - 3600  # 60min ago
     for d in (keep, take):
         os.utime(d, (old, old))
@@ -194,9 +194,26 @@ def test_next_cache_candidates_excludes_held_paths(tmp_path):
     assert str(keep) not in paths, "held cosem-video path must be excluded"
 
 
+def test_next_cache_candidates_takes_whole_next_dir_not_just_cache_subdir(tmp_path):
+    # orch-console bus #76559: the bulk of a .next dir is static/server output OUTSIDE
+    # .next/cache -- the candidate must be the whole .next dir, not just its cache subdir.
+    root = tmp_path / "projects"
+    next_dir = root / "ihsanos" / ".next"
+    (next_dir / "cache").mkdir(parents=True)
+    (next_dir / "static").mkdir(parents=True)
+    (next_dir / "cache" / "blob").write_bytes(b"x" * 1024)
+    (next_dir / "static" / "chunk.js").write_bytes(b"y" * 2048)
+    old = time.time() - 3600
+    os.utime(next_dir, (old, old))
+    cands = dar.next_cache_candidates(root, exclude=set(), older_than_s=1800, now=time.time())
+    paths = {str(p) for p in cands}
+    assert str(next_dir) in paths
+    assert not any(p.endswith("cache") for p in paths), "must return the whole .next dir, not the cache subdir"
+
+
 def test_next_cache_candidates_skips_recently_modified(tmp_path):
     root = tmp_path / "projects"
-    fresh = root / "ihsanos" / ".next" / "cache"
+    fresh = root / "ihsanos" / ".next"
     fresh.mkdir(parents=True)
     (fresh / "blob").write_bytes(b"x" * 1024)
     # mtime = now → younger than the 30min gate → NOT a candidate (may be an active build)
@@ -249,7 +266,7 @@ def test_reclaim_dir_cmd_disk_free_flag_does_not_affect_dry_run(tmp_path, monkey
 
 def test_reclaim_next_cache_dry_run_deletes_nothing(tmp_path, monkeypatch):
     root = tmp_path / "projects"
-    d = root / "ihsanos" / ".next" / "cache"
+    d = root / "ihsanos" / ".next"
     d.mkdir(parents=True)
     (d / "blob").write_bytes(b"x" * 4096)
     old = time.time() - 7200                    # older than the 60min age gate → a candidate
