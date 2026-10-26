@@ -24,8 +24,11 @@ operator's own dotfiles or his own interactive shell sessions (he doesn't go
 through these boot scripts).
 """
 import re
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPTS = _REPO_ROOT / "scripts"
@@ -72,6 +75,12 @@ def test_agent_zdotdir_zshenv_exists_and_is_secret_free():
     )
 
 
+@pytest.mark.skipif(
+    shutil.which("zsh") is None,
+    reason="wet-prove needs a real zsh binary (ZDOTDIR is a zsh-only mechanism) -- "
+    "not present on the CI runner image; this mechanism only applies on the Mac "
+    "Mini fleet-health host, which always has zsh (it's the macOS default shell)",
+)
 def test_wetprove_zdotdir_blocks_sentinel_secrets_but_keeps_real_path_setup(tmp_path):
     """Wet-prove, not a grep: spawn a REAL zsh child against a FAKE $HOME whose
     .zshenv/.zshrc carry sentinel (non-secret-shaped, so the transcript guard
