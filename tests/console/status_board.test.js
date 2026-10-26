@@ -54,7 +54,8 @@ function loadPage(file, opts) {
     localStorage: store, sessionStorage: sess,
     location: loc, history: opts.history || { replaceState() {} },
     fetch: opts.fetch || function () { return new Promise(function () {}); },
-    setInterval() { return 0; }, clearInterval() {}, setTimeout() { return 0; }, clearTimeout() {},
+    setInterval: opts.setInterval || function () { return 0; },
+    clearInterval() {}, setTimeout() { return 0; }, clearTimeout() {},
     IntersectionObserver: function () { this.observe = function () {}; this.unobserve = function () {}; this.disconnect = function () {}; },
     URL: { createObjectURL() { return "blob:x"; }, revokeObjectURL() {} },
     console, module: { exports: {} },
@@ -190,7 +191,27 @@ console.log("tokenFromHash flow: ok");
   await new Promise(function (r) { setImmediate(r); });
   await new Promise(function (r) { setImmediate(r); });
   assert.ok(main401.innerHTML.indexOf("Unauthorized") !== -1, "401 paints Unauthorized");
-  console.log("401 flow: ok");
+
+  // NO token: nothing fetches, the enter-token prompt stays (the 60s
+  // auto-refresh must not fire load() tokenless and overwrite the prompt
+  // with an Unauthorized paint — the operator hasn't typed anything yet).
+  const mainNoTok = makeEl();
+  const fetches0 = [];
+  const timers = [];
+  loadPage("status.js", {
+    els: { main: mainNoTok, token: makeEl() },
+    localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+    fetch: function (u) { fetches0.push(u); return new Promise(function () {}); },
+    setInterval: function (fn, ms) { timers.push([fn, ms]); return 1; },
+  });
+  await new Promise(function (r) { setImmediate(r); });
+  assert.strictEqual(fetches0.length, 0, "no fetch fires without a token");
+  assert.ok(mainNoTok.innerHTML.indexOf("operator token") !== -1,
+    "the enter-token prompt stays painted");
+  assert.ok(timers.length >= 1, "auto-refresh timer armed");
+  timers.forEach(function (t) { t[0](); });  // fire the interval manually
+  assert.strictEqual(fetches0.length, 0, "interval tick without a token still fetches nothing");
+  console.log("401 + tokenless flows: ok");
 
   console.log("status_board.test.js OK");
 })().catch(function (e) { console.error(e); process.exit(1); });

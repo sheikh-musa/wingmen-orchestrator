@@ -124,6 +124,8 @@
   }
 
   function load() {
+    if (!token) return;  // tokenless: keep the enter-token prompt; the 60s
+                         // refresh must never overwrite it with a 401 paint
     $("main").innerHTML = '<div class="empty">Loading the open-item board…</div>';
     fetch("/api/status-board", { headers: authHeaders() })
       .then(function (r) {
