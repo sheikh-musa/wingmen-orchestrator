@@ -67,6 +67,13 @@ source "$ORCH_DIR/scripts/lib/pin_fleet_host_id.sh"
 # from the Keychain and needs it for auth.
 unset ANTHROPIC_API_KEY
 
+# GAC ISOLATION (op#29348 prod-wall gap, 2026-10-26): .env also carries
+# GOOGLE_APPLICATION_CREDENTIALS for cosem-adcda-specific tooling -- the same
+# `set -a` source above auto-exports it straight into this process's env, the
+# same gap found live on cc-quality (which has no cosem-adcda business either).
+# Unset immediately, same idiom as ANTHROPIC_API_KEY above.
+unset GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_PROJECT
+
 # Fleet donor-account default (token conservation, op#7994): if a
 # .orch_default_token POINTER file (holding the PATH to a 0600 token file) is
 # present, boot the hub on that account (Syed) instead of the .env default

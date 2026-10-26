@@ -56,6 +56,18 @@ fi
 
 # .env (DSN, OAuth token) lives in the orchestrator; cc-quality shares the substrate.
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+# GAC ISOLATION (op#29348 prod-wall gap, 2026-10-26): .env also carries
+# GOOGLE_APPLICATION_CREDENTIALS for cosem-adcda-specific tooling -- `set -a`
+# auto-exports it straight into this singleton's own process env. Unlike an
+# engineer-lane launch (scripts/launch_dangerous_cc.sh calls
+# apply_lane_gcloud_isolation to strip/override this per-lane), cc-quality has
+# no such isolation step, so it inherits the raw prod SA key pointer. The
+# PreToolUse lane_prod_key_guard then correctly, and totally, refuses every
+# Bash call for this lane for as long as that var resolves to a prod cred --
+# cc-quality has no cosem-adcda business, so there is nothing this lane ever
+# needs it for. Unset immediately after the .env source, same idiom as
+# ANTHROPIC_API_KEY below.
+unset GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_PROJECT
 # OAuth account resolution — precedence: explicit OVERRIDE (live re-token) > durable
 # pointer (.quality_default_token, reversible per-body default; op#11326 fleet flip,
 # revert = `rm .quality_default_token`) > .env. FAIL-SAFE: absent pointer -> .env.
