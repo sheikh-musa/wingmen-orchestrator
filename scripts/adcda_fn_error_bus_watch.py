@@ -65,15 +65,33 @@ LOGIN_FNS = {
 }
 
 
-# ── pure decision logic (unit-tested via --selftest; no network) ──────────────
-def decide(state: dict, counts: dict) -> dict:
-    """Given prior state + current {overall:int, per_fn:{name:int}}, return the
-    breaches to fire NOW (clear->breach transitions only) and the next state.
+# REFIRE DEBOUNCE (orch-console bus #76716, 2026-10-26): the Monitoring API query takes
+# max() over a WINDOW_MIN=25min lookback, so a resolved spike's own bucket can still be the
+# max for as long as it stays in that window -- and GCP's own alert evaluation lag means a
+# LATE-arriving poll can see state already cleared (by an earlier, luckier poll) and then
+# re-see that SAME stale bucket moments later, reading as a brand-new clear->breach
+# transition. Observed live: #76675 (07:26, overall=22) and #76712 (07:52, overall=22,
+# IDENTICAL count, window orch-console traced to one that ended 07:38) both fired, 26min
+# apart, for what was really one incident. Suppress a re-fire of the SAME key within
+# REFIRE_COOLDOWN_S of its last fire IF the new count is NOT an escalation (<= the last
+# fired count) -- a stale re-surfaced reading never looks worse than what already fired, so
+# this never swallows a genuinely growing Hassan-class breach (anything count > last fired
+# still fires immediately, cooldown or not).
+REFIRE_COOLDOWN_S = int(os.environ.get("FN_ERR_REFIRE_COOLDOWN_S", "1800"))  # 30min
 
-    state = {"active": [<breach_key>, ...]}  — breaches currently firing (deduped).
-    A breach_key is "overall" or "fn:<service_name>".
+
+# ── pure decision logic (unit-tested via --selftest; no network) ──────────────
+def decide(state: dict, counts: dict, now: float = 0.0) -> dict:
+    """Given prior state + current {overall:int, per_fn:{name:int}}, return the
+    breaches to fire NOW (clear->breach transitions, debounced -- see REFIRE_COOLDOWN_S
+    above) and the next state.
+
+    state = {"active": [<breach_key>, ...], "last_fired": {<breach_key>: {"at": epoch,
+    "count": int}}} — breaches currently firing (deduped) + when/at-what-count each was
+    last actually fired. A breach_key is "overall" or "fn:<service_name>".
     """
     prev_active = set(state.get("active", []))
+    last_fired = dict(state.get("last_fired", {}))  # copy: never mutate the caller's input state
     now_breached = set()
     detail = {}
 
@@ -86,14 +104,21 @@ def decide(state: dict, counts: dict) -> dict:
             now_breached.add(k)
             detail[k] = n
 
-    fire = sorted(now_breached - prev_active)   # NEW breaches only (dedup)
+    candidates = sorted(now_breached - prev_active)   # NEW breaches only (dedup)
+    fire = []
+    for k in candidates:
+        lf = last_fired.get(k)
+        if lf and (now - lf.get("at", 0)) < REFIRE_COOLDOWN_S and detail[k] <= lf.get("count", -1):
+            continue  # stale re-surface of an already-reported, non-escalating reading
+        fire.append(k)
+        last_fired[k] = {"at": now, "count": detail[k]}
     cleared = sorted(prev_active - now_breached)
     return {
         "fire": fire,
         "cleared": cleared,
         "detail": detail,
         "counts": counts,
-        "state": {"active": sorted(now_breached)},
+        "state": {"active": sorted(now_breached), "last_fired": last_fired},
     }
 
 
@@ -225,7 +250,8 @@ def run(dry: bool = False) -> dict:
     except Exception as e:  # noqa: BLE001 — fail-soft LOUD, never silent
         _die(f"{type(e).__name__}: {e}")
     state = _load_state()
-    d = decide(state, counts)
+    import time
+    d = decide(state, counts, now=time.time())
     enabled = os.environ.get("FLEET_FN_ERROR_WATCH_ENABLED") == "1"
     send_live = enabled and not dry
     print(f"adcda-fn-error-bus-watch — {'LIVE' if send_live else 'SCAN+LOG'} — "
@@ -268,12 +294,30 @@ def _selftest() -> int:
     # per-login-fn breach fires once, keyed by fn
     d = decide({"active": []}, {"overall": 0, "per_fn": {"authorizephonesignin": 11, "scanemiratesid": 3}})
     check("login fn>10 fires keyed", d["fire"] == ["fn:authorizephonesignin"])
-    # re-breach after clear re-fires
+    # re-breach after clear re-fires WHEN no prior fire record exists (first-ever breach shape)
     d = decide({"active": []}, {"overall": 21, "per_fn": {}})
-    check("re-breach after clear re-fires", d["fire"] == ["overall"])
+    check("re-breach after clear re-fires (no fire history)", d["fire"] == ["overall"])
     # boundary: exactly at threshold does NOT fire (strict >)
     d = decide({"active": []}, {"overall": 20, "per_fn": {"authorizephonesignin": 10}})
     check("exactly-at-threshold does not fire", d["fire"] == [])
+
+    # ── REFIRE DEBOUNCE (bus #76716): stale GCP metric re-surfaces an already-reported,
+    # non-escalating count shortly after a clear -> suppressed; a genuinely WORSE count,
+    # or one outside the cooldown window, still fires. ──
+    base_state = {"active": [], "last_fired": {"overall": {"at": 1000.0, "count": 22}}}
+    d = decide(base_state, {"overall": 22, "per_fn": {}}, now=1000.0 + 60)
+    check("stale re-surface, same count, inside cooldown -> suppressed", d["fire"] == [])
+    d = decide(base_state, {"overall": 21, "per_fn": {}}, now=1000.0 + 60)
+    check("stale re-surface, LOWER (but still breaching) count, inside cooldown -> suppressed",
+          d["fire"] == [])
+    d = decide(base_state, {"overall": 30, "per_fn": {}}, now=1000.0 + 60)
+    check("genuinely WORSE count, inside cooldown -> still fires (never silences escalation)",
+          d["fire"] == ["overall"])
+    d = decide(base_state, {"overall": 22, "per_fn": {}}, now=1000.0 + REFIRE_COOLDOWN_S + 1)
+    check("same count, OUTSIDE cooldown -> fires again", d["fire"] == ["overall"])
+    d = decide(base_state, {"overall": 22, "per_fn": {}}, now=1000.0 + 60)
+    check("suppressed fire still updates state.active (dedup bookkeeping intact)",
+          d["state"]["active"] == ["overall"])
     print("SELFTEST", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
