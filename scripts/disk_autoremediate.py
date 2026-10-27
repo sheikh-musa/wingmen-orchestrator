@@ -10,7 +10,7 @@ stays below a hard floor after reclaim (or a reclaimer errors). It NEVER touches
 data or operator-held paths.
 
 DISCIPLINE (CLAUDE.md §2):
-  - Reversible: every reclaimer target regenerates (npm/brew caches, .next/cache, file-history
+  - Reversible: every reclaimer target regenerates (npm/brew caches, .next build output, file-history
     undo snapshots). Never a real work file.
   - Dead-man / fail-loud: a reclaimer failure is logged LOUDLY and recorded, never silently
     swallowed; if free stays below the floor OR any reclaimer errored, it PAGES. Reclaimers are
@@ -28,11 +28,13 @@ Usage (from ~/wingmen/orchestrator):
 """
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
+import time
 
 GB = 1 << 30
 
@@ -131,11 +133,18 @@ def _dir_size(path: pathlib.Path) -> int:
     return total
 
 
-# ---- .next/cache candidate scan (pure-ish; fs read only) -----------------------
+# ---- .next candidate scan (pure-ish; fs read only) -----------------------------
 def next_cache_candidates(root, exclude, older_than_s, now):
-    """Return `.next/cache` dirs under root/<project>/** that are (a) NOT in an excluded
-    project and (b) older than `older_than_s` (mtime) — an active build touches its cache,
-    so a fresh mtime spares it. Best-effort: unreadable entries skipped, never crashes."""
+    """Return whole `.next` build-output dirs under root/<project>/** that are (a) NOT in an
+    excluded project and (b) older than `older_than_s` (mtime) — an active build touches its
+    cache, so a fresh mtime spares it. Best-effort: unreadable entries skipped, never crashes.
+
+    WIDENED (orch-console bus #76559, 2026-10-26): used to take only the nested `.next/cache`
+    subdir, missing the rest of `.next` (static/server compiled output) -- the bulk of what
+    orch-console hand-reclaimed (3.6GB) during the 2026-10-26 disk emergency this reclaimer
+    should have caught on its own. The WHOLE `.next` dir is equally regenerable (`next build`
+    recreates it start to finish), so take it all, not just the cache subdir. Pruning the walk
+    (`dns[:] = []`) once matched avoids descending into a dir we're already taking wholesale."""
     root = pathlib.Path(root)
     out = []
     try:
@@ -144,7 +153,8 @@ def next_cache_candidates(root, exclude, older_than_s, now):
         return out
     for dp, dns, _fn in walker:
         p = pathlib.Path(dp)
-        if p.name == "cache" and p.parent.name == ".next":
+        if p.name == ".next":
+            dns[:] = []  # don't descend into a dir we're taking wholesale
             try:
                 project = p.relative_to(root).parts[0]
             except (ValueError, IndexError):
@@ -253,7 +263,7 @@ def _reclaim_next_cache(dry_run):
             freed += sz
             continue
         if _lsof_in_use(d):  # KILL-TIME re-verify — skip if a build is using it
-            log(f"    .next/cache {d} in use (lsof) — skipped")
+            log(f"    .next {d} in use (lsof) — skipped")
             continue
         try:
             shutil.rmtree(d)
@@ -355,6 +365,68 @@ def _reclaim_chrome_cache(dry_run):
         except OSError as e:
             raise RuntimeError(f"rmtree {d} failed: {e}") from e
     return freed
+
+
+# Chrome code-sign clones (orch-console #77809, 2026-10-27): Chrome copies itself into
+# <DARWIN_USER_DIR>/X/com.google.Chrome.code_sign_clone/code_sign_clone.XXXXXX on launch and
+# never removes the old copies -- 19 had piled up (du 36GB, ~4GB real since the APFS clones
+# share blocks) when found on a 98%-full Mini. The newest clone is ALWAYS kept (a Chrome
+# mid-launch may not hold its files yet), and any clone a running Chrome holds is skipped by
+# the kill-time lsof guard. None = resolve lazily from getconf (no subprocess at import).
+CHROME_CLONE_ROOT = (pathlib.Path(os.environ["DISK_CHROME_CLONE_ROOT"])
+                     if os.environ.get("DISK_CHROME_CLONE_ROOT") else None)
+
+
+def _resolve_chrome_clone_root():
+    if CHROME_CLONE_ROOT is not None:
+        return CHROME_CLONE_ROOT
+    try:
+        r = subprocess.run(["getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True,
+                           text=True, timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    tmp = r.stdout.strip() if r.returncode == 0 else ""
+    if not tmp:
+        return None  # not macOS (or getconf refused) -- nothing to reap
+    return pathlib.Path(tmp).parent / "X" / "com.google.Chrome.code_sign_clone"
+
+
+def chrome_clone_candidates(root):
+    """Every `code_sign_clone.*` dir under `root` EXCEPT the newest (by mtime). Pure --
+    listdir/stat only. Symlinks and non-matching names are never candidates. Missing root ->
+    empty."""
+    if root is None:
+        return []
+    root = pathlib.Path(root)
+    try:
+        clones = [p for p in root.iterdir()
+                  if p.name.startswith("code_sign_clone.") and p.is_dir() and not p.is_symlink()]
+    except OSError:
+        return []
+    clones.sort(key=lambda p: p.stat().st_mtime)
+    return clones[:-1]
+
+
+def _reclaim_chrome_clones(dry_run):
+    """Remove stale Chrome code-sign clones. Apply measures the DISK-FREE delta, not the dir
+    sizes: the clones share APFS blocks, so summing _dir_size would claim ~9x what's freed.
+    Dry-run still reports the (overstated) dir-size estimate -- there's no effect to measure."""
+    cands = chrome_clone_candidates(_resolve_chrome_clone_root())
+    if dry_run:
+        return sum(_dir_size(d) for d in cands)
+    before = _disk_free()
+    for d in cands:
+        if _lsof_in_use(d):  # KILL-TIME re-verify — a running Chrome holds this clone
+            log(f"    chrome-clone {d} in use (lsof) — skipped")
+            continue
+        try:
+            shutil.rmtree(d)
+        except OSError as e:
+            raise RuntimeError(f"rmtree {d} failed: {e}") from e
+    after = _disk_free()
+    if before is None or after is None:
+        return 0
+    return max(0, after - before)
 
 
 def daily_backup_candidates(root, keep_n):
@@ -479,6 +551,7 @@ def build_reclaimers():
 
     reclaimers.append({"name": "next-cache", "apply": _reclaim_next_cache})
     reclaimers.append({"name": "chrome-cache", "apply": _reclaim_chrome_cache})
+    reclaimers.append({"name": "chrome-clones", "apply": _reclaim_chrome_clones})
     reclaimers.append({"name": "library-caches", "apply": _reclaim_library_caches})
     reclaimers.append({"name": "daily-backups", "apply": _reclaim_daily_backups})
     return reclaimers
@@ -551,6 +624,102 @@ def _page(free_before, free_after, summary, *, loud=True):
         print(f"[disk-autoremediate] WARN bus-page failed ({e}); banner stands", file=sys.stderr)
 
 
+# ---- Spotlight index guard (orch-console #77912, 2026-10-27) ---------------------------
+# The Mini's "unattributed ~90Gi" was /System/Volumes/Data/.Spotlight-V100: a 69GB index
+# from 08-28, left on disk after indexing was disabled. du from this user can't see inside
+# it (root-owned, TCC), and no reclaimer could touch it. With indexing OFF the directory
+# must not exist at all, so its reappearance -- or indexing turning back on -- is the
+# signal. Remediation needs root (`mdutil -X`), which this job doesn't hold, so it PAGES
+# with the exact fix instead of acting. At most once per SPOTLIGHT_PAGE_EVERY_S per
+# distinct finding-set; the memory clears once healthy.
+SPOTLIGHT_INDEX_DIR = pathlib.Path(os.environ.get(
+    "DISK_SPOTLIGHT_INDEX_DIR", "/System/Volumes/Data/.Spotlight-V100"))
+SPOTLIGHT_VOLUMES = ("/", "/System/Volumes/Data")
+SPOTLIGHT_PAGE_EVERY_S = int(os.environ.get("DISK_SPOTLIGHT_PAGE_EVERY_S", str(24 * 3600)))
+SPOTLIGHT_STATE = pathlib.Path(os.environ.get(
+    "DISK_SPOTLIGHT_STATE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs",
+                 "spotlight_guard_state.json")))
+_SPOTLIGHT_OFF_MARKERS = ("server is disabled", "indexing disabled", "no index")
+
+
+def _mdutil_status(volume):
+    try:
+        r = subprocess.run(["mdutil", "-s", volume], capture_output=True, text=True, timeout=15)
+        return (r.stdout + r.stderr).strip()
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def spotlight_findings(index_dir=None, status=_mdutil_status, volumes=SPOTLIGHT_VOLUMES):
+    """Problems to page about (empty = healthy). An unreadable mdutil status is NOT a
+    finding -- this guard only pages on positive evidence."""
+    index_dir = pathlib.Path(index_dir or SPOTLIGHT_INDEX_DIR)
+    out = []
+    if os.path.lexists(index_dir):
+        out.append(f"{index_dir} exists again (indexing is meant to be OFF; it grew to 69GB "
+                   f"unnoticed before)")
+    for vol in volumes:
+        st = status(vol)
+        if st and not any(m in st.lower() for m in _SPOTLIGHT_OFF_MARKERS):
+            out.append(f"Spotlight indexing looks ENABLED on {vol}: {st.splitlines()[-1][:120]}")
+    return out
+
+
+def spotlight_guard(*, findings=None, now=None, state_path=None, page=None):
+    """Run the check; page orch-console when due. Returns the findings."""
+    findings = spotlight_findings() if findings is None else findings
+    now = time.time() if now is None else now
+    state_path = pathlib.Path(state_path or SPOTLIGHT_STATE)
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        state = {}
+    if not findings:
+        if state:
+            try:
+                state_path.unlink()
+            except OSError:
+                pass
+        return findings
+    key = "|".join(sorted(findings))
+    if state.get("key") == key and now - state.get("paged_at", 0) < SPOTLIGHT_PAGE_EVERY_S:
+        return findings
+    (page or _page_spotlight)(findings)
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({"key": key, "paged_at": now}))
+    except OSError as e:
+        log(f"[disk-autoremediate] WARN spotlight guard state not saved ({e})")
+    return findings
+
+
+def _page_spotlight(findings):
+    lines = ["TL;DR: the Spotlight index is coming back on the Mini. It silently ate 69GB "
+             "last time (08-28 to 10-27). Needs a root fix."]
+    lines += [f"  - {f}" for f in findings]
+    lines += ["Fix (root + Full Disk Access; plain sudo from tmux is TCC-blocked): "
+              "ssh localhost, then `sudo mdutil -i off /` and `sudo mdutil -i off "
+              "/System/Volumes/Data`, then `sudo mdutil -X /System/Volumes/Data`. Verify with "
+              "`mdutil -s` and a df delta."]
+    print("\n".join(lines), file=sys.stderr, flush=True)
+    try:
+        import psycopg2
+        dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+        if dsn:
+            c = psycopg2.connect(dsn)
+            cur = c.cursor()
+            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
+            cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
+                           VALUES ('cc-fleet-health','orch-console','blocker','P2',%s,%s)""",
+                        ("Spotlight index regrowing on the Mini — needs root mdutil -X",
+                         "\n".join(lines)))
+            c.commit()
+    except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already stands
+        print(f"[disk-autoremediate] WARN spotlight page failed ({e}); banner stands",
+              file=sys.stderr)
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     apply = "--apply" in argv
@@ -559,6 +728,11 @@ def main(argv=None) -> int:
     if free is None:
         print(f"[disk-autoremediate] ERROR could not read {DATA_VOL} free", file=sys.stderr)
         return 1
+    if apply:
+        try:
+            spotlight_guard()
+        except Exception as e:  # noqa: BLE001 — a guard bug must never block disk reclaim
+            log(f"[disk-autoremediate] WARN spotlight guard failed: {e!r}")
     tier = decide(free, remediate_under=REMEDIATE_UNDER, floor=FLOOR)
     log(f"[disk-autoremediate {mode}] free={free // GB}GB tier={tier} "
         f"(remediate<{REMEDIATE_UNDER // GB}GB floor={FLOOR // GB}GB "

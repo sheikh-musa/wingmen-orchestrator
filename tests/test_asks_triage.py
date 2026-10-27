@@ -459,6 +459,36 @@ def test_triage_ask_needs_musa_off_clears_flag(operator_ledger_db):
         assert cur.fetchone() == (False,)
 
 
+# ── --delivered: LIVE-verified stamp, first stamp wins (op#34803, orch-console #78198) ──
+def test_parser_accepts_delivered_flag():
+    args = at.build_parser().parse_args(["5", "ask", "--summary", "s", "--delivered"])
+    assert args.delivered is True
+
+
+def test_stamp_delivered_is_first_stamp_wins(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    assert at.stamp_delivered(rid) == 1
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT delivered_at FROM operator_asks WHERE id=%s", (rid,))
+        first = cur.fetchone()[0]
+    assert first is not None
+    assert at.stamp_delivered(rid) == 0          # repeat: no-op, not an error
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT delivered_at FROM operator_asks WHERE id=%s", (rid,))
+        assert cur.fetchone()[0] == first
+
+
+def test_delivered_rides_along_with_ask_and_keeps_the_row_open(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    assert at.main([str(rid), "ask", "--summary", "LIVE, awaiting Musa confirm", "--delivered"]) == 0
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT triage_state, closed_at, delivered_at FROM operator_asks WHERE id=%s", (rid,))
+        state, closed_at, delivered_at = cur.fetchone()
+    assert state == "ask" and closed_at is None and delivered_at is not None
 # ── --answers (orch-console bus #78269, op#34850): root-cause fix for stale  ──
 # pending asks. Musa usually ANSWERS with a fresh message, not a Telegram
 # reply, so the reply-link auto-close misses it; when triaging the captured

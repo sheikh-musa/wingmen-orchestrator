@@ -7,6 +7,7 @@ No DB, no real lsof/git dependency except the real-git fixture for the ignore ga
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -165,6 +166,46 @@ def test_reap_one_apply_clears_ignored_spares_tracked(git_worktree, idle_project
     status = subprocess.run(["git", "-C", str(git_worktree), "status", "--porcelain"],
                             capture_output=True, text=True).stdout
     assert status.strip() == ""
+
+
+@pytest.fixture
+def symlinked_worktree(tmp_path):
+    """A real git worktree whose node_modules is a SYMLINK into a sibling worktree's real
+    node_modules (the cosem-platform.wt-editor34048 shape, bus #77680)."""
+    sibling_nm = tmp_path / "proj.wt-sibling" / "node_modules"
+    sibling_nm.mkdir(parents=True)
+    (sibling_nm / "dep.js").write_bytes(b"z" * 8192)
+    wt = tmp_path / "proj.wt-linked"
+    wt.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=wt, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=wt, check=True)
+    (wt / ".gitignore").write_text("node_modules\n")   # no trailing slash: matches a symlink
+    subprocess.run(["git", "add", ".gitignore"], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=wt, check=True)
+    (wt / "node_modules").symlink_to(sibling_nm)
+    return wt, sibling_nm
+
+
+def test_reap_one_unlinks_symlinked_node_modules_never_touches_target(
+        symlinked_worktree, idle_project, monkeypatch):
+    wt, sibling_nm = symlinked_worktree
+    monkeypatch.setattr(nm, "_lsof_cwd_in_use", lambda p: False)
+    rep = nm.reap_one(wt, dry_run=False)
+    assert rep["errors"] == []
+    assert not os.path.lexists(wt / "node_modules")       # the link is gone
+    assert (sibling_nm / "dep.js").exists()               # the sibling's real tree is intact
+    assert rep["freed"] == 0                              # a link frees nothing here
+    assert rep["cleared"] == [{"dir": str(wt / "node_modules"), "bytes": 0}]
+
+
+def test_reap_one_dry_run_leaves_symlink_and_reports_zero_bytes(
+        symlinked_worktree, idle_project, monkeypatch):
+    wt, sibling_nm = symlinked_worktree
+    monkeypatch.setattr(nm, "_lsof_cwd_in_use", lambda p: False)
+    rep = nm.reap_one(wt, dry_run=True)
+    assert (wt / "node_modules").is_symlink()
+    assert rep["freed"] == 0
 
 
 def test_reap_one_in_use_spares_everything(git_worktree, monkeypatch):

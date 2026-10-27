@@ -210,3 +210,48 @@ def test_local_mode_absolute_file_path_is_idempotent(tmp_path, media_dir, monkey
     out = ingest._tg_download_file("TOKEN", str(src), dest)
     assert out == dest
     assert open(dest, "rb").read() == b"pre-existing-bytes"
+
+
+
+# ── getFile retry (orch-console #77889, 2026-10-27) ─────────────────────────────────────
+# Both of today's lost operator photos failed on ONE Errno 54 reset at getFile, which had no
+# retry at all (the file download after it already retried).
+def _getfile_urlopen(failures):
+    calls = []
+
+    def _urlopen(url, timeout=None):
+        calls.append(url)
+        if failures:
+            raise failures.pop(0)
+        return BytesIO(json.dumps({"ok": True, "result": {"file_path": "photos/f.jpg"}}).encode())
+    return _urlopen, calls
+
+
+def test_getfile_retries_through_a_reset_burst(monkeypatch):
+    import urllib.error as ue
+    reset = ue.URLError(ConnectionResetError(54, "Connection reset by peer"))
+    urlopen, calls = _getfile_urlopen([reset, reset])
+    monkeypatch.setattr(ingest.urllib.request, "urlopen", urlopen)
+    slept = []
+    assert ingest._get_file_path("tok", "fid", sleep=slept.append) == "photos/f.jpg"
+    assert len(calls) == 3 and slept == [2, 6]
+
+
+def test_getfile_http_error_is_not_retried(monkeypatch):
+    import urllib.error as ue
+    err = ue.HTTPError("u", 400, "Bad Request: invalid file_id", {}, None)
+    urlopen, calls = _getfile_urlopen([err])
+    monkeypatch.setattr(ingest.urllib.request, "urlopen", urlopen)
+    with pytest.raises(ue.HTTPError):
+        ingest._get_file_path("tok", "fid", sleep=lambda s: None)
+    assert len(calls) == 1
+
+
+def test_getfile_raises_after_exhausting_retries(monkeypatch):
+    import urllib.error as ue
+    reset = ue.URLError(ConnectionResetError(54, "Connection reset by peer"))
+    urlopen, calls = _getfile_urlopen([reset] * 10)
+    monkeypatch.setattr(ingest.urllib.request, "urlopen", urlopen)
+    with pytest.raises(ue.URLError):
+        ingest._get_file_path("tok", "fid", sleep=lambda s: None)
+    assert len(calls) == 1 + len(ingest.GETFILE_RETRY_DELAYS)

@@ -17,6 +17,10 @@ Usage:
   asks_triage.py <id> not
   asks_triage.py <id> done [--evidence "<bus/op ids>"]
                            [--committed-date ISO] [--outbound-msg-id ID]
+  (any action) [--delivered] — stamp delivered_at = now() (LIVE verified),
+  first stamp wins, rides along with any action (op#34803, orch-console
+  #78198: UI asks stay open after live until Musa confirms, so turnaround
+  measures delivered_at, not closed_at).
 
   (any action) [--answers ASK_ID] — the row being triaged IS Musa's answer to
   open ask ASK_ID: confirm+close it, linking the answering operator message
@@ -125,6 +129,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="operator_summary — the plain-language, decision-first line "
                           "the Needs-Musa hero renders instead of triage_summary "
                           "(no agent code-names/hc#/op#; orch-console bus #75387)")
+    ap.add_argument("--delivered", action="store_true",
+                    help="stamp delivered_at = now() (LIVE verified). Idempotent: the FIRST stamp "
+                         "wins. Rides along with any action. UI asks stay open after live until "
+                         "Musa confirms, so turnaround measures delivered_at, not closed_at "
+                         "(op#34803, orch-console #78198)")
     ap.add_argument("--answers", type=int, default=None, metavar="ASK_ID",
                      help="the operator message being triaged IS the answer to open "
                           "ask ASK_ID — confirm+close it (same close as the console "
@@ -134,6 +143,18 @@ def build_parser() -> argparse.ArgumentParser:
                           "fresh message, not a TG reply, so the reply-link "
                           "auto-close never fires (orch-console bus #78269)")
     return ap
+
+
+def stamp_delivered(item_id: int, *, dsn: str | None = None) -> int:
+    """Set operator_asks.delivered_at = now() unless it's already set (first stamp wins).
+    Returns rows stamped: 1 on the first call, 0 on any repeat (not an error)."""
+    dsn = dsn or _dsn()
+    if not dsn:
+        raise RuntimeError("no DATABASE_URL/SUPABASE_DB_URL")
+    with psycopg.connect(dsn, autocommit=True, connect_timeout=10) as conn, conn.cursor() as cur:
+        cur.execute("UPDATE operator_asks SET delivered_at = now() "
+                    "WHERE id = %s AND delivered_at IS NULL", (item_id,))
+        return cur.rowcount
 
 
 def triage(item_id: int, action: str, *, summary: str | None = None,
@@ -298,6 +319,13 @@ def main(argv=None) -> int:
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"error: {type(e).__name__}: {e}\n")
         return 2
+    if args.delivered:
+        try:
+            stamped = stamp_delivered(args.id)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"error: --delivered stamp failed: {type(e).__name__}: {e}\n")
+            return 2
+        print("delivered_at stamped" if stamped else "delivered_at already set (first stamp kept)")
     if n == 1:
         if args.answers is not None:
             # True on both close paths — just-now confirmed or already closed

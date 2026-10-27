@@ -43,6 +43,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -183,11 +184,30 @@ def _media_dest_name(channel_key: str, upd_id: int, file_unique_id: str,
     return f"{safe_channel}_{upd_id}_{safe_unique}{ext}"
 
 
+# getFile had NO retry (orch-console #77889, 2026-10-27): both of today's lost operator photos
+# (updates 440382277 / 440382285) failed on a single Errno 54 reset at this call, before the
+# retrying file download ever ran. Same schedule as _tg_chunked_send.RETRY_DELAYS.
+GETFILE_RETRY_DELAYS = (2, 6, 15)
+
+
+def _get_file_path(token: str, file_id: str, sleep=time.sleep) -> str:
+    url = f"{TELEGRAM_BOT_API_BASE_URL}/bot{token}/getFile?file_id={file_id}"
+    for i, delay in enumerate((0,) + GETFILE_RETRY_DELAYS):
+        if delay:
+            sleep(delay)
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                return json.load(r)["result"]["file_path"]
+        except urllib.error.HTTPError:
+            raise                      # a real API answer (e.g. 400/404) — retrying won't help
+        except (OSError, ValueError):  # URLError/reset/timeout, or a truncated JSON body
+            if i == len(GETFILE_RETRY_DELAYS):
+                raise
+
+
 def _download_media(token: str, file_id: str, file_unique_id: str, channel_key: str,
                      upd_id: int, name: str | None = None) -> str:
-    with urllib.request.urlopen(
-            f"{TELEGRAM_BOT_API_BASE_URL}/bot{token}/getFile?file_id={file_id}", timeout=30) as r:
-        fp = json.load(r)["result"]["file_path"]
+    fp = _get_file_path(token, file_id)
     os.makedirs(_MEDIA_DIR, exist_ok=True)
     safe = _media_dest_name(channel_key, upd_id, file_unique_id, fp, name)
     dest = os.path.join(_MEDIA_DIR, safe)
@@ -695,6 +715,23 @@ def match_channel_in_group(group: list[Channel], chat_id: int | None,
 
 # ── Route: agent-session / log-and-route => nudge-only tmux line ─────────────
 
+_ABSENT_TARGET_LOGGED: set = set()
+
+
+def _session_exists(target) -> bool:
+    """Same tmux binary + exact-match form nudge_session uses. On a tmux error we can't
+    tell, so say True and let nudge_session's own has-session decide (old behavior)."""
+    if not target:
+        return False
+    tmux = shutil.which("tmux") or "/opt/homebrew/bin/tmux"
+    try:
+        r = subprocess.run([tmux, "has-session", "-t", f"={target}"],
+                           capture_output=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return r.returncode == 0
+
+
 def nudge_session(target: str, channel_key: str, n_unread: int) -> bool:
     """Count-only nudge. NEVER carries payload (CAI-RESP-357). Best-effort
     signal — delivery is guaranteed by the log + reconciliation, not by this."""
@@ -932,9 +969,24 @@ def drain_stale_deferred(conn, ch: "Channel") -> None:
             return
     if newest_id <= getattr(ch, "_last_forced_nudge_id", 0):
         return   # already force-nudged this batch — one forced nudge per message
+    # ABSENT-TARGET SKIP (orch-console #77913, 2026-10-27): the Mini has no 'orch' session
+    # (the hub lives on gzb), so log-and-route channels pinned here were "force-nudged"
+    # into nothing every pass and logged as if delivered (brandit-coffeemedia: 3 rows,
+    # 10 days, no reader). Skip a target that isn't on this host, saying so ONCE per
+    # (channel, target) per process; the rows stay durable and unhandled for their owner.
+    if not _session_exists(target):
+        if (ch.key, target) not in _ABSENT_TARGET_LOGGED:
+            _ABSENT_TARGET_LOGGED.add((ch.key, target))
+            _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s but nudge target "
+                      f"'{target}' is not a session on this host — NOT nudged (needs an "
+                      f"owner_lane/inject_target, or unpin the channel here)")
+        return
     ch._last_forced_nudge_id = newest_id
-    nudge_session(target, ch.key, n)
-    _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s — FORCED nudge (max-latency cap)")
+    if nudge_session(target, ch.key, n):
+        _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s — FORCED nudge (max-latency cap)")
+    else:
+        _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s — FORCED nudge to "
+                  f"'{target}' NOT delivered (fire-window hold or tmux error)")
 
 
 def reassure_if_unhandled(conn, ch: "Channel") -> None:

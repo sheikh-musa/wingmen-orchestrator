@@ -179,11 +179,11 @@ def test_run_reclaimers_dry_run_passes_flag_through():
 # ---- next_cache_candidates(): held-path exclusion + age gate -------------------
 def test_next_cache_candidates_excludes_held_paths(tmp_path):
     root = tmp_path / "projects"
-    keep = root / "cosem-video-pipeline" / "build" / ".next" / "cache"
-    take = root / "ihsanos" / ".next" / "cache"
+    keep = root / "cosem-video-pipeline" / "build" / ".next"
+    take = root / "ihsanos" / ".next"
     for d in (keep, take):
-        d.mkdir(parents=True)
-        (d / "blob").write_bytes(b"x" * 1024)
+        (d / "cache").mkdir(parents=True)
+        (d / "cache" / "blob").write_bytes(b"x" * 1024)
     old = time.time() - 3600  # 60min ago
     for d in (keep, take):
         os.utime(d, (old, old))
@@ -194,9 +194,26 @@ def test_next_cache_candidates_excludes_held_paths(tmp_path):
     assert str(keep) not in paths, "held cosem-video path must be excluded"
 
 
+def test_next_cache_candidates_takes_whole_next_dir_not_just_cache_subdir(tmp_path):
+    # orch-console bus #76559: the bulk of a .next dir is static/server output OUTSIDE
+    # .next/cache -- the candidate must be the whole .next dir, not just its cache subdir.
+    root = tmp_path / "projects"
+    next_dir = root / "ihsanos" / ".next"
+    (next_dir / "cache").mkdir(parents=True)
+    (next_dir / "static").mkdir(parents=True)
+    (next_dir / "cache" / "blob").write_bytes(b"x" * 1024)
+    (next_dir / "static" / "chunk.js").write_bytes(b"y" * 2048)
+    old = time.time() - 3600
+    os.utime(next_dir, (old, old))
+    cands = dar.next_cache_candidates(root, exclude=set(), older_than_s=1800, now=time.time())
+    paths = {str(p) for p in cands}
+    assert str(next_dir) in paths
+    assert not any(p.endswith("cache") for p in paths), "must return the whole .next dir, not the cache subdir"
+
+
 def test_next_cache_candidates_skips_recently_modified(tmp_path):
     root = tmp_path / "projects"
-    fresh = root / "ihsanos" / ".next" / "cache"
+    fresh = root / "ihsanos" / ".next"
     fresh.mkdir(parents=True)
     (fresh / "blob").write_bytes(b"x" * 1024)
     # mtime = now → younger than the 30min gate → NOT a candidate (may be an active build)
@@ -249,7 +266,7 @@ def test_reclaim_dir_cmd_disk_free_flag_does_not_affect_dry_run(tmp_path, monkey
 
 def test_reclaim_next_cache_dry_run_deletes_nothing(tmp_path, monkeypatch):
     root = tmp_path / "projects"
-    d = root / "ihsanos" / ".next" / "cache"
+    d = root / "ihsanos" / ".next"
     d.mkdir(parents=True)
     (d / "blob").write_bytes(b"x" * 4096)
     old = time.time() - 7200                    # older than the 60min age gate → a candidate
@@ -420,3 +437,127 @@ def test_reclaim_library_caches_skips_nonempty_dir_race_without_raising(tmp_path
     assert racing.exists(), "the racing/non-empty entry must be left in place, not half-removed"
     assert not removable.exists(), "a removable entry must still be reclaimed"
     assert freed >= 1024
+
+
+# ---- Chrome code-sign clones (orch-console #77809, 2026-10-27) ------------------------
+# Chrome leaves a full self-copy per launch under .../X/com.google.Chrome.code_sign_clone and
+# never cleans up (19 piled up on the Mini). Keep the newest, skip any a live Chrome holds.
+def _clone(root, name, mtime, size=4096):
+    d = root / f"code_sign_clone.{name}"
+    (d / "Google Chrome.app").mkdir(parents=True)
+    (d / "Google Chrome.app" / "blob").write_bytes(b"x" * size)
+    os.utime(d, (mtime, mtime))
+    return d
+
+
+def test_chrome_clone_candidates_keep_the_newest_and_skip_non_clones(tmp_path):
+    root = tmp_path / "com.google.Chrome.code_sign_clone"
+    old = _clone(root, "old", 1_000)
+    mid = _clone(root, "mid", 2_000)
+    newest = _clone(root, "new", 3_000)
+    (root / "unrelated").mkdir()
+    (root / "code_sign_clone.link").symlink_to(newest)
+    assert set(dar.chrome_clone_candidates(root)) == {old, mid}
+
+
+def test_chrome_clone_candidates_missing_or_unresolved_root_is_empty(tmp_path):
+    assert dar.chrome_clone_candidates(tmp_path / "nope") == []
+    assert dar.chrome_clone_candidates(None) == []
+
+
+def test_reclaim_chrome_clones_apply_spares_newest_and_held(tmp_path, monkeypatch):
+    root = tmp_path / "com.google.Chrome.code_sign_clone"
+    stale = _clone(root, "stale", 1_000)
+    held = _clone(root, "held", 2_000)
+    newest = _clone(root, "new", 3_000)
+    monkeypatch.setattr(dar, "CHROME_CLONE_ROOT", root)
+    monkeypatch.setattr(dar, "_lsof_in_use", lambda p: pathlib.Path(p) == held)
+    frees = iter([10 * GB, 14 * GB])
+    monkeypatch.setattr(dar, "_disk_free", lambda *a, **k: next(frees))
+    freed = dar._reclaim_chrome_clones(dry_run=False)
+    assert not stale.exists()
+    assert held.exists(), "a clone a running Chrome holds must never be removed"
+    assert newest.exists(), "the newest clone is always kept"
+    assert freed == 4 * GB, "freed must be the disk-free delta (clones share APFS blocks)"
+
+
+def test_reclaim_chrome_clones_dry_run_deletes_nothing(tmp_path, monkeypatch):
+    root = tmp_path / "com.google.Chrome.code_sign_clone"
+    stale = _clone(root, "stale", 1_000)
+    _clone(root, "new", 3_000)
+    monkeypatch.setattr(dar, "CHROME_CLONE_ROOT", root)
+    freed = dar._reclaim_chrome_clones(dry_run=True)
+    assert stale.exists()
+    assert freed >= 4096
+
+
+def test_reclaim_chrome_clones_no_root_is_a_noop(monkeypatch):
+    monkeypatch.setattr(dar, "CHROME_CLONE_ROOT", None)
+    monkeypatch.setattr(dar, "_resolve_chrome_clone_root", lambda: None)
+    assert dar._reclaim_chrome_clones(dry_run=False) == 0
+
+
+def test_chrome_clones_reclaimer_is_registered():
+    assert "chrome-clones" in [r["name"] for r in dar.build_reclaimers()]
+
+
+# ---- Spotlight index guard (orch-console #77912, 2026-10-27) ----------------------------
+# A 69GB .Spotlight-V100 from 08-28 sat on the Data volume, invisible to every reclaimer,
+# after indexing was disabled. With indexing OFF it must not exist; regrowth pages console.
+_OFF = lambda vol: "Spotlight server is disabled."
+
+
+def test_spotlight_healthy_when_index_absent_and_indexing_off(tmp_path):
+    assert dar.spotlight_findings(index_dir=tmp_path / "absent", status=_OFF) == []
+
+
+def test_spotlight_flags_a_reappearing_index_dir(tmp_path):
+    d = tmp_path / ".Spotlight-V100"
+    d.mkdir()
+    f = dar.spotlight_findings(index_dir=d, status=_OFF)
+    assert len(f) == 1 and "exists again" in f[0]
+
+
+def test_spotlight_flags_indexing_enabled_but_not_an_unreadable_status(tmp_path):
+    on = lambda vol: f"{vol}:\n\tIndexing enabled."
+    assert len(dar.spotlight_findings(index_dir=tmp_path / "x", status=on)) == 2
+    assert dar.spotlight_findings(index_dir=tmp_path / "x", status=lambda v: None) == []
+    no_index = lambda vol: f"{vol}:\n\tNo index."
+    assert dar.spotlight_findings(index_dir=tmp_path / "x", status=no_index) == []
+
+
+def test_spotlight_guard_pages_once_per_window_then_again_after(tmp_path, monkeypatch):
+    pages = []
+    state = tmp_path / "state.json"
+    kw = dict(findings=["index back"], state_path=state, page=pages.append)
+    dar.spotlight_guard(now=1000, **kw)
+    dar.spotlight_guard(now=1000 + 3600, **kw)
+    assert len(pages) == 1, "a repeat inside the window must not re-page"
+    dar.spotlight_guard(now=1000 + dar.SPOTLIGHT_PAGE_EVERY_S + 1, **kw)
+    assert len(pages) == 2
+
+
+def test_spotlight_guard_new_finding_pages_immediately_and_clears_when_healthy(tmp_path):
+    pages = []
+    state = tmp_path / "state.json"
+    dar.spotlight_guard(findings=["a"], now=1000, state_path=state, page=pages.append)
+    dar.spotlight_guard(findings=["a", "b"], now=1001, state_path=state, page=pages.append)
+    assert len(pages) == 2
+    dar.spotlight_guard(findings=[], now=1002, state_path=state, page=pages.append)
+    assert not state.exists()
+
+
+def test_spotlight_guard_runs_before_the_disk_ok_early_return(monkeypatch):
+    calls = []
+    monkeypatch.setattr(dar, "spotlight_guard", lambda: calls.append(1))
+    monkeypatch.setattr(dar, "_disk_free", lambda *a, **k: 200 * GB)
+    assert dar.main(["--apply"]) == 0
+    assert calls == [1]
+
+
+def test_spotlight_guard_failure_never_blocks_reclaim(monkeypatch):
+    def boom():
+        raise RuntimeError("guard bug")
+    monkeypatch.setattr(dar, "spotlight_guard", boom)
+    monkeypatch.setattr(dar, "_disk_free", lambda *a, **k: 200 * GB)
+    assert dar.main(["--apply"]) == 0

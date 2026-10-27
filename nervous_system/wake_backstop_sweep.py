@@ -545,6 +545,43 @@ def _base_of(agent):
 _ESCALATED_SEEN: set = set()
 
 
+# Seed the stuck-page once-guard at process start from the bus (console #78389, amending
+# Nazim 43009(b)): daemon deploys are now frequent enough that "one repeat page per restart"
+# is real noise (#78378 re-paged rows 77805/77837/77864 after a 16:42Z deploy restart). The
+# bus already records every stuck page with its row ids, so read those back: read-only, no
+# new table or file. Seeding from the bus also dedups across hosts (Mini + gzb).
+_STUCK_PAGE_BODY_RE = re.compile(r"row\(s\) \[([0-9,\s]+)\] to \S+ are STILL unread")
+
+
+def _fetch_recent_stuck_page_bodies(max_age_s: int = STUCK_PAGE_MAX_AGE_S) -> list:
+    if not _DSN:
+        return []
+    with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT body FROM agent_messages WHERE subject LIKE '[wake-backstop]%%un-drained%%' "
+                    "AND created_at > now() - make_interval(secs => %s)", (max_age_s,))
+        return [r[0] for r in cur.fetchall()]
+
+
+def seed_stuck_seen_from_bus(seen: set, fetch=_fetch_recent_stuck_page_bodies) -> int:
+    """Add ("stuck", id) for every row id already stuck-paged in the last 24h. Returns how
+    many were added. Fail-soft: a read error logs loudly and seeds nothing (the old
+    behaviour: at most one repeat page), never crashes the floor."""
+    try:
+        bodies = fetch()
+    except Exception as e:  # noqa: BLE001
+        print(f"{_ts()} stuck-page once-guard seed FAILED (will repeat-page once): {e!r}",
+              file=sys.stderr, flush=True)
+        return 0
+    added = 0
+    for body in bodies or []:
+        for m in _STUCK_PAGE_BODY_RE.finditer(body or ""):
+            for tok in m.group(1).split(","):
+                if tok.strip().isdigit() and ("stuck", int(tok)) not in seen:
+                    seen.add(("stuck", int(tok)))
+                    added += 1
+    return added
+
+
 def _default_console_alive() -> bool:
     """orch-console's own liveness (audit-20261006 item 4, bus#54648): a fresh agent_status
     heartbeat, not the hub's lease. Resolved lazily (same shape as _default_this_host) so this
@@ -966,12 +1003,44 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
 # injection.
 IDLE_UNREAD_NUDGE_AGE_S = int(os.environ.get("IDLE_UNREAD_NUDGE_AGE_S", "900"))    # 15 min
 IDLE_UNREAD_WARN_AGE_S = int(os.environ.get("IDLE_UNREAD_WARN_AGE_S", "1800"))     # 30 min
+
+# FAST TIER for P0/P1 (bus #77607->#77620->#77633, 2026-10-27): the uniform 900s/1800s
+# thresholds above were tuned for low-priority FYI rows; a P0/P1 sitting unread on a lane
+# that READS idle-but-isn't (the false-busy class this same incident fixed in pane_busy) must
+# not wait a full 15/30 min before the fleet notices. P2/P3 are UNCHANGED (no new noise there
+# -- this is additive, not a global tightening). P0 is included alongside P1 (not just P1 as
+# first scoped in #77633) so the fleet's most urgent tier is never slower to escalate than P1.
+IDLE_UNREAD_NUDGE_AGE_FAST_S = int(os.environ.get("IDLE_UNREAD_NUDGE_AGE_FAST_S", "180"))  # 3 min
+IDLE_UNREAD_WARN_AGE_FAST_S = int(os.environ.get("IDLE_UNREAD_WARN_AGE_FAST_S", "300"))    # 5 min
+IDLE_UNREAD_FAST_PRIORITIES = frozenset(
+    p.strip() for p in os.environ.get("IDLE_UNREAD_FAST_PRIORITIES", "P0,P1").split(",") if p.strip()
+)
 # Minimum time between warns for the SAME agent, regardless of id-set churn (cc-fleet-health,
 # 2026-10-25) -- the prior exact-frozenset dedup re-fired every time the unread id-set changed
 # at all, which on a busy lane accumulating new mail every few minutes meant a fresh warn every
 # ~2min instead of the intended "occasional doorbell." See
 # idle-unread-warn-dedup-defeated-by-id-set-churn for the incident.
 IDLE_UNREAD_WARN_COOLDOWN_S = int(os.environ.get("IDLE_UNREAD_WARN_COOLDOWN_S", "1200"))  # 20 min
+
+# Nudge-safe pane-busy (bus #77607->#77620->#77633): the idle-unread doorbell is a NUDGE path
+# (queuing text via lane_nudge.sh never forces an interrupt), so it uses the laxer check that
+# drops the "N shells still running" false-busy -- see agent_wake._pane_busy's nudge_safe
+# param. Nothing else in this module (sweep_once's busy/idle classification) is touched.
+def _pane_busy_nudge_safe(session: str) -> bool:
+    return _pane_busy(session, nudge_safe=True)
+
+
+# IDLE CONFIRMATION (cc-fleet-health, 2026-10-27): a single capture-pane snapshot can catch a
+# lane MID-TURN in the instant between a tool result landing and the next spinner line
+# rendering, with no "esc to interrupt" on screen -- so one sample reads "idle" on a lane that
+# has been working continuously. Observed 11+ times on cc-cosem-platform-4 in one night (each
+# pane-probed and found 30-70min into a live turn), each one a false nudge + false warn. Before
+# ACTING on an idle reading, re-sample this many more times, this far apart; ANY busy sample
+# means busy. Only paid when a nudge/warn would actually fire, never on a dedup'd tick. See
+# idle-unread-watchdog-misreads-busy-foreground-as-idle.
+IDLE_UNREAD_IDLE_CONFIRM_SAMPLES = int(os.environ.get("IDLE_UNREAD_IDLE_CONFIRM_SAMPLES", "2"))
+IDLE_UNREAD_IDLE_CONFIRM_GAP_S = float(os.environ.get("IDLE_UNREAD_IDLE_CONFIRM_GAP_S", "3"))
+
 
 # The from_agent the sweep stamps on its OWN nudge rows. ONE source so the self-feed exclusion
 # below (idle_unread_sweep) can never drift from what _default_nudge actually posts — a mismatch
@@ -987,18 +1056,20 @@ _IDLE_NUDGED_SEEN: dict = {}
 _IDLE_WARNED_SEEN: dict = {}
 
 
-def _fetch_idle_unread_rows(nudge_age_s: int):
+def _fetch_idle_unread_rows(min_age_s: int):
     """Coarse prefilter (mirrors _fetch_rows/_fetch_stuck_rows): unread, un-skipped,
-    non-test rows past the NUDGE age. idle_unread_sweep double-checks age itself (defense
-    in depth, and what lets tests inject `rows` directly with sub-threshold entries)."""
+    non-test rows past the SMALLEST age any priority tier could act on (the fast P0/P1
+    threshold) -- idle_unread_sweep applies the real, priority-aware age cutoff itself
+    (defense in depth, and what lets tests inject `rows` directly with sub-threshold
+    entries). Also returns `priority` now so the per-row fast/slow tier can be decided."""
     if not _DSN:
         return []
     with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT id, to_agent, created_at, from_agent FROM agent_messages "
+            "SELECT id, to_agent, created_at, from_agent, priority FROM agent_messages "
             "WHERE read_at IS NULL AND skipped_at IS NULL AND is_test IS NOT TRUE "
             "AND created_at < now() - make_interval(secs => %s) "
-            "ORDER BY to_agent, created_at", (nudge_age_s,))
+            "ORDER BY to_agent, created_at", (min_age_s,))
         return cur.fetchall()
 
 
@@ -1018,6 +1089,38 @@ def _bus_insert(from_agent, to_agent, mtype, priority, subject, body, req: bool 
         return row_id
 
 
+def _still_unread(ids) -> list:
+    """The subset of `ids` still unread and un-skipped RIGHT NOW. On any DB problem return
+    `ids` unchanged (old behavior: a hiccup must never swallow a genuine nudge)."""
+    ids = [i for i in (ids or []) if i is not None]
+    if not ids or not _DSN:
+        return ids
+    try:
+        with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+            cur.execute("SELECT id FROM agent_messages WHERE id = ANY(%s) "
+                        "AND read_at IS NULL AND skipped_at IS NULL", (ids,))
+            return [r[0] for r in cur.fetchall()]
+    except Exception:  # noqa: BLE001
+        return ids
+
+
+def _recently_sent(agent: str, since) -> bool:
+    """True if `agent` OR its base id sent any bus row after `since`. Lanes routinely reply
+    under their BASE id (cc-cosem-adcda for cc-cosem-adcda-2), which leaves their instance
+    rows read_at NULL even though they acted (orch-console #77932/#77971). On any DB problem,
+    False (old behavior: an unprovable veto never suppresses a page)."""
+    if not _DSN or since is None:
+        return False
+    ids = sorted({agent, re.sub(r"-\d+$", "", agent)})
+    try:
+        with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM agent_messages WHERE from_agent = ANY(%s) "
+                        "AND created_at > %s LIMIT 1", (ids, since))
+            return cur.fetchone() is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _default_nudge(agent: str, ids: list, wake=wake_agent) -> "int | None":
     """Post ONE bus row to `agent` naming its unread ids, then deliver it via the NORMAL
     doorbell (agent_wake.wake_agent) — never a raw pane injection."""
@@ -1033,26 +1136,59 @@ def _default_nudge(agent: str, ids: list, wake=wake_agent) -> "int | None":
     return row_id
 
 
+def _unread_age_summary(ids) -> "str | None":
+    """MEASURED age of the oldest of `ids` + whether any is fast-tier, e.g.
+    'oldest 10m old, P1 fast tier (warns at 5m)'. None when it can't be measured, so the
+    warn says so instead of asserting a number (#78343 claimed '30min+'/'1800s+' for a P1
+    that had been unread 10m: the text hardcoded the SLOW tier while the fast tier fired)."""
+    ids = [i for i in (ids or []) if i is not None]
+    if not ids or not _DSN:
+        return None
+    try:
+        with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+            cur.execute("SELECT extract(epoch FROM now() - min(created_at)), "
+                        "array_agg(DISTINCT priority) FROM agent_messages WHERE id = ANY(%s)",
+                        (ids,))
+            age_s, prios = cur.fetchone()
+    except Exception:  # noqa: BLE001 — wording only; never block the warn
+        return None
+    if age_s is None:
+        return None
+    fast = sorted(p for p in (prios or []) if p in IDLE_UNREAD_FAST_PRIORITIES)
+    tier = (f"{'/'.join(fast)} fast tier (warns at {IDLE_UNREAD_WARN_AGE_FAST_S // 60}m)" if fast
+            else f"slow tier (warns at {IDLE_UNREAD_WARN_AGE_S // 60}m)")
+    return f"oldest {int(float(age_s)) // 60}m old, {tier}"
+
+
 def _default_warn_fleet_health(agent: str, ids: list) -> "int | None":
     """A row nudged once but STILL unread past the WARN age needs a human/SRE look —
     escalate ONCE (per distinct id-set) to cc-fleet-health, the same pattern as this
     module's other escalations."""
     ids_str = ", ".join(f"#{i}" for i in ids)
+    age = _unread_age_summary(ids) or "age not measured"
     return _bus_insert(
         "cc-fleet-health", "cc-fleet-health", "blocker", "P2",
-        f"[idle-unread] {agent} still unread {len(ids)} row(s) 30min+ after going idle",
-        f"ids={ids_str}. Already nudged via the doorbell once; the pane is idle and the "
-        f"row(s) are STILL unread {IDLE_UNREAD_WARN_AGE_S}s+ after they landed. Needs a look "
-        f"— {agent} may be stuck on something else, or the nudge itself may not be landing.")
+        f"[idle-unread] {agent} still unread {len(ids)} row(s) past warn age ({age})",
+        f"ids={ids_str}. Already nudged via the doorbell once; the pane read idle and the "
+        f"row(s) are STILL unread ({age}). Needs a look — {agent} may be stuck on something "
+        f"else, the nudge may not be landing, or it was only idle between turns (re-sample "
+        f"the pane before acting).")
 
 
-def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_busy=_pane_busy,
+def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session,
+                      pane_busy=_pane_busy_nudge_safe,
                       nudge=_default_nudge, warn=_default_warn_fleet_health, now_dt=None,
                       nudge_age_s: int = IDLE_UNREAD_NUDGE_AGE_S,
+                      nudge_age_fast_s: int = IDLE_UNREAD_NUDGE_AGE_FAST_S,
                       warn_age_s: int = IDLE_UNREAD_WARN_AGE_S,
+                      warn_age_fast_s: int = IDLE_UNREAD_WARN_AGE_FAST_S,
+                      fast_priorities=IDLE_UNREAD_FAST_PRIORITIES,
                       warn_cooldown_s: int = IDLE_UNREAD_WARN_COOLDOWN_S,
                       nudged_seen=None, warned_seen=None,
-                      is_offline_stale=_is_offline_stale, mark=_mark_skipped) -> dict:
+                      is_offline_stale=_is_offline_stale, mark=_mark_skipped,
+                      idle_confirm_samples: int = IDLE_UNREAD_IDLE_CONFIRM_SAMPLES,
+                      idle_confirm_gap_s: float = IDLE_UNREAD_IDLE_CONFIRM_GAP_S,
+                      sleep=None, still_unread=None, recently_sent=None) -> dict:
     """For each recipient (is_wake_eligible_recipient — never a human/operator, the hub only
     on ITS OWN wake floor which this age-only signal never satisfies so the hub is simply
     never nudged here) whose pane is IDLE (never busy — 'esc to interrupt') but has directed
@@ -1072,9 +1208,25 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
     the cwd-substring fallback — see [[resolve-tmux-session-cwd-fallback-sibling-misattribution]])
     mis-resolve a dead instance onto a LIVE sibling's pane, defeating the old skipped_dead check;
     agent_status.status is the authoritative signal per fleet_health.py's own observed-activity
-    gate, so it is checked FIRST and wins outright."""
+    gate, so it is checked FIRST and wins outright.
+
+    FAST TIER (bus #77607->#77620->#77633): a row whose priority is in `fast_priorities`
+    (P0/P1 by default) is nudged after nudge_age_fast_s and warned after warn_age_fast_s
+    instead of the slower uniform defaults -- P2/P3 (and any row with no priority signal,
+    e.g. a 4-tuple row) keep today's thresholds exactly.
+
+    IDLE CONFIRMATION: the first pane_busy sample is one snapshot; before a nudge or warn
+    actually fires, the pane is re-sampled idle_confirm_samples more times idle_confirm_gap_s
+    apart, and a busy reading on ANY of them skips the agent as busy (no nudge, no warn, dedup
+    state untouched)."""
+    sleep = time.sleep if sleep is None else sleep
+    if still_unread is None:
+        # Injected rows (tests/callers) carry their own truth; only DB-fetched rows re-check.
+        still_unread = _still_unread if rows is None else (lambda ids: list(ids))
+    if recently_sent is None:
+        recently_sent = _recently_sent if rows is None else (lambda agent, since: False)
     if rows is None:
-        rows = _fetch_idle_unread_rows(nudge_age_s)
+        rows = _fetch_idle_unread_rows(min(nudge_age_s, nudge_age_fast_s))
     now_dt = now_dt if now_dt is not None else datetime.now(timezone.utc)
     nudged_seen = _IDLE_NUDGED_SEEN if nudged_seen is None else nudged_seen
     warned_seen = _IDLE_WARNED_SEEN if warned_seen is None else warned_seen
@@ -1083,18 +1235,20 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
     for r in rows:
         rid, agent, created_at = r[0], r[1], r[2]
         frm = r[3] if len(r) > 3 else None
+        prio = r[4] if len(r) > 4 else None
         if not is_wake_eligible_recipient(agent):
             continue
-        by_agent.setdefault(agent, []).append((rid, created_at, frm))
+        by_agent.setdefault(agent, []).append((rid, created_at, frm, prio))
 
     nudged, warned, skipped_busy, skipped_dead, auto_quiesced, skipped_own = [], [], [], [], [], []
+    skipped_responsive = []
     for agent, entries in by_agent.items():
         try:
             offline = is_offline_stale(agent, now_dt=now_dt)
         except Exception:  # noqa: BLE001 — an unprovable veto never auto-quiesces
             offline = False
         if offline:
-            newly = mark([rid for rid, _ca, _frm in entries])
+            newly = mark([rid for rid, _ca, _frm, _p in entries])
             if newly:
                 auto_quiesced.append(agent)
             nudged_seen.pop(agent, None)
@@ -1112,8 +1266,8 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
         # directed unread rows. If counted, each nudge becomes the next tick's "unread row" and
         # the sweep nudges about its own nudge forever (the cc-cosem-platform-1 runaway,
         # 2026-10-08). EXCLUDE them from the unread count AND auto-skip them so they drain.
-        own_ids = [rid for rid, _ca, frm in entries if frm == _IDLE_NUDGE_FROM]
-        genuine = [(rid, ca) for rid, ca, frm in entries if frm != _IDLE_NUDGE_FROM]
+        own_ids = [rid for rid, _ca, frm, _p in entries if frm == _IDLE_NUDGE_FROM]
+        genuine = [(rid, ca, p) for rid, ca, frm, p in entries if frm != _IDLE_NUDGE_FROM]
         if own_ids and mark(own_ids):
             skipped_own.append(agent)
 
@@ -1123,10 +1277,56 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
             except Exception:  # noqa: BLE001 — un-ageable -> treat as not-yet-due
                 return -1.0
 
-        nudge_ids = sorted(rid for rid, ca in genuine if ca is not None and _age_s(ca) >= nudge_age_s)
+        def _nudge_due_age(p):
+            return nudge_age_fast_s if p in fast_priorities else nudge_age_s
+
+        def _warn_due_age(p):
+            return warn_age_fast_s if p in fast_priorities else warn_age_s
+
+        nudge_ids = sorted(rid for rid, ca, p in genuine
+                           if ca is not None and _age_s(ca) >= _nudge_due_age(p))
         if not nudge_ids:
             continue
+        # RESPONSIVE GATE (cc-fleet-health, 2026-10-27): a lane that has SENT a bus row (under
+        # its instance OR base id) after its newest due unread row landed has acted since its
+        # mail arrived -- the base-id reply pattern leaves instance rows unread. 3 of 4 false
+        # pages that afternoon were this (platform-4 #77968, adcda-2 #77993/#78074).
+        newest_due = max((ca for rid, ca, p in genuine if rid in set(nudge_ids)), default=None)
+        if recently_sent(agent, newest_due):
+            skipped_responsive.append(agent)
+            continue
         ids_key = frozenset(nudge_ids)
+        warn_ids = sorted(rid for rid, ca, p in genuine
+                          if ca is not None and _age_s(ca) >= _warn_due_age(p))
+        last_warned_at = warned_seen.get(agent)
+        warn_due = bool(warn_ids) and (
+            last_warned_at is None
+            or (now_dt - last_warned_at).total_seconds() >= warn_cooldown_s)
+
+        # IDLE CONFIRMATION: only when something would actually fire, re-sample the pane; any
+        # busy reading means the first sample caught a mid-turn render gap — skip as busy.
+        if nudged_seen.get(agent) != ids_key or warn_due:
+            went_busy = False
+            for _ in range(max(0, idle_confirm_samples)):
+                sleep(idle_confirm_gap_s)
+                if pane_busy(session):
+                    went_busy = True
+                    break
+            if went_busy:
+                skipped_busy.append(agent)
+                continue
+            # STALE-SNAPSHOT RE-CHECK (cc-fleet-health, 2026-10-27): `rows` was fetched at the
+            # top of the pass, and the confirmation above adds seconds per agent. adcda-1 read
+            # P1 #77852 at 10:52:27Z and was still warned at 10:52:37Z. Drop ids read/skipped
+            # since, and recompute what (if anything) is still due.
+            live = set(still_unread(sorted(set(nudge_ids) | set(warn_ids))))
+            nudge_ids = [i for i in nudge_ids if i in live]
+            warn_ids = [i for i in warn_ids if i in live]
+            if not nudge_ids:
+                continue
+            ids_key = frozenset(nudge_ids)
+            warn_due = bool(warn_ids) and warn_due
+
         if nudged_seen.get(agent) != ids_key:
             nudge(agent, nudge_ids)
             nudged_seen[agent] = ids_key
@@ -1141,11 +1341,13 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
         # drop the memory once the agent fully drains (warn_ids empty) so a later fresh batch
         # warns promptly rather than waiting out a stale cooldown. See
         # idle-unread-warn-dedup-defeated-by-id-set-churn for the full incident history.
-        warn_ids = sorted(rid for rid, ca in genuine if ca is not None and _age_s(ca) >= warn_age_s)
+        if warn_ids and warn_due:
+            # Re-check AGAIN: the nudge above can take ~20-30s (verified submit), and a row
+            # read in that window was still being warned about (adcda-2 #77947, 12:19Z).
+            live_now = set(still_unread(warn_ids))
+            warn_ids = [i for i in warn_ids if i in live_now]
         if warn_ids:
-            last_warned_at = warned_seen.get(agent)
-            due = last_warned_at is None or (now_dt - last_warned_at).total_seconds() >= warn_cooldown_s
-            if due:
+            if warn_due:
                 warn(agent, warn_ids)
                 warned_seen[agent] = now_dt
                 warned.append(agent)
@@ -1154,7 +1356,7 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
 
     return {"nudged": nudged, "warned": warned, "skipped_busy": skipped_busy,
             "skipped_dead": skipped_dead, "auto_quiesced": auto_quiesced,
-            "skipped_own": skipped_own}
+            "skipped_own": skipped_own, "skipped_responsive": skipped_responsive}
 
 
 def _ts() -> str:
@@ -1168,6 +1370,8 @@ def main() -> int:
     once = "--once" in sys.argv
     print(f"{_ts()} wake-backstop-sweep up — cadence={WAKE_SWEEP_SEC}s grace={WAKE_SWEEP_GRACE_S}s "
           f"dry_run={dry} auto_wake_enabled={auto_wake_enabled()}", flush=True)
+    seeded = seed_stuck_seen_from_bus(_ESCALATED_SEEN)
+    print(f"{_ts()} stuck-page once-guard seeded from bus: {seeded} row id(s)", flush=True)
     while True:
         try:
             # honor the kill-switch: when auto-wake is OFF, observe (dry) — never send.

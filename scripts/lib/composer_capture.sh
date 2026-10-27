@@ -360,6 +360,27 @@ _cc_text_busy() {
   return 1
 }
 
+# _cc_text_busy_nudge_safe <pane-text> : exit 0 (shell-true) iff busy under the SAME rules as
+# _cc_text_busy MINUS the "N shells still running" check (bus #77607->#77620->#77633,
+# 2026-10-27). That check was built for a synchronous foreground Bash tool call still in
+# flight, but it also matches a lane whose background-subagent panel is still showing elapsed
+# time after the main turn has genuinely finished -- so a lane with a long-lived background
+# subagent read as perpetually busy to BOTH the realtime doorbell and the backstop sweep,
+# leaving new P0/P1 mail unread for 20-30+ min (confirmed on 4 lanes: cc-cosem-platform-2,
+# cc-irsyad-coord-1, cc-cosem-adcda-1, cc-cosem-platform-4). Queuing text via lane_nudge.sh
+# NEVER forces an interrupt (Enter queues, never interrupts -- validated empirically ~20+
+# times across those 4 lanes with zero disruptions), so it is safe to drop this ONE check for
+# the nudge/doorbell path specifically. This is a NEW function, not a change to the default
+# _cc_text_busy -- every destructive-path caller (lane_wedge_watchdog.py, lane_watchdog.py's
+# orch-idle gate, the reapers, self_recycle's wait-for-idle via pane_busy.sh) keeps the fully
+# conservative check untouched.
+_cc_text_busy_nudge_safe() {
+  printf '%s\n' "${1-}" | tail -4  | LC_ALL=C grep -q 'esc to interrupt' && return 0
+  printf '%s\n' "${1-}" | tail -12 | LC_ALL=C grep -qE '^[^[:space:]].*Waiting for [0-9]+ background agents?' && return 0
+  printf '%s\n' "${1-}" | tail -12 | LC_ALL=C grep -qE '^[^[:space:]].*\(.*(thinking|tokens)' && return 0
+  return 1
+}
+
 # _cc_history_match <composer-flat> <pane-text> : exit 0 iff the composer's EXACT text
 # appears as a prior submitted '❯ <text>' line in the VISIBLE transcript (EXACT WHOLE-LINE,
 # formatting-stripped + NBSP-normalised — same strip as _cc_extract). count>=2 = the live

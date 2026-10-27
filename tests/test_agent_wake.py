@@ -89,7 +89,7 @@ def test_cap_alert_debounced_within_window(wake_dir):
 def test_wake_agent_cap_sets_alert_due_once(wake_dir, monkeypatch):
     # 5 wakes in window -> cap hit; first call alert_due=True, second False (debounced)
     monkeypatch.setattr(agent_wake, "resolve_tmux_session", lambda a: "sess")
-    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s: False)
+    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s, **_: False)
     _seed(wake_dir, "cc-ihsanos", [800.0, 850.0, 900.0, 920.0, 940.0])
     r1 = agent_wake.wake_agent("cc-ihsanos", now=1000.0)
     assert r1.get("cap_hit") is True and r1.get("alert_due") is True
@@ -107,7 +107,7 @@ def test_wake_agent_cap_sets_alert_due_once(wake_dir, monkeypatch):
 @pytest.fixture
 def _wake_ready(wake_dir, monkeypatch):
     monkeypatch.setattr(agent_wake, "resolve_tmux_session", lambda a: "sess")
-    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s: False)
+    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s, **_: False)
     return wake_dir
 
 
@@ -213,6 +213,7 @@ class _FakeConn:
 
 
 def test_candidate_sessions_includes_offline_family_hijack_guard_at_resolve(monkeypatch):
+    monkeypatch.setattr(agent_wake, "is_singleton_base", lambda a: False)
     """Candidate SELECTION now includes OFFLINE base-family rows too (so a base-id wake can
     reach an offline-but-live-pane instance, e.g. cc-cosem-tdu-coord-1). The op#11297 self
     rule still holds (self kept unconditionally). The Nazim #40426 sibling-hijack guard is NOT
@@ -222,9 +223,11 @@ def test_candidate_sessions_includes_offline_family_hijack_guard_at_resolve(monk
     filter (which would re-break the tdu-coord recovery)."""
     captured = {}
     monkeypatch.setattr(agent_wake, "_DSN", "postgres://x")
+    # (Example family is cc-cosem-tdu-coord, the recovery case this pins: cc-orchestrator is a
+    # SINGLETON since orch-console #77922 and resolves to its own row only.)
     monkeypatch.setattr(agent_wake.psycopg, "connect",
-                        lambda *a, **k: _FakeConn(captured, [("cc-orchestrator", "orch", "online")]))
-    out = agent_wake._candidate_sessions("cc-orchestrator")
+                        lambda *a, **k: _FakeConn(captured, [("cc-cosem-tdu-coord", "orch", "online")]))
+    out = agent_wake._candidate_sessions("cc-cosem-tdu-coord")
     sql, params = captured["sql"], captured["params"]
     # Widened predicate: self OR any base-family row, offline or not.
     assert "(agent_id=%s OR base_agent_id=%s)" in sql
@@ -232,7 +235,7 @@ def test_candidate_sessions_includes_offline_family_hijack_guard_at_resolve(monk
     assert "base_agent_id=%s AND status<>'offline'" not in sql
     # Self is still not itself status-gated (op#11297).
     assert "(agent_id=%s AND status" not in sql
-    assert params == ("cc-orchestrator", "cc-orchestrator")
+    assert params == ("cc-cosem-tdu-coord", "cc-cosem-tdu-coord")
     assert out == ["orch"]  # flows through rank_candidates unchanged
 
 
@@ -325,3 +328,89 @@ class TestIsWakeSuppressedByPause:
         raise, not suppress) — same fail-open contract as the injectable path."""
         monkeypatch.setattr(agent_wake, "_DSN", None)
         assert agent_wake.is_wake_suppressed_by_pause("cc-ihsanos", "P2") is False
+
+
+# ── cross-host guard on the cwd fallback (cc-fleet-health, 2026-10-27) ─────────────────────
+# gzb resolved the Mini's cc-cosem-platform-4 (sessions not live on gzb) onto ITS OWN idle
+# cosem-convergence pane via the cwd fallback, so gzb's idle-unread sweep read the wrong pane
+# as "idle", nudged it and warned cc-fleet-health for hours.
+def _fallback_only(monkeypatch):
+    monkeypatch.setattr(agent_wake, "_candidate_sessions", lambda a: [])
+    monkeypatch.setattr(agent_wake, "_first_live_session", lambda c, **k: None)
+    monkeypatch.setattr(agent_wake, "_expected_cwd_tokens", lambda a: ["cosem-platform"])
+    monkeypatch.setattr(agent_wake, "_live_claude_panes", lambda: [
+        {"session": "cosem-convergence", "cwd": "/home/u/wingmen/projects/cosem-platform.wt-x"}])
+
+
+def test_cwd_fallback_never_resolves_an_agent_registered_only_on_another_host(monkeypatch):
+    _fallback_only(monkeypatch)
+    out = agent_wake.resolve_tmux_session(
+        "cc-cosem-platform-4", host_source=lambda a: ["Sheikhs-Mini"], local_host="gzbai")
+    assert out is None
+
+
+def test_cwd_fallback_still_resolves_an_agent_registered_on_this_host(monkeypatch):
+    _fallback_only(monkeypatch)
+    out = agent_wake.resolve_tmux_session(
+        "cc-cosem-platform-4", host_source=lambda a: ["gzbai"], local_host="gzbai")
+    assert out == "cosem-convergence"
+
+
+def test_cwd_fallback_unchanged_when_host_is_unknown(monkeypatch):
+    # Lookup failure (None) or no recorded host ([]) is not evidence of foreignness: keep the
+    # old behavior so a DB hiccup can never cost a wake.
+    _fallback_only(monkeypatch)
+    for hosts in (None, []):
+        out = agent_wake.resolve_tmux_session(
+            "cc-x", host_source=lambda a, h=hosts: h, local_host="gzbai")
+        assert out == "cosem-convergence"
+
+
+def test_cwd_fallback_resolves_when_any_family_host_is_local(monkeypatch):
+    _fallback_only(monkeypatch)
+    out = agent_wake.resolve_tmux_session(
+        "cc-cosem-platform", host_source=lambda a: ["Sheikhs-Mini", "gzbai.local"],
+        local_host="gzbai")
+    assert out == "cosem-convergence"
+
+
+def test_live_registered_session_is_not_affected_by_the_host_guard(monkeypatch):
+    monkeypatch.setattr(agent_wake, "_candidate_sessions", lambda a: ["mine"])
+    monkeypatch.setattr(agent_wake, "_first_live_session", lambda c, **k: "mine")
+    out = agent_wake.resolve_tmux_session(
+        "cc-y", host_source=lambda a: pytest.fail("host guard must not run"), local_host="z")
+    assert out == "mine"
+
+
+# ── singleton bases: own row only, never a cwd guess (orch-console #77922) ─────────────────
+def test_singleton_candidates_are_its_own_row_only(monkeypatch):
+    monkeypatch.setattr(agent_wake, "is_singleton_base", lambda a: a == "cc-orchestrator")
+    captured = {}
+    monkeypatch.setattr(agent_wake, "_DSN", "postgres://x")
+    monkeypatch.setattr(agent_wake.psycopg, "connect",
+                        lambda *a, **k: _FakeConn(captured, [("orch",)]))
+    out = agent_wake._candidate_sessions("cc-orchestrator")
+    assert "agent_id=%s" in captured["sql"] and "base_agent_id" not in captured["sql"]
+    assert captured["params"] == ("cc-orchestrator",)
+    assert out == ["orch"]
+
+
+def test_singleton_never_uses_the_cwd_fallback(monkeypatch):
+    monkeypatch.setattr(agent_wake, "is_singleton_base", lambda a: a == "cc-orchestrator")
+    _fallback_only(monkeypatch)
+    monkeypatch.setattr(agent_wake, "_live_claude_panes", lambda: [
+        {"session": "substrate-clean", "cwd": "/Users/x/wingmen/projects/orchestrator.wt-cleanup"}])
+    monkeypatch.setattr(agent_wake, "_expected_cwd_tokens", lambda a: ["orchestrator"])
+    out = agent_wake.resolve_tmux_session(
+        "cc-orchestrator", host_source=lambda a: ["Sheikhs-Mini"], local_host="Sheikhs-Mini")
+    assert out is None
+
+
+def test_non_singleton_family_query_unchanged(monkeypatch):
+    monkeypatch.setattr(agent_wake, "is_singleton_base", lambda a: False)
+    captured = {}
+    monkeypatch.setattr(agent_wake, "_DSN", "postgres://x")
+    monkeypatch.setattr(agent_wake.psycopg, "connect",
+                        lambda *a, **k: _FakeConn(captured, [("cc-irsyad-1", "s1", "online")]))
+    agent_wake._candidate_sessions("cc-irsyad")
+    assert "(agent_id=%s OR base_agent_id=%s)" in captured["sql"]

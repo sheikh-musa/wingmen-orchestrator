@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+from datetime import datetime, timezone
 
 from . import acl
 from .gate_validation import BrokerValidationError, check_project_ref, require_gate
@@ -45,6 +46,11 @@ class BrokerServer:
         token: str,
         mgmt_api_fn,
         peer_uid_fn=acl.peer_uid,
+        *,
+        uid_override: "frozenset[int] | None" = None,
+        uid_override_expires_at: "datetime | None" = None,
+        ref_override: "str | None" = None,
+        ref_override_expires_at: "datetime | None" = None,
     ) -> None:
         self.sock_path = sock_path
         self.allowed_uids = allowed_uids
@@ -52,6 +58,13 @@ class BrokerServer:
         self.token = token
         self.mgmt_api_fn = mgmt_api_fn
         self.peer_uid_fn = peer_uid_fn
+        # BOUNDED OVERRIDE (op#34322/#76985/#76989, 2026-10-26) -- see acl.py /
+        # gate_validation.py docstrings for the wall-clock-reverts-by-
+        # construction design. All four default to inert (None).
+        self.uid_override = uid_override
+        self.uid_override_expires_at = uid_override_expires_at
+        self.ref_override = ref_override
+        self.ref_override_expires_at = ref_override_expires_at
 
     def serve_forever(self) -> None:
         if os.path.exists(self.sock_path):
@@ -106,8 +119,15 @@ class BrokerServer:
             self._respond(conn, encode_error(ErrorCode.INTERNAL_ERROR, "could not resolve peer uid"))
             return
 
+        now = datetime.now(timezone.utc)
         try:
-            acl.check_acl(uid, self.allowed_uids)
+            acl.check_acl(
+                uid,
+                self.allowed_uids,
+                override_uids=self.uid_override,
+                override_expires_at=self.uid_override_expires_at,
+                now=now,
+            )
         except acl.AclDenied as e:
             logger.warning("exec_broker: ACL denied for uid %s: %s", uid, e)
             self._respond(conn, encode_error(ErrorCode.ACL_DENIED, str(e)))
@@ -133,7 +153,12 @@ class BrokerServer:
                 db_conn.commit()
 
                 try:
-                    check_project_ref(req.project_ref)
+                    check_project_ref(
+                        req.project_ref,
+                        override_ref=self.ref_override,
+                        override_expires_at=self.ref_override_expires_at,
+                        now=now,
+                    )
                     require_gate(req.guarded_sql, req.gate_id, req.project_ref, cur)
                 except BrokerValidationError as e:
                     log_finalized(cur, row_id, "error", e.code.value)

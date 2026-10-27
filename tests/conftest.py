@@ -1,7 +1,9 @@
 """Shared fixtures for the Wingmen orchestrator test suite."""
 
+import atexit
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -39,8 +41,23 @@ def _pg_bin(name: str) -> str:
     return path
 
 
+def _reap_orphaned_pg_clusters():
+    """Best-effort: stop + remove clusters an earlier SIGKILLed/timed-out run left behind
+    (pg_ctl daemonizes, so they outlive the run -- orch-console #77831). Never fails the
+    session."""
+    try:
+        from scripts.lib import pgtest_reaper
+        pg_ctl = os.path.join(_PG_BIN, "pg_ctl")
+        if os.path.exists(pg_ctl):
+            pgtest_reaper.reap(tempfile.gettempdir(), pg_ctl)
+    except Exception as e:  # noqa: BLE001
+        import warnings
+        warnings.warn(f"pgtest orphan sweep skipped: {e!r}")
+
+
 @pytest.fixture(scope="session")
 def pg_dsn():
+    _reap_orphaned_pg_clusters()
     datadir = tempfile.mkdtemp(prefix="wingmen-pgtest-")
     shutil.rmtree(datadir)  # initdb wants to create it
     sockdir = tempfile.mkdtemp(prefix="wingmen-pgsock-")
@@ -64,13 +81,45 @@ def pg_dsn():
                 break
         except psycopg.OperationalError:
             time.sleep(0.1)
-    try:
-        yield dsn
-    finally:
-        subprocess.run([_pg_bin("pg_ctl"), "-D", datadir, "-w", "stop"],
+
+    # The `finally:` below never runs if pytest is killed, and the daemonized postmaster
+    # then outlives the run. Also stop on interpreter exit and on SIGTERM/SIGHUP (timeouts,
+    # closed terminals); SIGKILL is left to _reap_orphaned_pg_clusters on the next run.
+    stopped = []
+
+    def _teardown():
+        if stopped:
+            return
+        stopped.append(True)
+        subprocess.run([os.path.join(_PG_BIN, "pg_ctl"), "-D", datadir, "-w", "stop"],
                        capture_output=True, env=_PG_ENV)
         shutil.rmtree(datadir, ignore_errors=True)
         shutil.rmtree(sockdir, ignore_errors=True)
+
+    atexit.register(_teardown)
+    prev_handlers = {}
+
+    def _on_signal(signum, frame):
+        _teardown()
+        prev = prev_handlers.get(signum)
+        if callable(prev):
+            prev(signum, frame)
+        else:
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            prev_handlers[sig] = signal.signal(sig, _on_signal)
+        except ValueError:  # not the main thread -- atexit + the next-run sweep still cover it
+            pass
+    try:
+        yield dsn
+    finally:
+        for sig, prev in prev_handlers.items():
+            signal.signal(sig, prev)
+        atexit.unregister(_teardown)
+        _teardown()
 
 
 # ── Production-silo DSN guard (orch-console bus #44006, op#22741) ───────────
@@ -105,7 +154,7 @@ def assert_dsn_is_not_production(dsn) -> None:
 @pytest.fixture
 def operator_ledger_db(pg_dsn, monkeypatch):
     """Ephemeral Postgres carrying the real operator_messages/operator_asks
-    schema (mirrors migrations 007/020/021/044/072/082/084/085/118) — op#22669 ledger
+    schema (mirrors migrations 007/020/021/044/072/082/084/085/118/121) — op#22669 ledger
     tests must NEVER touch the live substrate (orch-console bus #44006,
     op#22741: a test using DATABASE_URL directly inserted + deleted rows in
     production and one fake operator message reached a body's live inbox
@@ -167,7 +216,9 @@ def operator_ledger_db(pg_dsn, monkeypatch):
                                     CHECK (committed_date IS NULL OR outbound_msg_id IS NOT NULL),
                 -- migration 118 (needs-Musa flag + plain-language hero line)
                 needs_operator_decision boolean NOT NULL DEFAULT false,
-                operator_summary    text
+                operator_summary    text,
+                delivered_at        timestamptz,
+                slow_paged_at       timestamptz
             )
         """)
         cur.execute("""

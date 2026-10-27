@@ -48,12 +48,12 @@ def test_retryable_outcomes_are_the_transient_ones(why):
 
 def test_wake_agent_records_pending_on_busy_and_clears_on_verified_wake(wake_dir, monkeypatch):
     monkeypatch.setattr(agent_wake, "resolve_tmux_session", lambda a: "sess")
-    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s: True)
+    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s, **_: True)
     res = agent_wake.wake_agent("cc-quality", "msg #7", row_id=7, now=1000.0)
     assert res["why"] == "busy (mid-turn)"
     assert [r["row_id"] for r in agent_wake.pending_rows()] == [7]
     # pane frees up, submit verifies → marker cleared
-    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s: False)
+    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s, **_: False)
     monkeypatch.setattr(agent_wake, "_verified_submit", lambda s, sig, row_id=None: 0)
     res = agent_wake.wake_agent("cc-quality", "msg #7", row_id=7, now=1100.0)
     assert res["woke"] is True
@@ -62,7 +62,7 @@ def test_wake_agent_records_pending_on_busy_and_clears_on_verified_wake(wake_dir
 
 def test_wake_agent_records_pending_on_debounce_and_rc3(wake_dir, monkeypatch):
     monkeypatch.setattr(agent_wake, "resolve_tmux_session", lambda a: "sess")
-    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s: False)
+    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s, **_: False)
     monkeypatch.setattr(agent_wake, "_verified_submit", lambda s, sig, row_id=None: 3)
     res = agent_wake.wake_agent("cc-quality", "msg #8", row_id=8, now=1000.0)
     assert res["why"] == "submit-unverified"
@@ -79,6 +79,6 @@ def test_wake_agent_does_not_record_pending_for_terminal_outcomes(wake_dir, monk
     assert res["why"] == "no live session" and agent_wake.pending_rows() == []
     # no row_id → nothing to mark (command nudges)
     monkeypatch.setattr(agent_wake, "resolve_tmux_session", lambda a: "sess")
-    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s: True)
+    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s, **_: True)
     agent_wake.wake_agent("cc-quality", "cmd", now=1000.0)
     assert agent_wake.pending_rows() == []

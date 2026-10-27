@@ -138,6 +138,7 @@ def _stub_env(monkeypatch, glm_wk, lanes):
     monkeypatch.setattr(g, "lanes_to_switch", lambda od, fn: list(lanes))
     monkeypatch.setattr(g, "load_state", lambda: {})
     monkeypatch.setattr(g, "save_state", lambda s: None)
+    monkeypatch.setattr(g, "_op33932_already_moved", lambda: False)
 
 
 def _glm_calls(calls):
@@ -166,12 +167,13 @@ def test_lane_on_glm_still_pages(monkeypatch):
 
 
 # ── Musa op#33932: standing 90% -> brains-to-Syed page, independent of GLM state ──
-def _stub_musa_only(monkeypatch, musa_7d, musa_5h=7.0, state=None):
+def _stub_musa_only(monkeypatch, musa_7d, musa_5h=7.0, state=None, already_moved=False):
     monkeypatch.setattr(g, "read_glm", lambda: {"wk": 10.0, "5h": 5.0, "wk_reset": "r", "5h_reset": "r"})
     monkeypatch.setattr(g, "read_musa", lambda: {"7d": musa_7d, "5h": musa_5h, "idle": 0.0})
     monkeypatch.setattr(g, "lanes_to_switch", lambda od, fn: [])
     monkeypatch.setattr(g, "load_state", lambda: {} if state is None else state)
     monkeypatch.setattr(g, "save_state", lambda s: state.update(s) if state is not None else None)
+    monkeypatch.setattr(g, "_op33932_already_moved", lambda: already_moved)
 
 
 def test_musa_syed_move_pages_at_90pct(monkeypatch):
@@ -215,3 +217,25 @@ def test_musa_syed_move_dry_run_does_not_persist_state(monkeypatch):
     g.main([])  # no --apply
     assert len(calls) == 1
     assert "page_musa_syed_move" not in state
+
+
+def test_musa_syed_move_stands_down_once_ground_truth_confirms_moved(monkeypatch):
+    """op#33932 (bus #76389/#76399): once the singletons are actually on Syed, the
+    standing >=90% condition must NOT keep re-paging every cooldown window -- the
+    move (the action) is done even though Musa stays >=90% until its own reset."""
+    calls = _spy_page(monkeypatch)
+    _stub_musa_only(monkeypatch, musa_7d=95.0, already_moved=True)
+    rc = g.main(["--apply"])
+    assert calls == [], f"should stand down once already-moved is confirmed, but paged: {calls}"
+    assert rc == 0
+
+
+def test_musa_syed_move_pages_again_if_ground_truth_says_not_moved_despite_cooldown_state(monkeypatch):
+    """Ground truth overrides nothing it doesn't need to: a real still-pending move
+    still pages on the normal cooldown rule once already_moved is False again."""
+    calls = _spy_page(monkeypatch)
+    stale = g.dt.datetime.now(g.dt.timezone.utc).timestamp() - g.PAGE_COOLDOWN_S - 1
+    state = {"page_musa_syed_move": stale}
+    _stub_musa_only(monkeypatch, musa_7d=95.0, state=state, already_moved=False)
+    g.main(["--apply"])
+    assert len(calls) == 1

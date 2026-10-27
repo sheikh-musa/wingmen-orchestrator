@@ -21,6 +21,7 @@ import subprocess
 import sys as _sys, os as _os
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 from scripts.lib import pane_busy  # footer-scoped busy check (one implementation)
+from scripts.lib.singleton_bases import is_singleton_base
 import time
 
 import psycopg
@@ -355,6 +356,16 @@ def _candidate_sessions(agent_id: str) -> list[str]:
     base = _base_family(agent_id)
     if not _DSN:
         return []
+    if is_singleton_base(agent_id):
+        # A singleton is only ever its OWN row: a stray '-N' registered under its base (the
+        # cc-orchestrator-1 worker on the Mini, orch-console #77922) must never be a wake target.
+        try:
+            with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+                cur.execute("SELECT tmux_session FROM agent_status "
+                            "WHERE agent_id=%s AND tmux_session IS NOT NULL", (agent_id,))
+                return [r[0] for r in cur.fetchall()]
+        except Exception:  # noqa: BLE001 — same fail-soft as the family query below
+            return []
     try:
         with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
             cur.execute(
@@ -425,7 +436,31 @@ def _first_live_session(candidates, has_session=None, agent_id=None,
     return None
 
 
-def resolve_tmux_session(agent_id: str) -> str | None:
+def _local_host() -> str:
+    import socket
+    return socket.gethostname().split(".")[0]
+
+
+def _registered_hosts(agent_id: str):
+    """Hosts agent_status records for this agent: its OWN row's host if it has one, else its
+    base family's. [] = nothing recorded; None = lookup failed (caller keeps old behavior)."""
+    if not _DSN:
+        return None
+    try:
+        with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+            cur.execute("SELECT host FROM agent_status WHERE agent_id=%s AND host IS NOT NULL",
+                        (agent_id,))
+            own = [r[0] for r in cur.fetchall()]
+            if own:
+                return own
+            cur.execute("SELECT DISTINCT host FROM agent_status "
+                        "WHERE base_agent_id=%s AND host IS NOT NULL", (_base_family(agent_id),))
+            return [r[0] for r in cur.fetchall()]
+    except Exception:  # noqa: BLE001 — unknown, not foreign
+        return None
+
+
+def resolve_tmux_session(agent_id: str, *, host_source=None, local_host=None) -> str | None:
     """Resolve on the LIVE-SESSION FACT (op#11297 #16880): a registered tmux_session
     whose pane is actually live — DECOUPLED from the status field AND from cwd-intro-
     spection. This closes all three miss-classes at once: offline-while-alive (status
@@ -441,8 +476,20 @@ def resolve_tmux_session(agent_id: str) -> str | None:
         return live
     # FALLBACK: cwd introspection — only helps scoped agents from a login shell (not
     # {*} roles, not under the launchd sandbox). Kept for non-launchd scoped callers.
+    if is_singleton_base(agent_id):
+        return None  # never guess a singleton's pane from cwd: that finds a worker, not the body
     tokens = _expected_cwd_tokens(agent_id)
     if not tokens:
+        return None
+    # CROSS-HOST GUARD (cc-fleet-health, 2026-10-27): an agent registered ONLY on another host
+    # has no pane here, so the cwd match can only land on a DIFFERENT local lane. gzb resolved
+    # the Mini's cc-cosem-platform-4 onto its own idle cosem-convergence pane, so every gzb
+    # idle-unread pass read "idle", nudged that wrong pane and warned cc-fleet-health -- the
+    # long-unexplained [idle-unread] refires. Only positive foreign-host evidence skips; an
+    # unknown host (lookup failed / nothing recorded) keeps the old behavior.
+    hosts = (host_source or _registered_hosts)(agent_id)
+    here = (local_host or _local_host()).lower()
+    if hosts and all(str(h).split(".")[0].lower() != here for h in hosts):
         return None
     for pane in _live_claude_panes():
         if any(f"/{t}" in pane["cwd"] for t in tokens):
@@ -488,7 +535,7 @@ def _verified_submit(session: str, signal: str, row_id=None) -> int:
         return 1
 
 
-def _pane_busy(session: str) -> bool:
+def _pane_busy(session: str, *, nudge_safe: bool = False) -> bool:
     """True if the lane is mid-turn (don't interrupt; debounce will retry).
 
     Reads the LIVE FOOTER via the shared helper. This used to grep the whole capture, so a
@@ -499,12 +546,20 @@ def _pane_busy(session: str) -> bool:
 
     Unreadable pane => NOT busy: this path DELIVERS, and a dropped nudge is recoverable
     (the bus row is durable) while an undelivered one is invisible.
+
+    nudge_safe=True (bus #77607->#77620->#77633, 2026-10-27): drops the "N shells still
+    running" busy check, which also matches a finished turn whose background-subagent panel
+    is still showing elapsed time -- that false-busy debounced the wake of any lane with a
+    long-lived background subagent, sitting on new P0/P1 mail for 20-30+ min. Opt-in only:
+    the wake/doorbell call site below passes it; nothing else does, so every other caller
+    (status classification, lane_wedge_watchdog, lane_watchdog's orch-idle gate, the reapers)
+    keeps today's fully conservative check.
     """
     try:
         pane = subprocess.check_output(
             ["tmux", "capture-pane", "-t", session, "-p"],
             text=True, stderr=subprocess.DEVNULL)
-        return pane_busy.is_busy_text(pane, on_unreadable=False)
+        return pane_busy.is_busy_text(pane, on_unreadable=False, nudge_safe=nudge_safe)
     except Exception:
         return False
 
@@ -646,7 +701,7 @@ def _wake_agent_inner(agent_id: str, reason: str, dry_run: bool, now: float | No
             if gate["alert_due"]:
                 _record_cap_alert(agent_id, now)
         return {"woke": False, "session": session, **gate}
-    if _pane_busy(session):
+    if _pane_busy(session, nudge_safe=True):
         return {"woke": False, "why": "busy (mid-turn)", "session": session}
     if dry_run:
         return {"woke": False, "why": "dry-run", "session": session, "signal": _SIGNAL}
