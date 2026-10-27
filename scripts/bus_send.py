@@ -544,13 +544,25 @@ def resolve_sub_tag(from_agent: str, env: dict) -> str | None:
     instance id instead, which duplicates the id into from_agent rather than
     recording it where the schema already has a column for exactly this.
 
-    Returns CC_AGENT_ID when present and distinct from from_agent (the normal
-    multi-instance case); None when absent (daemons/singletons with no
-    sub-tag) or equal to from_agent (an explicit --from already named the
-    instance, so sub_tag would be pure duplication).
+    Returns CC_AGENT_ID when present, distinct from from_agent, AND in the
+    SAME family as from_agent (i.e. it starts with "{from_agent}-"); None
+    when absent (daemons/singletons with no sub-tag), equal to from_agent
+    (an explicit --from already named the instance, so sub_tag would be
+    pure duplication), or from a DIFFERENT family.
+
+    The family check matters because CC_AGENT_ID is the CALLING process's
+    own identity, inherited from whatever lane context invoked it -- it has
+    no relation to --from's family just because the two values differ. A
+    cross-family value isn't just wrong attribution: the DB's
+    agent_messages_sub_tag_family_prefix_chk constraint requires sub_tag to
+    start with from_agent + "-", so returning one here would get the WHOLE
+    row silently rejected, not just the sub_tag (self-caught near-miss, bus
+    #78926/#78927).
     """
     sub_tag = env.get("CC_AGENT_ID")
     if not sub_tag or sub_tag == from_agent:
+        return None
+    if not sub_tag.startswith(f"{from_agent}-"):
         return None
     return sub_tag
 

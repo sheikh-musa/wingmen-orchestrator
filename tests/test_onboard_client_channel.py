@@ -280,3 +280,130 @@ def test_write_invite_link_file_is_secret(tmp_path):
     tool.write_invite_link(link, "wingmendevbot", tok)
     assert link.read_text().strip() == f"https://t.me/wingmendevbot?start={tok}"
     assert stat.S_IMODE(link.stat().st_mode) == 0o600
+
+
+# ── op#22517 lockstep render (console-revamp #78815 fast-follow a) ───────────
+# A client channel's Mini pin (boot_nazim_ingest.sh INGEST_CHANNELS) and its
+# _CONSOLE_POLLED_CLIENT_TAGS entry must move in the SAME render pass -- the
+# half-pair my 126 render shipped broke the drift guard in CI until
+# console-revamp's 7699f50. These tests pin the renderer's side of that pair.
+
+_OPERATOR_LOG_FIXTURE = '''\
+# (fixture shaped like the real constant block, nervous_system/operator_log.py)
+_LANE_OWNED_TAGS = ("hk-editor", "mamadah", "coffeemedia")
+
+_CONSOLE_POLLED_CLIENT_TAGS = frozenset({
+    "cosem-caai", "cosem-exams", "alderei",  # 2026-08-03
+    "cosem-tdu", "angullia",                  # 2026-09-27 (op#22517 fix)
+    "oeh",                                     # 2026-09-27 (op#22521/bus#43713)
+})
+
+def _after(): pass
+'''
+
+
+def _write_operator_log(tmp_path, extra_tag=None):
+    text = _OPERATOR_LOG_FIXTURE
+    if extra_tag:
+        text = text.replace(
+            "})\n\ndef _after",
+            f'\n    "{extra_tag}",'
+            + " " * max(1, 37 - len(extra_tag))
+            + "# 2026-10-27 (test fixture)\n})\n\ndef _after",
+        )
+    ol = tmp_path / "operator_log.py"
+    ol.write_text(text)
+    return ol
+
+
+def _frozenset_block(text):
+    import re as _re
+    m = _re.search(r"_CONSOLE_POLLED_CLIENT_TAGS = frozenset\(\{(.*?)\n\}\)", text, _re.DOTALL)
+    assert m, "fixture lost its _CONSOLE_POLLED_CLIENT_TAGS block"
+    return m.group(1)
+
+
+def test_render_polled_tags_diff_adds_client_tag(tmp_path):
+    ol = _write_operator_log(tmp_path)
+    with mock.patch.object(tool, "OPERATOR_LOG", ol):
+        diff = tool.render_polled_tags_diff("zz-new")
+    assert diff is not None
+    old_text, new_text = diff
+    block = _frozenset_block(new_text)
+    # the tag lands INSIDE the frozenset, with the date-commented entry shape
+    assert f'    "zz-new",' in block
+    from datetime import datetime
+    assert f'# {datetime.now().strftime("%Y-%m-%d")} auto lockstep (onboard render)' in block
+    # idempotence input: every existing entry survives untouched
+    for existing in ("cosem-caai", "angullia", "oeh"):
+        assert f'"{existing}"' in block
+
+
+def test_render_polled_tags_diff_idempotent_when_tag_present(tmp_path):
+    ol = _write_operator_log(tmp_path, extra_tag="bariq")
+    with mock.patch.object(tool, "OPERATOR_LOG", ol):
+        assert tool.render_polled_tags_diff("bariq") is None
+        assert tool.render_polled_tags_diff("zz-new") is not None  # heals a tag-side gap
+
+
+def test_render_polled_tags_diff_refuses_missing_constant(tmp_path):
+    ol = tmp_path / "operator_log.py"
+    ol.write_text("def _after(): pass\n")  # no frozenset block at all
+    with mock.patch.object(tool, "OPERATOR_LOG", ol):
+        with pytest.raises(SystemExit):
+            tool.render_polled_tags_diff("zz-new")
+
+
+def _fake_conn(rows=()):
+    conn = mock.MagicMock()
+    conn.cursor.return_value = FakeCursor(list(rows))
+    return conn
+
+
+def _render_via_main(tmp_path, audience):
+    """Run tool.main() end-to-end against tmp fixtures for both lockstep
+    files, the way a lane actually renders a Mini client onboarding."""
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    boot = tmp_path / "boot_nazim_ingest.sh"
+    boot.write_text('#!/bin/bash\nINGEST_CHANNELS="nazim-console"\n')
+    ol = _write_operator_log(tmp_path)
+    argv = [
+        "--channel-key", "zz-new", "--chat-id", "123",
+        "--token-env-key", "ZZ_TOKEN", "--mode", "agent-session",
+        "--inject-target", "zz-new", "--audience", audience,
+        "--owner-lane", "cc-bariq", "--host", "mini", "--store", "none",
+        "--self-description", "Site-edit channel for the zz-new client",
+    ]
+    with mock.patch.object(tool, "connect", return_value=_fake_conn()), \
+         mock.patch.object(tool, "ORCH_DIR", tmp_path), \
+         mock.patch.object(tool, "MIGRATIONS_DIR", migrations), \
+         mock.patch.object(tool, "INGEST_SCRIPT", boot), \
+         mock.patch.object(tool, "OPERATOR_LOG", ol), \
+         mock.patch.object(tool, "LIVE_CHECKOUT", tmp_path):
+        rc = tool.main(argv)
+    assert rc == 0
+    return boot, ol, migrations
+
+
+def test_main_mini_client_pins_boot_script_and_polled_tag_in_one_pass(tmp_path):
+    boot, ol, migrations = _render_via_main(tmp_path, "client")
+    # the migration rendered...
+    assert list(migrations.glob("*_zz_new_onboarding.sql"))
+    # ...AND the boot-script pin...
+    import re as _re
+    pinned = _re.search(r'INGEST_CHANNELS="([^"]+)"', boot.read_text()).group(1)
+    assert "zz-new" in pinned.split(",")
+    # ...AND the op#22517 lockstep partner, in the SAME run -- never half a pair
+    assert '"zz-new"' in _frozenset_block(ol.read_text())
+
+
+def test_main_mini_internal_does_not_touch_polled_client_tags(tmp_path):
+    # internal Mini pins are lane-owned tags (operator_log._LANE_OWNED_TAGS),
+    # NOT console-polled client tags -- adding one to _CONSOLE_POLLED_CLIENT_TAGS
+    # would break the drift-guard equality itself.
+    boot, ol, migrations = _render_via_main(tmp_path, "internal")
+    import re as _re
+    pinned = _re.search(r'INGEST_CHANNELS="([^"]+)"', boot.read_text()).group(1)
+    assert "zz-new" in pinned.split(",")          # pin still happens
+    assert '"zz-new"' not in _frozenset_block(ol.read_text())  # tag add must not

@@ -126,6 +126,27 @@
 # dedicated side-table only post_agent_message's body writes to instead,
 # verified RED against the pre-migration content before the fix, GREEN
 # after. Existing switch_lane_token.sh test suites (35 tests) re-run clean.
+#
+# STEP 2, scripts/render_gate/render_gate.sh, 2026-10-28 (Musa op#34845,
+# console's ordering bus #78846/#78857): loud_warn()'s best-effort console
+# alert (the script's only raw-write call site) used a literal `psql -c
+# "...INSERT..."` call; migrated onto scripts/bus_send.py's send() (direct
+# import -- no pre-existing Python context here, unlike the CLI-subprocess
+# form used elsewhere). The CLI has no --posted-by-identity flag, and the
+# original explicitly set it to the literal 'cc-fleet-health' (not the DB
+# trigger's current_user auto-population) -- send() is called directly so
+# that nuance is preserved exactly, same as requires_response=true. No
+# existing test touched this. Unlike disk_space_monitor.sh, this heredoc's
+# DSN comes straight from $DATABASE_URL (no hardcoded live-.env parsing), so
+# it IS dynamically testable: added tests/test_render_gate_loud_warn_bus_
+# send.py, extracting the real heredoc text between its own `<<'PY'`/`PY`
+# markers and running it against an ephemeral Postgres. The usual discriminator
+# columns (thread_id, posted_by_identity) don't distinguish old vs. new here
+# (the old raw INSERT set the same literal posted_by_identity, and thread_id
+# has its own column DEFAULT) -- used a dedicated side-table only
+# post_agent_message's body writes to instead. Verified RED against the
+# pre-migration content (the heredoc markers don't exist pre-migration, so
+# extraction itself fails), GREEN after.
 
 scripts/irsyad_autoscaler.py
 scripts/irsyad_confirm_executor.py
@@ -135,7 +156,6 @@ scripts/irsyad_spin_worker.py
 scripts/irsyad_worker_reaper.py
 scripts/disk_space_monitor.sh
 scripts/fire_fix1a_grant_ping.sh
-scripts/render_gate/render_gate.sh
 legacy/ihsanos_drain/main.py
 
 # STEP 1b, 2026-10-27 (Musa op#34845, console's PR#551 GO + follow-up bus
