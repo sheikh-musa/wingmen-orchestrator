@@ -1,8 +1,26 @@
 -- 123_durable_inbox_enforce_bus_writer.sql
 -- ledger: silo=tscuymavysscrvoberrr
 -- (orchestrator substrate)
--- No -- assert: line needed -- this file contains no REVOKE/DROP FUNCTION (that
--- convention trigger) now that the revoke is split out to migration 124.
+-- assert: no_execute anon public.mark_delivered(bigint,integer)
+-- assert: no_execute authenticated public.mark_delivered(bigint,integer)
+-- assert: no_execute anon public.ack_message(bigint)
+-- assert: no_execute authenticated public.ack_message(bigint)
+--
+-- LIVE HOLE IN SCOPE (Musa op#34845, bus #78531, console's own live query on
+-- tscuymavysscrvoberrr): mark_delivered(bigint,integer)/ack_message(bigint) are
+-- SECURITY DEFINER; before this fix, anon and authenticated held EXECUTE on both via
+-- Supabase's standing ALTER DEFAULT PRIVILEGES rule (same mechanism as migration 122's
+-- finding D on post_agent_message) -- migration 117's own `REVOKE EXECUTE ... FROM
+-- PUBLIC` never touched it, since PUBLIC is not anon/authenticated as individual roles.
+-- That meant anyone holding the public anon key could mark ANY bus row delivered or
+-- acked via PostgREST. This file's REVOKE below (plus the asserts above, which the
+-- applier checks AFTER the SQL runs so a silent no-op REVOKE can't pass) is the fix.
+-- service_role keeps its EXECUTE (migration 117's original grant, untouched here --
+-- it's the only legitimate caller path, though no in-repo script calls either RPC yet;
+-- grep confirms zero callers in scripts/ or nervous_system/ outside tests/).
+-- This file DOES now contain a REVOKE (triggering the applier's assert-required
+-- convention), unlike migration 124 (the separate, still-deferred PR-B revoke of
+-- service_role/postgres direct INSERT on the table itself).
 --
 -- PR SPLIT (Musa op#34845, bus #78393 ruling, superseding the plan below of "124 lands
 -- once the writer gate is green"): migration 124 does NOT ship in this PR. orch-console's
@@ -155,3 +173,9 @@ END $$;
 ALTER FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text) OWNER TO bus_writer;
 ALTER FUNCTION mark_delivered(bigint,integer) OWNER TO bus_writer;
 ALTER FUNCTION ack_message(bigint) OWNER TO bus_writer;
+
+-- Musa op#34845, bus #78531: close the anon/authenticated EXECUTE hole (see header).
+-- FROM PUBLIC repeated here too (harmless no-op if migration 117's own REVOKE already
+-- holds) so this file is self-contained and correct regardless of 117's state.
+REVOKE EXECUTE ON FUNCTION mark_delivered(bigint,integer) FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION ack_message(bigint) FROM PUBLIC, anon, authenticated;

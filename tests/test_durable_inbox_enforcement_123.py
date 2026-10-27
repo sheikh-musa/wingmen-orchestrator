@@ -224,6 +224,17 @@ def _setup_base_and_123(cur):
         if cur.fetchone() is None:
             cur.execute(f"CREATE ROLE {role}")
 
+    # Supabase's standing ALTER DEFAULT PRIVILEGES rule (Musa op#34845, bus #78531
+    # console live finding): grants EXECUTE on every NEW function to anon/authenticated/
+    # service_role individually, at CREATE time -- separate from and unaffected by a
+    # later REVOKE EXECUTE ... FROM PUBLIC. Must be set BEFORE migration_117 runs (it
+    # creates mark_delivered/ack_message) to reproduce the live anon/authenticated
+    # EXECUTE hole console found on tscuymavysscrvoberrr.
+    cur.execute(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "GRANT EXECUTE ON FUNCTIONS TO anon, authenticated, service_role"
+    )
+
     cur.execute(_AGENT_MESSAGES_SCHEMA)
     cur.execute("ALTER TABLE agent_messages ENABLE ROW LEVEL SECURITY")
     cur.execute(
@@ -460,8 +471,23 @@ def test_work_item_mirror_resolves_from_agent_when_responded_at_preset_with_123_
     )
 
 
-
-
+def test_anon_and_authenticated_cannot_execute_mark_delivered_or_ack_message(additive_db):
+    """Musa op#34845, bus #78531 (console's own live finding on tscuymavysscrvoberrr):
+    mark_delivered/ack_message are SECURITY DEFINER and, before this fix, anon and
+    authenticated held EXECUTE via Supabase's standing ALTER DEFAULT PRIVILEGES rule
+    (same mechanism as finding D on post_agent_message) -- unaffected by migration 117's
+    own `REVOKE EXECUTE ... FROM PUBLIC` (PUBLIC is not anon/authenticated). That meant
+    anyone holding the public anon key could mark ANY bus row delivered or acked via
+    PostgREST. service_role must keep EXECUTE (migration 117's original grant, untouched)
+    since that is the legitimate caller path."""
+    with additive_db.cursor() as cur:
+        for role in ("anon", "authenticated"):
+            for fn in ("mark_delivered(bigint,integer)", "ack_message(bigint)"):
+                cur.execute("SELECT has_function_privilege(%s, %s, 'EXECUTE')", (role, fn))
+                assert cur.fetchone()[0] is False, f"{role} can still EXECUTE {fn}"
+        for fn in ("mark_delivered(bigint,integer)", "ack_message(bigint)"):
+            cur.execute("SELECT has_function_privilege(%s, %s, 'EXECUTE')", ("service_role", fn))
+            assert cur.fetchone()[0] is True, f"service_role lost its legitimate EXECUTE on {fn}"
 
 
 

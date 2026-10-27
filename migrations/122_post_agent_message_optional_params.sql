@@ -3,7 +3,16 @@
 -- (orchestrator substrate)
 -- assert: dropped public.post_agent_message(text,text,text,text,text,text,boolean,uuid,text)
 -- assert: no_execute public public.post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text)
+-- assert: no_execute anon public.post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text)
+-- assert: no_execute authenticated public.post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text)
 -- assert: search_path public.post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text)
+--
+-- Musa op#34845, bus #78531: the applier (apply_migration.py) verifies privilege
+-- claims AFTER the SQL runs, because a REVOKE can silently no-op (exactly finding D
+-- below -- the FROM PUBLIC revoke never touched anon/authenticated's own default-ACL
+-- grant). The no_execute public assert alone would have passed even with finding D's
+-- bug still live (PUBLIC was genuinely revoked); only the anon/authenticated asserts
+-- added here actually prove the fix at apply time instead of trusting the REVOKE line.
 --
 -- backlog#124 (orch-console ruling, bus #74939): the 3 scripts held back from the
 -- one-shots migration (lane_drill_seed.py, nervous_system/qwen_lane.py,
