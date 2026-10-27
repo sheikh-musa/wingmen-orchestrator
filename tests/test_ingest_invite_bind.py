@@ -509,3 +509,28 @@ def test_invite_pending_window_is_unused_and_unexpired(bind_dsn):
     _seed_invite(bind_dsn, "bariq", "tok-live", hours=48)
     with psycopg.connect(bind_dsn) as conn:
         assert ingest.invite_pending(conn, "bariq")
+
+
+def test_empty_allowlist_watchdog_survives_invite_check_failure(bind_dsn, monkeypatch):
+    """#78884 (orch-console 78883, GO condition on PR #556): the Mini
+    demonstrably loses DNS for minutes at a time — an unguarded
+    invite-pending check raises inside the inbound daemon, the worst
+    possible place. Any failure must log one line and fall back to the
+    pre-fix behavior (KEEP the warning): fail loud, never crash."""
+    monkeypatch.setenv("SHARED_BOT_TOKEN", "fake-token-value")
+    _seed_desc_channel(bind_dsn, "bariq", "SHARED_BOT_TOKEN", BARIQ_DESC)
+    _seed_channel(bind_dsn, "sibling", "SHARED_BOT_TOKEN", chat_ids=[999])
+    _seed_invite(bind_dsn, "bariq", "tok-pending", hours=48)
+
+    def _boom(conn, channel_key):
+        raise RuntimeError("simulated DNS loss / pooler refusal")
+    monkeypatch.setattr(ingest, "invite_pending", _boom)
+
+    captured = []
+    monkeypatch.setattr(ingest, "_log_line", lambda msg: captured.append(msg))
+    monkeypatch.setattr(ingest, "tg_call", _Recorder([]))
+    _run_cycle(bind_dsn, "SHARED_BOT_TOKEN")  # must complete, not raise
+    # the pre-fix behavior is kept: the warning fires for the empty-allowlist row
+    assert [m for m in captured if "EMPTY allowed_chat_ids" in m and "'bariq'" in m]
+    # and exactly one line says why the skip didn't apply (fails loud)
+    assert [m for m in captured if "invite-pending check failed" in m]

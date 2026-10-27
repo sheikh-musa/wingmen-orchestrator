@@ -1681,8 +1681,17 @@ async def _run_token_cycle(token_env_key: str, channels: dict[str, Channel],
         # the "never match any message" claim below is stale for exactly that
         # window. The check costs one connection only when a group actually
         # has an empty-allowlist row.
-        with psycopg.connect(_dsn()) as wconn:
-            misconfigured = [k for k in misconfigured if not invite_pending(wconn, k)]
+        # (#78884, orch-console 78883 — GO condition on PR #556): this
+        # connect runs inside the inbound daemon cycle, and the Mini
+        # demonstrably loses DNS for minutes at a time — any failure here
+        # logs one line and falls back to the pre-fix behavior (keep the
+        # warning). Fail loud, never crash the poller.
+        try:
+            with psycopg.connect(_dsn()) as wconn:
+                misconfigured = [k for k in misconfigured if not invite_pending(wconn, k)]
+        except Exception as exc:  # noqa: BLE001 — the whole point is "never crash here"
+            _log_line(f"WATCHDOG: invite-pending check failed ({type(exc).__name__}) -- "
+                      "warning on all empty-allowlist rows")
     for misconfigured_key in misconfigured:
         _log_line(f"WATCHDOG: {token_env_key}: '{misconfigured_key}' has an EMPTY "
                   f"allowed_chat_ids/allowed_usernames in a {len(group)}-channel "
