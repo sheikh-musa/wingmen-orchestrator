@@ -1,0 +1,8 @@
+builds.html render evidence (op#34918/34919, fc-v87, commits 2f1582f+52f6776+3b2a7a3)
+— lane cc-console-revamp-1. iPhone-13 Playwright render with stubbed
+/api/build-status (2 programmes, 1 measured ask 5.1h, 1 not-measured ask).
+DOM asserts green: 2 programme cards, chip classes building/next, last
+progress, next check-in, FULL ask title present (78520 note 1), delivery
+times in Dubai UTC+4 — 09:14Z renders 13:14, 14:21Z renders 18:21, no UTC
+leak (78520 note 2), not-measured row paints NO time, badge fc-v87. PNG:
+builds-390.png. The deploy-gate render re-renders with LIVE data at ship.
