@@ -192,7 +192,18 @@ def refuse_if_instance_stale_and_base_live(to: str, dsn: str | None = None) -> N
         return
     row = _agent_status_row(to, dsn=dsn)
     if row is None:
-        return  # no status row at all -- not this guard's concern
+        # An instance of a SINGLETON base with no status row at all is a dead address: it
+        # used to be waved through here. Console's GO rulings #78373/#78383 went to
+        # 'cc-fleet-health-1' (a stale agents row, no status row) and sat unread while the
+        # doorbell rang the real body for mail it couldn't see. Not a blanket ban on -N:
+        # auditor singletons do run live instances (cc-finance-1 is live), which have rows.
+        _base = re.sub(r"-\d+$", "", to)
+        if is_singleton_base(_base):
+            raise SystemExit(
+                f"bus_send: REFUSED — '{to}' has no agent_status row (no live body) and its "
+                f"base '{_base}' is a singleton. Use --to {_base} instead."
+            )
+        return  # not a singleton's instance -- not this guard's concern
     base_agent_id, to_is_live = row
     if not base_agent_id or base_agent_id == to or to_is_live:
         return  # `to` IS the base, or the instance itself is live -- nothing stranded
