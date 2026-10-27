@@ -199,6 +199,47 @@ Not for the fleet: the cooking, the brand-voice decisions, and anything that nee
 
 ---
 
+## NOVEL IDEAS (op#34981-82): five moves from this lane's vantage point
+
+Written after a full read of the portfolio, the strategy docs and the money record. Each has one line on why it is feasible for Wingmen specifically, the first concrete step, and what it unlocks.
+
+### N1. The speculative-build engine: turn perishable token capacity into a weekly free prototype for a warm prospect
+
+- **The idea.** Every week the fleet builds one working prototype (a deployed demo tenant with synthetic data, not a mock) for the warmest unconverted lead on the revenue ledger, publishes it on share.wingmen.dev with a price attached, and the operator sends one message: "we built this for you, here is what it costs to make it yours". A public "built this week" feed becomes the marketing.
+- **Why feasible for us.** The Claude Max weekly pools reset and unused capacity is lost; the design pipeline, quality reviewer, demo tenants (Meridian Training Academy, the storefront demo store, the HR demo) and share.wingmen.dev already exist. No human agency can afford to build before being paid; this fleet already pays for the capacity whether it builds or not.
+- **First step.** A small `speculative_builds` queue fed from cc-finance's opportunity list, triggered when the fleet SRE's pool-usage signal shows under 60 percent used by day four of the window. First target: the SushiTei Phase 0 outlet demo.
+- **Unlocks.** Sales without a salesperson, a proof-of-work pipeline instead of proposals, and a weekly public artefact that compounds into reputation.
+
+### N2. Sell the governance, not the code: a hosted assurance gate for other teams' AI agents
+
+- **The idea.** Package what makes this fleet safe (the ihsan gate's six checks, independent review on money and security changes, fail-closed hooks, hash-chained audit, residency checks) as a GitHub App plus a review lane that other small teams' agent fleets must pass before merge or deploy. "Your agents write the code; ours refuse to let it ship unreviewed."
+- **Why feasible for us.** The ihsan-gate manifest is already machine-readable, the pre-push and PreToolUse hooks exist and are tested in anger, and cc-quality already is the independent reviewer. The buyer category (teams adopting coding agents) is the fastest-growing one in software and carries no client-data residency burden for Wingmen, because the gate reads diffs, not customer rows.
+- **First step.** Install the pre-push hook plus ihsan-gate manifest as a GitHub App on one external repo (a Gazzabyte project) and have cc-quality post its verdict as a required check. Charge per repo per month.
+- **Unlocks.** A product built on the one asset no competitor has copied (two years of governance doctrine enforced in code), with margins that do not depend on the operator's hours.
+
+### N3. "Your Supabase, our software": make the Gazzabyte hosting pattern the standard commercial shape
+
+- **The idea.** irsyad already runs in the partner's own Supabase org at zero infrastructure cost to Wingmen. Make that the default for every client: the client owns the silo and pays the cloud bill directly; Wingmen sells software plus operations as a subscription with an export-anytime guarantee written into the contract.
+- **Why feasible for us.** One-repo-zero-forks and per-client silos are already enforced doctrine; the direct-apply migration tooling already handles multiple stores; the registry already tracks each store's ref and region. The Gulf and Muslim-institution markets want exactly this and cannot buy it from US SaaS.
+- **First step.** A one-page "bring your own Supabase" onboarding runbook (project creation, region, roles, the migration applier pointed at it, the export script) applied to the next madrasah or mosque on day one.
+- **Unlocks.** The honest sovereignty pitch at last (the data really is theirs, in their jurisdiction), infrastructure cost that stays flat as clients grow, and the residency gate turned from a sales blocker into the sales argument.
+
+### N4. Provably conflict-free scheduling as one engine across four verticals
+
+- **The idea.** The AI course administrator's "model proposes, solver proves" engine is not an academy feature. Point it at madrasah timetables and teacher allocation (irsyad), restaurant rostering across 14 outlets (SushiTei), mosque programme and venue scheduling (Idea 3), and cook-day capacity for home-based sellers (the storefront's caps and fulfilment calendar are already the data). Brand property: "a timetable that is proven, not guessed".
+- **Why feasible for us.** The constraint model, the independent verifier and the SME-validated spec exist; the storefront already stores caps, cut-offs and calendars; irsyad already stores classes and teachers. Nobody else in these markets has a solver, and the LLM-only competitors cannot promise conflict-freeness.
+- **First step.** Expose the scheduler as an internal service and call it from the storefront's fulfilment calendar for Hadramawt Kitchen's weekly capacity plan; measure one week of real use.
+- **Unlocks.** One engine amortised across every vertical, a premium tier for Ideas 1, 3, 5 and 6, and a defensible technical claim.
+
+### N5. A second-brain-native company: the vault steers the fleet and the fleet writes the vault
+
+- **The idea.** Go beyond the read-only projection now in flight. Every decision, ask, held commitment and revenue event lands as a dated capture in the operator's vault inbox; once a week the fleet reads the vault for new intents the operator wrote in his own words and turns them into asks on the ledger; this report's ideas live there as a living board with an honest scoreboard per idea (tested, paying, dead).
+- **Why feasible for us.** The vault audit is done, the capture rules and protected folders are defined, the asks ledger and ingest already exist, and the operator already thinks by writing notes. The missing piece is a two-way loop, not new infrastructure.
+- **First step.** A nightly read-only projection of open asks, the revenue ledger and this report's ten ideas into the vault inbox as captures, with a freshness stamp; then one weekly "intents from the vault" pass that proposes asks and never writes to protected folders.
+- **Unlocks.** The operator directs the company by writing, the strategy memory survives every agent reset, and the fleet stops depending on whoever remembers what Musa said in July.
+
+---
+
 ## Appendix: research briefs (five read-only subagents, 2026-10-27, summarised)
 
 - **COSEM / ADCDA.** Live Firebase PWA with roughly 90 to 157 cloud functions; onboarding, skill sheets, attendance, observations, inventory, reports, phone-OTP and passkey login. cosem-platform (Supabase, Singapore) owns scheduling and is the convergence target. Scheduling direction changed on 2026-10-19 from engine-solve to a drag-and-drop editor with live clash checks. Residency is the main blocker: government ID data on Firestore; on-premise or sovereign hosting needs the Postgres move. No pricing or contract found. Sources: `docs/data-store-registry.md`, memory `project_adcda_platform_convergence`, `reference_adcda_onprem_residency_requires_firestore_to_postgres`, `project_cosem_theory_omr_trial_spec`.
