@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import json
 import os
 import pathlib
 import sys
@@ -140,6 +141,135 @@ def _notify(cur, to_agent: str, subject: str, body: str, priority: str = "P1",
     return cur.fetchone()["id"]
 
 
+# hc#581 (console #78229/#78250): every open operator ask with a committed_date gets ONE
+# held_commitment owned by the console, so a lane that misses its date pages the console at
+# the deadline through the fire path below. No new daemon: hydrated at the top of each sweep.
+ASK_SOURCE_PREFIX = "operator_asks:"
+ASK_CHANNEL_TAG = "operator-asks"
+# committed_date stored at exactly 00:00:00Z is a DATE, not a time (164 rows, some earlier
+# than their own ask). Console ruling #78250: it means the END of that day in Musa's
+# timezone. Any other time is an exact deadline.
+MUSA_TZ = "Asia/Dubai"
+
+
+def ask_deadline(committed: _dt.datetime) -> _dt.datetime:
+    """committed_date -> the moment the console should be paged (UTC)."""
+    from zoneinfo import ZoneInfo
+    u = committed.astimezone(_dt.timezone.utc)
+    if (u.hour, u.minute, u.second, u.microsecond) != (0, 0, 0, 0):
+        return u
+    end = _dt.datetime.combine(u.date() + _dt.timedelta(days=1), _dt.time(0),
+                               tzinfo=ZoneInfo(MUSA_TZ))
+    return end.astimezone(_dt.timezone.utc)
+
+
+def plan_ask_commitments(asks: list[dict], existing: list[dict]) -> list[tuple]:
+    """PURE: what to change so each ask has exactly the commitment it should.
+
+    Returns ('insert', ask, deadline) | ('reschedule', row, deadline) | ('cancel', row, reason).
+    - open ask, no active row (and no earlier row at/after this deadline) -> insert
+    - open ask, pending row with a different deadline                    -> reschedule
+    - open ask, FIRED row but the lane re-committed to a LATER date       -> cancel + insert
+    - ask closed (or no longer triaged 'ask') with an active row          -> cancel
+    Closing the ask is itself the attributable record that the promise resolved, so the
+    commitment is CANCELLED with that reason — never DISCHARGED (rule 1 above) — which also
+    stops the fired-row escalation re-paging the console every ESCALATE_AFTER."""
+    by_ref: dict[str, list[dict]] = {}
+    for r in existing:
+        if (r.get("source_ref") or "").startswith(ASK_SOURCE_PREFIX):
+            by_ref.setdefault(r["source_ref"], []).append(r)
+    out = []
+    for a in asks:
+        rows = by_ref.get(f"{ASK_SOURCE_PREFIX}{a['id']}", [])
+        active = [r for r in rows if r["status"] in ("pending", "fired")]
+        is_open = a.get("closed_at") is None and a.get("triage_state") == "ask"
+        if not is_open:
+            why = (f"ask #{a['id']} closed ({a.get('closed_reason') or 'no reason given'})"
+                   if a.get("closed_at") else
+                   f"ask #{a['id']} re-triaged to {a.get('triage_state')}")
+            out.extend(("cancel", r, why) for r in active)
+            continue
+        if a.get("committed_date") is None:
+            continue
+        deadline = ask_deadline(a["committed_date"])
+        if active:
+            for r in active:
+                if r["status"] == "pending" and r["due_at"] != deadline:
+                    out.append(("reschedule", r, deadline))
+                elif r["status"] == "fired" and deadline > r["due_at"]:
+                    out.append(("cancel", r, f"re-committed to {deadline:%Y-%m-%d %H:%M}Z"))
+                    out.append(("insert", a, deadline))
+            continue
+        if not rows or max(r["due_at"] for r in rows) < deadline:
+            out.append(("insert", a, deadline))
+    return out
+
+
+def hydrate_ask_commitments(conn, fire: bool) -> int:
+    """Impure: apply plan_ask_commitments in its OWN tx (rolled back on dry-run), before the
+    core sweep, so a hydrate failure can never stop existing commitments firing. Returns the
+    number of changes."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT oa.id, oa.source_msg_id AS op, oa.delegated_to, oa.committed_date,
+                      oa.closed_at, oa.closed_reason, oa.triage_state,
+                      left(coalesce(oa.triage_summary, oa.ask), 200) AS summary
+                 FROM operator_asks oa
+                WHERE (oa.committed_date IS NOT NULL AND oa.closed_at IS NULL
+                       AND oa.triage_state = 'ask')
+                   OR EXISTS (SELECT 1 FROM held_commitments h
+                               WHERE h.source_ref = %s || oa.id
+                                 AND h.status IN ('pending','fired'))""",
+            (ASK_SOURCE_PREFIX,))
+        asks = cur.fetchall()
+        cur.execute(
+            "SELECT id, source_ref, status, due_at FROM held_commitments "
+            "WHERE source_ref LIKE %s", (ASK_SOURCE_PREFIX + "%",))
+        existing = cur.fetchall()
+        plan = plan_ask_commitments(asks, existing)
+        for kind, obj, arg in plan:
+            if kind == "insert":
+                lane = obj.get("delegated_to") or "(no lane delegated)"
+                title = (f"op#{obj.get('op')} ask #{obj['id']} past its committed date — "
+                         f"lane {lane}")
+                # held_commitments_payload_valid_json: payload must parse as JSON
+                payload = json.dumps({
+                    "op": obj.get("op"), "ask_id": obj["id"], "lane": lane,
+                    "ask": obj.get("summary") or "",
+                    "committed_for": f"{arg:%Y-%m-%d %H:%M}Z",
+                    "what_to_do": ("Chase the lane or re-commit the date with Musa. This "
+                                   "commitment cancels itself when the ask is closed "
+                                   "(scripts/asks_close.py) — close the ask, don't discharge "
+                                   "this row by hand."),
+                })
+                cur.execute(
+                    """INSERT INTO held_commitments
+                         (owner_agent, title, payload, due_at, status, source_ref,
+                          channel_tag, created_by)
+                       VALUES (%s, %s, %s, %s, 'pending', %s, %s, %s)""",
+                    (CONSOLE, title[:300], payload, arg, f"{ASK_SOURCE_PREFIX}{obj['id']}",
+                     ASK_CHANNEL_TAG, FROM_AGENT))
+                print(f"{'' if fire else '[dry-run] '}ASK-COMMIT insert ask #{obj['id']} "
+                      f"due {arg:%Y-%m-%d %H:%M}Z")
+            elif kind == "reschedule":
+                cur.execute(
+                    "UPDATE held_commitments SET due_at=%s, updated_at=now() "
+                    "WHERE id=%s AND status='pending'", (arg, obj["id"]))
+                print(f"{'' if fire else '[dry-run] '}ASK-COMMIT reschedule #{obj['id']} "
+                      f"-> {arg:%Y-%m-%d %H:%M}Z")
+            else:
+                cur.execute(
+                    "UPDATE held_commitments SET status='cancelled', cancelled_at=now(), "
+                    "cancel_reason=%s, updated_at=now() "
+                    "WHERE id=%s AND status IN ('pending','fired')", (arg, obj["id"]))
+                print(f"{'' if fire else '[dry-run] '}ASK-COMMIT cancel #{obj['id']}: {arg}")
+    if fire:
+        conn.commit()
+    else:
+        conn.rollback()
+    return len(plan)
+
+
 def sweep(fire: bool) -> int:
     dsn = _dsn()
     if not dsn:
@@ -148,6 +278,20 @@ def sweep(fire: bool) -> int:
               file=sys.stderr)
         return 2
 
+    hydrate_failed = False
+    try:
+        with psycopg.connect(dsn, connect_timeout=20, row_factory=dict_row) as hconn:
+            hydrate_ask_commitments(hconn, fire)
+    except Exception as e:  # noqa: BLE001 — the core sweep must still run; exit non-zero below
+        hydrate_failed = True
+        print(f"commitment_sweeper: ASK-COMMIT HYDRATE FAILED: {type(e).__name__}: {e}",
+              file=sys.stderr)
+
+    rc = _sweep_due(dsn, fire)
+    return rc if rc else (3 if hydrate_failed else 0)
+
+
+def _sweep_due(dsn: str, fire: bool) -> int:
     fired = escalated = skipped_unowned = 0
 
     with psycopg.connect(dsn, connect_timeout=20, row_factory=dict_row) as conn:
