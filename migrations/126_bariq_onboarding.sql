@@ -1,4 +1,4 @@
--- 122_bariq_onboarding.sql
+-- 126_bariq_onboarding.sql
 -- ledger: silo=tscuymavysscrvoberrr
 -- (orchestrator substrate)
 --
@@ -68,5 +68,5 @@ REVOKE ALL ON public.bot_channel_invites FROM PUBLIC, anon, authenticated;
 INSERT INTO public.bot_channel_invites
   (channel_key, token_hash, expires_at, created_by)
 VALUES
-  ('bariq', '1d76d967baad411920170e281eb37e2bef95d0edb9ccd97d194349ee1a3dc32a', now() + make_interval(hours => 72), 'cc-bariq')
+  ('bariq', '68dd84b5ad2e68907f463a062b77bab4ffb11c3749b0d560e7107eabd03d9a75', now() + make_interval(hours => 72), 'cc-bariq')
 ON CONFLICT (token_hash) DO NOTHING;
