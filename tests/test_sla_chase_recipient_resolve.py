@@ -162,3 +162,37 @@ def test_send_client_ask_chase_summary_no_op_for_empty_batch(monkeypatch):
     ok = w.send_client_ask_chase_summary(conn, [])
     assert ok is True
     assert conn.executed == []  # never even connects for an empty batch
+
+
+# ── 10-27: a lane row 'down' on THIS registry is intent, not liveness ────────
+def test_down_lane_with_live_instance_on_another_host_routes_to_the_instance():
+    resolved, reason = w.resolve_recipient(
+        "irsyad-coord", {"cc-irsyad-coord", "cc-irsyad-coord-1"},
+        {"irsyad-coord": "cc-irsyad-coord"}, {"irsyad-coord", "cc-irsyad-coord"},
+        {"cc-irsyad-coord": ["cc-irsyad-coord-1"]})
+    assert resolved == "cc-irsyad-coord-1" and "is live" in reason
+
+
+def test_down_base_id_owner_with_one_live_instance_routes_to_it():
+    resolved, _ = w.resolve_recipient(
+        "cc-irsyad-coord", {"cc-irsyad-coord"}, {}, {"cc-irsyad-coord"},
+        {"cc-irsyad-coord": ["cc-irsyad-coord-1"]})
+    assert resolved == "cc-irsyad-coord-1"
+
+
+def test_down_lane_with_several_live_instances_is_ambiguous_never_guessed():
+    resolved, reason = w.resolve_recipient(
+        "cc-cosem-adcda", {"cc-cosem-adcda"}, {}, {"cc-cosem-adcda"},
+        {"cc-cosem-adcda": ["cc-cosem-adcda-3", "cc-cosem-adcda-1", "cc-cosem-adcda-2"]})
+    assert resolved is None and "ambiguous" in reason and "3 live instances" in reason
+
+
+def test_down_lane_with_no_live_instance_still_skips():
+    resolved, reason = w.resolve_recipient(
+        "cc-oeh", {"cc-oeh"}, {}, {"cc-oeh"}, {"cc-other": ["cc-other-1"]})
+    assert resolved is None and "desired_state=down" in reason
+
+
+def test_without_live_instances_behaviour_is_unchanged():
+    resolved, reason = w.resolve_recipient("cc-oeh", {"cc-oeh"}, {}, {"cc-oeh"})
+    assert resolved is None and "desired_state=down" in reason
