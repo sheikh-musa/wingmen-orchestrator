@@ -1052,6 +1052,21 @@ def _bus_insert(from_agent, to_agent, mtype, priority, subject, body, req: bool 
         return row_id
 
 
+def _still_unread(ids) -> list:
+    """The subset of `ids` still unread and un-skipped RIGHT NOW. On any DB problem return
+    `ids` unchanged (old behavior: a hiccup must never swallow a genuine nudge)."""
+    ids = [i for i in (ids or []) if i is not None]
+    if not ids or not _DSN:
+        return ids
+    try:
+        with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+            cur.execute("SELECT id FROM agent_messages WHERE id = ANY(%s) "
+                        "AND read_at IS NULL AND skipped_at IS NULL", (ids,))
+            return [r[0] for r in cur.fetchall()]
+    except Exception:  # noqa: BLE001
+        return ids
+
+
 def _default_nudge(agent: str, ids: list, wake=wake_agent) -> "int | None":
     """Post ONE bus row to `agent` naming its unread ids, then deliver it via the NORMAL
     doorbell (agent_wake.wake_agent) — never a raw pane injection."""
@@ -1093,7 +1108,7 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session,
                       is_offline_stale=_is_offline_stale, mark=_mark_skipped,
                       idle_confirm_samples: int = IDLE_UNREAD_IDLE_CONFIRM_SAMPLES,
                       idle_confirm_gap_s: float = IDLE_UNREAD_IDLE_CONFIRM_GAP_S,
-                      sleep=None) -> dict:
+                      sleep=None, still_unread=None) -> dict:
     """For each recipient (is_wake_eligible_recipient — never a human/operator, the hub only
     on ITS OWN wake floor which this age-only signal never satisfies so the hub is simply
     never nudged here) whose pane is IDLE (never busy — 'esc to interrupt') but has directed
@@ -1125,6 +1140,9 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session,
     apart, and a busy reading on ANY of them skips the agent as busy (no nudge, no warn, dedup
     state untouched)."""
     sleep = time.sleep if sleep is None else sleep
+    if still_unread is None:
+        # Injected rows (tests/callers) carry their own truth; only DB-fetched rows re-check.
+        still_unread = _still_unread if rows is None else (lambda ids: list(ids))
     if rows is None:
         rows = _fetch_idle_unread_rows(min(nudge_age_s, nudge_age_fast_s))
     now_dt = now_dt if now_dt is not None else datetime.now(timezone.utc)
@@ -1206,6 +1224,17 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session,
             if went_busy:
                 skipped_busy.append(agent)
                 continue
+            # STALE-SNAPSHOT RE-CHECK (cc-fleet-health, 2026-10-27): `rows` was fetched at the
+            # top of the pass, and the confirmation above adds seconds per agent. adcda-1 read
+            # P1 #77852 at 10:52:27Z and was still warned at 10:52:37Z. Drop ids read/skipped
+            # since, and recompute what (if anything) is still due.
+            live = set(still_unread(sorted(set(nudge_ids) | set(warn_ids))))
+            nudge_ids = [i for i in nudge_ids if i in live]
+            warn_ids = [i for i in warn_ids if i in live]
+            if not nudge_ids:
+                continue
+            ids_key = frozenset(nudge_ids)
+            warn_due = bool(warn_ids) and warn_due
 
         if nudged_seen.get(agent) != ids_key:
             nudge(agent, nudge_ids)

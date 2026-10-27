@@ -612,3 +612,50 @@ def test_zero_confirm_samples_is_the_old_single_snapshot_behavior():
                           idle_confirm_samples=0)
     assert nudged == [("cc-oeh", (1,))]
     assert len(calls) == 1
+
+
+# ---- STALE-SNAPSHOT RE-CHECK (cc-fleet-health, 2026-10-27) -------------------------------
+# rows are fetched at the top of the pass; adcda-1 read P1 #77852 at 10:52:27Z and was still
+# warned at 10:52:37Z. Right before sending, ids read/skipped since must be dropped.
+
+def test_row_read_during_the_pass_is_neither_nudged_nor_warned():
+    nudged, warned, nudge, warn = _collector()
+    res = wbs.idle_unread_sweep(rows=[_row(1, "cc-cosem-adcda-1", 350, priority="P1")],
+                                resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+                                nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={},
+                                warned_seen={}, still_unread=lambda ids: [])
+    assert nudged == [] and warned == []
+
+
+def test_only_still_unread_ids_are_named():
+    nudged, warned, nudge, warn = _collector()
+    wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 2000), _row(2, "cc-oeh", 2000)],
+                          resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+                          nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={},
+                          still_unread=lambda ids: [i for i in ids if i == 2])
+    assert nudged == [("cc-oeh", (2,))]
+    assert warned == [("cc-oeh", (2,))]
+
+
+def test_recheck_runs_after_idle_confirmation_not_before():
+    order = []
+    pane_busy = lambda s: order.append("pane") or False
+    still = lambda ids: order.append("recheck") or list(ids)
+    nudged, warned, nudge, warn = _collector()
+    wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 1000)], resolve_session=lambda a: "sess",
+                          pane_busy=pane_busy, nudge=nudge, warn=warn, now_dt=_NOW,
+                          nudged_seen={}, warned_seen={}, still_unread=still)
+    assert order[-1] == "recheck" and order.count("pane") == 3
+
+
+def test_still_unread_keeps_ids_when_the_db_is_unavailable(monkeypatch):
+    monkeypatch.setattr(wbs, "_DSN", None)
+    assert wbs._still_unread([5, 6]) == [5, 6]
+
+    monkeypatch.setattr(wbs, "_DSN", "postgres://x")
+
+    def boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(wbs.psycopg, "connect", boom)
+    assert wbs._still_unread([5, 6]) == [5, 6]
