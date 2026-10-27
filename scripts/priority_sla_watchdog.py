@@ -1542,6 +1542,10 @@ def slow_ask_targets(rows, *, now, ack_min=SLOW_ASK_ACK_MIN, horizon_min=SLOW_AS
         # pages: nobody routed it, which is the dropped-ask class this guard exists for.
         if r.get("delegated_to") == "orch-console" or r.get("console_held"):
             continue
+        # console #78612: a DEFERRED ask was parked by Musa on purpose (ask 5469,
+        # op#34961), so no lane ack is expected and paging it is noise
+        if r.get("deferred_at") is not None:
+            continue
         age = now - float(created_epoch)   # extract(epoch) arrives as Decimal
         if ack_min * 60 <= age < horizon_min * 60:
             due.append(r)
@@ -1581,7 +1585,7 @@ def _fetch_slow_ask_candidates(conn):
         cur.execute(
             "SELECT oa.id, oa.source_msg_id AS op, oa.delegated_to, "
             "  left(coalesce(oa.triage_summary, oa.ask), 200) AS summary, "
-            "  extract(epoch FROM oa.created_at) AS created_epoch, oa.slow_paged_at, "
+            "  extract(epoch FROM oa.created_at) AS created_epoch, oa.slow_paged_at, oa.deferred_at, "
             "  EXISTS (SELECT 1 FROM held_commitments h WHERE h.owner_agent = 'orch-console' "
             "          AND h.status IN ('pending','fired') "
             "          AND h.source_ref = 'operator_messages:' || oa.source_msg_id) AS console_held, "
@@ -1627,7 +1631,7 @@ def _fetch_slow_ask_candidates(conn):
             "FROM operator_asks oa "
             "WHERE oa.closed_at IS NULL AND oa.triage_state = 'ask' "
             "  AND oa.ask_surface = 'operator' AND oa.source_msg_id IS NOT NULL "
-            "  AND oa.slow_paged_at IS NULL "
+            "  AND oa.slow_paged_at IS NULL AND oa.deferred_at IS NULL "
             "  AND oa.created_at > now() - make_interval(mins => %s)",
             (SLOW_ASK_SUBJECT_PREFIX + "%", SLOW_ASK_DELEGATION_WINDOW_MIN, SLOW_ASK_HORIZON_MIN))
         cols = [d[0] for d in cur.description]
