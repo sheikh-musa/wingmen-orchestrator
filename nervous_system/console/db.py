@@ -748,10 +748,15 @@ def fetch_ask_delivery_times(limit: int = 50) -> dict:
     """Per-ask ask->live times for the build-status view (op#34919). HONESTY
     CONTRACT: an ask with no delivered_at stamp is NOT MEASURED — it lands in
     not_measured with no time fields at all, never a zero and never a done
-    (coverage is near zero today; fleet-health is automating the stamps)."""
+    (coverage is near zero today; fleet-health is automating the stamps).
+    Display text NEVER falls back to the raw captured ask — operator_summary,
+    else triage_summary, else the neutral '(awaiting triage)' placeholder
+    (the #61117 never-raw rule; cc-quality #78556 blocker 2 caught this exact
+    COALESCE-to-ask fallback leaking raw client-captured text on /builds)."""
     measured_sql = (
         "SELECT a.id, "
-        "  COALESCE(a.operator_summary, left(a.ask, 80)) AS line, "
+        "  COALESCE(a.operator_summary, a.triage_summary, '(awaiting triage)') "
+        "AS line, "
         "  a.created_at AS asked_at, a.delivered_at, "
         "  round(extract(epoch FROM (a.delivered_at - a.created_at))/3600.0, 1) AS total_hours, "
         "  a.ask_surface AS surface "
@@ -761,7 +766,8 @@ def fetch_ask_delivery_times(limit: int = 50) -> dict:
     )
     not_measured_sql = (
         "SELECT a.id, "
-        "  COALESCE(a.operator_summary, left(a.ask, 80)) AS line, "
+        "  COALESCE(a.operator_summary, a.triage_summary, '(awaiting triage)') "
+        "AS line, "
         "  a.created_at AS asked_at, "
         "  a.ask_surface AS surface "
         "FROM operator_asks a "
