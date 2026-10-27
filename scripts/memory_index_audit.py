@@ -35,6 +35,7 @@ import os
 import pathlib
 import re
 import sys
+from datetime import datetime, timezone
 
 PROJECTS = pathlib.Path.home() / ".claude" / "projects"
 INDEX = "MEMORY.md"
@@ -102,6 +103,138 @@ def _strip_type_prefix(stem: str) -> str:
         if stem.startswith(p):
             return stem[len(p):]
     return stem
+
+
+# --- frontmatter schema audit (op#34635/34637, bus #77584/#77641: report-first, extend this
+# checker rather than ship a new one-off script) -----------------------------------------
+#
+# A SEPARATE axis from audit()/audit_edges() above: those catch silent LOSS (a file nothing
+# points at, a link to nothing); this catches a file that IS reachable but whose own
+# frontmatter has drifted from the schema every lane is supposed to share (name/description/
+# metadata.{node_type,type,originSessionId,modified}) — found fleet-wide via a 2026-10-27
+# survey (393/2197 files, 16 of 27 real lanes).
+#
+# fix_frontmatter() keeps the SAME append-only philosophy as fix() above: it only ever adds a
+# field whose correct value is unambiguous (node_type is always "memory"; modified can be
+# honestly backfilled from the file's own mtime; type is only inferred when the filename
+# carries one of the 4 recognized prefixes already trusted elsewhere in this file). It never
+# fabricates a historical originSessionId (that fact is genuinely lost, not just unwritten),
+# and it never touches the "legacy schema" shape (type: at the top level instead of nested in
+# metadata:, name: holding a full sentence) — that needs RESTRUCTURING, not appending, which
+# is exactly the class of mutation this tool has always refused to do on another agent's
+# memory unattended.
+_FRONTMATTER_FENCE_RE = re.compile(r"^---\n(.*?\n)---\n", re.S)
+_METADATA_BLOCK_RE = re.compile(r"^metadata:\n((?:[ \t]+\S.*\n?)*)", re.M)
+
+
+def _infer_type_from_filename(stem: str) -> "str | None":
+    """The same prefix convention _strip_type_prefix() already trusts, read the other
+    direction: a recognized prefix IS a confident type, not a guess."""
+    for p in _TYPE_PREFIXES:
+        if stem.startswith(p):
+            return p.rstrip("_")
+    return None
+
+
+def _frontmatter_issues(stem: str, text: str) -> dict:
+    """Regex-field-extraction only (same style as _description() above) — this never needs to
+    fully parse the YAML, only to see whether 7 specific fields are present and sane."""
+    m = _FRONTMATTER_FENCE_RE.match(text)
+    if not m:
+        return {"malformed": True}
+    fm = m.group(1)
+
+    name_m = re.search(r"^name:\s*(.*)$", fm, re.M)
+    name = name_m.group(1).strip() if name_m else None
+    desc_m = re.search(r"^description:\s*(.*)$", fm, re.M)
+    has_description = bool(desc_m and desc_m.group(1).strip() not in ("", '""', "''"))
+    meta_m = _METADATA_BLOCK_RE.search(fm)
+    meta_block = meta_m.group(1) if meta_m else None
+    type_at_top_level = bool(re.search(r"^type:\s*\S", fm, re.M))
+
+    issues: dict = {}
+    if name is None:
+        issues["missing_name"] = True
+    elif name.strip("\"'") == "":
+        issues["empty_name"] = True
+    elif re.search(r"\s", name.strip("\"'")):
+        issues["name_is_sentence"] = True
+
+    if not has_description:
+        issues["missing_description"] = True
+
+    if meta_block is None:
+        issues["missing_metadata_block"] = True
+    if type_at_top_level:
+        issues["type_at_top_level"] = True
+
+    if meta_block is not None:
+        if not re.search(r"^\s*node_type:\s*\S", meta_block, re.M):
+            issues["missing_node_type"] = True
+        if not re.search(r"^\s*modified:\s*\S", meta_block, re.M):
+            issues["missing_modified"] = True
+        if not re.search(r"^\s*originSessionId:\s*\S", meta_block, re.M):
+            issues["missing_origin_session_id"] = True
+        if not re.search(r"^\s*type:\s*\S", meta_block, re.M):
+            issues["missing_type"] = True
+            inferred = _infer_type_from_filename(stem)
+            if inferred:
+                issues["inferred_type"] = inferred
+
+    return issues
+
+
+def audit_frontmatter(mem_dir: pathlib.Path) -> dict:
+    files = [p for p in mem_dir.glob("*.md") if p.name not in INDEX_FILES]
+    dirty = []
+    for p in files:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        issues = _frontmatter_issues(p.stem, text)
+        if issues:
+            dirty.append({"file": p.name, **issues})
+    return {"dir": mem_dir, "files": len(files), "dirty": dirty}
+
+
+def fix_frontmatter(mem_dir: pathlib.Path, result: dict) -> int:
+    """Append ONLY node_type / modified / filename-inferable type, ONLY into an existing
+    metadata: block. Returns how many fields were added. A file with missing_metadata_block
+    (the legacy shape) is skipped entirely — there is no safe append target."""
+    added = 0
+    for entry in result["dirty"]:
+        if entry.get("missing_metadata_block"):
+            continue
+        path = mem_dir / entry["file"]
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        m = _FRONTMATTER_FENCE_RE.match(text)
+        if not m:
+            continue
+        fm = m.group(1)
+        meta_m = _METADATA_BLOCK_RE.search(fm)
+        if not meta_m:
+            continue
+
+        lines_to_add = []
+        if entry.get("missing_node_type"):
+            lines_to_add.append("  node_type: memory\n")
+        if entry.get("missing_modified"):
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            lines_to_add.append(f"  modified: {mtime.strftime('%Y-%m-%dT%H:%M:%SZ')}\n")
+        if entry.get("missing_type") and entry.get("inferred_type"):
+            lines_to_add.append(f"  type: {entry['inferred_type']}\n")
+        if not lines_to_add:
+            continue
+
+        insert_at = m.start(1) + meta_m.end(1)
+        new_text = text[:insert_at] + "".join(lines_to_add) + text[insert_at:]
+        path.write_text(new_text, encoding="utf-8")
+        added += len(lines_to_add)
+    return added
 
 
 def resolve_edge(target: str, stems: set) -> "str | None":
@@ -364,6 +497,13 @@ def main() -> int:
                     help="append index lines for orphaned memory files")
     ap.add_argument("--alert", action="store_true",
                     help="dedup+route bus alerts: NEAR-LIMIT->owner (deduped), hard flags->SRE (every run)")
+    ap.add_argument("--audit-frontmatter", action="store_true",
+                    help="report frontmatter schema violations (node_type/modified/originSessionId/type"
+                         " drift, legacy no-metadata-block shape) per lane; report only, fixes nothing")
+    ap.add_argument("--fix-frontmatter", action="store_true",
+                    help="like --audit-frontmatter, and also append the unambiguous fixable fields"
+                         " (node_type, modified, inferred type) -- never fabricates originSessionId or"
+                         " restructures a legacy (no metadata: block) file")
     a = ap.parse_args()
 
     if not PROJECTS.is_dir():
@@ -371,6 +511,7 @@ def main() -> int:
         return 1
 
     problems = []
+    fm_problems = []
     for mem_dir in sorted(PROJECTS.glob("*/memory")):
         if not mem_dir.is_dir():
             continue
@@ -412,6 +553,27 @@ def main() -> int:
             print(f"    unwritten targets (worth writing, not errors): {', '.join(e['unwritten'][:6])}")
         if flags:
             problems.append((label, hard, advisory, r))
+
+        if a.audit_frontmatter or a.fix_frontmatter:
+            fr = audit_frontmatter(mem_dir)
+            fixed = fix_frontmatter(mem_dir, fr) if (a.fix_frontmatter and fr["dirty"]) else 0
+            if fixed:
+                fr = audit_frontmatter(mem_dir)  # re-audit so the report reflects reality
+                fr["fixed"] = fixed
+            if fr["dirty"] or fr.get("fixed"):
+                fm_extra = f" (+{fr['fixed']} fields appended)" if fr.get("fixed") else ""
+                print(f"    frontmatter: {len(fr['dirty'])} file(s) with violations{fm_extra}")
+                for entry in fr["dirty"]:
+                    issue_keys = [k for k in entry if k not in ("file", "inferred_type")]
+                    print(f"      {entry['file']}: {', '.join(issue_keys)}")
+                fm_problems.append((label, fr))
+
+    if a.audit_frontmatter or a.fix_frontmatter:
+        if fm_problems:
+            total_files = sum(len(fr["dirty"]) for _, fr in fm_problems)
+            print(f"\n{len(fm_problems)} lane(s), {total_files} file(s) with frontmatter violations.")
+        else:
+            print("\nFRONTMATTER CLEAN — no schema violations found.")
 
     if not problems:
         print("\nALL CLEAN — every memory file is indexed, every link resolves, "
