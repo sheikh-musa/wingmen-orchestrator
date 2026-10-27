@@ -713,7 +713,7 @@ def fetch_backlog() -> List[dict]:
 def fetch_build_status() -> List[dict]:
     """The build-status view's programme rows (fc-v87, Musa op#34918, orch-
     console 78503/78505). One row per operator_backlog programme carrying a
-    phases jsonb (migration 122): owner, phase list, last real progress, next
+    phases jsonb (migration 125): owner, phase list, last real progress, next
     checkpoint. Owning lanes maintain phases via scripts/update_programme_
     phases.py; programme_stall_guard keeps its clock job (an open programme
     with no live checkpoint still pages) — this read NEVER writes.

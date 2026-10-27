@@ -10,7 +10,7 @@ to see each move:
   3. TG 2.0 (per-client channels,      — owner cc-bariq-1
      invite deep-link onboarding, Bariq as client 1)
 
-Each row gets a phases jsonb (migration 122 column) seeded with the real
+Each row gets a phases jsonb (migration 125 column) seeded with the real
 state known at seed time — owning lanes refine it from there via
 scripts/update_programme_phases.py. Each programme also gets ONE live
 held_commitments checkpoint (payload {"backlog_id": N}, status pending) so
@@ -19,7 +19,7 @@ programme with no live checkpoint pages once a day, and day-one seed noise
 would be a false alarm.
 
 FAIL-CLOSED: refuses if operator_backlog has no `phases` column (migration
-122 not applied) rather than half-seeding rows the view can never see.
+125 not applied) rather than half-seeding rows the view can never see.
 
 Idempotent: three rows already present under op_ref='op#34918' -> no-op.
 Never writes explicit ids (identity column rule); DSN defaults to
@@ -110,7 +110,7 @@ def seed(dsn: str) -> int:
             conn.rollback()
             raise SystemExit(
                 "✗ REFUSE: operator_backlog has no `phases` column — migration "
-                "122 is not applied on this store. Apply the migration first "
+                "125 is not applied on this store. Apply the migration first "
                 "(scripts/apply_migration.py, gated); seeding before it would "
                 "create rows the build-status view can never see."
             )

@@ -1,4 +1,4 @@
--- 122_operator_backlog_phases.sql
+-- 125_operator_backlog_phases.sql
 -- ledger: silo=tscuymavysscrvoberrr
 -- (orchestrator substrate)
 --
@@ -33,8 +33,9 @@
 --
 -- Applied via scripts/apply_migration.py (direct psycopg, same-transaction
 -- ledger write) — NEVER `supabase db push` (decision 962).
--- NOTE: paperclip PR#490 (unmerged) renumbers ITS migrations to 122/123/124;
--- if it merges after this lands, its 122 needs a renumber away from this file.
+-- Numbered 125 (orch-console 78567): 122/123/124 belong to paperclip PR#490
+-- (124 is its parked privilege-cut) — that PR keeps its numbers, this one
+-- moved.
 
 BEGIN;
 

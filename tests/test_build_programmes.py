@@ -83,7 +83,7 @@ def bare_backlog_db(pg_dsn):
 # ── seed ───────────────────────────────────────────────────────────────────
 
 def test_seed_refuses_without_phases_column(bare_backlog_db):
-    """Fail-closed: no phases column = migration 122 not applied = no seeding."""
+    """Fail-closed: no phases column = migration 125 not applied = no seeding."""
     with pytest.raises(SystemExit, match=r"(?i)has no .phases. column"):
         seed.main(["--dsn", bare_backlog_db])
 
