@@ -489,3 +489,121 @@ def test_delivered_rides_along_with_ask_and_keeps_the_row_open(operator_ledger_d
         cur.execute("SELECT triage_state, closed_at, delivered_at FROM operator_asks WHERE id=%s", (rid,))
         state, closed_at, delivered_at = cur.fetchone()
     assert state == "ask" and closed_at is None and delivered_at is not None
+# ── --answers (orch-console bus #78269, op#34850): root-cause fix for stale  ──
+# pending asks. Musa usually ANSWERS with a fresh message, not a Telegram
+# reply, so the reply-link auto-close misses it; when triaging the captured
+# row that IS the answer, --answers N confirms+closes ask N and links the
+# answering operator message (this row's source_msg_id) as evidence.
+def test_parser_accepts_answers_flag():
+    args = at.build_parser().parse_args(["31", "not", "--answers", "77"])
+    assert args.id == 31
+    assert args.action == "not"
+    assert args.answers == 77
+
+
+def test_answers_closes_target_ask_with_confirm_semantics(operator_ledger_db):
+    """The target ask gets the SAME close the operator's swipe-to-confirm
+    writes (asks_close.py confirm): confirmed_at + closed_at +
+    closed_reason='operator_done', plus evidence naming the answering op msg."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        target = _insert_captured(c, "[__test__] the ask being answered")
+        cur = c.cursor()
+        cur.execute(
+            "UPDATE operator_asks SET triage_state='ask', triage_summary='s' "
+            "WHERE id=%s", (target,))
+        ans = _insert_captured(c, "[__test__] yes go ahead with option B")
+        cur.execute(
+            "UPDATE operator_asks SET source_msg_id=4242 WHERE id=%s", (ans,))
+        c.commit()
+    n = at.triage(ans, "not", answers=target, dsn=operator_ledger_db)
+    assert n == 1  # main row still triaged normally
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT triage_state, closed_at, closed_reason FROM operator_asks "
+            "WHERE id=%s ORDER BY id", (target,))
+        state, closed_at, reason = cur.fetchone()
+        assert state == "ask"  # the ANSWER row is 'not'; the target keeps its triage
+        assert closed_at is not None
+        assert reason == "operator_done"
+        cur.execute(
+            "SELECT confirmed_at, triage_evidence_ref FROM operator_asks WHERE id=%s",
+            (target,))
+        confirmed_at, evidence = cur.fetchone()
+        assert confirmed_at is not None
+        assert "4242" in (evidence or ""), "evidence links the answering op msg"
+
+
+def test_answers_unknown_ask_id_raises(operator_ledger_db):
+    """A typo'd ASK_ID must fail loudly, never silently pass as answered."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        ans = _insert_captured(c)
+    with pytest.raises(ValueError):
+        at.triage(ans, "not", answers=987654, dsn=operator_ledger_db)
+
+
+def test_answers_refuses_to_name_the_row_being_triaged(operator_ledger_db):
+    """--answers <own id> is a semantic tangle (triage + confirm on one row);
+    refuse it rather than pick a winner silently."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    with pytest.raises(ValueError):
+        at.triage(rid, "not", answers=rid, dsn=operator_ledger_db)
+
+
+def test_answers_on_already_closed_target_is_idempotent_ok(operator_ledger_db):
+    """Already-closed target: the goal state (closed) already holds — no
+    raise, no reopen, evidence left as it was."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        target = _insert_captured(c)
+        cur = c.cursor()
+        cur.execute(
+            "UPDATE operator_asks SET triage_state='done', closed_at=now(), "
+            "closed_reason='done' WHERE id=%s", (target,))
+        c.commit()
+        ans = _insert_captured(c)
+    at.triage(ans, "not", answers=target, dsn=operator_ledger_db)  # must not raise
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT closed_reason FROM operator_asks WHERE id=%s", (target,))
+        assert cur.fetchone() == ("done",)
+
+
+def test_answers_cli_on_already_closed_target_exits_zero(operator_ledger_db, capsys):
+    """cc-quality 78363/78368 finding 2 (wet-proven): the ANSWER row is still
+    triage-eligible but the TARGET ask is already closed — the idempotent
+    re-run shape a sweeper hits. The CLI must report ok/exit 0 (the goal
+    state holds), never the old exit-2 "0 rows updated", which reads as a
+    hard failure on a correct DB."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        target = _insert_captured(c, "[__test__] the ask already closed")
+        cur = c.cursor()
+        cur.execute(
+            "UPDATE operator_asks SET triage_state='done', closed_at=now(), "
+            "closed_reason='done' WHERE id=%s", (target,))
+        ans = _insert_captured(c, "[__test__] the answering message")
+        c.commit()
+    rc = at.main([str(ans), "not", "--answers", str(target)])
+    out = capsys.readouterr().out
+    assert rc == 0, f"already-closed target is idempotent ok, not a failure (out={out!r})"
+    assert out.startswith("ok")
+
+
+def test_answers_primary_miss_exits_2_and_leaves_target_open(operator_ledger_db, capsys):
+    """cc-quality 78363/78368 finding 2, second face: when the PRIMARY triage
+    update touches nothing (typo'd item id), the CLI must fail — and the
+    --answers close must NOT have fired either: a triage that didn't happen
+    cannot be the evidence that an ask was answered."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        target = _insert_captured(c, "[__test__] open target ask")
+        c.commit()
+    rc = at.main([str(987654), "not", "--answers", str(target)])
+    assert rc == 2
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT closed_at FROM operator_asks WHERE id=%s", (target,))
+        assert cur.fetchone()[0] is None, \
+            "target must stay open when the primary triage no-ops"

@@ -192,7 +192,18 @@ def refuse_if_instance_stale_and_base_live(to: str, dsn: str | None = None) -> N
         return
     row = _agent_status_row(to, dsn=dsn)
     if row is None:
-        return  # no status row at all -- not this guard's concern
+        # An instance of a SINGLETON base with no status row at all is a dead address: it
+        # used to be waved through here. Console's GO rulings #78373/#78383 went to
+        # 'cc-fleet-health-1' (a stale agents row, no status row) and sat unread while the
+        # doorbell rang the real body for mail it couldn't see. Not a blanket ban on -N:
+        # auditor singletons do run live instances (cc-finance-1 is live), which have rows.
+        _base = re.sub(r"-\d+$", "", to)
+        if is_singleton_base(_base):
+            raise SystemExit(
+                f"bus_send: REFUSED — '{to}' has no agent_status row (no live body) and its "
+                f"base '{_base}' is a singleton. Use --to {_base} instead."
+            )
+        return  # not a singleton's instance -- not this guard's concern
     base_agent_id, to_is_live = row
     if not base_agent_id or base_agent_id == to or to_is_live:
         return  # `to` IS the base, or the instance itself is live -- nothing stranded
@@ -433,6 +444,53 @@ def warn_if_unevidenced_claim(mtype: str, subject: str, body: str, evidence: str
         file=stream or sys.stderr,
     )
     _log_warn("unevidenced_claim", mtype=mtype, subject=subject, matched_keyword=m.group(1))
+
+
+# console ruling #78298 "A" (op#34803 slow-ask): every orch-console delegation subject
+# cites the op number, so the slow-ask net can tie a lane's ack to Musa's ask. Two
+# delegations without one (#78234, #78246) false-flagged real acks on 10-27. WARN mode
+# (soak-logged); whether it should REFUSE is a later call on the soak numbers.
+_OP_TOKEN_RE = re.compile(r"(?i)\bop\s*#\s*\d{4,}")
+
+
+def _is_lane(to: str, dsn: str | None = None) -> bool:
+    """True when `to` (base or -N instance) is a launch_dangerous_cc.sh fleet lane."""
+    import psycopg2
+
+    base = re.sub(r"-\d+$", "", to)
+    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM fleet_lanes WHERE launcher='launch_dangerous_cc.sh' "
+        "AND base_agent_id IN (%s, %s) LIMIT 1", (to, base))
+    hit = cur.fetchone() is not None
+    conn.close()
+    return hit
+
+
+def warn_if_delegation_without_op(from_agent: str, to: str, subject: str,
+                                  thread: str | None, reply_to: int | None,
+                                  stream=None, is_lane=None) -> None:
+    """orch-console -> lane, fresh thread (no --thread/--reply-to), subject with no
+    `op#N` token: WARN. Replies inside an existing thread are not delegations."""
+    if from_agent != "orch-console" or thread or reply_to:
+        return
+    if _OP_TOKEN_RE.search(subject or ""):
+        return
+    try:
+        if not (is_lane or _is_lane)(to):
+            return
+    except (Exception, SystemExit) as e:  # noqa: BLE001 -- dburl() exits on no DSN; a warn must never block a send
+        print(f"bus_send: WARNING — op#-citation check could not run ({type(e).__name__}); "
+              "sending anyway.", file=stream or sys.stderr)
+        return
+    print(
+        f"bus_send: WARNING — delegation to lane '{to}' has no op number in the subject. "
+        "Start it with 'op#N' so the slow-ask net can match the lane's ack to Musa's ask "
+        "(console ruling #78298 A, WARN-mode soak).",
+        file=stream or sys.stderr,
+    )
+    _log_warn("delegation_without_op", to=to, subject=subject)
 
 
 # fable-audit E-client-lanes-quality.md item 5 / hc#359 (bus #64729): hash
@@ -780,6 +838,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"SENT id={row_id} thread={thread_id} from={from_agent} to={args.to} "
           f"priority={args.priority} req={args.req}"
           + (f" sub_tag={sub_tag}" if sub_tag else ""))
+    # after the row lands: a habit warning must never sit in a refusal's path or delay a send
+    warn_if_delegation_without_op(from_agent, args.to, args.subject, args.thread, args.reply_to)
     return 0
 
 

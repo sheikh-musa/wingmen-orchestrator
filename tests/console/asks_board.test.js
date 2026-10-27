@@ -194,3 +194,19 @@ assert.ok(uh.indexOf("prompt(") === -1, "never window.prompt (iOS PWA suppresses
 console.log("unlockHtml: ok");
 
 console.log("asks_board.test.js OK");
+// ── fc-v86 (op#34852): home's "Your asks" card is REMOVED — /asks is the ONE
+// asks view, so the operator's confirm affordance (previously home's
+// swipe-to-confirm on review cards) must live HERE. Lock: a delegate_done
+// ("review") row carries confirm + dismiss controls; non-review rows don't.
+assert.ok(api.askCard, "askCard must be exported");
+const rev = api.askCard({ id: 7, text: "ship the weekly digest", status: "delegate_done",
+                          delegated_to: "cc-ihsanos", ask_surface: "operator",
+                          updated_age_s: 60, asked_age_s: 600 });
+assert.ok(rev.indexOf('data-confirm="7"') !== -1, "review row carries data-confirm");
+assert.ok(/confirm/i.test(rev), "confirm copy present");
+assert.ok(rev.indexOf('data-drop="7"') !== -1, "review row carries data-drop (dismiss)");
+const plain = api.askCard({ id: 8, text: "build the thing", status: "in_progress",
+                            delegated_to: "cc-cosem", ask_surface: "operator",
+                            updated_age_s: 60, asked_age_s: 600 });
+assert.ok(plain.indexOf("data-confirm") === -1, "non-review rows carry no confirm control");
+console.log("askCard confirm controls: ok");

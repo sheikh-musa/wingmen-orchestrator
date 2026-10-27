@@ -1091,3 +1091,49 @@ def test_escalate_operator_default_console_alive_check_failure_treated_as_dead(m
     monkeypatch.setattr(wbs, "_default_console_alive", boom)
     wbs._escalate_operator("subj", "body")
     assert sent[0]["to"] == wbs.HUB_AGENT
+
+
+# ---- once-guard seeded from the bus at process start (console #78389) ----
+
+_PRIOR_PAGE = ("TL;DR: row(s) [201, 77837] to cc-quality are STILL unread 1800s+ after they were "
+               "sent — well past normal latency")
+
+
+def test_seed_parses_row_ids_from_prior_stuck_pages():
+    seen = set()
+    n = wbs.seed_stuck_seen_from_bus(seen, fetch=lambda: [_PRIOR_PAGE, "unrelated body"])
+    assert n == 2 and ("stuck", 201) in seen and ("stuck", 77837) in seen
+
+
+def test_seed_failure_is_soft_and_seeds_nothing():
+    def boom():
+        raise RuntimeError("db down")
+    seen = set()
+    assert wbs.seed_stuck_seen_from_bus(seen, fetch=boom) == 0 and seen == set()
+
+
+def test_restarted_process_does_not_repage_a_row_paged_in_the_prior_24h():
+    # Same scenario as test_stuck_row_to_alive_agent_paged_once_with_pane_state_43063, but a
+    # FRESH process: its seen-set starts empty and is seeded from the bus, where row 201 was
+    # already stuck-paged. It must not page 201 again (the #78378 restart duplicate).
+    marked, pages, mark, page = _cas_collector()
+    seen = set()
+    wbs.seed_stuck_seen_from_bus(seen, fetch=lambda: [_PRIOR_PAGE])
+    stuck = [_row_ts("cc-quality", 201, age_s=2000)]
+    wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+                   now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(),
+                   this_host="Sheikhs-Mini", pane_state=lambda a: "idle",
+                   pane_active=lambda a: False, mark=mark, escalate=page, escalated_seen=seen)
+    assert pages == []
+
+
+def test_unseeded_fresh_process_still_pages_a_new_stuck_row():
+    marked, pages, mark, page = _cas_collector()
+    seen = set()
+    wbs.seed_stuck_seen_from_bus(seen, fetch=lambda: [_PRIOR_PAGE])   # 201 + 77837 only
+    stuck = [_row_ts("cc-quality", 999, age_s=2000)]
+    wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+                   now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(),
+                   this_host="Sheikhs-Mini", pane_state=lambda a: "idle",
+                   pane_active=lambda a: False, mark=mark, escalate=page, escalated_seen=seen)
+    assert len(pages) == 1 and "999" in pages[0][1]

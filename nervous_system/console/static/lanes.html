@@ -72,6 +72,19 @@
     display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
   .sub b.bad{color:var(--rose)} .sub b.good{color:var(--jade)}
 
+  /* ── persistent top bar (fc-v86, bus #78269 op#34849): Asks / Lane manager /
+     irsyad inside this page's sticky header — same shape as home's .topbar.
+     Current page renders calm + aria-current (a span, not a link). */
+  .topnav{display:flex;gap:7px;margin-top:12px}
+  .tnbtn{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;
+    padding:10px 6px;border-radius:12px;font:600 12.5px/1 var(--sans);color:var(--dim);
+    background:var(--surface);border:1px solid var(--hair);white-space:nowrap;text-decoration:none}
+  a.tnbtn:active{background:var(--surface-2)}
+  .tnbtn.cur{color:var(--jade);background:var(--jade-soft);border-color:rgba(55,211,154,.25);cursor:default}
+  .tncnt{font:700 11px/1 var(--mono);min-width:20px;text-align:center;padding:3px 6px;
+    border-radius:999px;background:var(--jade-soft);color:var(--jade);border:1px solid rgba(55,211,154,.25)}
+  .tncnt.has-waits{background:var(--amber-soft);color:var(--amber);border-color:rgba(246,196,83,.3)}
+
   .pin{font:10px/1 var(--mono);text-transform:uppercase;letter-spacing:.12em;color:var(--faint);
     margin:22px 2px 11px;display:flex;align-items:center;gap:9px}
   .pin::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--hair),transparent)}
@@ -228,9 +241,19 @@
     <div class="top">
       <a class="back" href="/fleet">‹ Fleet</a>
       <h1>Lane manager</h1>
-      <span id="build" class="build"><span class="d"></span>fc-v85</span>
+      <span id="build" class="build"><span class="d"></span>fc-v86</span>
       <button id="refresh" class="refresh">↻</button>
     </div>
+    <!-- fc-v86 (bus #78269, op#34849): the same persistent top bar as the home
+         page, folded INTO this page's already-sticky header so the three
+         primary destinations stay pinned here too. Asks badge = waiting-on-you
+         count (/api/asks-waiting — same derivation as home, so the badges
+         agree); Lane manager is THIS page (aria-current, calm, not a link). -->
+    <nav class="topnav" aria-label="primary">
+      <a class="tnbtn" href="/asks">📋 Asks <span id="tbAsksCount" class="tncnt">—</span></a>
+      <span class="tnbtn cur" aria-current="page">🔑 Lane manager</span>
+      <a class="tnbtn" href="/irsyad">🧾 irsyad</a>
+    </nav>
     <div id="sub" class="sub">Loading ground-truth…</div>
   </header>
   <div id="fleetSwitch" class="fleetswitch"></div>

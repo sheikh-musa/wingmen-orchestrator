@@ -1639,6 +1639,7 @@ def _fleet_payload():
         f_queue = ex.submit(db.fetch_queue)              # per-lane worklist (lane_tasks — the drain view)
         f_inbox = ex.submit(db.fetch_inbox_backlog)      # fc-v52: unhandled bus inbox per body (drain board)
         f_asks = ex.submit(db.fetch_asks)                # fc-v55: operator's LIVE "Your asks" (status derived in SQL)
+        f_fleet_asks = ex.submit(db.fetch_fleet_asks)    # fc-v86: the needs-Musa count source (badge == /asks hero)
         # fc-v55: collapse same-lane twins (a family registered on two hosts) into
         # ONE card, so the no-local-pane twin never renders as a phantom DARK lane.
         lanes = _dedupe_lanes_by_family(_enrich_lanes_live(f_lanes.result(), live=live))
@@ -1714,6 +1715,16 @@ def _fleet_payload():
         except Exception as e:
             logger.warning("your_asks failed: %s", e)
             your_asks = []
+        # fc-v86 (orch-console 78374): the badge's row source = the /asks
+        # board's OWN rows (fetch_fleet_asks), counted with the ONE needs-Musa
+        # predicate (db.needs_musa) — never build_asks_query statuses, which
+        # undercounted live 11 vs 33 (they miss the migration-118 flag and the
+        # client-channel surface). Same guard shape as every other signal.
+        try:
+            fleet_ask_rows = f_fleet_asks.result()
+        except Exception as e:
+            logger.warning("fleet_asks failed: %s", e)
+            fleet_ask_rows = []
     # Mobile payload trim (op#10291): the queue `detail` field was ~11KB of the
     # ~18KB queue section (63%) — the bulk of the /api/fleet payload that the
     # marginal Abu-Dhabi<->Singapore relay drops. It's only needed ON TAP, which
@@ -1815,6 +1826,16 @@ def _fleet_payload():
     # ("N needs your call") + the "N open · N needs you · N to review" subline.
     asks_needs = sum(1 for a in your_asks if a.get("status") == "needs_you")
     asks_review = sum(1 for a in your_asks if a.get("status") == "delegate_done")
+    # fc-v86 (bus #78269, op#34848): home de-noise. The home "Your asks" CARD
+    # is now REMOVED entirely (op#34852 — /asks via the top-bar Asks button is
+    # the ONE asks view), so /api/fleet no longer ships your_asks rows at all
+    # (nobody renders them; dropping the key is pure mobile-payload budget).
+    # What stays is pulse.asks_waiting — the honest waiting-on-you count the
+    # top-bar Asks badge renders: the EXACT derivation the /asks hero uses
+    # (db.needs_musa over the board's own fetch_fleet_asks rows, orch-console
+    # 78374), so the badge always equals the hero it opens. The full board is
+    # /api/asks-board.
+    asks_waiting = sum(1 for a in fleet_ask_rows if db.needs_musa(a))
 
     return {
         "pulse": {**counts, "needs_you": len(needs),
@@ -1823,11 +1844,11 @@ def _fleet_payload():
                   "pane_health": pane_header["state"], "pane_worst": pane_header["worst"],
                   # fc-v55: operator-ask headline counts (the "Your asks" hero).
                   "asks_open": len(your_asks), "asks_needs": asks_needs,
-                  "asks_review": asks_review},
-        # fc-v55: the operator's LIVE "Your asks" board (status derived in SQL,
-        # never stored). Primary operator surface; the drain board is demoted to
-        # a collapsed "Fleet chatter (SRE view)" below it.
-        "your_asks": _jsonable(your_asks),
+                  "asks_review": asks_review,
+                  # fc-v86: the waiting-on-YOU count — the only asks number home shows.
+                  "asks_waiting": asks_waiting},
+        # fc-v86 (op#34852): no "your_asks" rows on /api/fleet — the home card is
+        # gone; /api/asks-board serves the ONE asks view at /asks.
         "needs_you": _jsonable(needs),
         "backlog": _jsonable(backlog),
         "coordinators": _jsonable(coordinators),
@@ -2224,14 +2245,13 @@ def _make_handler(feedloop: "_FeedLoop"):
                         "answered": len(answered_rows),
                         "board_status": _tally(open_rows, "board_status"),
                         "topics": _tally(open_rows + answered_rows, "topic"),
-                        # cc-quality #75389 follow-up: match the client hero's
-                        # needsMusa() exactly — waiting_on_operator OR the
-                        # migration-118 needs_operator_decision flag, so the
-                        # server count and the hero can never disagree.
+                        # cc-quality #75389 follow-up / orch-console 78374: the
+                        # ONE needs-Musa derivation (db.needs_musa) — same
+                        # predicate the top-bar badge counts through, over the
+                        # same build_fleet_asks_query rows, so server count,
+                        # hero and badge can never disagree.
                         "needs_musa": sum(
-                            1 for r in open_rows
-                            if r.get("waiting_on_operator")
-                            or r.get("needs_operator_decision")),
+                            1 for r in open_rows if db.needs_musa(r)),
                     }
                     auth.audit(self._client(), path, "200")
                     return self._json(200, _jsonable({
@@ -2239,6 +2259,17 @@ def _make_handler(feedloop: "_FeedLoop"):
                         "answered": answered_rows,
                         "counts": counts,
                     }))
+
+                if path == "/api/asks-waiting":
+                    # fc-v86 (bus #78269): the waiting-on-you count for the
+                    # lanes.html top bar — the EXACT derivation the /asks hero
+                    # uses (db.needs_musa over fetch_fleet_asks rows, orch-
+                    # console 78374), so the badge it opens shows this count.
+                    # Lightweight: {count} only, no rows.
+                    rows = db.fetch_fleet_asks()
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, {"count": sum(
+                        1 for a in rows if db.needs_musa(a))})
 
                 if path == "/api/status-board":
                     # "nothing goes dark" Phase 1 (bus 77019): ONE live view of

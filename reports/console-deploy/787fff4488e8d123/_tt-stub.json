@@ -1,0 +1,6 @@
+{"registry": {"tokens": [{"name": "musa-max", "fingerprint": "a1b2c3"}], "models": []},
+ "rows": [{"session": "cc-ihsanos-1", "agent_id": "cc-ihsanos-1", "base_agent_id": "cc-ihsanos",
+           "state": "working", "host": "mini", "token_pointer_name": "musa-max",
+           "token_group": null, "token_settable": true, "remote": false,
+           "current_task": "storefront build", "heartbeat_age_s": 15}],
+ "stale": false, "stamp": "stub"}

@@ -551,6 +551,43 @@ def _base_of(agent):
 _ESCALATED_SEEN: set = set()
 
 
+# Seed the stuck-page once-guard at process start from the bus (console #78389, amending
+# Nazim 43009(b)): daemon deploys are now frequent enough that "one repeat page per restart"
+# is real noise (#78378 re-paged rows 77805/77837/77864 after a 16:42Z deploy restart). The
+# bus already records every stuck page with its row ids, so read those back: read-only, no
+# new table or file. Seeding from the bus also dedups across hosts (Mini + gzb).
+_STUCK_PAGE_BODY_RE = re.compile(r"row\(s\) \[([0-9,\s]+)\] to \S+ are STILL unread")
+
+
+def _fetch_recent_stuck_page_bodies(max_age_s: int = STUCK_PAGE_MAX_AGE_S) -> list:
+    if not _DSN:
+        return []
+    with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT body FROM agent_messages WHERE subject LIKE '[wake-backstop]%%un-drained%%' "
+                    "AND created_at > now() - make_interval(secs => %s)", (max_age_s,))
+        return [r[0] for r in cur.fetchall()]
+
+
+def seed_stuck_seen_from_bus(seen: set, fetch=_fetch_recent_stuck_page_bodies) -> int:
+    """Add ("stuck", id) for every row id already stuck-paged in the last 24h. Returns how
+    many were added. Fail-soft: a read error logs loudly and seeds nothing (the old
+    behaviour: at most one repeat page), never crashes the floor."""
+    try:
+        bodies = fetch()
+    except Exception as e:  # noqa: BLE001
+        print(f"{_ts()} stuck-page once-guard seed FAILED (will repeat-page once): {e!r}",
+              file=sys.stderr, flush=True)
+        return 0
+    added = 0
+    for body in bodies or []:
+        for m in _STUCK_PAGE_BODY_RE.finditer(body or ""):
+            for tok in m.group(1).split(","):
+                if tok.strip().isdigit() and ("stuck", int(tok)) not in seen:
+                    seen.add(("stuck", int(tok)))
+                    added += 1
+    return added
+
+
 def _default_console_alive() -> bool:
     """orch-console's own liveness (audit-20261006 item 4, bus#54648): a fresh agent_status
     heartbeat, not the hub's lease. Resolved lazily (same shape as _default_this_host) so this
@@ -1096,17 +1133,43 @@ def _default_nudge(agent: str, ids: list, wake=wake_agent) -> "int | None":
     return row_id
 
 
+def _unread_age_summary(ids) -> "str | None":
+    """MEASURED age of the oldest of `ids` + whether any is fast-tier, e.g.
+    'oldest 10m old, P1 fast tier (warns at 5m)'. None when it can't be measured, so the
+    warn says so instead of asserting a number (#78343 claimed '30min+'/'1800s+' for a P1
+    that had been unread 10m: the text hardcoded the SLOW tier while the fast tier fired)."""
+    ids = [i for i in (ids or []) if i is not None]
+    if not ids or not _DSN:
+        return None
+    try:
+        with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+            cur.execute("SELECT extract(epoch FROM now() - min(created_at)), "
+                        "array_agg(DISTINCT priority) FROM agent_messages WHERE id = ANY(%s)",
+                        (ids,))
+            age_s, prios = cur.fetchone()
+    except Exception:  # noqa: BLE001 — wording only; never block the warn
+        return None
+    if age_s is None:
+        return None
+    fast = sorted(p for p in (prios or []) if p in IDLE_UNREAD_FAST_PRIORITIES)
+    tier = (f"{'/'.join(fast)} fast tier (warns at {IDLE_UNREAD_WARN_AGE_FAST_S // 60}m)" if fast
+            else f"slow tier (warns at {IDLE_UNREAD_WARN_AGE_S // 60}m)")
+    return f"oldest {int(float(age_s)) // 60}m old, {tier}"
+
+
 def _default_warn_fleet_health(agent: str, ids: list) -> "int | None":
     """A row nudged once but STILL unread past the WARN age needs a human/SRE look —
     escalate ONCE (per distinct id-set) to cc-fleet-health, the same pattern as this
     module's other escalations."""
     ids_str = ", ".join(f"#{i}" for i in ids)
+    age = _unread_age_summary(ids) or "age not measured"
     return _bus_insert(
         "cc-fleet-health", "cc-fleet-health", "blocker", "P2",
-        f"[idle-unread] {agent} still unread {len(ids)} row(s) 30min+ after going idle",
-        f"ids={ids_str}. Already nudged via the doorbell once; the pane is idle and the "
-        f"row(s) are STILL unread {IDLE_UNREAD_WARN_AGE_S}s+ after they landed. Needs a look "
-        f"— {agent} may be stuck on something else, or the nudge itself may not be landing.")
+        f"[idle-unread] {agent} still unread {len(ids)} row(s) past warn age ({age})",
+        f"ids={ids_str}. Already nudged via the doorbell once; the pane read idle and the "
+        f"row(s) are STILL unread ({age}). Needs a look — {agent} may be stuck on something "
+        f"else, the nudge may not be landing, or it was only idle between turns (re-sample "
+        f"the pane before acting).")
 
 
 def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session,
@@ -1304,6 +1367,8 @@ def main() -> int:
     once = "--once" in sys.argv
     print(f"{_ts()} wake-backstop-sweep up — cadence={WAKE_SWEEP_SEC}s grace={WAKE_SWEEP_GRACE_S}s "
           f"dry_run={dry} auto_wake_enabled={auto_wake_enabled()}", flush=True)
+    seeded = seed_stuck_seen_from_bus(_ESCALATED_SEEN)
+    print(f"{_ts()} stuck-page once-guard seeded from bus: {seeded} row id(s)", flush=True)
     while True:
         try:
             # honor the kill-switch: when auto-wake is OFF, observe (dry) — never send.

@@ -221,10 +221,16 @@ def render_unmapped_channel_page(rows: list[dict]) -> str:
 def fetch_overdue(conn) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, committed_date, triage_summary, delegated_to, thread_id "
+            "SELECT id, source_msg_id, committed_date, triage_summary, delegated_to, thread_id "
             "FROM operator_asks "
             "WHERE triage_state = 'ask' AND closed_at IS NULL "
-            "  AND committed_date IS NOT NULL AND committed_date < now() "
+            "  AND committed_date IS NOT NULL "
+            # console #78250: 00:00:00Z is a DATE = end of that day in Asia/Dubai;
+            # any other time is exact (same rule as commitment_sweeper.ask_deadline)
+            "  AND (CASE WHEN (committed_date AT TIME ZONE 'UTC')::time = '00:00' "
+            "        THEN ((committed_date AT TIME ZONE 'UTC')::date + 1)::timestamp "
+            "             AT TIME ZONE 'Asia/Dubai' "
+            "        ELSE committed_date END) < now() "
             "ORDER BY committed_date ASC"
         )
         return _rows(cur)
@@ -236,6 +242,31 @@ def render_overdue_page(row: dict) -> str:
         f"OVERDUE — \"{row['triage_summary']}\". Deliver it, or re-triage with a "
         f"new --committed-date (scripts/asks_triage.py) if the date needs to move."
     )
+
+
+def choose_instance(instances: list[str], last_worked: dict) -> "str | None":
+    """PURE: of a base id's 2+ live instances, the one that most recently sent a bus
+    subject citing this ask (`last_worked` maps instance -> datetime/epoch, missing =
+    never). None when no instance ever cited it — the caller then pages the console
+    rather than guessing (console #78250, after #2141 -> cc-cosem-platform was refused
+    every day for having two live instances and the job only logged it)."""
+    cited = [(last_worked[i], i) for i in instances if last_worked.get(i) is not None]
+    return max(cited)[1] if cited else None
+
+
+def fetch_last_worked(conn, instances: list[str], row: dict) -> dict:
+    """instance -> latest created_at of a bus row it SENT whose subject cites the ask's
+    op number (whole numeric token) or 'ask #<id>'."""
+    if not instances:
+        return {}
+    op = row.get("source_msg_id")
+    pats = [f"ask #{row['id']}([^0-9]|$)"] + ([f"(^|[^0-9]){op}([^0-9]|$)"] if op else [])
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT from_agent, max(created_at) FROM agent_messages "
+            "WHERE from_agent = ANY(%s) AND subject ~ ANY(%s) GROUP BY from_agent",
+            (instances, pats))
+        return {a: t for a, t in cur.fetchall()}
 
 
 # ---- 4. STALE — decide (never auto-closed) ----------------------------------
@@ -379,11 +410,29 @@ def main(argv=None) -> int:
     for row in overdue:
         if not row.get("delegated_to"):
             continue
+        lane = row["delegated_to"]
+        subject = f"ask #{row['id']} OVERDUE (committed {row['committed_date']})"
+        body = render_overdue_page(row)
+        thread = str(row["thread_id"]) if row.get("thread_id") else None
         try:
-            _page(row["delegated_to"], "blocker",
-                  f"ask #{row['id']} OVERDUE (committed {row['committed_date']})",
-                  render_overdue_page(row), req=True,
-                  thread=str(row["thread_id"]) if row.get("thread_id") else None)
+            # A BASE id with 2+ live instances is refused by _page (no single right
+            # guess). Resolve it to the instance that last worked this ask; if none
+            # did, the console gets the page instead of it dying in this job's log.
+            instances = bus_send.live_instance_ids(lane, dsn=dsn)
+            if len(instances) > 1:
+                with psycopg.connect(dsn, connect_timeout=10) as rconn:
+                    chosen = choose_instance(instances, fetch_last_worked(rconn, instances, row))
+                if chosen:
+                    lane = chosen
+                else:
+                    lane, thread = PAGE_TO_CONSOLE, None
+                    subject = f"[unroutable] {subject} — {row['delegated_to']} has " \
+                              f"{len(instances)} live instances, none has worked it"
+                    body = (f"Delegated to BASE id {row['delegated_to']} with live instances "
+                            f"{', '.join(instances)}; none has a bus subject citing this ask, "
+                            f"so there's no right instance to page. Re-delegate it to one.\n\n"
+                            + body)
+            _page(lane, "blocker", subject, body, req=True, thread=thread)
         except (Exception, SystemExit) as e:  # noqa: BLE001
             failures.append(f"overdue page for #{row['id']}: {type(e).__name__}: {e}")
 
@@ -397,6 +446,17 @@ def main(argv=None) -> int:
         print("asks_reconcile_daily: FAILURES (fail loud, non-fatal to other sends):", file=sys.stderr)
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
+        # A failure only in this log is a silent one: nobody reads it (#2141 was refused
+        # daily for days). Page the console with the list too (console #78250).
+        try:
+            bus_send.send(PAGE_FROM_AGENT, PAGE_TO_CONSOLE, "blocker",
+                          f"asks_reconcile_daily: {len(failures)} page(s) FAILED to send",
+                          "TL;DR: the daily asks reconcile could not deliver these pages; "
+                          "each needs a re-route or a fix.\n\n"
+                          + "\n".join(f"- {f}" for f in failures), "P1", req=True, dsn=dsn)
+        except (Exception, SystemExit) as e:  # noqa: BLE001
+            print(f"  - failure page to console ALSO failed: {type(e).__name__}: {e}",
+                  file=sys.stderr)
         return 1
     return 0
 

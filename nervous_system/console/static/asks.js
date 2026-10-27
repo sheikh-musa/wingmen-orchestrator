@@ -152,9 +152,20 @@
     var t = ASK_TAG[a.status] || ASK_TAG.pending;
     var needs = needsMusa(a) || a.status === "needs_you";
     var surf = SURF_LABEL[a.ask_surface] || a.ask_surface;
+    // fc-v86 (op#34852): home's "Your asks" card (and its swipe-to-confirm) is
+    // GONE — this board is the ONE asks view, so the operator's authoritative
+    // confirm lives HERE now: a "review" (delegate_done) row carries confirm +
+    // dismiss controls (POST /api/ask-close, same rail the home card used).
+    var rev = a.status === "delegate_done"
+      ? '<div class="arev">'
+        +  '<button type="button" class="arevbtn" data-confirm="' + a.id + '">✓ landed</button>'
+        +  '<button type="button" class="arevbtn drop" data-drop="' + a.id + '">dismiss</button>'
+        +  '<span class="arevnote">delegate reported done — confirm it landed</span>'
+        + '</div>'
+      : "";
     return '<div class="ask' + (needs ? " needs" : "") + '" data-ask="' + a.id + '">' +
       '<span class="atag ' + t.cls + '">' + t.label + '</span>' +
-      '<div class="abody"><div class="atxt">' + esc(a.text) + '</div>' + askMeta(a) + '</div>' +
+      '<div class="abody"><div class="atxt">' + esc(a.text) + '</div>' + rev + askMeta(a) + '</div>' +
       '<span class="surf">' + esc(surf) + '</span>' +
     '</div>';
   }
@@ -305,6 +316,41 @@
   }
 
   $("refresh").addEventListener("click", load);
+
+  // fc-v86 (op#34852): the operator's confirm/dismiss on "review" rows —
+  // ported from the removed home card's swipe. POST /api/ask-close (same
+  // token-gated rail the home card used); best-effort optimistic disable,
+  // the next 15s poll is the source of truth.
+  var askBusy = {};
+  function closeAsk(id, action) {
+    if (!id || askBusy[id]) return;
+    askBusy[id] = true;
+    var btn = document.querySelector('[data-confirm="' + id + '"], [data-drop="' + id + '"]');
+    if (btn) btn.disabled = true;
+    fetch("/api/ask-close", {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+      body: JSON.stringify({ id: Number(id), action: action })
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j || {} }; }, function () { return { ok: r.ok, j: {} }; }); })
+      .then(function (res) {
+        if (res.ok && res.j.ok) { load(); }
+        else {
+          if (btn) btn.disabled = false;
+          if (window.sub) window.sub.textContent = res.j.error || "close failed";
+        }
+      })
+      .catch(function () {
+        if (btn) btn.disabled = false;
+        if (window.sub) window.sub.textContent = "network dropped — close may not have run";
+      })
+      .finally(function () { askBusy[id] = false; });
+  }
+  $("groups").addEventListener("click", function (e) {
+    var t = e.target.closest ? e.target.closest("[data-confirm],[data-drop]") : null;
+    if (!t) return;
+    if (t.hasAttribute("data-confirm")) closeAsk(t.getAttribute("data-confirm"), "confirm");
+    else closeAsk(t.getAttribute("data-drop"), "drop");
+  });
   load();
   setInterval(load, 15000);
 
@@ -317,6 +363,7 @@
       topicCounts: topicCounts,
       needsMusa: needsMusa,
       heroCard: heroCard,
+      askCard: askCard,
       tokenFromHash: tokenFromHash,
       unlockHtml: unlockHtml,
     };

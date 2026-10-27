@@ -281,6 +281,77 @@ def sequence_drift(cur, table_prefix=None):
     return fixed, errors
 
 
+# 7. ASKS-JOB EXIT WATCH (console #78250): asks_reconcile_daily exited 1 for days (#2141
+# refused every run) and nobody read its log. Any asks launchd job, plus the commitment
+# sweeper (it carries hc#581's ask deadlines), whose LAST exit is non-zero pages orch-console
+# ONCE per failure episode; the entry clears when the job exits 0 again.
+EXIT_WATCH_LABEL_RE = re.compile(r"^dev\.wingmen\.(asks-.+|commitment-sweeper)$")
+EXIT_WATCH_STATE = _ORCH_DIR / "logs" / "asks_job_exit_watch.json"
+
+
+def parse_launchctl_list(text):
+    """`launchctl list` -> {label: last_exit_status:int} for watched labels."""
+    out = {}
+    for line in text.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3 or not EXIT_WATCH_LABEL_RE.match(parts[2]):
+            continue
+        try:
+            out[parts[2]] = int(parts[1])
+        except ValueError:
+            continue
+    return out
+
+
+def exit_watch_plan(statuses, state):
+    """PURE: (labels to page now, new state). state maps label -> exit status already
+    paged. Page when non-zero and not yet paged for this status; clear on exit 0."""
+    to_page, new = [], dict(state)
+    for label, status in sorted(statuses.items()):
+        if status == 0:
+            new.pop(label, None)
+        elif state.get(label) != status:
+            to_page.append((label, status))
+    return to_page, new
+
+
+def asks_job_exit_watch(dry=False):
+    """Impure. Returns labels paged. A failure here is printed loud and never fatal."""
+    import json
+    try:
+        text = subprocess.run(["launchctl", "list"], capture_output=True, text=True,
+                              timeout=20, check=True).stdout
+        state = json.loads(EXIT_WATCH_STATE.read_text()) if EXIT_WATCH_STATE.exists() else {}
+    except Exception as e:  # noqa: BLE001
+        print(f"ASKS-JOB EXIT WATCH could not read launchd/state: {type(e).__name__}: {e}")
+        return []
+    to_page, new = exit_watch_plan(parse_launchctl_list(text), state)
+    paged = []
+    for label, status in to_page:
+        if dry:
+            print(f"[dry] ASKS-JOB EXIT WATCH would page: {label} last exit {status}")
+            continue
+        try:
+            from scripts import bus_send
+            log = _ORCH_DIR / "logs" / f"{label.split('.')[-1]}.log"
+            bus_send.send("cc-fleet-health", "orch-console", "blocker",
+                          f"asks job {label} exited {status}",
+                          f"TL;DR: launchd job {label} last exited with status {status}, so "
+                          f"its run failed or only half-ran.\n\n- Log: {log}\n- This is "
+                          "paged once per failure; it clears when the job next exits 0.",
+                          "P1", req=True)
+            new[label] = status
+            paged.append(label)
+        except (Exception, SystemExit) as e:  # noqa: BLE001 — unstamped, retried next sweep
+            print(f"ASKS-JOB EXIT WATCH page FAILED for {label}: {type(e).__name__}: {e}")
+    if not dry:
+        try:
+            EXIT_WATCH_STATE.write_text(json.dumps(new))
+        except Exception as e:  # noqa: BLE001
+            print(f"ASKS-JOB EXIT WATCH state write FAILED: {type(e).__name__}: {e}")
+    return paged
+
+
 def main():
     quiet = "--quiet" in sys.argv
     sessions = live_tmux_sessions()
@@ -411,6 +482,10 @@ def main():
     if seq_errors:
         print("SEQUENCE SELF-HEAL — per-table errors (skipped, not fatal): " +
               ", ".join(f"{t}: {e}" for t, e in seq_errors))
+
+    exit_paged = asks_job_exit_watch()
+    if exit_paged:
+        print("ASKS-JOB EXIT WATCH paged orch-console: " + ", ".join(exit_paged))
 
     if not quiet:
         if marked:
