@@ -175,3 +175,20 @@ def test_interim_delegation_window_defaults_to_15_minutes():
     # console #78298 ruling B: a delegation row to the lane within 15 min of the ask,
     # plus a lane reply in its thread, counts as an ack until every subject cites the op#
     assert w.SLOW_ASK_DELEGATION_WINDOW_MIN == 15
+
+
+# ── console #78426: exempt console's OWN ledger, never an unrouted ask ───────
+def test_undelegated_ask_with_no_held_commitment_still_pages():
+    r = row(id=11, lane=None)
+    r["console_held"] = False
+    assert ids(w.slow_ask_targets([r], now=NOW)) == [11]
+
+
+def test_console_held_timed_reminder_is_exempt_like_ask_5430():
+    r = row(id=5430, lane=None)
+    r["console_held"] = True        # held_commitment 727, owner orch-console, pending
+    assert w.slow_ask_targets([r], now=NOW) == []
+
+
+def test_ask_delegated_to_console_itself_is_exempt():
+    assert w.slow_ask_targets([row(id=12, lane="orch-console")], now=NOW) == []
