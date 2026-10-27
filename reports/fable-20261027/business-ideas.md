@@ -144,6 +144,51 @@ Ideas 5, 6 and 7 ride behind these on the same engines and should be taken when 
 
 ---
 
+## 4a. Direct ask (op#34977): the quickest way to 100 USD a day with the substrate
+
+100 USD a day is about 3,000 USD or 4,000 SGD a month. Today the fleet has one agreed price (Hadramawt Kitchen, S$99 + S$49 a month, not yet collected) and one payment (Gazzabyte, US$8k, unsolicited). Nothing recurring covers burn. The fastest money is selling the fleet's build hours to warm contacts; recurring software at 100 a day is two to three months away at best. The constraint is Musa's selling hours, not the fleet's build hours.
+
+| Route | Days to first dollar | What we sell, to whom | Reuses | Path to 100 USD a day | Main risk |
+|---|---|---|---|---|---|
+| 1. Fixed-price build and audit work | 3 to 7 | 48-hour security, performance and mobile-design audit with fixes at S$1,500 to 3,000; bespoke site build at S$500 to 1,500. To Gazzabyte's SME book, Bariq, Hadramawt Kitchen's circle, COSEM's circle, Musa's network | Whole fleet, quality reviewer, design pipeline, share.wingmen.dev, cc-finance PayNow invoice, per-client Telegram channel | One audit every 10 days is about S$4,500 a month; or two site builds a week at S$700 is about S$5,600 a month | Services stop when Musa stops pitching; delivered design still needs a strong-model or human eyeball |
+| 2. Collect and quote what already exists with Gazzabyte and COSEM | 7 to 14 | The parked irsyad modules the client already asked for (Tabung Fajr tin inventory, GIRO and bank-statement upload, bulk receipts, zakat distribution reports) at S$3,000 to 6,000 each under the recorded "new module = new quote" rule; the COSEM invoice tracker as a paid module; the Hadramawt Kitchen S$99 | irsyad in production, cc-irsyad-coord and autoscaler lanes, hash-chained audit floor, receivables tracker | One S$4,000 module a month is 100 USD a day on its own | Money and audit modules were parked by Musa in July and need design-first plus Gazzabyte partners' sign-off; execution stays with coord on the irsyad key; the Gazzabyte split is unformalised, so the reseller sheet comes first |
+| 3. wingmen.dev website pipeline | 10 to 21, not quick to 100 a day | One-time build S$399 to 1,499 plus care S$39 to 99 a month to SMEs in Singapore and the UAE | Clone-first redesign pipeline, Telegram chat-to-edit, Vercel and Supabase deploy, measured US$0.45 per site and US$0.03 per edit | Build fees bridge (two a week at S$700 is 100 a day); recurring alone needs 35 to 100 care subscribers at US$29 to 99, which is months at an unknown conversion rate | Build #1 not shipped end to end; pricing and launch decisions pending; the uniqueness eyeball is the hardest step to automate |
+
+Not quick, do not count on them for 100 a day: storefront subscriptions (S$49 a month needs about 80 merchants; PayNow confirm is manual and the merchant editor is not deployed), the training-academy suite and Gulf govtech (no named second academy, residency blocker), the HR suite (Milestone B unfinished), licensing the substrate, hifz or the bots.
+
+Recommendation: run Route 1 this week with two named prospects, run Route 2 in parallel through coord with the reseller sheet first, and let Route 3 land behind them. Posted to orch-console as bus #78638 at 19:2xZ.
+
+---
+
+## 4b. Direct ask (op#34979): Zahidah, Mama Da's Broth, and what the fleet can do
+
+Public information only; nobody contacted, nothing logged into. Family member of the operator; no personal details recorded here beyond the public business.
+
+**What is public today.** Instagram @mamadasbroth.sg: "Mama Da's Broth Singapore", bio "Collagen Packed, Nutritious, Great for Your Gut, 100% Natural Ingredients, 100% Muslim Owned, Singapore's Very Own", 169 followers, 12 visible posts dated April to June 2025 and nothing since. The Linktree goes to a Cococart shop, WhatsApp, YouTube, TikTok and a corporate-enquiries email. The Cococart shop says "closed for now but we'll be back soon" with no product list; only "10 percent off first order above S$60" and "free shipping above S$100" remain. So the brand exists and the positioning is good (halal-adjacent collagen bone broth, Muslim-owned, made in Singapore), but it is paused; every move below is a relaunch, not growth. Market anchor: the closest Singapore comparable (BabyBroth) sells 200 ml jars at S$15 to 17.50 and 8 x 50 ml baby tubs at S$21 to 32, S$13 flat delivery, free above S$100, no halal claim, no collagen claim, no chef credential. That gap is hers. One check before anything goes on packaging: a public search did not surface a MasterChef Singapore contestant page under her name, so confirm the exact season and credited name so the claim is citable.
+
+**(a) Top three growth moves for the broth business**
+
+1. **Relaunch as a weekly pre-order with capacity caps**, not an always-open shop. Effort low. Revenue speculative: at S$15 to 18 per 500 ml pack and 40 to 80 packs a week, roughly S$2,500 to 5,500 a month before costs. First step this week: two cook days, a two-day order window on the storefront, and one honest Instagram post about the return.
+2. **Own the "halal collagen broth for mums and babies" lane.** The comparable owns "baby" but cannot say halal; she can say halal, Muslim-owned, MasterChef-trained and food-science-informed. Add a no-salt baby variant and a postnatal confinement pack. Effort medium. Revenue speculative: confinement packs at S$120 to 180 for two weeks, 10 to 20 mothers a month is S$1,500 to 3,500. First step: one post and one reel on the baby and postnatal use case; ask three mothers in her network to pre-order a trial pack.
+3. **B2B and recurring**: supply halal cafes, hotpot and soup stalls and gyms with broth as a base or menu item, plus a monthly family subscription. The Linktree already has a corporate-enquiries line. Effort medium to high (volume, cold chain, possibly a licensed kitchen rather than home-based). Revenue: one cafe at 20 litres a week at S$8 to 10 a litre is about S$700 to 900 a month per account; three accounts plus 30 subscribers at S$60 a month is roughly S$4,000 a month. First step: a one-page wholesale sheet and two warm asks through the F&B network Hadramawt Kitchen sits in.
+
+**(b) Top two new-venture options on the MasterChef credibility**
+
+1. **Premium halal private dining and corporate chef's table**, 8 to 12 seats, two sittings a month, plus brand collaborations. Effort medium, highest margin per hour of her time. Revenue: S$150 to 250 a head, 10 seats, two sittings is S$3,000 to 5,000 a month; corporate dinners pay more. First step: one menu, one date, one post, first sitting sold to friends-of-friends at a founder price.
+2. **A paid cooking programme**: a short recorded "weeknight halal cooking" or "broth-based cooking for families" course plus live monthly classes, with recipes as the lead magnet (the Linktree already lists two recipes). Effort medium once, then low. Revenue speculative: S$49 to 99 a course, 30 to 100 buyers a quarter is S$1,500 to 10,000 a quarter, plus live classes at S$60 to 90 a seat. First step: record one 20-minute lesson on a phone and sell it for S$19 to test demand before building anything.
+
+Honest note: (b) trades on her time and presence; (a) trades on product and can run while she studies. Pick by the hours she actually has.
+
+**(c) Where the substrate can do real work for her**
+
+1. **Ordering and operations.** Onboard Mama Da's Broth as a merchant on the storefront (Telegram ordering, variants, daily caps, fulfilment calendar, cut-offs) so pre-orders, capacity and delivery slots run without WhatsApp back-and-forth. This is exactly the home-based F&B seller the platform was built for; she would be merchant number two after Hadramawt Kitchen and a real test of Telegram-only onboarding. Effort for us low. First step: a seeded demo store with her products this week; she decides whether the Linktree "Buy" button points at it.
+2. **Content.** A weekly content kit from the fleet (three captions, one reel script, one recipe card in her voice) drafted for her approval, plus a landing page on wingmen.dev through the website pipeline to replace the closed Cococart page. The per-client Telegram bot pattern exists already, so a terse assistant channel is cheap. Effort low. First step: she approves a voice sample; the fleet drafts the relaunch post and four weeks of content.
+3. **Numbers and compliance.** A one-page unit-cost sheet (bones, gas, packaging, delivery, labour) and a short note on Singapore home-based food business rules and what a licensed-kitchen step would cost, so (a)3 and (b)1 are priced honestly. Effort low. First step: she lists ingredient costs per batch; the fleet turns it into prices and break-even. Her business data gets its own store, not a shared project, per the residency rule.
+
+Not for the fleet: the cooking, the brand-voice decisions, and anything that needs her face on camera. Posted to orch-console as bus #78648.
+
+---
+
 ## 5. Honest caveats
 
 - Every price marked "proposal" is this lane's estimate. The recorded prices are: Hadramawt Kitchen S$99 + S$49/month (not yet collected); the locked US$29 hook, US$29 site, US$49 to 79 store floor; the Gazzabyte split (two conflicting records); the US$8k irsyad payment; the specced ihsanOS tiers. Nothing else is a recorded price.
