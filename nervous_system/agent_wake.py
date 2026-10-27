@@ -488,7 +488,7 @@ def _verified_submit(session: str, signal: str, row_id=None) -> int:
         return 1
 
 
-def _pane_busy(session: str) -> bool:
+def _pane_busy(session: str, *, nudge_safe: bool = False) -> bool:
     """True if the lane is mid-turn (don't interrupt; debounce will retry).
 
     Reads the LIVE FOOTER via the shared helper. This used to grep the whole capture, so a
@@ -499,12 +499,20 @@ def _pane_busy(session: str) -> bool:
 
     Unreadable pane => NOT busy: this path DELIVERS, and a dropped nudge is recoverable
     (the bus row is durable) while an undelivered one is invisible.
+
+    nudge_safe=True (bus #77607->#77620->#77633, 2026-10-27): drops the "N shells still
+    running" busy check, which also matches a finished turn whose background-subagent panel
+    is still showing elapsed time -- that false-busy debounced the wake of any lane with a
+    long-lived background subagent, sitting on new P0/P1 mail for 20-30+ min. Opt-in only:
+    the wake/doorbell call site below passes it; nothing else does, so every other caller
+    (status classification, lane_wedge_watchdog, lane_watchdog's orch-idle gate, the reapers)
+    keeps today's fully conservative check.
     """
     try:
         pane = subprocess.check_output(
             ["tmux", "capture-pane", "-t", session, "-p"],
             text=True, stderr=subprocess.DEVNULL)
-        return pane_busy.is_busy_text(pane, on_unreadable=False)
+        return pane_busy.is_busy_text(pane, on_unreadable=False, nudge_safe=nudge_safe)
     except Exception:
         return False
 
@@ -646,7 +654,7 @@ def _wake_agent_inner(agent_id: str, reason: str, dry_run: bool, now: float | No
             if gate["alert_due"]:
                 _record_cap_alert(agent_id, now)
         return {"woke": False, "session": session, **gate}
-    if _pane_busy(session):
+    if _pane_busy(session, nudge_safe=True):
         return {"woke": False, "why": "busy (mid-turn)", "session": session}
     if dry_run:
         return {"woke": False, "why": "dry-run", "session": session, "signal": _SIGNAL}

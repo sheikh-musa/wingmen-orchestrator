@@ -297,3 +297,61 @@ def test_live_frozen_thinking_pane_reads_stale_idle(tmp_path):
     # identical capture each time -> frozen -> stale -> NOT busy (exit 1)
     frames = 'n=23\n' + _THINK_FRAME
     assert _pane_busy_session(tmp_path, frames) == 1
+
+
+# --------------------------------------------------------------------------------------
+# NUDGE-SAFE variant (bus #77607->#77620->#77633, 2026-10-27): a NEW, opt-in check that
+# drops ONLY the "N shells still running" marker -- that marker also matches a finished
+# turn whose background-subagent panel is still showing elapsed time, which debounced the
+# realtime doorbell + backstop sweep on any lane with a long-lived background subagent for
+# 20-30+ min (cc-cosem-platform-2, cc-irsyad-coord-1, cc-cosem-adcda-1, cc-cosem-platform-4).
+# Every OTHER busy pattern (esc-to-interrupt, background-agents, thinking) must still trip
+# it, and the DEFAULT (nudge_safe=False) must be completely unchanged.
+
+def _busy_nudge_safe(pane_text: str) -> bool:
+    r = subprocess.run(["bash", "-c", f'. "{_LIB.parent / "composer_capture.sh"}"; '
+                       f'_cc_text_busy_nudge_safe "$1"', "_", pane_text],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def test_nudge_safe_shell_helper_reads_the_shell_marker_pane_as_idle():
+    assert _busy_nudge_safe(SHELL_RUNNING_PANE) is False
+    assert _busy_nudge_safe(SHELL_RUNNING_PLURAL_PANE) is False
+
+
+def test_nudge_safe_python_helper_reads_the_shell_marker_pane_as_idle():
+    assert pb.is_busy_text(SHELL_RUNNING_PANE, nudge_safe=True) is False
+    assert pb.is_busy_text(SHELL_RUNNING_PLURAL_PANE, nudge_safe=True) is False
+
+
+def test_nudge_safe_default_is_false_shell_marker_pane_still_reads_busy_by_default():
+    # The narrowing is OPT-IN -- every caller that does not pass nudge_safe=True keeps
+    # today's fully conservative behavior (the exact case test_python_helper_reads_a_running_
+    # shell_as_busy already pins for the default, repeated here against the explicit kwarg).
+    assert pb.is_busy_text(SHELL_RUNNING_PANE, nudge_safe=False) is True
+    assert pb.is_busy_text(SHELL_RUNNING_PANE) is True
+
+
+@pytest.mark.parametrize("pane_text", [
+    "some output\n" + BUSY_FOOTER,
+    THINKING_PANE,
+    BG_AGENTS_PANE,
+    SINGLE_BG_AGENT_PANE,
+])
+def test_nudge_safe_still_catches_every_other_busy_pattern(pane_text):
+    assert _busy_nudge_safe(pane_text) is True
+    assert pb.is_busy_text(pane_text, nudge_safe=True) is True
+
+
+def test_nudge_safe_a_plain_idle_pane_stays_idle():
+    assert _busy_nudge_safe("some output\n" + IDLE_FOOTER) is False
+    assert pb.is_busy_text("some output\n" + IDLE_FOOTER, nudge_safe=True) is False
+
+
+def test_agent_wake_doorbell_call_site_opts_into_nudge_safe():
+    # Pin the call-site contract: the wake/doorbell path in _wake_agent_inner must pass
+    # nudge_safe=True, or a lane with a finished background subagent stays permanently
+    # unwakeable again.
+    src = (Path(__file__).resolve().parent.parent / "nervous_system" / "agent_wake.py").read_text()
+    assert "_pane_busy(session, nudge_safe=True)" in src
