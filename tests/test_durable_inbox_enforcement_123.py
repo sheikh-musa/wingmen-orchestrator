@@ -224,18 +224,18 @@ def _setup_base_and_123(cur):
     # this is a test-fixture-only fix, NOT something migration 123 itself grants,
     # since the real schema was never dropped/recreated and never lost it.
     cur.execute("GRANT USAGE ON SCHEMA public TO PUBLIC")
-    for role in ("anon", "authenticated", "service_role"):
-        cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
-        if cur.fetchone() is None:
-            cur.execute(f"CREATE ROLE {role}")
-    # live_applier (CREATEROLE) gets automatic ADMIN on these from creating them (PG16+),
-    # but NOT SET -- same createrole_self_grant-empty rule as bus_writer (Musa op#34845,
-    # bus #78576). Tests below `SET ROLE service_role/anon/authenticated` to simulate
-    # different real callers, which needs SET; this is test-fixture-only plumbing (on the
-    # real substrate these roles pre-exist, postgres doesn't create them), so it is NOT
-    # part of migration 123 -- granted here, not in the migration file. INHERIT FALSE so
-    # live_applier never ambiently gains their privileges outside an explicit SET ROLE.
-    cur.execute("GRANT anon, authenticated, service_role TO live_applier WITH INHERIT FALSE, SET TRUE")
+    # anon/authenticated/service_role's creation and live_applier's ADMIN+SET on them are
+    # handled by additive_db's superuser block BEFORE this function runs (see its own
+    # comment) -- NOT here. CI's full suite shares one session-scoped pg_dsn cluster
+    # (tests/conftest.py) across every test file; several tests/migrations/*.py files
+    # create these three roles directly as the initdb superuser, and (alphabetically)
+    # collect before this file, so by the time this function runs the roles usually
+    # already exist, created by a role OTHER than live_applier -- live_applier then has
+    # no ADMIN option on them and `GRANT anon TO live_applier` from here fails with
+    # "permission denied to grant role \"anon\"" (caught on real CI, run 40566301054;
+    # never caught locally, where pg_dsn is always a single fresh cluster for just this
+    # file). A superuser can always GRANT any role regardless of who created it or
+    # whether it already existed, which is why that grant now runs from there instead.
 
     # Supabase's standing ALTER DEFAULT PRIVILEGES rule (Musa op#34845, bus #78531
     # console live finding): grants EXECUTE on every NEW function to anon/authenticated/
@@ -309,6 +309,32 @@ def additive_db(pg_dsn):
         # this to PUBLIC by default) -- live's postgres role has it on the real
         # substrate database or it could never have created anything there.
         super_cur.execute("GRANT CREATE ON DATABASE postgres TO live_applier")
+        # anon/authenticated/service_role, and live_applier's ADMIN+SET on them, are set
+        # up HERE, as the superuser, not inside _setup_base_and_123 as live_applier
+        # itself (bus #78576 CI finding beyond console's original repro, run 40566301054):
+        # these three roles are usually already created by some OTHER tests/migrations/*.py
+        # file sharing this same session-scoped pg_dsn cluster (tests/conftest.py), by
+        # whatever role that file used -- not necessarily live_applier. A non-superuser
+        # CREATEROLE role only gets automatic ADMIN on a role it itself created; it has
+        # none on a pre-existing one, so `GRANT anon TO live_applier` as live_applier can
+        # fail with "permission denied to grant role anon" depending on test run order --
+        # exactly what real CI hit (passed every local run, which always starts this
+        # cluster fresh for just this one file). The superuser can grant ANY role
+        # regardless of who created it or whether it pre-existed, so doing it from here
+        # is unconditionally correct no matter what ran earlier in the session. INHERIT
+        # FALSE, SET TRUE: live_applier never ambiently gains these roles' privileges,
+        # but tests below can explicitly `SET ROLE service_role/anon/authenticated` to
+        # simulate different real callers. Test-fixture-only plumbing either way -- on
+        # the real substrate these roles pre-exist and postgres never creates them --
+        # so this stays out of migration 123 itself.
+        for role in ("anon", "authenticated", "service_role"):
+            super_cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+            if super_cur.fetchone() is None:
+                super_cur.execute(f"CREATE ROLE {role}")
+        super_cur.execute(
+            "GRANT anon, authenticated, service_role TO live_applier "
+            "WITH INHERIT FALSE, SET TRUE"
+        )
 
     applier_dsn = pg_dsn.replace("user=postgres", "user=live_applier")
     with psycopg.connect(applier_dsn, autocommit=True) as conn, conn.cursor() as cur:
