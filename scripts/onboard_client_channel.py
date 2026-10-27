@@ -15,13 +15,18 @@ Checks enforced here (refuse, don't warn — a config gap must never be the
 thing that exposes an outside party):
 
   - channel_key must not already exist.
-  - DEDICATED TOKEN POLICY (Musa's ruling, 2026-10-19, bus #71813): a
-    --audience client channel's --token-env-key must not already back ANY
-    other channel (client or internal), and an --audience internal channel's
-    token must not already back an existing CLIENT channel. The shared
-    wingmendevbot-style token is for internal/test tags ONLY, never a real
-    external client -- this directly kills the sibling-name-leak class the
-    coffeemedia-hamhuskies-test proof surfaced (bus #70768/#70771).
+  - SHARED-TOKEN PER-CHANNEL ISOLATION (Musa's settled model, op#33571,
+    2026-10-24 — supersedes the 2026-10-19 dedicated-token ruling bus
+    #71813): ONE shared bot, tenant isolation PER-CHANNEL in bot_channels.
+    A client channel MAY share a token with siblings; what this tool now
+    enforces instead of token dedication:
+      * the new channel's allowed_chat_ids must not overlap ANY sibling
+        channel's allowed_chat_ids on the same token (two channels bound to
+        the same chat is the cross-wire class);
+      * --self-description, when given, must not contain any other
+        channel_key (mechanical sibling-name-leak guard — the leak the old
+        ruling existed to kill; Refinement #4: the responder describes
+        itself from the channel's own row, so the row must be clean).
   - PINNED/ENABLED CONSISTENCY per token_env_key: every channel sharing a
     token must be uniformly Mini-pinned (INGEST_CHANNELS) or uniformly
     hub-managed (enabled=true, no pin) -- never mixed, which is the exact
@@ -60,6 +65,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import sys
 from pathlib import Path
 
@@ -69,6 +75,13 @@ INGEST_SCRIPT = ORCH_DIR / "scripts" / "boot_nazim_ingest.sh"
 REGISTRY_DOC = ORCH_DIR / "docs" / "data-store-registry.md"
 SUBSTRATE_SILO = "tscuymavysscrvoberrr"
 LIVE_CHECKOUT = Path.home() / "wingmen" / "orchestrator"
+
+# op#34846: t.me deep links need the BOT's public username. The map covers
+# the bots this fleet actually shares today; anything else must pass
+# --bot-username explicitly (refuse rather than render a link-less invite).
+KNOWN_BOT_USERNAMES = {
+    "WINGMENDEVBOT_TOKEN": "wingmendevbot",
+}
 
 _INSERT_COLUMNS = (
     "channel_key, token_env_key, mode, inject_target, inject_prefix, responder_ref,\n"
@@ -85,8 +98,8 @@ def fail(msg: str) -> None:
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--channel-key", required=True)
-    p.add_argument("--chat-id", type=int, action="append", required=True, dest="chat_ids",
-                    help="repeatable; positive = DM, negative = group")
+    p.add_argument("--chat-id", type=int, action="append", default=None, dest="chat_ids",
+                   help="allowed chat id (repeatable; positive = DM, negative = group); OMIT with --invite — the first /start on the deep link binds the chat")
     p.add_argument("--token-env-key", required=True)
     p.add_argument("--tag", help="channel_tag; defaults to --channel-key")
     p.add_argument("--mode", choices=["log-and-route", "agent-session"], required=True)
@@ -96,6 +109,8 @@ def parse_args(argv=None):
     p.add_argument("--owner-lane", default=None)
     p.add_argument("--store", required=True, help="exact store name + project ref, or literal 'none'")
     p.add_argument("--powers", default="reply_text", help="comma list, default least-privilege reply_text")
+    p.add_argument("--self-description", default=None,
+                    help="per-channel responder self-description (Refinement #4); refused if it names any sibling channel")
     p.add_argument("--agent-reviewer", default=None)
     p.add_argument("--host", choices=["mini", "hub"], required=True)
     p.add_argument("--override-to-direct", action="store_true")
@@ -105,6 +120,15 @@ def parse_args(argv=None):
     p.add_argument("--responder-ref", default=None)
     p.add_argument("--sensitive-data", choices=["true", "false"], default="true")
     p.add_argument("--dry-run", action="store_true", help="print the rendered migration, write nothing")
+    p.add_argument("--invite", action="store_true",
+                   help="op#34846 self-serve onboarding: render with an EMPTY allowlist + a "
+                        "single-use, expiring invite (hash at rest only) the first '/start <token>' "
+                        "on the bot binds the chat to")
+    p.add_argument("--invite-ttl-hours", type=int, default=72,
+                   help="invite expiry in hours from APPLY time (default 72)")
+    p.add_argument("--bot-username", default=None,
+                   help="bot's public t.me username for the invite deep link; required for "
+                        "token env keys not in the known map")
     return p.parse_args(argv)
 
 
@@ -122,29 +146,37 @@ def check_channel_key_free(cur, channel_key: str) -> None:
         fail(f"channel_key {channel_key!r} already exists in bot_channels")
 
 
-def check_token_dedication(cur, token_env_key: str, audience: str, channel_key: str) -> None:
+def check_token_isolation(cur, token_env_key: str, channel_key: str, chat_ids: list[int]) -> None:
+    """op#33571 settled model: shared token allowed; isolation is per-channel.
+
+    Enforces (a) no allowed_chat_ids overlap between channels sharing a token,
+    (b) caller-side sibling-leak guard for self-descriptions.
+    """
     cur.execute(
-        "SELECT channel_key, audience FROM bot_channels WHERE token_env_key=%s AND channel_key != %s",
+        "SELECT channel_key, allowed_chat_ids FROM bot_channels WHERE token_env_key=%s AND channel_key != %s",
         (token_env_key, channel_key),
     )
-    rows = cur.fetchall()
-    if audience == "client":
-        if rows:
-            existing = ", ".join(f"{k} ({a})" for k, a in rows)
+    new_set = set(chat_ids)
+    for sib_key, sib_chats in cur.fetchall():
+        overlap = new_set & set(sib_chats or [])
+        if overlap:
             fail(
-                f"--audience client requires a DEDICATED token never shared with any other "
-                f"channel (Musa's 2026-10-19 ruling, bus #71813 -- kills the sibling-name-leak "
-                f"risk the TG2.0 test surfaced). {token_env_key} is already used by: {existing}. "
-                f"Provision a brand-new bot token + env var for this client."
+                f"allowed_chat_ids {sorted(overlap)} already bound to sibling channel "
+                f"{sib_key!r} on {token_env_key} -- two channels on one token may never "
+                f"share a chat (per-channel isolation, Musa op#33571)."
             )
-    else:
-        client_rows = [k for k, a in rows if a == "client"]
-        if client_rows:
-            fail(
-                f"{token_env_key} already backs CLIENT-facing channel(s) {client_rows} -- an "
-                f"internal/test channel may not share a token with a real client (same rule, "
-                f"other direction)."
-            )
+
+
+def check_self_description(cur, channel_key: str, self_description: str) -> None:
+    cur.execute("SELECT channel_key FROM bot_channels WHERE channel_key != %s", (channel_key,))
+    siblings = [k for (k,) in cur.fetchall()]
+    leaked = [s for s in siblings if s and s in self_description.lower()]
+    if leaked:
+        fail(
+            f"--self-description names sibling channel(s) {leaked} -- the responder "
+            f"describes itself from this row (Refinement #4); sibling names in it are "
+            f"exactly the leak class op#33571's per-channel isolation exists to kill."
+        )
 
 
 def pinned_channels() -> list[str]:
@@ -226,6 +258,48 @@ def validate_mode_target(mode: str, inject_target: str | None) -> None:
         fail("--mode agent-session requires --inject-target <lane>")
 
 
+def validate_chat_ids(args) -> None:
+    """op#34846: --invite renders with an EMPTY allowlist — the first
+    '/start <token>' on the deep link binds the chat (ingest.py
+    try_invite_bind), so no chat ids may be pinned at render time. Without
+    --invite the pre-op#34846 flow stands: at least one --chat-id is
+    mandatory."""
+    if args.invite:
+        if args.chat_ids:
+            fail("--invite fills allowed_chat_ids at bind time (first /start on the "
+                 "deep link) -- drop --chat-id; the bind owns the allowlist")
+    elif not args.chat_ids:
+        fail("--chat-id is required (or pass --invite for a self-serve deep-link "
+             "channel whose allowlist fills at bind time)")
+
+
+def mint_invite() -> str:
+    """Single-use invite token. token_urlsafe(24) = 32 chars of URL-safe
+    base64 — fits Telegram's 64-byte deep-link payload cap with room to
+    spare, ~192 bits of entropy."""
+    return secrets.token_urlsafe(24)
+
+
+def bot_username_for(token_env_key: str, override: str | None) -> str:
+    if override:
+        return override
+    username = KNOWN_BOT_USERNAMES.get(token_env_key)
+    if not username:
+        fail(f"--bot-username is required for {token_env_key} (not in the known map) -- "
+             "an invite without a t.me deep link is unusable, and guessing a username "
+             "would render a link to the wrong bot")
+    return username
+
+
+def write_invite_link(path: Path, username: str, token: str) -> None:
+    """The ONLY two places the plaintext token ever exists: this 0600 file
+    and the render's stdout. Never the migration (hash only), never the bus,
+    never git (.secrets/ is gitignored)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"https://t.me/{username}?start={token}\n")
+    path.chmod(0o600)
+
+
 def next_migration_number() -> int:
     # Scan BOTH this worktree's migrations/ and the live checkout's -- the
     # live checkout can hold applied-but-uncommitted migrations ahead of any
@@ -258,6 +332,8 @@ def build_group_routing(args, phase: str) -> dict:
     if reviewer:
         routing["agent_reviewer"] = reviewer
     routing["powers"] = powers_list
+    if args.self_description:
+        routing["self_description"] = args.self_description
     if args.override_to_direct:
         routing["direct_override_grant"] = args.override_gate_citation
     return routing
@@ -289,8 +365,13 @@ def render_migration(args, number: int, phase: str) -> tuple[str, str]:
     ]
     if args.audience == "client":
         comment_lines.append(
-            "-- DEDICATED token per Musa's 2026-10-19 ruling (bus #71813) -- never shared with "
-            "another channel."
+            "-- SHARED token per Musa's settled one-bot model (op#33571, 2026-10-24; supersedes"
+        )
+        comment_lines.append(
+            "-- bus #71813) -- isolation is per-channel: private chat_id binding (no overlap"
+        )
+        comment_lines.append(
+            "-- with siblings on this token), self-description free of sibling names."
         )
     if args.override_to_direct:
         comment_lines.append(
@@ -299,7 +380,38 @@ def render_migration(args, number: int, phase: str) -> tuple[str, str]:
         )
     comment_lines.append(f"-- --store {args.store}")
     comment_lines.append("--")
-    comment_lines.append(f"-- REVERT: DELETE FROM public.bot_channels WHERE channel_key = '{key}';")
+
+    invite = bool(getattr(args, "invite", False)) and getattr(args, "invite_token", None)
+    if invite:
+        token_hash = hashlib.sha256(args.invite_token.encode()).hexdigest()
+        ttl = getattr(args, "invite_ttl_hours", 72) or 72
+        comment_lines += [
+            "-- op#34846 SELF-SERVE INVITE: the channel ships with an EMPTY allowlist;",
+            "-- the first '/start <token>' on the t.me deep link binds the chat"
+            " (ingest.py",
+            "-- try_invite_bind), consumes the single-use invite and replies with this",
+            "-- channel's own self_description. The PLAINTEXT token is NOT in this file",
+            "-- (sha256 at rest only); it lives solely in the render's stdout + a 0600",
+            "-- link file under .secrets/ (gitignored). Relay it out-of-band, never",
+            "-- over the bus. Expiry anchors at APPLY time (now()+interval), not render.",
+            "--",
+            "-- Asserts (lint: the REVOKE below requires them):",
+            "-- assert: no_table_privilege anon public.bot_channel_invites SELECT",
+            "-- assert: no_table_privilege anon public.bot_channel_invites INSERT",
+            "-- assert: no_table_privilege anon public.bot_channel_invites UPDATE",
+            "-- assert: no_table_privilege anon public.bot_channel_invites DELETE",
+            "-- assert: no_table_privilege anon public.bot_channel_invites TRUNCATE",
+            "-- assert: no_table_privilege authenticated public.bot_channel_invites SELECT",
+            "-- assert: no_table_privilege authenticated public.bot_channel_invites INSERT",
+            "-- assert: no_table_privilege authenticated public.bot_channel_invites UPDATE",
+            "-- assert: no_table_privilege authenticated public.bot_channel_invites DELETE",
+            "-- assert: no_table_privilege authenticated public.bot_channel_invites TRUNCATE",
+        ]
+    comment_lines.append(
+        f"-- REVERT: DELETE FROM public.bot_channels WHERE channel_key = '{key}';")
+    if invite:
+        comment_lines.append(
+            f"-- REVERT: DELETE FROM public.bot_channel_invites WHERE channel_key = '{key}';")
     comment_lines.append("")
 
     insert_sql = (
@@ -314,7 +426,39 @@ def render_migration(args, number: int, phase: str) -> tuple[str, str]:
         f"   {sqlstr(args.audience)}, {sqlstr(args.owner_lane)})\n"
         "ON CONFLICT (channel_key) DO NOTHING;\n"
     )
-    return name, "\n".join(comment_lines) + insert_sql
+    invite_sql = ""
+    if invite:
+        created_by = args.owner_lane or "onboard_client_channel"
+        invite_sql = (
+            "\n"
+            "-- Single-use, expiring invite keyed to this channel (op#34846). The\n"
+            "-- lock-down block is the 014 substrate pattern: service-role only, RLS\n"
+            "-- + deny-all + REVOKEs (new tables get anon/authenticated ALL by\n"
+            "-- pg_default_acl implicitly — see the assert header above).\n"
+            "CREATE TABLE IF NOT EXISTS public.bot_channel_invites (\n"
+            "  id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n"
+            "  channel_key    TEXT NOT NULL REFERENCES public.bot_channels(channel_key)\n"
+            "                 ON DELETE CASCADE,\n"
+            "  token_hash     TEXT NOT NULL UNIQUE,\n"
+            "  expires_at     TIMESTAMPTZ NOT NULL,\n"
+            "  used_at        TIMESTAMPTZ,\n"
+            "  bound_chat_id  BIGINT,\n"
+            "  created_by     TEXT NOT NULL,\n"
+            "  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()\n"
+            ");\n"
+            "ALTER TABLE public.bot_channel_invites ENABLE ROW LEVEL SECURITY;\n"
+            "CREATE POLICY deny_all_bot_channel_invites ON public.bot_channel_invites\n"
+            "  FOR ALL TO PUBLIC USING (false) WITH CHECK (false);\n"
+            "REVOKE ALL ON public.bot_channel_invites FROM PUBLIC, anon, authenticated;\n"
+            "\n"
+            "INSERT INTO public.bot_channel_invites\n"
+            "  (channel_key, token_hash, expires_at, created_by)\n"
+            "VALUES\n"
+            f"  ({sqlstr(key)}, '{token_hash}', "
+            f"now() + make_interval(hours => {ttl}), {sqlstr(created_by)})\n"
+            "ON CONFLICT (token_hash) DO NOTHING;\n"
+        )
+    return name, "\n".join(comment_lines) + insert_sql + invite_sql
 
 
 def render_ingest_diff(channel_key: str) -> tuple[str, str] | None:
@@ -331,6 +475,8 @@ def render_ingest_diff(channel_key: str) -> tuple[str, str] | None:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    if args.chat_ids is None:            # --chat-id omitted (--invite flow)
+        args.chat_ids = []
 
     cwd = Path.cwd().resolve()
     if args.host == "mini" and cwd == LIVE_CHECKOUT.resolve():
@@ -342,14 +488,19 @@ def main(argv=None) -> int:
 
     validate_mode_target(args.mode, args.inject_target)
     validate_store(args.store)
+    validate_chat_ids(args)
     phase = resolve_phase(args)
+    if args.invite:
+        args.invite_token = mint_invite()
 
     conn = connect()
     try:
         cur = conn.cursor()
         check_channel_key_free(cur, args.channel_key)
-        check_token_dedication(cur, args.token_env_key, args.audience, args.channel_key)
+        check_token_isolation(cur, args.token_env_key, args.channel_key, args.chat_ids)
         check_host_token_consistency(cur, args.token_env_key, args.host, args.channel_key)
+        if args.self_description:
+            check_self_description(cur, args.channel_key, args.self_description)
     finally:
         conn.close()
 
@@ -360,6 +511,15 @@ def main(argv=None) -> int:
     print(sql_text)
     print(f"-- sha256: {sha}")
     print(f"-- sha256 (12-char prefix for gate citation): {sha[:12]}")
+
+    if args.invite:
+        username = bot_username_for(args.token_env_key, args.bot_username)
+        link = f"https://t.me/{username}?start={args.invite_token}"
+        print(f"\n# CLIENT INVITE LINK (single-use, expires at apply+{args.invite_ttl_hours}h):")
+        print(f"#   {link}")
+        print("#   The plaintext token exists ONLY here and (post-render) in the 0600")
+        print("#   link file — never in the migration (sha256 only), never in a bus body,")
+        print("#   never in git. Relay to the client out-of-band (CA/Musa), not via agents.")
 
     ingest_diff = None
     if args.host == "mini":
@@ -374,6 +534,13 @@ def main(argv=None) -> int:
     out_path = MIGRATIONS_DIR / name
     out_path.write_text(sql_text)
     print(f"\n# Wrote {out_path.relative_to(ORCH_DIR)}")
+
+    if args.invite:
+        username = bot_username_for(args.token_env_key, args.bot_username)
+        link_path = ORCH_DIR / ".secrets" / f"invite_{slugify(args.channel_key)}.link"
+        write_invite_link(link_path, username, args.invite_token)
+        print(f"# Wrote the client link 0600 to {link_path.relative_to(ORCH_DIR)} "
+              "(gitignored; relay out-of-band).")
 
     if ingest_diff:
         old_text, new_text = ingest_diff

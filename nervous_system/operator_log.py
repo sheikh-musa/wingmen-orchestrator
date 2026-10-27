@@ -197,6 +197,7 @@ _CONSOLE_POLLED_CLIENT_TAGS = frozenset({
     "cosem-caai", "cosem-exams", "alderei",  # 2026-08-03
     "cosem-tdu", "angullia",                  # 2026-09-27 (op#22517 fix)
     "oeh",                                     # 2026-09-27 (op#22521/bus#43713)
+    "bariq",                                   # 2026-10-27 (op#34846 TG2.0 client #1)
 })
 
 # Suffixes written by the lane phase-gate (scripts/lane_reply.sh): '<tag>-drill' is a reply
