@@ -41,14 +41,25 @@ loud_warn(){
     [ -n "$detail" ] && printf ' detail: %s\n' "$detail"
     printf '======================================================================\033[0m\n\n'
     # best-effort loud bus alert to console — never fails / never blocks the publish
+    # Musa op#34845, bus #78757/#78846 (PR-B step 2): was a literal `psql -c
+    # "...INSERT..."` call; routed through scripts/bus_send.py's send() (direct
+    # import -- no pre-existing Python/psycopg context in this script, unlike
+    # the CLI subprocess form used for plain-shell writers with no such context
+    # elsewhere). The CLI has no --posted-by-identity flag, and the original
+    # explicitly set it to the literal 'cc-fleet-health' (not the DB trigger's
+    # current_user auto-population) -- send() is called directly so that nuance
+    # is preserved exactly, same as requires_response=true.
     if [ -n "${DATABASE_URL:-}" ]; then
-      psql "$DATABASE_URL" -v ON_ERROR_STOP=0 -c \
-        "SELECT set_config('app.current_agent_id','cc-fleet-health',true);
-         INSERT INTO agent_messages(from_agent,to_agent,message_type,subject,body,requires_response,priority,created_at,posted_by_identity)
-         VALUES ('cc-fleet-health','orch-console','update',
-           '⚠ RENDER-GATE WARN (non-blocking) — ${what} on client page ${SLUG}',
-           'Stage-${STAGE} render-gate flagged ${what} on ${SLUG} at publish; publish PROCEEDED (non-blocking, hard-refuse is Stage-2). Eyeball ${OUT}/mobile-top.png; verdict ${OUT}/verdict.json. detail: ${detail}',
-           true,'P2', now(),'cc-fleet-health');" >/dev/null 2>&1 || true
+      "$ORCH/.venv/bin/python3" - \
+        "⚠ RENDER-GATE WARN (non-blocking) — ${what} on client page ${SLUG}" \
+        "Stage-${STAGE} render-gate flagged ${what} on ${SLUG} at publish; publish PROCEEDED (non-blocking, hard-refuse is Stage-2). Eyeball ${OUT}/mobile-top.png; verdict ${OUT}/verdict.json. detail: ${detail}" \
+        <<'PY' >/dev/null 2>&1 || true
+import sys, os
+sys.path.insert(0, os.path.expanduser('~/wingmen/orchestrator'))
+from scripts.bus_send import send as bus_send
+bus_send('cc-fleet-health', 'orch-console', 'update', sys.argv[1], sys.argv[2],
+          'P2', req=True, posted_by_identity='cc-fleet-health', dsn=os.environ.get('DATABASE_URL'))
+PY
     fi
   else
     log "$what WARN (Stage 0 observe) ${detail}"
