@@ -1,0 +1,19 @@
+{
+  "pulse": {"working": 3, "idle": 1, "offline": 1, "needs_you": 0,
+            "pane_health": "clear", "asks_open": 477, "asks_needs": 0,
+            "asks_review": 2, "asks_waiting": 11},
+  "your_asks": [
+    {"id": 901, "ask": "Approve the ADCDA W5 schedule before Friday", "delegated_to": "orch-console",
+     "waiting_on_operator": true, "chase_by": null, "status": "waiting_on_musa",
+     "updated_age_s": 5400, "asked_age_s": 90000},
+    {"id": 902, "ask": "Sign off the tabung monthly statement", "delegated_to": "orch-console",
+     "waiting_on_operator": true, "chase_by": null, "status": "waiting_on_musa",
+     "updated_age_s": 86400, "asked_age_s": 172800}
+  ],
+  "needs_you": [], "backlog": [], "coordinators": [],
+  "lanes": [{"agent_id": "cc-ihsanos-1", "base_agent_id": "cc-ihsanos", "status": "working",
+             "current_task": "storefront build", "heartbeat_age_s": 15, "desired_state": "up",
+             "display_name": "Ihsanos lane"}],
+  "deploys": [], "drain_board": {"rows": []},
+  "pool_usage": [], "context_bloat": [], "glm_usage": null, "queue": []
+}
