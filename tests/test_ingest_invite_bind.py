@@ -34,23 +34,11 @@ import pytest
 from nervous_system import ingest
 from tests.test_ingest_token_group_routing import (
     _BOT_CHANNELS_DDL,
+    _INVITES_DDL,
     _SUPPORT_DDL,
     _load_group,
     _seed_channel,
 )
-
-_INVITES_DDL = """
-    CREATE TABLE bot_channel_invites (
-      id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      channel_key  TEXT NOT NULL REFERENCES bot_channels(channel_key) ON DELETE CASCADE,
-      token_hash   TEXT NOT NULL UNIQUE,
-      expires_at   TIMESTAMPTZ NOT NULL,
-      used_at      TIMESTAMPTZ,
-      bound_chat_id BIGINT,
-      created_by   TEXT,
-      created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-"""
 
 BARIQ_DESC = ("Bariq Employment site-edit channel: send approved site changes "
               "(hero headline/description, contact details, testimonials) and "
@@ -75,9 +63,8 @@ def bind_dsn(pg_dsn, monkeypatch):
         cur.execute("DROP SCHEMA public CASCADE")
         cur.execute("CREATE SCHEMA public")
         cur.execute(_BOT_CHANNELS_DDL)
-        for ddl in _SUPPORT_DDL:
+        for ddl in _SUPPORT_DDL:  # includes bot_channel_invites (migration 126)
             cur.execute(ddl)
-        cur.execute(_INVITES_DDL)
     return pg_dsn
 
 
@@ -475,3 +462,50 @@ def test_unpinned_channel_self_activates_on_bind(bind_dsn, monkeypatch):
         cur.execute("SELECT enabled, allowed_chat_ids FROM bot_channels "
                     "WHERE channel_key='client-x'")
         assert cur.fetchone() == (True, [424242])
+
+
+# ── 5c. empty-allowlist watchdog vs the invite-pending window (fast-follow b) ─
+# green-lit by console-revamp #78815: the watchdog skip for channels whose
+# empty allowlist is the DESIGNED pre-bind state.
+
+def test_empty_allowlist_watchdog_silent_while_invite_pending(bind_dsn, monkeypatch):
+    """op#34846: an empty allowlist is the designed pre-bind state while an
+    unused, unexpired invite is outstanding — the pre-GATE bind hook answers
+    the '/start <token>' tap, so the watchdog's "never match any message"
+    claim is stale for exactly that window and must not fire (the ~29s log
+    noise class on the Mini until the client taps)."""
+    monkeypatch.setenv("SHARED_BOT_TOKEN", "fake-token-value")
+    _seed_desc_channel(bind_dsn, "bariq", "SHARED_BOT_TOKEN", BARIQ_DESC)
+    _seed_channel(bind_dsn, "sibling", "SHARED_BOT_TOKEN", chat_ids=[999])
+    _seed_invite(bind_dsn, "bariq", "tok-pending", hours=48)
+    captured = []
+    monkeypatch.setattr(ingest, "_log_line", lambda msg: captured.append(msg))
+    monkeypatch.setattr(ingest, "tg_call", _Recorder([]))
+    _run_cycle(bind_dsn, "SHARED_BOT_TOKEN")
+    assert not [m for m in captured if "EMPTY allowed_chat_ids" in m and "'bariq'" in m]
+
+
+def test_empty_allowlist_watchdog_fires_without_invite(bind_dsn, monkeypatch):
+    """The guard still guards: an empty-allowlist channel with NO outstanding
+    invite genuinely matches nothing — the watchdog must keep saying so."""
+    monkeypatch.setenv("SHARED_BOT_TOKEN", "fake-token-value")
+    _seed_desc_channel(bind_dsn, "ghost", "SHARED_BOT_TOKEN", "Ghost channel")
+    _seed_channel(bind_dsn, "sibling", "SHARED_BOT_TOKEN", chat_ids=[999])
+    captured = []
+    monkeypatch.setattr(ingest, "_log_line", lambda msg: captured.append(msg))
+    monkeypatch.setattr(ingest, "tg_call", _Recorder([]))
+    _run_cycle(bind_dsn, "SHARED_BOT_TOKEN")
+    assert [m for m in captured if "EMPTY allowed_chat_ids" in m and "'ghost'" in m]
+
+
+def test_invite_pending_window_is_unused_and_unexpired(bind_dsn):
+    """The skip window is exactly: an unused AND unexpired invite — used or
+    expired invites don't suppress the watchdog."""
+    _seed_desc_channel(bind_dsn, "bariq", "SHARED_BOT_TOKEN", BARIQ_DESC)
+    _seed_invite(bind_dsn, "bariq", "tok-used", used=True)
+    _seed_invite(bind_dsn, "bariq", "tok-expired", expired=True)
+    with psycopg.connect(bind_dsn) as conn:
+        assert not ingest.invite_pending(conn, "bariq")
+    _seed_invite(bind_dsn, "bariq", "tok-live", hours=48)
+    with psycopg.connect(bind_dsn) as conn:
+        assert ingest.invite_pending(conn, "bariq")
