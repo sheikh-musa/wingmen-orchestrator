@@ -499,3 +499,65 @@ def test_reclaim_chrome_clones_no_root_is_a_noop(monkeypatch):
 
 def test_chrome_clones_reclaimer_is_registered():
     assert "chrome-clones" in [r["name"] for r in dar.build_reclaimers()]
+
+
+# ---- Spotlight index guard (orch-console #77912, 2026-10-27) ----------------------------
+# A 69GB .Spotlight-V100 from 08-28 sat on the Data volume, invisible to every reclaimer,
+# after indexing was disabled. With indexing OFF it must not exist; regrowth pages console.
+_OFF = lambda vol: "Spotlight server is disabled."
+
+
+def test_spotlight_healthy_when_index_absent_and_indexing_off(tmp_path):
+    assert dar.spotlight_findings(index_dir=tmp_path / "absent", status=_OFF) == []
+
+
+def test_spotlight_flags_a_reappearing_index_dir(tmp_path):
+    d = tmp_path / ".Spotlight-V100"
+    d.mkdir()
+    f = dar.spotlight_findings(index_dir=d, status=_OFF)
+    assert len(f) == 1 and "exists again" in f[0]
+
+
+def test_spotlight_flags_indexing_enabled_but_not_an_unreadable_status(tmp_path):
+    on = lambda vol: f"{vol}:\n\tIndexing enabled."
+    assert len(dar.spotlight_findings(index_dir=tmp_path / "x", status=on)) == 2
+    assert dar.spotlight_findings(index_dir=tmp_path / "x", status=lambda v: None) == []
+    no_index = lambda vol: f"{vol}:\n\tNo index."
+    assert dar.spotlight_findings(index_dir=tmp_path / "x", status=no_index) == []
+
+
+def test_spotlight_guard_pages_once_per_window_then_again_after(tmp_path, monkeypatch):
+    pages = []
+    state = tmp_path / "state.json"
+    kw = dict(findings=["index back"], state_path=state, page=pages.append)
+    dar.spotlight_guard(now=1000, **kw)
+    dar.spotlight_guard(now=1000 + 3600, **kw)
+    assert len(pages) == 1, "a repeat inside the window must not re-page"
+    dar.spotlight_guard(now=1000 + dar.SPOTLIGHT_PAGE_EVERY_S + 1, **kw)
+    assert len(pages) == 2
+
+
+def test_spotlight_guard_new_finding_pages_immediately_and_clears_when_healthy(tmp_path):
+    pages = []
+    state = tmp_path / "state.json"
+    dar.spotlight_guard(findings=["a"], now=1000, state_path=state, page=pages.append)
+    dar.spotlight_guard(findings=["a", "b"], now=1001, state_path=state, page=pages.append)
+    assert len(pages) == 2
+    dar.spotlight_guard(findings=[], now=1002, state_path=state, page=pages.append)
+    assert not state.exists()
+
+
+def test_spotlight_guard_runs_before_the_disk_ok_early_return(monkeypatch):
+    calls = []
+    monkeypatch.setattr(dar, "spotlight_guard", lambda: calls.append(1))
+    monkeypatch.setattr(dar, "_disk_free", lambda *a, **k: 200 * GB)
+    assert dar.main(["--apply"]) == 0
+    assert calls == [1]
+
+
+def test_spotlight_guard_failure_never_blocks_reclaim(monkeypatch):
+    def boom():
+        raise RuntimeError("guard bug")
+    monkeypatch.setattr(dar, "spotlight_guard", boom)
+    monkeypatch.setattr(dar, "_disk_free", lambda *a, **k: 200 * GB)
+    assert dar.main(["--apply"]) == 0

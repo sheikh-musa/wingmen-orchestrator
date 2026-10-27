@@ -28,11 +28,13 @@ Usage (from ~/wingmen/orchestrator):
 """
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
+import time
 
 GB = 1 << 30
 
@@ -622,6 +624,102 @@ def _page(free_before, free_after, summary, *, loud=True):
         print(f"[disk-autoremediate] WARN bus-page failed ({e}); banner stands", file=sys.stderr)
 
 
+# ---- Spotlight index guard (orch-console #77912, 2026-10-27) ---------------------------
+# The Mini's "unattributed ~90Gi" was /System/Volumes/Data/.Spotlight-V100: a 69GB index
+# from 08-28, left on disk after indexing was disabled. du from this user can't see inside
+# it (root-owned, TCC), and no reclaimer could touch it. With indexing OFF the directory
+# must not exist at all, so its reappearance -- or indexing turning back on -- is the
+# signal. Remediation needs root (`mdutil -X`), which this job doesn't hold, so it PAGES
+# with the exact fix instead of acting. At most once per SPOTLIGHT_PAGE_EVERY_S per
+# distinct finding-set; the memory clears once healthy.
+SPOTLIGHT_INDEX_DIR = pathlib.Path(os.environ.get(
+    "DISK_SPOTLIGHT_INDEX_DIR", "/System/Volumes/Data/.Spotlight-V100"))
+SPOTLIGHT_VOLUMES = ("/", "/System/Volumes/Data")
+SPOTLIGHT_PAGE_EVERY_S = int(os.environ.get("DISK_SPOTLIGHT_PAGE_EVERY_S", str(24 * 3600)))
+SPOTLIGHT_STATE = pathlib.Path(os.environ.get(
+    "DISK_SPOTLIGHT_STATE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs",
+                 "spotlight_guard_state.json")))
+_SPOTLIGHT_OFF_MARKERS = ("server is disabled", "indexing disabled", "no index")
+
+
+def _mdutil_status(volume):
+    try:
+        r = subprocess.run(["mdutil", "-s", volume], capture_output=True, text=True, timeout=15)
+        return (r.stdout + r.stderr).strip()
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def spotlight_findings(index_dir=None, status=_mdutil_status, volumes=SPOTLIGHT_VOLUMES):
+    """Problems to page about (empty = healthy). An unreadable mdutil status is NOT a
+    finding -- this guard only pages on positive evidence."""
+    index_dir = pathlib.Path(index_dir or SPOTLIGHT_INDEX_DIR)
+    out = []
+    if os.path.lexists(index_dir):
+        out.append(f"{index_dir} exists again (indexing is meant to be OFF; it grew to 69GB "
+                   f"unnoticed before)")
+    for vol in volumes:
+        st = status(vol)
+        if st and not any(m in st.lower() for m in _SPOTLIGHT_OFF_MARKERS):
+            out.append(f"Spotlight indexing looks ENABLED on {vol}: {st.splitlines()[-1][:120]}")
+    return out
+
+
+def spotlight_guard(*, findings=None, now=None, state_path=None, page=None):
+    """Run the check; page orch-console when due. Returns the findings."""
+    findings = spotlight_findings() if findings is None else findings
+    now = time.time() if now is None else now
+    state_path = pathlib.Path(state_path or SPOTLIGHT_STATE)
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        state = {}
+    if not findings:
+        if state:
+            try:
+                state_path.unlink()
+            except OSError:
+                pass
+        return findings
+    key = "|".join(sorted(findings))
+    if state.get("key") == key and now - state.get("paged_at", 0) < SPOTLIGHT_PAGE_EVERY_S:
+        return findings
+    (page or _page_spotlight)(findings)
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({"key": key, "paged_at": now}))
+    except OSError as e:
+        log(f"[disk-autoremediate] WARN spotlight guard state not saved ({e})")
+    return findings
+
+
+def _page_spotlight(findings):
+    lines = ["TL;DR: the Spotlight index is coming back on the Mini. It silently ate 69GB "
+             "last time (08-28 to 10-27). Needs a root fix."]
+    lines += [f"  - {f}" for f in findings]
+    lines += ["Fix (root + Full Disk Access; plain sudo from tmux is TCC-blocked): "
+              "ssh localhost, then `sudo mdutil -i off /` and `sudo mdutil -i off "
+              "/System/Volumes/Data`, then `sudo mdutil -X /System/Volumes/Data`. Verify with "
+              "`mdutil -s` and a df delta."]
+    print("\n".join(lines), file=sys.stderr, flush=True)
+    try:
+        import psycopg2
+        dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+        if dsn:
+            c = psycopg2.connect(dsn)
+            cur = c.cursor()
+            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
+            cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
+                           VALUES ('cc-fleet-health','orch-console','blocker','P2',%s,%s)""",
+                        ("Spotlight index regrowing on the Mini — needs root mdutil -X",
+                         "\n".join(lines)))
+            c.commit()
+    except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already stands
+        print(f"[disk-autoremediate] WARN spotlight page failed ({e}); banner stands",
+              file=sys.stderr)
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     apply = "--apply" in argv
@@ -630,6 +728,11 @@ def main(argv=None) -> int:
     if free is None:
         print(f"[disk-autoremediate] ERROR could not read {DATA_VOL} free", file=sys.stderr)
         return 1
+    if apply:
+        try:
+            spotlight_guard()
+        except Exception as e:  # noqa: BLE001 — a guard bug must never block disk reclaim
+            log(f"[disk-autoremediate] WARN spotlight guard failed: {e!r}")
     tier = decide(free, remediate_under=REMEDIATE_UNDER, floor=FLOOR)
     log(f"[disk-autoremediate {mode}] free={free // GB}GB tier={tier} "
         f"(remediate<{REMEDIATE_UNDER // GB}GB floor={FLOOR // GB}GB "
