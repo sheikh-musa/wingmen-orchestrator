@@ -646,7 +646,14 @@ SWITCH_TARGET="$NEW_FP" SWITCH_MODELAPPLY="$MODEL_APPLY" \
 "$VENV_PY" - <<'PYAUDIT' 2>>/dev/stderr || echo "WARNING: switch audit/alert emit FAILED (switch itself already completed above)" >&2
 import os
 try:
-    import psycopg
+    # Musa op#34845, bus #78757/#78846 (PR-B step 2): was a raw psycopg INSERT INTO
+    # agent_messages, one row per recipient; routed through scripts/bus_send.py's
+    # send() (direct import — cwd is already ORCH_DIR, set by this script's own
+    # `cd "$HOME/wingmen/orchestrator"` near the top), same sanctioned
+    # post_agent_message RPC path as every other migrated writer. send() generates
+    # its own fresh thread_id per call (uuid.uuid4()) when none is passed, matching
+    # the original per-row-independent gen_random_uuid() column default exactly.
+    from scripts.bus_send import send as bus_send
     # DATABASE_URL is already exported (the script did `set -a; source .env`).
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     bg = os.environ.get("SWITCH_BREAKGLASS") == "1"
@@ -672,14 +679,8 @@ try:
     # switches — the billing-affecting operator/emergency paths the governance node
     # needs visibility on (cai #16101, soft/non-blocking, requires_response=false).
     recipients = ["orch-console"] + (["cai"] if (armed or bg) else [])
-    with psycopg.connect(dsn) as c, c.cursor() as cur:
-        cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-        for _to in recipients:
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response) "
-                "VALUES ('cc-fleet-health',%s,%s,%s,%s,%s,false)",
-                (_to, mtype, subj, body, prio))
-        c.commit()
+    for _to in recipients:
+        bus_send("cc-fleet-health", _to, mtype, subj, body, prio, req=False, dsn=dsn)
     print(f"[switch_lane_token] audit row emitted to {recipients} ({mtype}, {prio}).")
 except Exception as e:
     raise SystemExit(f"audit emit error: {e}")
