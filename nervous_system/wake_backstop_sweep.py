@@ -545,6 +545,43 @@ def _base_of(agent):
 _ESCALATED_SEEN: set = set()
 
 
+# Seed the stuck-page once-guard at process start from the bus (console #78389, amending
+# Nazim 43009(b)): daemon deploys are now frequent enough that "one repeat page per restart"
+# is real noise (#78378 re-paged rows 77805/77837/77864 after a 16:42Z deploy restart). The
+# bus already records every stuck page with its row ids, so read those back: read-only, no
+# new table or file. Seeding from the bus also dedups across hosts (Mini + gzb).
+_STUCK_PAGE_BODY_RE = re.compile(r"row\(s\) \[([0-9,\s]+)\] to \S+ are STILL unread")
+
+
+def _fetch_recent_stuck_page_bodies(max_age_s: int = STUCK_PAGE_MAX_AGE_S) -> list:
+    if not _DSN:
+        return []
+    with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT body FROM agent_messages WHERE subject LIKE '[wake-backstop]%%un-drained%%' "
+                    "AND created_at > now() - make_interval(secs => %s)", (max_age_s,))
+        return [r[0] for r in cur.fetchall()]
+
+
+def seed_stuck_seen_from_bus(seen: set, fetch=_fetch_recent_stuck_page_bodies) -> int:
+    """Add ("stuck", id) for every row id already stuck-paged in the last 24h. Returns how
+    many were added. Fail-soft: a read error logs loudly and seeds nothing (the old
+    behaviour: at most one repeat page), never crashes the floor."""
+    try:
+        bodies = fetch()
+    except Exception as e:  # noqa: BLE001
+        print(f"{_ts()} stuck-page once-guard seed FAILED (will repeat-page once): {e!r}",
+              file=sys.stderr, flush=True)
+        return 0
+    added = 0
+    for body in bodies or []:
+        for m in _STUCK_PAGE_BODY_RE.finditer(body or ""):
+            for tok in m.group(1).split(","):
+                if tok.strip().isdigit() and ("stuck", int(tok)) not in seen:
+                    seen.add(("stuck", int(tok)))
+                    added += 1
+    return added
+
+
 def _default_console_alive() -> bool:
     """orch-console's own liveness (audit-20261006 item 4, bus#54648): a fresh agent_status
     heartbeat, not the hub's lease. Resolved lazily (same shape as _default_this_host) so this
@@ -1333,6 +1370,8 @@ def main() -> int:
     once = "--once" in sys.argv
     print(f"{_ts()} wake-backstop-sweep up — cadence={WAKE_SWEEP_SEC}s grace={WAKE_SWEEP_GRACE_S}s "
           f"dry_run={dry} auto_wake_enabled={auto_wake_enabled()}", flush=True)
+    seeded = seed_stuck_seen_from_bus(_ESCALATED_SEEN)
+    print(f"{_ts()} stuck-page once-guard seeded from bus: {seeded} row id(s)", flush=True)
     while True:
         try:
             # honor the kill-switch: when auto-wake is OFF, observe (dry) — never send.
