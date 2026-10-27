@@ -89,7 +89,7 @@ def test_cap_alert_debounced_within_window(wake_dir):
 def test_wake_agent_cap_sets_alert_due_once(wake_dir, monkeypatch):
     # 5 wakes in window -> cap hit; first call alert_due=True, second False (debounced)
     monkeypatch.setattr(agent_wake, "resolve_tmux_session", lambda a: "sess")
-    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s: False)
+    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s, **_: False)
     _seed(wake_dir, "cc-ihsanos", [800.0, 850.0, 900.0, 920.0, 940.0])
     r1 = agent_wake.wake_agent("cc-ihsanos", now=1000.0)
     assert r1.get("cap_hit") is True and r1.get("alert_due") is True
@@ -107,7 +107,7 @@ def test_wake_agent_cap_sets_alert_due_once(wake_dir, monkeypatch):
 @pytest.fixture
 def _wake_ready(wake_dir, monkeypatch):
     monkeypatch.setattr(agent_wake, "resolve_tmux_session", lambda a: "sess")
-    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s: False)
+    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s, **_: False)
     return wake_dir
 
 

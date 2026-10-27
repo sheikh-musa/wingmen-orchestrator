@@ -39,15 +39,24 @@ import subprocess
 _CC_LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "composer_capture.sh")
 
 
-def is_busy_text(pane_text: str, on_unreadable: bool = True) -> bool:
+def is_busy_text(pane_text: str, on_unreadable: bool = True, nudge_safe: bool = False) -> bool:
     """True when the LIVE footer shows a turn in progress (esc-to-interrupt, background-agents,
     or an extended-thinking spinner). Delegates the busy patterns to the shared shell definition
     so all copies agree by construction. Pure text: no liveness re-capture (that is the live
-    pane_busy(session) path); a frozen spinner still reads busy here, which fails safe."""
+    pane_busy(session) path); a frozen spinner still reads busy here, which fails safe.
+
+    nudge_safe=True (bus #77607->#77620->#77633, 2026-10-27): drops ONLY the "N shells still
+    running" check (_cc_text_busy_nudge_safe instead of _cc_text_busy) -- that check also
+    matches a finished turn whose background-subagent panel is still showing elapsed time,
+    which made the realtime doorbell + backstop sweep debounce a lane forever. A NEW, opt-in
+    parameter, not a default change: every other caller (lane clearing, the reapers,
+    lane_wedge_watchdog/lane_watchdog's destructive paths) keeps the fully conservative check
+    by leaving this False."""
     if not (pane_text or "").strip():
         return on_unreadable
+    fn = "_cc_text_busy_nudge_safe" if nudge_safe else "_cc_text_busy"
     r = subprocess.run(
-        ["bash", "-c", 'source "$1"; _cc_text_busy "$2"', "_", _CC_LIB, pane_text],
+        ["bash", "-c", 'source "$1"; "$2" "$3"', "_", _CC_LIB, fn, pane_text],
         capture_output=True,
     )
     return r.returncode == 0
@@ -60,10 +69,11 @@ def _tmux() -> str:
     return "tmux"
 
 
-def is_busy(session: str, on_unreadable: bool = True, tmux: str = None) -> bool:
+def is_busy(session: str, on_unreadable: bool = True, tmux: str = None,
+            nudge_safe: bool = False) -> bool:
     try:
         r = subprocess.run([tmux or _tmux(), "capture-pane", "-t", f"={session}:0.0", "-p"],
                            capture_output=True, text=True, timeout=10)
-        return is_busy_text(r.stdout or "", on_unreadable=on_unreadable)
+        return is_busy_text(r.stdout or "", on_unreadable=on_unreadable, nudge_safe=nudge_safe)
     except Exception:
         return on_unreadable

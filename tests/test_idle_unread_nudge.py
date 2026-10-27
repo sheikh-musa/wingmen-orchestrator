@@ -28,11 +28,13 @@ import wake_backstop_sweep as wbs  # noqa: E402
 _NOW = datetime(2026, 9, 30, 12, 0, 0, tzinfo=timezone.utc)
 
 
-def _row(rid, agent, age_s, frm="cc-peer"):
-    """(id, to_agent, created_at, from_agent) — age_s seconds before _NOW.
+def _row(rid, agent, age_s, frm="cc-peer", priority=None):
+    """(id, to_agent, created_at, from_agent, priority) — age_s seconds before _NOW.
     from_agent defaults to a genuine non-fleet-health peer (so existing tests keep asserting
-    that a GENUINE directed row still nudges — the regression guard for the self-feed fix)."""
-    return (rid, agent, _NOW - timedelta(seconds=age_s), frm)
+    that a GENUINE directed row still nudges — the regression guard for the self-feed fix).
+    priority defaults to None (no signal), which the fast P0/P1 tier never matches, so every
+    pre-existing call site keeps the old uniform-threshold behavior unchanged."""
+    return (rid, agent, _NOW - timedelta(seconds=age_s), frm, priority)
 
 
 def _collector():
@@ -400,3 +402,125 @@ def test_wired_into_the_daemon_loop():
     import inspect
     src = inspect.getsource(wbs.main)
     assert "idle_unread_sweep" in src
+
+
+# ---- FAST TIER for P0/P1 (bus #77607->#77620->#77633, 2026-10-27) ----------------------
+# A P0/P1 sitting unread on an idle lane must not wait the full 15/30 min uniform window;
+# P2/P3 (and no-priority rows) keep today's thresholds exactly -- additive, not a tightening.
+
+def test_p1_nudges_at_3min_well_under_the_15min_default():
+    nudged, warned, nudge, warn = _collector()
+    res = wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 200, priority="P1")],  # 3m20s
+                                resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+                                nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={})
+    assert nudged == [("cc-oeh", (1,))]
+
+
+def test_p0_nudges_at_3min_same_as_p1():
+    nudged, warned, nudge, warn = _collector()
+    res = wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 200, priority="P0")],
+                                resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+                                nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={})
+    assert nudged == [("cc-oeh", (1,))]
+
+
+def test_p2_at_3min_does_not_nudge_keeps_the_15min_default():
+    nudged, warned, nudge, warn = _collector()
+    res = wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 200, priority="P2")],
+                                resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+                                nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={})
+    assert nudged == []
+
+
+def test_no_priority_signal_keeps_the_15min_default_unchanged():
+    # A 4-tuple row (no 5th element) must behave exactly as before the fast tier existed.
+    nudged, warned, nudge, warn = _collector()
+    res = wbs.idle_unread_sweep(rows=[(1, "cc-oeh", _NOW - timedelta(seconds=200), "cc-peer")],
+                                resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+                                nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={})
+    assert nudged == []
+
+
+def test_p1_warns_at_5min_well_under_the_30min_default():
+    nudged, warned, nudge, warn = _collector()
+    res = wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 310, priority="P1")],  # 5m10s
+                                resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+                                nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={})
+    assert nudged == [("cc-oeh", (1,))]
+    assert warned == [("cc-oeh", (1,))]
+
+
+def test_p2_at_5min_does_not_warn_keeps_the_30min_default():
+    nudged, warned, nudge, warn = _collector()
+    res = wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 310, priority="P2")],
+                                resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+                                nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={})
+    assert warned == []
+
+
+def test_mixed_priority_only_the_p1_row_is_named_at_3min():
+    nudged, warned, nudge, warn = _collector()
+    wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 200, priority="P2"),
+                                _row(2, "cc-oeh", 200, priority="P1")],
+                          resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+                          nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={})
+    assert nudged == [("cc-oeh", (2,))]      # P2 row (id 1) not yet due
+
+
+# ---- the actual incident: foreground-idle + background-shell marker + unread P1 ---------
+# (bus #77607->#77620->#77633): cc-cosem-platform-2/-4, cc-irsyad-coord-1, cc-cosem-adcda-1
+# all read as permanently BUSY because their background-subagent panel still showed
+# "N shell(s) still running" after the main turn finished, so a P0/P1 sat unread for
+# 20-30+ min. This wires the REAL nudge-safe busy check (not a stub) through
+# idle_unread_sweep and proves a foreground-idle-but-shell-marker pane with a fresh P1 now
+# nudges instead of being skipped as busy.
+
+from scripts.lib import pane_busy as pb  # noqa: E402
+
+SHELL_RUNNING_PANE = (
+    "⏺ All 39 pass now. Running the full suite once more to confirm no regressions.\n"
+    "\n"
+    "  Ran 1 shell command\n"
+    "\n"
+    "✻ Cooked for 4m 29s · done 10:36 PM · 1 shell still running\n"
+    "────────────────────────────\n"
+    "❯ \n"
+    "────────────────────────────\n"
+    "  ⏵⏵ bypass permissions on · 1 shell · ↓ to manage\n"
+)
+
+BUSY_FOOTER_PANE = (
+    "some output\n"
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ctrl+t\n"
+)
+
+
+def test_shell_marker_pane_with_fresh_p1_nudges_not_skipped_busy():
+    nudged, warned, nudge, warn = _collector()
+    real_nudge_safe_busy = lambda s: pb.is_busy_text(SHELL_RUNNING_PANE, nudge_safe=True)
+    res = wbs.idle_unread_sweep(rows=[_row(1, "cc-cosem-platform-2", 200, priority="P1")],
+                                resolve_session=lambda a: "sess", pane_busy=real_nudge_safe_busy,
+                                nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={})
+    assert res["skipped_busy"] == []
+    assert nudged == [("cc-cosem-platform-2", (1,))]
+
+
+def test_genuinely_busy_pane_is_still_skipped_under_nudge_safe():
+    # The fix narrows ONE check, not the whole gate: a REAL foreground turn (esc-to-interrupt)
+    # must still be skipped as busy even through the nudge-safe path.
+    nudged, warned, nudge, warn = _collector()
+    real_nudge_safe_busy = lambda s: pb.is_busy_text(BUSY_FOOTER_PANE, nudge_safe=True)
+    res = wbs.idle_unread_sweep(rows=[_row(1, "cc-cosem-platform-2", 200, priority="P1")],
+                                resolve_session=lambda a: "sess", pane_busy=real_nudge_safe_busy,
+                                nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={})
+    assert res["skipped_busy"] == ["cc-cosem-platform-2"]
+    assert nudged == []
+
+
+def test_idle_unread_sweep_default_pane_busy_is_the_nudge_safe_variant():
+    # The design asks for idle_unread_sweep's default pane_busy to BE the nudge-safe wrapper
+    # (not left at the plain, fully-conservative agent_wake._pane_busy) -- pin the wiring
+    # itself so a future refactor can't silently drop it.
+    import inspect
+    sig = inspect.signature(wbs.idle_unread_sweep)
+    assert sig.parameters["pane_busy"].default is wbs._pane_busy_nudge_safe
