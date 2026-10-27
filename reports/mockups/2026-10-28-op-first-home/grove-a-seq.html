@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=390, initial-scale=1"/>
+<title>Grove · (a) desks — annotated sequence</title>
+<style>
+:root{--bg:#090b10;--surface:#12161e;--surface2:#171c26;--hair:rgba(255,255,255,.07);--txt:#e8ebf1;
+--dim:#949cac;--faint:#5c6472;--jade:#37d39a;--rose:#fb7185;--amber:#f6c453;--indigo:#8aa6ff;
+--sans:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;--mono:ui-monospace,Menlo,monospace}
+*{box-sizing:border-box}
+body{margin:0;color:var(--txt);font:15px/1.5 var(--sans);letter-spacing:-.01em;
+background:linear-gradient(180deg,#0c0f16,#090b10 50%)}
+.wrap{max-width:640px;margin:0 auto;padding:16px 16px 48px}
+h1{font-size:17px;margin:0 0 2px;font-weight:800}.sub{color:var(--faint);font:11.5px var(--mono);margin-bottom:18px}
+.frame{border:1px solid var(--hair);border-radius:20px;background:var(--surface);padding:16px 16px 14px;margin-bottom:14px;position:relative}
+.frame .tag{position:absolute;top:-9px;left:14px;font:700 9.5px var(--mono);color:var(--bg);padding:3px 9px;border-radius:999px;background:var(--indigo)}
+.frame .when{font:10.5px var(--mono);color:var(--faint);margin-bottom:12px}
+.desk{width:180px;border:1px solid var(--hair);border-radius:16px;background:var(--surface2);padding:13px;margin:6px auto}
+.desk .client{font:700 10.5px var(--sans);color:var(--indigo);text-transform:uppercase;letter-spacing:.08em}
+.desk .task{font:650 13px/1.3 var(--sans);margin-top:5px}
+.desk .time{display:flex;align-items:center;gap:6px;margin-top:9px;font:10px var(--mono);color:var(--faint)}
+.desk .time .dot{width:6px;height:6px;border-radius:50%;background:var(--jade);box-shadow:0 0 7px var(--jade)}
+.desk.live{border-color:rgba(55,211,154,.5);background:linear-gradient(180deg,rgba(55,211,154,.14),var(--surface2) 70%)}
+.desk.live::after{content:"went live";position:absolute;top:-9px;right:10px;font:700 9.5px var(--mono);color:var(--bg);background:var(--jade);padding:3px 8px;border-radius:999px}
+.desk.live{position:relative}
+.desk.stuck{transform:rotate(-3deg) translateY(9px);border-color:rgba(246,196,83,.45);background:linear-gradient(180deg,rgba(246,196,83,.1),var(--surface2) 75%)}
+.desk.stuck .time .dot{background:var(--amber);box-shadow:0 0 7px var(--amber)}
+.chime{position:absolute;top:26px;right:16px;font:700 10px var(--mono);color:var(--jade);border:1px solid rgba(55,211,154,.4);padding:3px 8px;border-radius:999px}
+.ann{font:11px/1.55 var(--sans);color:var(--dim);margin-top:12px;padding-top:10px;border-top:1px dashed var(--hair)}
+.ann b{color:var(--txt);font-weight:650}
+</style></head><body><div class="wrap">
+<h1>Grove · desks show real work</h1><div class="sub">idea (a) — 3-beat sequence</div>
+
+<div class="frame"><span class="tag">1 · working</span><div class="when">11:04</div>
+  <div class="desk"><div class="client">irsyad</div><div class="task">Tabung go-live prep</div>
+    <div class="time"><span class="dot"></span>14m on it</div></div>
+  <div class="ann">Normal state. The desk shows the <b>client, the task it holds right now, and how long it has been on it</b> — pulled from each desk's live task, not a hand-edited label.</div>
+</div>
+
+<div class="frame"><span class="tag" style="background:var(--amber)">2 · stuck</span><div class="when">11:44 — 30 min of silence</div>
+  <div class="desk stuck"><div class="client">irsyad</div><div class="task">Tabung go-live prep</div>
+    <div class="time"><span class="dot"></span>no movement 40m</div></div>
+  <div class="ann">If a desk stops moving past a threshold, <b>the desk physically slumps</b> — tilt + amber rim — so a stall is visible from across the room. The right desk gets pinged; the desk un-slumps on the first sign of life.</div>
+</div>
+
+<div class="frame"><span class="tag" style="background:var(--jade)">3 · live</span><div class="when">17:21 — build verified</div>
+  <div class="chime">🔔 chime</div>
+  <div class="desk live"><div class="client">fleet</div><div class="task">Console home redesign</div>
+    <div class="time"><span class="dot"></span>done · verified</div></div>
+  <div class="ann">When a build goes live and is verified, <b>the desk lights up jade with a “went live” chip</b> and the Grove plays a soft chime. Tap the desk for the one-line “what shipped” card.</div>
+</div>
+</div></body></html>

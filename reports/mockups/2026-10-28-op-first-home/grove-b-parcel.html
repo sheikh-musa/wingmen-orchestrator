@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=390, initial-scale=1"/>
+<title>Grove · (b) your ask as a parcel — still</title>
+<style>
+:root{--bg:#090b10;--surface:#12161e;--surface2:#171c26;--hair:rgba(255,255,255,.07);--txt:#e8ebf1;
+--dim:#949cac;--faint:#5c6472;--jade:#37d39a;--rose:#fb7185;--amber:#f6c453;--indigo:#8aa6ff;
+--sans:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;--mono:ui-monospace,Menlo,monospace}
+*{box-sizing:border-box}
+body{margin:0;color:var(--txt);font:15px/1.5 var(--sans);letter-spacing:-.01em;
+background:radial-gradient(100% 50% at 50% -6%,rgba(138,166,255,.06),transparent 60%),linear-gradient(180deg,#0c0f16,#090b10 50%)}
+.wrap{max-width:640px;margin:0 auto;padding:0 16px 44px}
+header{display:flex;align-items:center;gap:10px;padding:14px 0 4px}
+h1{font-size:17px;margin:0;font-weight:800}.sub{color:var(--faint);font:11.5px var(--mono)}
+h2{margin:18px 0 4px;font:800 11px/1 var(--sans);text-transform:uppercase;letter-spacing:.11em;color:var(--faint)}
+.street{position:relative;border:1px solid var(--hair);border-radius:20px;background:var(--surface);padding:18px 16px 16px;margin-top:10px;overflow:hidden}
+.street .road{position:relative;height:120px;margin-top:8px;
+background:repeating-linear-gradient(90deg,rgba(255,255,255,.05) 0 18px,transparent 18px 36px) 0 55px/36px 2px no-repeat}
+.end{position:absolute;top:0;width:120px;text-align:center}
+.end .door{width:64px;height:84px;border-radius:12px;margin:0 auto;border:1px solid rgba(138,166,255,.4);
+background:linear-gradient(180deg,rgba(138,166,255,.16),var(--surface2));display:flex;align-items:center;justify-content:center;font-size:26px}
+.end .lbl{font:10.5px var(--mono);color:var(--faint);margin-top:8px}
+.end.desk .door{border-color:rgba(55,211,154,.4);background:linear-gradient(180deg,rgba(55,211,154,.14),var(--surface2))}
+.courier{position:absolute;left:50%;top:36px;transform:translateX(-50%);text-align:center}
+.courier .body{width:34px;height:34px;border-radius:50%;background:var(--indigo);display:flex;align-items:center;justify-content:center;font-size:16px;box-shadow:0 0 18px rgba(138,166,255,.5)}
+.parcel{position:relative;width:112px;margin:10px auto 0;border:1px solid var(--amber);border-radius:10px;background:var(--surface2);padding:9px 10px;text-align:center}
+.parcel .t{font:650 12px/1.25 var(--sans)}
+.parcel .s{font:700 9px var(--mono);color:var(--bg);background:var(--amber);display:inline-block;padding:2px 8px;border-radius:999px;margin-top:6px}
+.parcel .s.building{background:var(--indigo)}
+.parcel .s.live{background:var(--jade)}
+.states{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:10px}
+.chip{border:1px solid var(--hair);border-radius:12px;background:var(--surface);padding:10px 10px 9px;text-align:center}
+.chip .ic{font-size:18px}
+.chip .n{font:700 11px var(--sans);margin-top:4px}
+.chip .d{font:9.5px var(--mono);color:var(--faint);margin-top:2px}
+.tapcard{border:1px solid rgba(138,166,255,.35);border-radius:14px;background:linear-gradient(180deg,rgba(138,166,255,.09),var(--surface));padding:12px 14px;margin-top:14px}
+.tapcard .h{display:flex;justify-content:space-between;font:700 12.5px var(--sans)}
+.tapcard .h .who{color:var(--faint);font:10.5px var(--mono)}
+.tapcard .row{display:flex;gap:8px;align-items:center;margin-top:8px;font:11px var(--mono);color:var(--dim)}
+.tapcard .row .k{color:var(--faint);width:74px}
+.note{margin-top:16px;font:10.5px/1.5 var(--mono);color:var(--faint)}
+</style></head><body><div class="wrap">
+<header><div><h1>Fleet Grove</h1><div class="sub">Your ask · Tue 28 Oct, 01:20</div></div></header>
+
+<h2>One ask, one parcel</h2>
+<div class="street">
+  <div class="road">
+    <div class="end" style="left:0"><div class="door">🏠</div><div class="lbl">you asked<br>16:32</div></div>
+    <div class="end desk" style="right:0"><div class="door">🖥</div><div class="lbl">ADCDA desk<br>took it 16:36</div></div>
+    <div class="courier"><div class="body">🛵</div>
+      <div class="parcel"><div class="t">MUIS CEO — intro email</div><div class="s building">building</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="states">
+  <div class="chip"><div class="ic">📦</div><div class="n">asked</div><div class="d">amber tag</div></div>
+  <div class="chip"><div class="ic">🛠</div><div class="n">building</div><div class="d">desk holds it</div></div>
+  <div class="chip"><div class="ic">✅</div><div class="n">live</div><div class="d">chime 🔔</div></div>
+</div>
+
+<h2>Tap the parcel</h2>
+<div class="tapcard">
+  <div class="h"><span>MUIS CEO — intro email</span><span class="who">#12</span></div>
+  <div class="row"><span class="k">status</span><span style="color:var(--indigo)">building — on the ADCDA desk</span></div>
+  <div class="row"><span class="k">asked</span><span>16:32 · 9h ago</span></div>
+  <div class="row"><span class="k">due</span><span>tomorrow evening</span></div>
+  <div class="row"><span class="k">last move</span><span>23:50 — draft email written, waiting on your wording pick</span></div>
+</div>
+
+<div class="note">still, idea (b) — parcel identity = the ask row (title, asked-at, due, last activity); courier path is the routing from you to the owning desk. All fields exist today except the courier art itself.</div>
+</div></body></html>
