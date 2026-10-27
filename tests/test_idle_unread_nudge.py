@@ -659,3 +659,59 @@ def test_still_unread_keeps_ids_when_the_db_is_unavailable(monkeypatch):
 
     monkeypatch.setattr(wbs.psycopg, "connect", boom)
     assert wbs._still_unread([5, 6]) == [5, 6]
+
+
+# ---- RESPONSIVE GATE + pre-warn recheck (cc-fleet-health, 2026-10-27) --------------------
+# Lanes reply under their BASE id (cc-cosem-adcda for cc-cosem-adcda-2), leaving instance rows
+# read_at NULL though they acted: 3 of 4 false pages that afternoon.
+
+def test_lane_that_sent_after_its_newest_unread_row_is_not_paged():
+    nudged, warned, nudge, warn = _collector()
+    res = wbs.idle_unread_sweep(rows=[_row(1, "cc-cosem-adcda-2", 2000, priority="P1")],
+                                resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+                                nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={},
+                                warned_seen={}, recently_sent=lambda agent, since: True)
+    assert nudged == [] and warned == []
+    assert res["skipped_responsive"] == ["cc-cosem-adcda-2"]
+
+
+def test_gate_is_asked_about_the_NEWEST_due_row():
+    seen = []
+    nudged, warned, nudge, warn = _collector()
+    wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 3000), _row(2, "cc-oeh", 1000)],
+                          resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+                          nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={},
+                          recently_sent=lambda agent, since: seen.append(since) or False)
+    assert seen == [_NOW - timedelta(seconds=1000)]
+
+
+def test_silent_lane_is_still_paged():
+    nudged, warned, nudge, warn = _collector()
+    wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 2000)], resolve_session=lambda a: "sess",
+                          pane_busy=lambda s: False, nudge=nudge, warn=warn, now_dt=_NOW,
+                          nudged_seen={}, warned_seen={}, recently_sent=lambda a, s: False)
+    assert nudged == [("cc-oeh", (1,))] and warned == [("cc-oeh", (1,))]
+
+
+def test_row_read_during_the_nudge_is_dropped_from_the_warn():
+    # still_unread is consulted twice: after idle confirmation (both live), then right before
+    # the warn (row 1 was read while the nudge's verified submit ran).
+    answers = iter([[1, 2], [2]])
+    nudged, warned, nudge, warn = _collector()
+    wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 2000), _row(2, "cc-oeh", 2000)],
+                          resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+                          nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={},
+                          still_unread=lambda ids, live=None: (lambda live: [i for i in ids if i in live])(next(answers)))
+    assert nudged == [("cc-oeh", (1, 2))]
+    assert warned == [("cc-oeh", (2,))]
+
+
+def test_recently_sent_never_suppresses_when_the_db_is_unavailable(monkeypatch):
+    monkeypatch.setattr(wbs, "_DSN", None)
+    assert wbs._recently_sent("cc-oeh-1", _NOW) is False
+    monkeypatch.setattr(wbs, "_DSN", "postgres://x")
+
+    def boom(*a, **k):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(wbs.psycopg, "connect", boom)
+    assert wbs._recently_sent("cc-oeh-1", _NOW) is False
