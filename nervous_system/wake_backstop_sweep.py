@@ -993,6 +993,18 @@ def _pane_busy_nudge_safe(session: str) -> bool:
     return _pane_busy(session, nudge_safe=True)
 
 
+# IDLE CONFIRMATION (cc-fleet-health, 2026-10-27): a single capture-pane snapshot can catch a
+# lane MID-TURN in the instant between a tool result landing and the next spinner line
+# rendering, with no "esc to interrupt" on screen -- so one sample reads "idle" on a lane that
+# has been working continuously. Observed 11+ times on cc-cosem-platform-4 in one night (each
+# pane-probed and found 30-70min into a live turn), each one a false nudge + false warn. Before
+# ACTING on an idle reading, re-sample this many more times, this far apart; ANY busy sample
+# means busy. Only paid when a nudge/warn would actually fire, never on a dedup'd tick. See
+# idle-unread-watchdog-misreads-busy-foreground-as-idle.
+IDLE_UNREAD_IDLE_CONFIRM_SAMPLES = int(os.environ.get("IDLE_UNREAD_IDLE_CONFIRM_SAMPLES", "2"))
+IDLE_UNREAD_IDLE_CONFIRM_GAP_S = float(os.environ.get("IDLE_UNREAD_IDLE_CONFIRM_GAP_S", "3"))
+
+
 # The from_agent the sweep stamps on its OWN nudge rows. ONE source so the self-feed exclusion
 # below (idle_unread_sweep) can never drift from what _default_nudge actually posts — a mismatch
 # would re-open the self-perpetuation it exists to close.
@@ -1078,7 +1090,10 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session,
                       fast_priorities=IDLE_UNREAD_FAST_PRIORITIES,
                       warn_cooldown_s: int = IDLE_UNREAD_WARN_COOLDOWN_S,
                       nudged_seen=None, warned_seen=None,
-                      is_offline_stale=_is_offline_stale, mark=_mark_skipped) -> dict:
+                      is_offline_stale=_is_offline_stale, mark=_mark_skipped,
+                      idle_confirm_samples: int = IDLE_UNREAD_IDLE_CONFIRM_SAMPLES,
+                      idle_confirm_gap_s: float = IDLE_UNREAD_IDLE_CONFIRM_GAP_S,
+                      sleep=None) -> dict:
     """For each recipient (is_wake_eligible_recipient — never a human/operator, the hub only
     on ITS OWN wake floor which this age-only signal never satisfies so the hub is simply
     never nudged here) whose pane is IDLE (never busy — 'esc to interrupt') but has directed
@@ -1103,7 +1118,13 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session,
     FAST TIER (bus #77607->#77620->#77633): a row whose priority is in `fast_priorities`
     (P0/P1 by default) is nudged after nudge_age_fast_s and warned after warn_age_fast_s
     instead of the slower uniform defaults -- P2/P3 (and any row with no priority signal,
-    e.g. a 4-tuple row) keep today's thresholds exactly."""
+    e.g. a 4-tuple row) keep today's thresholds exactly.
+
+    IDLE CONFIRMATION: the first pane_busy sample is one snapshot; before a nudge or warn
+    actually fires, the pane is re-sampled idle_confirm_samples more times idle_confirm_gap_s
+    apart, and a busy reading on ANY of them skips the agent as busy (no nudge, no warn, dedup
+    state untouched)."""
+    sleep = time.sleep if sleep is None else sleep
     if rows is None:
         rows = _fetch_idle_unread_rows(min(nudge_age_s, nudge_age_fast_s))
     now_dt = now_dt if now_dt is not None else datetime.now(timezone.utc)
@@ -1166,6 +1187,26 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session,
         if not nudge_ids:
             continue
         ids_key = frozenset(nudge_ids)
+        warn_ids = sorted(rid for rid, ca, p in genuine
+                          if ca is not None and _age_s(ca) >= _warn_due_age(p))
+        last_warned_at = warned_seen.get(agent)
+        warn_due = bool(warn_ids) and (
+            last_warned_at is None
+            or (now_dt - last_warned_at).total_seconds() >= warn_cooldown_s)
+
+        # IDLE CONFIRMATION: only when something would actually fire, re-sample the pane; any
+        # busy reading means the first sample caught a mid-turn render gap — skip as busy.
+        if nudged_seen.get(agent) != ids_key or warn_due:
+            went_busy = False
+            for _ in range(max(0, idle_confirm_samples)):
+                sleep(idle_confirm_gap_s)
+                if pane_busy(session):
+                    went_busy = True
+                    break
+            if went_busy:
+                skipped_busy.append(agent)
+                continue
+
         if nudged_seen.get(agent) != ids_key:
             nudge(agent, nudge_ids)
             nudged_seen[agent] = ids_key
@@ -1180,12 +1221,8 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session,
         # drop the memory once the agent fully drains (warn_ids empty) so a later fresh batch
         # warns promptly rather than waiting out a stale cooldown. See
         # idle-unread-warn-dedup-defeated-by-id-set-churn for the full incident history.
-        warn_ids = sorted(rid for rid, ca, p in genuine
-                          if ca is not None and _age_s(ca) >= _warn_due_age(p))
         if warn_ids:
-            last_warned_at = warned_seen.get(agent)
-            due = last_warned_at is None or (now_dt - last_warned_at).total_seconds() >= warn_cooldown_s
-            if due:
+            if warn_due:
                 warn(agent, warn_ids)
                 warned_seen[agent] = now_dt
                 warned.append(agent)
