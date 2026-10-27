@@ -39,10 +39,14 @@ test_work_item_mirror_resolves_from_agent_when_responded_at_preset_with_123_alon
 never surfaced until Musa's own repro against the real substrate.
 """
 import pathlib
+import sys
 import uuid
 
 import psycopg
 import pytest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "scripts"))
+import apply_migration as am  # noqa: E402
 
 MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parent.parent / "migrations"
 
@@ -560,6 +564,30 @@ def test_anon_and_authenticated_cannot_execute_mark_delivered_or_ack_message(add
         for fn in ("mark_delivered(bigint,integer)", "ack_message(bigint)"):
             cur.execute("SELECT has_function_privilege(%s, %s, 'EXECUTE')", ("service_role", fn))
             assert cur.fetchone()[0] is True, f"service_role lost its legitimate EXECUTE on {fn}"
+
+
+def test_123_sets_lock_timeout_as_its_first_statement():
+    """Musa op#34845, bus #78689 (console's own live rehearsal on tscuymavysscrvoberrr,
+    PR#490 gate): CREATE POLICY on agent_messages takes an ACCESS EXCLUSIVE lock, and the
+    applier sets no lock_timeout of its own -- PGOPTIONS does not pass through Supavisor
+    (console measured lock_timeout reading 0 there). Console's rehearsal hit a real
+    session that had been idle-in-transaction for ~3 days holding a lock on
+    agent_messages; a real apply in that state would queue forever behind it, stalling
+    every bus read and write fleet-wide, not just this migration. Fix: SET LOCAL
+    lock_timeout = '5s' as this migration's own first statement, so an apply that can't
+    get the lock fails cleanly and gets retried instead of stalling the fleet -- same
+    convention already used by migrations 080/082/084/085/091/092/118/119/120/121.
+
+    Static check against what the real applier actually executes (apply_migration's own
+    strip_sql_comments/strip_txn_control), not just what the raw file happens to
+    contain, so a BEGIN; wrapper or a comment line ahead of it can't hide a wrong
+    ordering from this test."""
+    raw = (MIGRATIONS_DIR / "123_durable_inbox_enforce_bus_writer.sql").read_text()
+    body = am.strip_txn_control(am.strip_sql_comments(raw)).strip()
+    assert body.startswith("SET LOCAL lock_timeout = '5s';"), (
+        "migration 123's first executed statement must be `SET LOCAL lock_timeout = "
+        f"'5s';` (the bus-stall guard from bus #78689), got: {body[:80]!r}"
+    )
 
 
 

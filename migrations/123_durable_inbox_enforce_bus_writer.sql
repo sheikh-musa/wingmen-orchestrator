@@ -113,6 +113,18 @@
 -- ever applied BEFORE 122 for any reason, this line will fail to resolve (the
 -- 9-param function still exists then) -- that failure is a correct, loud signal
 -- to apply 122 first, not a bug to silently work around.
+--
+-- LOCK-WAIT GUARD (Musa op#34845, bus #78689, console's own live rehearsal on
+-- tscuymavysscrvoberrr, PR#490 gate): CREATE POLICY on agent_messages below takes an
+-- ACCESS EXCLUSIVE lock, and the applier sets no lock_timeout of its own -- PGOPTIONS
+-- does not pass through Supavisor (console measured lock_timeout reading 0 there).
+-- Console's rehearsal hit a real session that had been idle-in-transaction for ~3 days
+-- holding a lock on agent_messages; a real apply in that state would queue forever
+-- behind it, stalling every bus read and write fleet-wide, not just this migration.
+-- This MUST be this file's first executed statement (see
+-- test_123_sets_lock_timeout_as_its_first_statement) -- same convention already used
+-- by migrations 080/082/084/085/091/092/118/119/120/121.
+SET LOCAL lock_timeout = '5s';
 
 DO $$
 BEGIN
