@@ -715,6 +715,23 @@ def match_channel_in_group(group: list[Channel], chat_id: int | None,
 
 # ── Route: agent-session / log-and-route => nudge-only tmux line ─────────────
 
+_ABSENT_TARGET_LOGGED: set = set()
+
+
+def _session_exists(target) -> bool:
+    """Same tmux binary + exact-match form nudge_session uses. On a tmux error we can't
+    tell, so say True and let nudge_session's own has-session decide (old behavior)."""
+    if not target:
+        return False
+    tmux = shutil.which("tmux") or "/opt/homebrew/bin/tmux"
+    try:
+        r = subprocess.run([tmux, "has-session", "-t", f"={target}"],
+                           capture_output=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return r.returncode == 0
+
+
 def nudge_session(target: str, channel_key: str, n_unread: int) -> bool:
     """Count-only nudge. NEVER carries payload (CAI-RESP-357). Best-effort
     signal — delivery is guaranteed by the log + reconciliation, not by this."""
@@ -952,9 +969,24 @@ def drain_stale_deferred(conn, ch: "Channel") -> None:
             return
     if newest_id <= getattr(ch, "_last_forced_nudge_id", 0):
         return   # already force-nudged this batch — one forced nudge per message
+    # ABSENT-TARGET SKIP (orch-console #77913, 2026-10-27): the Mini has no 'orch' session
+    # (the hub lives on gzb), so log-and-route channels pinned here were "force-nudged"
+    # into nothing every pass and logged as if delivered (brandit-coffeemedia: 3 rows,
+    # 10 days, no reader). Skip a target that isn't on this host, saying so ONCE per
+    # (channel, target) per process; the rows stay durable and unhandled for their owner.
+    if not _session_exists(target):
+        if (ch.key, target) not in _ABSENT_TARGET_LOGGED:
+            _ABSENT_TARGET_LOGGED.add((ch.key, target))
+            _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s but nudge target "
+                      f"'{target}' is not a session on this host — NOT nudged (needs an "
+                      f"owner_lane/inject_target, or unpin the channel here)")
+        return
     ch._last_forced_nudge_id = newest_id
-    nudge_session(target, ch.key, n)
-    _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s — FORCED nudge (max-latency cap)")
+    if nudge_session(target, ch.key, n):
+        _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s — FORCED nudge (max-latency cap)")
+    else:
+        _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s — FORCED nudge to "
+                  f"'{target}' NOT delivered (fire-window hold or tmux error)")
 
 
 def reassure_if_unhandled(conn, ch: "Channel") -> None:
