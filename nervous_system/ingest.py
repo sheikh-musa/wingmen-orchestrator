@@ -43,6 +43,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -183,11 +184,30 @@ def _media_dest_name(channel_key: str, upd_id: int, file_unique_id: str,
     return f"{safe_channel}_{upd_id}_{safe_unique}{ext}"
 
 
+# getFile had NO retry (orch-console #77889, 2026-10-27): both of today's lost operator photos
+# (updates 440382277 / 440382285) failed on a single Errno 54 reset at this call, before the
+# retrying file download ever ran. Same schedule as _tg_chunked_send.RETRY_DELAYS.
+GETFILE_RETRY_DELAYS = (2, 6, 15)
+
+
+def _get_file_path(token: str, file_id: str, sleep=time.sleep) -> str:
+    url = f"{TELEGRAM_BOT_API_BASE_URL}/bot{token}/getFile?file_id={file_id}"
+    for i, delay in enumerate((0,) + GETFILE_RETRY_DELAYS):
+        if delay:
+            sleep(delay)
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                return json.load(r)["result"]["file_path"]
+        except urllib.error.HTTPError:
+            raise                      # a real API answer (e.g. 400/404) — retrying won't help
+        except (OSError, ValueError):  # URLError/reset/timeout, or a truncated JSON body
+            if i == len(GETFILE_RETRY_DELAYS):
+                raise
+
+
 def _download_media(token: str, file_id: str, file_unique_id: str, channel_key: str,
                      upd_id: int, name: str | None = None) -> str:
-    with urllib.request.urlopen(
-            f"{TELEGRAM_BOT_API_BASE_URL}/bot{token}/getFile?file_id={file_id}", timeout=30) as r:
-        fp = json.load(r)["result"]["file_path"]
+    fp = _get_file_path(token, file_id)
     os.makedirs(_MEDIA_DIR, exist_ok=True)
     safe = _media_dest_name(channel_key, upd_id, file_unique_id, fp, name)
     dest = os.path.join(_MEDIA_DIR, safe)

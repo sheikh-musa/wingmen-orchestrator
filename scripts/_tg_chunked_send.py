@@ -12,6 +12,7 @@ import difflib
 import json
 import os
 import sys
+import random
 import time
 import urllib.error
 import urllib.parse
@@ -125,6 +126,17 @@ def chunks(text: str):
 # respecting retry_after), and fall back Markdown->plain on a 400 parse error.
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 RETRY_SLEEP_DEFAULT = 2
+# Three retries with growing backoff (orch-console #77889, 2026-10-27): the Mini's path to
+# api.telegram.org resets in bursts (Errno 54; ~2.5% of requests, all day, independent of
+# fleet load) that outlast ONE 2s retry -- two nazim_send replies were dropped that way.
+# ±20% jitter so concurrent senders don't retry in lockstep; retry_after always wins.
+RETRY_DELAYS = (RETRY_SLEEP_DEFAULT, 6, 15)
+RETRY_JITTER = 0.2
+
+
+def _jittered(delay: float, rand=None) -> float:
+    rand = rand or random.uniform
+    return delay * rand(1 - RETRY_JITTER, 1 + RETRY_JITTER)
 
 
 def _post(tok: str, chat: str, body: str, parse_mode: str | None = None) -> dict:
@@ -162,9 +174,10 @@ def _post(tok: str, chat: str, body: str, parse_mode: str | None = None) -> dict
 
 
 def send_with_resilience(tok: str, chat: str, body: str, parse_mode: str | None = None,
-                         sleep=time.sleep, post=None) -> dict:
-    """Send one chunk with ONE retry on a transient failure and a Markdown->plain fallback
-    on a parse error. `post`/`sleep` are injected for testing. Returns the final result."""
+                         sleep=time.sleep, post=None, rand=None) -> dict:
+    """Send one chunk with up to len(RETRY_DELAYS) retries on a transient failure and a
+    Markdown->plain fallback on a parse error. `post`/`sleep`/`rand` are injected for
+    testing. Returns the final result."""
     post = post or _post
     r = post(tok, chat, body, parse_mode)
     if r["ok"]:
@@ -174,10 +187,14 @@ def send_with_resilience(tok: str, chat: str, body: str, parse_mode: str | None 
     if (r.get("status") == 400 and parse_mode
             and "parse" in (r.get("description") or "").lower()):
         return post(tok, chat, body, None)
-    # Transient (throttle / server / network): back off once (honor retry_after) and retry.
-    if r.get("status") in RETRYABLE_STATUS or r.get("status") is None:
-        sleep(r.get("retry_after") or RETRY_SLEEP_DEFAULT)
-        return post(tok, chat, body, parse_mode)
+    # Transient (throttle / server / network): back off (honor retry_after) and retry.
+    for delay in RETRY_DELAYS:
+        if not (r.get("status") in RETRYABLE_STATUS or r.get("status") is None):
+            return r
+        sleep(r.get("retry_after") or _jittered(delay, rand))
+        r = post(tok, chat, body, parse_mode)
+        if r["ok"]:
+            return r
     return r
 
 
