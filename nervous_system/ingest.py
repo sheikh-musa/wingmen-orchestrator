@@ -36,6 +36,7 @@ Env: INGEST_DSN overrides the substrate DSN (tests); tokens resolve via each
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import pathlib
@@ -713,6 +714,178 @@ def match_channel_in_group(group: list[Channel], chat_id: int | None,
     return None
 
 
+# ── Self-serve invite deep-link bind (Musa op#34846, orch-console #78263) ────
+#
+# Onboarding without waiting for a first 'hi': onboard_client_channel.py
+# --invite mints a single-use, expiring token and stores ONLY its sha256 in
+# bot_channel_invites — the plaintext lives in the t.me/<bot>?start=TOKEN deep
+# link CA/Musa relays to the client and nowhere at rest. The first '/start
+# TOKEN' inbound on the bot BINDS the sending chat to the invite's channel:
+# allowlist widened, invite consumed, bound chat audited on the invite row.
+# This hooks AFTER the durable LOG and BEFORE the GATE inside process_update
+# — A1/LOG/GATE/ROUTE order is untouched; the bind is pure admission-control.
+
+GENERIC_INVITE_REPLY = (
+    "This link isn't valid anymore. Please ask for a fresh link and tap it "
+    "again — I can't connect you from this message.")
+GENERIC_BIND_WELCOME = (
+    "✅ Connected — this channel is now active. You can send your messages here.")
+
+
+def hash_invite_token(payload: str) -> str:
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _start_invite_payload(text: str) -> str | None:
+    """'/start TOKEN' -> TOKEN; the '/start@bot TOKEN' group form -> TOKEN;
+    bare '/start' -> ''. None when the text is not a /start at all."""
+    t = (text or "").strip()
+    if not t.lower().startswith("/start"):
+        return None
+    rest = t[len("/start"):].strip()
+    if rest.startswith("@"):
+        rest = rest.split(" ", 1)[1] if " " in rest else ""
+    return rest.strip()
+
+
+def try_invite_bind(conn, ch: Channel, channels: dict | None, msg: dict,
+                    op_msg_id: int) -> bool:
+    """Handle a '/start' carrying (or lacking) an invite token. Returns True
+    when fully handled here — bind, refusal or re-welcome: always replied to +
+    audited, never routed. Returns False when this update is not ours to
+    intercept: not a /start at all, or a BARE '/start' (plain Start button)
+    with no unused+unexpired invite outstanding on this token — that keeps
+    today's logged+gated silence. A deep-link tap '/start TOKEN' is ALWAYS
+    answered: bind on a valid token, the generic reply on an invalid, used or
+    expired one (op#34846 — never silent).
+
+    Sibling-leak discipline: the success reply is the INVITE's channel's own
+    self_description fetched from its bot_channels row — never anything
+    derived from sibling channels sharing this token."""
+    text = msg.get("text") or ""
+    payload = _start_invite_payload(text)
+    if payload is None:
+        return False
+    chat_id = (msg.get("chat") or {}).get("id")
+    if chat_id is None:
+        return False
+
+    if not payload:
+        # Bare button-tap: helpful (generic 'ask for a fresh link') only
+        # while an onboarding invite is actually outstanding on this token.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM bot_channel_invites i "
+                "JOIN bot_channels c ON c.channel_key = i.channel_key "
+                "WHERE c.token_env_key = %s AND i.used_at IS NULL "
+                "AND i.expires_at > now() LIMIT 1", (ch.token_env_key,))
+            if cur.fetchone() is None:
+                return False
+
+    reply, reply_tag, outcome = None, ch.channel_tag, "generic"
+    if payload:
+        with conn.cursor() as cur:
+            # Validity lives in SQL (used_at IS NULL AND expires_at > now()):
+            # unknown, replayed and expired tokens are indistinguishable BY
+            # DESIGN — each gets the same generic reply, nothing bound.
+            cur.execute(
+                "SELECT i.id, i.channel_key, "
+                "c.group_routing->>'self_description', c.channel_tag "
+                "FROM bot_channel_invites i "
+                "JOIN bot_channels c ON c.channel_key = i.channel_key "
+                "WHERE i.token_hash = %s AND i.used_at IS NULL "
+                "AND i.expires_at > now()", (hash_invite_token(payload),))
+            inv = cur.fetchone()
+        if inv:
+            inv_id, inv_key, self_desc, inv_tag = inv
+            with conn.cursor() as cur:
+                # Overlap guard (op#33571 per-channel isolation): a chat
+                # already bound on this token never cross-binds. Checked
+                # BEFORE the consume so a refused attempt does not burn the
+                # invite — the right client can still use it.
+                cur.execute(
+                    "SELECT channel_key FROM bot_channels "
+                    "WHERE token_env_key = %s AND %s = ANY(allowed_chat_ids)",
+                    (ch.token_env_key, chat_id))
+                bound = cur.fetchone()
+            if bound and bound[0] != inv_key:
+                outcome = "cross-bind-refused"
+            elif bound:
+                # already this channel's chat re-tapping its link: idempotent
+                # re-welcome, no state change.
+                reply, reply_tag, outcome = \
+                    self_desc or GENERIC_BIND_WELCOME, inv_tag, "re-welcome"
+            else:
+                with conn.cursor() as cur:
+                    # Guarded consume = single-use under races: the rowcount
+                    # decides, not the earlier read.
+                    cur.execute(
+                        "UPDATE bot_channel_invites SET used_at = now(), "
+                        "bound_chat_id = %s WHERE id = %s AND used_at IS NULL",
+                        (chat_id, inv_id))
+                    won = cur.rowcount == 1
+                if won:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE bot_channels SET allowed_chat_ids = "
+                            "(SELECT ARRAY(SELECT DISTINCT unnest("
+                            "allowed_chat_ids || ARRAY[%s]::bigint[]))), "
+                            "updated_at = now() WHERE channel_key = %s",
+                            (chat_id, inv_key))
+                        # Self-activation — but NEVER for a channel pinned on
+                        # THIS host via INGEST_CHANNELS: a pinned row flipping
+                        # enabled=true is the dual-poller 409 class the
+                        # pinned-drift watchdog pages on (see load_channels).
+                        # On this host the pin IS the poll switch; the bind's
+                        # job here is the allowlist only.
+                        if inv_key not in pinned_keys():
+                            cur.execute(
+                                "UPDATE bot_channels SET enabled = true, "
+                                "updated_at = now() "
+                                "WHERE channel_key = %s AND NOT enabled",
+                                (inv_key,))
+                    conn.commit()
+                    # Hot in-memory update: routing picks the bound chat up in
+                    # THIS cycle's remaining updates without waiting for the
+                    # CONFIG_REFRESH reload (which re-reads the row anyway).
+                    if channels and inv_key in channels:
+                        hot = channels[inv_key]
+                        ids = list(hot.allowed_chat_ids or [])
+                        if chat_id not in ids:
+                            hot.allowed_chat_ids = ids + [chat_id]
+                    reply, reply_tag, outcome = \
+                        self_desc or GENERIC_BIND_WELCOME, inv_tag, \
+                        f"bound to {inv_key}"
+                else:
+                    outcome = "lost-single-use-race"
+    if reply is None:
+        reply = GENERIC_INVITE_REPLY
+
+    send_ok = True
+    try:
+        tg_call(ch.token, "sendMessage", {"chat_id": chat_id, "text": reply})
+    except Exception as e:                                      # noqa: BLE001
+        send_ok = False
+        _log_line(f"{ch.key}: invite-bind reply send failed "
+                  f"({type(e).__name__}: {e}) — bind/refusal already durable")
+    try:
+        with conn.cursor() as cur:
+            # handled_at: the reply is delivered and needs no operator action
+            # (an unstamped outbound row would read as pending work).
+            cur.execute(
+                "INSERT INTO operator_messages (direction, channel, chat_id, tag, "
+                "text, delivered, from_name, handled_at) "
+                "VALUES ('outbound','telegram',%s,%s,%s,%s,'invite-bind',now())",
+                (str(chat_id), reply_tag, reply, send_ok))
+        conn.commit()
+    except Exception as e:                                      # noqa: BLE001
+        conn.rollback()
+        _log_line(f"{ch.key}: invite-bind outbound audit insert failed "
+                  f"({type(e).__name__}: {e})")
+    _log_line(f"{ch.key}: invite-bind chat={chat_id}: {outcome}")
+    return True
+
+
 # ── Route: agent-session / log-and-route => nudge-only tmux line ─────────────
 
 _ABSENT_TARGET_LOGGED: set = set()
@@ -1157,9 +1330,13 @@ def _handle_callback(conn, ch: "Channel", cb: dict, upd_id: int) -> bool:
     return True
 
 
-def process_update(conn, ch: Channel, upd: dict) -> bool:
+def process_update(conn, ch: Channel, upd: dict,
+                   channels: dict[str, Channel] | None = None) -> bool:
     """A1→LOG→GATE→ROUTE for one getUpdates entry. Returns True if this
-    process 'won' the dedupe insert (i.e. the update was newly processed)."""
+    process 'won' the dedupe insert (i.e. the update was newly processed).
+    `channels` (the daemon's live channel map) is only used by the invite
+    deep-link bind for its hot in-memory allowlist update; None = DB-only
+    (the CONFIG_REFRESH reload picks the bind up within 60s)."""
     upd_id = upd["update_id"]
 
     # ── INLINE BUTTON ACTIONS (op#7326) ──────────────────────────────────────────────
@@ -1331,6 +1508,24 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
                 raise
         conn.commit()
 
+    # 2b. PRE-GATE — self-serve invite deep-link bind (op#34846): a '/start'
+    # while an unused+unexpired invite is outstanding on this token is
+    # admission-control (bind or generic refusal), handled AFTER the durable
+    # LOG above and INSTEAD of routing. The row needs no operator action
+    # either way, so it is stamped handled exactly like a gated row.
+    if (msg.get("text") or "").strip().lower().startswith("/start"):
+        if try_invite_bind(conn, ch, channels, msg, op_msg_id):
+            try:
+                with conn.cursor() as _icur:
+                    _icur.execute(
+                        "UPDATE operator_messages SET handled_at=now() "
+                        "WHERE id=%s AND handled_at IS NULL",
+                        (op_msg_id,))
+                conn.commit()
+            except Exception:                                   # noqa: BLE001
+                pass
+            return True
+
     # 3. GATE — deny-by-default; disallowed stays logged-and-skipped.
     if chat_id is None or not gate_allows(ch, chat_id, username):
         _log_line(f"{ch.key}: update {upd_id} gated (chat {chat_id}) — logged, not routed")
@@ -1487,7 +1682,7 @@ async def _run_token_cycle(token_env_key: str, channels: dict[str, Channel],
                 # under the group's first row — same as today's single-channel
                 # "random stranger messages the bot" case (logged, then gated,
                 # never routed). group[0] is deterministic (sorted by key).
-                process_update(conn, matched or group[0], upd)
+                process_update(conn, matched or group[0], upd, channels)
             if updates:
                 # Offset fail-safe: ack ONLY after the whole batch is durable.
                 new_off = updates[-1]["update_id"]

@@ -4,6 +4,7 @@ Pure-logic tests only (stub DB cursors) -- no live DATABASE_URL touch, so
 these run under the static/no-DB test lane same as
 tests/migrations/test_ingest_channels_enabled_false.py.
 """
+import hashlib
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,26 +33,27 @@ class FakeCursor:
         return self._result or []
 
 
-def test_check_token_dedication_refuses_client_on_shared_token():
-    cur = FakeCursor([("coffeemedia", "internal"), ("angullia", "client")])
+def test_check_token_isolation_refuses_overlapping_chat_id():
+    # op#33571 settled model: sharing a token is fine; sharing a CHAT is not.
+    cur = FakeCursor([("angullia", [111])])
     with pytest.raises(SystemExit):
-        tool.check_token_dedication(cur, "WINGMENDEVBOT_TOKEN", "client", "zz-new")
+        tool.check_token_isolation(cur, "WINGMENDEVBOT_TOKEN", "zz-new", [111, 222])
 
 
-def test_check_token_dedication_refuses_internal_sharing_with_client():
-    cur = FakeCursor([("angullia", "client")])
+def test_check_token_isolation_allows_disjoint_chats():
+    cur = FakeCursor([("angullia", [111])])
+    tool.check_token_isolation(cur, "WINGMENDEVBOT_TOKEN", "zz-new", [222])  # no raise
+
+
+def test_check_self_description_refuses_sibling_name():
+    cur = FakeCursor([("angullia",)])
     with pytest.raises(SystemExit):
-        tool.check_token_dedication(cur, "WINGMENDEVBOT_TOKEN", "internal", "zz-new")
+        tool.check_self_description(cur, "zz-new", "Ask angullia for help")
 
 
-def test_check_token_dedication_allows_fresh_dedicated_token():
-    cur = FakeCursor([])
-    tool.check_token_dedication(cur, "ZZ_FRESH_BOT_TOKEN", "client", "zz-new")  # no raise
-
-
-def test_check_token_dedication_allows_internal_sharing_with_internal():
-    cur = FakeCursor([("coffeemedia", "internal")])
-    tool.check_token_dedication(cur, "WINGMENDEVBOT_TOKEN", "internal", "zz-new")  # no raise
+def test_check_self_description_allows_clean_description():
+    cur = FakeCursor([("angullia",)])
+    tool.check_self_description(cur, "zz-new", "Site-edit channel for zz")  # no raise
 
 
 def test_check_channel_key_free_refuses_existing():
@@ -98,7 +100,8 @@ def make_args(**overrides):
         store="none", powers="reply_text", agent_reviewer=None, host="hub",
         override_to_direct=False, override_gate_citation=None,
         inject_target="zz", inject_prefix=None, responder_ref=None,
-        sensitive_data="true",
+        sensitive_data="true", self_description=None,
+        invite=False, invite_ttl_hours=72, invite_token=None, bot_username=None,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -211,3 +214,69 @@ def test_render_migration_shape_matches_112_column_order():
     assert tool._INSERT_COLUMNS.replace("\n", " ").replace("  ", " ") in sql_text.replace("\n", " ").replace("  ", " ")
     assert "enabled, poll_offset" in sql_text
     assert ", false, NULL," in sql_text  # enabled always false, never a flag to flip it
+
+
+# ── op#34846 self-serve invite deep links (Musa #78263) ──────────────────────
+
+def test_validate_chat_ids_invite_xor_chat_id():
+    # --invite means the allowlist fills at bind time: no chat ids allowed
+    with pytest.raises(SystemExit):
+        tool.validate_chat_ids(make_args(invite=True, chat_ids=[1]))
+    tool.validate_chat_ids(make_args(invite=True, chat_ids=[]))
+    # without --invite the chat id is still mandatory (the pre-op#34846 flow)
+    with pytest.raises(SystemExit):
+        tool.validate_chat_ids(make_args(invite=False, chat_ids=[]))
+    tool.validate_chat_ids(make_args(invite=False, chat_ids=[1]))
+
+
+def test_mint_invite_shape():
+    import re as _re
+    a, b = tool.mint_invite(), tool.mint_invite()
+    for tok in (a, b):
+        assert 20 <= len(tok) <= 64            # Telegram deep-link payload cap
+        assert _re.fullmatch(r"[A-Za-z0-9_-]+", tok)
+    assert a != b
+
+
+def test_render_migration_invite_hash_never_plaintext():
+    args = make_args(audience="client", token_env_key="WINGMENDEVBOT_TOKEN",
+                     invite=True, invite_token="super-secret-plaintext",
+                     chat_ids=[], owner_lane="cc-bariq")
+    name, sql_text = tool.render_migration(args, 200, "supervised")
+    expected_hash = hashlib.sha256(b"super-secret-plaintext").hexdigest()
+    assert expected_hash in sql_text                    # only the hash at rest
+    assert "super-secret-plaintext" not in sql_text     # plaintext NEVER lands
+    assert "CREATE TABLE IF NOT EXISTS public.bot_channel_invites" in sql_text
+    assert "token_hash" in sql_text
+    assert "make_interval(hours => 72)" in sql_text     # expiry, SQL-side
+    # channel ships with an EMPTY allowlist — no {0} placeholder (op#34846)
+    assert "'{}', '{}'," in sql_text
+    assert "{0}" not in sql_text
+    # 014-style lockdown: RLS + deny-all + REVOKEs + assert lines (lint: a
+    # REVOKE without asserts is refused outright)
+    assert "ENABLE ROW LEVEL SECURITY" in sql_text
+    assert "REVOKE ALL ON public.bot_channel_invites FROM PUBLIC, anon, authenticated" in sql_text
+    assert "-- assert: no_table_privilege anon public.bot_channel_invites SELECT" in sql_text
+
+
+def test_render_migration_without_invite_has_no_invite_block():
+    _, sql_text = tool.render_migration(make_args(audience="client", chat_ids=[-555]),
+                                        200, "supervised")
+    assert "bot_channel_invites" not in sql_text
+
+
+def test_bot_username_for_known_token_and_refusal():
+    assert tool.bot_username_for("WINGMENDEVBOT_TOKEN", None) == "wingmendevbot"
+    assert tool.bot_username_for("MYSTERY_TOKEN", "custombot") == "custombot"
+    with pytest.raises(SystemExit):
+        tool.bot_username_for("MYSTERY_TOKEN", None)    # can't build the link
+
+
+def test_write_invite_link_file_is_secret(tmp_path):
+    import os
+    import stat
+    tok = tool.mint_invite()
+    link = tmp_path / "invite_zz.link"
+    tool.write_invite_link(link, "wingmendevbot", tok)
+    assert link.read_text().strip() == f"https://t.me/wingmendevbot?start={tok}"
+    assert stat.S_IMODE(link.stat().st_mode) == 0o600
