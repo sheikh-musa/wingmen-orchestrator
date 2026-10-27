@@ -1289,3 +1289,46 @@ def test_check_rule_e_still_detects_a_literal_dsn_shaped_value():
     inline_dsn = "postgres" + "://orchuser:RealLooking9Zx@203.0.113.40:5432/orch"
     result = _guard_mod.check_rule_e(f'psql "{inline_dsn}"')
     assert result is not None and "postgres-dsn" in result
+
+
+# ---- `env` with options/assignments but NO command dumps the environment ------------
+# Real incident 2026-10-27 12:50Z (orch-console #78045, a repeat of 10-07): a chained
+# env clause of the form `env -u VAR` with nothing after it printed the full environment
+# (DB URL, GitHub token, Supabase service key, a messaging token) into a transcript. Only an
+# exact bare `env` lead was ever treated as a dump. These are parsed by the hook, never run.
+
+@pytest.mark.parametrize("command", [
+    "env -u MUSA_TELEGRAM_ID; echo done",          # the incident shape
+    "env -u MUSA_TELEGRAM_ID && echo done",
+    "env -u FOO",
+    "env -i",
+    "env -",
+    "env -0",
+    "env A=1",
+    "env A=1 B=2",
+    "env --unset=FOO",
+    "env -uFOO",
+    "env -u FOO -u BAR",
+    "/usr/bin/env -u FOO",
+    "cd /tmp && env -u FOO",
+])
+def test_blocks_env_with_no_command(command):
+    assert_blocked("Bash", {"command": command}, expect_substr="dumps the environment")
+
+
+@pytest.mark.parametrize("command", [
+    "env -u FOO some-cmd",
+    "env A=1 python3 x.py",
+    "env -i bash -c 'echo hi'",
+    "env -u DATABASE_URL -u SUPABASE_DB_URL scripts/pytest_local.sh -q tests/x.py",
+    "env -S 'python3 -V'",
+    "env -C /tmp ls",
+    "env -u FOO -- ls",
+    "FOO=1 env -u BAR make test",
+])
+def test_allows_env_running_a_command(command):
+    assert_allowed("Bash", {"command": command})
+
+
+def test_bare_env_dump_still_allowed_through_a_hash_sink():
+    assert_allowed("Bash", {"command": "env -u FOO | shasum -a 256"})

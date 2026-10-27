@@ -1082,11 +1082,57 @@ def _segment_dump_kind(segment: str, lead: str) -> bool:
         return True
     if EXPORT_DUMP_LEADING_RE.match(lead) or TMUX_DUMP_LEADING_RE.match(lead):
         return True
-    if lead == "env" or lead == "set":
+    if lead == "set" or _env_without_command(lead):
         return True
     if PROC_ENVIRON_RE.search(segment):
         return True
     return False
+
+
+# env's own options. Those taking a separate argument consume the next token; -S/--split-string
+# carries a COMMAND string, so its presence means a command follows (not a dump).
+_ENV_OPTS_WITH_ARG = {"-u", "--unset", "-C", "--chdir", "-P"}
+_ENV_COMMAND_STRING_OPTS = {"-S", "--split-string"}
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _env_without_command(lead: str) -> bool:
+    """True if `lead` runs env (bare or /path/to/env) with NO command after its options and
+    NAME=value assignments -- which prints the whole environment. Real incident 2026-10-27
+    12:50Z (orch-console #78045, a repeat of 10-07): a chained `env -u VAR` with nothing after
+    it dumped the DB URL, a GitHub token, the Supabase service key and a messaging token,
+    because only an exact bare `env` lead was ever treated as a dump. `env -u X cmd`,
+    `env A=1 python3 x.py` and `env -i bash -c ...` run a command and are not dumps."""
+    try:
+        toks = shlex.split(lead, posix=True)
+    except ValueError:
+        toks = lead.split()
+    if not toks or os.path.basename(toks[0]) != "env":
+        return False
+    i = 1
+    while i < len(toks):
+        t = toks[i]
+        if t == "--":
+            i += 1
+            break
+        if t in _ENV_COMMAND_STRING_OPTS or t.startswith(("-S", "--split-string=")):
+            return False
+        if t in _ENV_OPTS_WITH_ARG:
+            i += 2
+            continue
+        if t.startswith("-") and t != "-":
+            i += 1          # -i, -0, -v, -uNAME, --unset=NAME, --ignore-environment, ...
+            continue
+        if t == "-":
+            i += 1          # POSIX synonym for -i
+            continue
+        if _ENV_ASSIGNMENT_RE.match(t):
+            i += 1
+            continue
+        return False        # a command word: env runs it, no dump
+    while i < len(toks) and _ENV_ASSIGNMENT_RE.match(toks[i]):
+        i += 1
+    return i >= len(toks)
 
 
 def _segment_prints_secret(segment: str, lead: str) -> bool:
