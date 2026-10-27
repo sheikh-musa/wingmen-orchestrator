@@ -72,6 +72,19 @@
 # preserving dedupe/guard/best-effort (`|| true`) semantics exactly. Deleted
 # from this file in the SAME PR as the migration per the shrink-only contract
 # above.
+#
+# STEP 2, scripts/lane_reply.sh, 2026-10-28 (Musa op#34845, same ruling): the
+# SUPERVISED-phase draft (filed to the channel's agent_reviewer, default
+# orch-console) used a raw psycopg INSERT INTO agent_messages RETURNING id;
+# migrated onto scripts.bus_send's send() (direct Python import, not the CLI
+# subprocess -- this script's write path is already inline Python with an
+# open DB connection, so importing send() is the natural fit, same sanctioned
+# post_agent_message RPC either way). tests/test_lane_reply_redaction.py's
+# ephemeral-PG fixture was extended with a minimal post_agent_message RPC
+# (same 11-param shape as migration 122's) and a thread_id column; a new test
+# (test_supervised_reply_posts_the_draft_through_post_agent_message_rpc)
+# proves the RPC path actually ran (thread_id populated), verified RED
+# against the pre-migration code before the fix, GREEN after.
 
 scripts/irsyad_autoscaler.py
 scripts/irsyad_confirm_executor.py
@@ -81,7 +94,6 @@ scripts/irsyad_spin_worker.py
 scripts/irsyad_worker_reaper.py
 scripts/disk_space_monitor.sh
 scripts/fire_fix1a_grant_ping.sh
-scripts/lane_reply.sh
 scripts/render_gate/render_gate.sh
 scripts/reset_auditor.sh
 scripts/reset_cai.sh
