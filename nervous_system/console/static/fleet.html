@@ -70,9 +70,10 @@
       linear-gradient(180deg, #0c0f16, var(--bg) 42%);
     background-attachment: fixed;
     -webkit-text-size-adjust: 100%;
-    /* the header now scrolls in normal flow (no sticky top:inset), so the page
-       body itself starts below the notch */
-    padding-top: env(safe-area-inset-top);
+    /* fc-v86: the sticky .topbar owns the notch safe-area now (its own
+       padding-top carries the inset), so the body no longer offsets — the bar
+       fills the island strip instead of leaving a gap above it */
+    padding-top: 0;
     /* leave room for the resting dock so the last lane isn't hidden under it */
     padding-bottom: calc(env(safe-area-inset-bottom) + 78px);
   }
@@ -475,6 +476,29 @@
     color: var(--dim); background: var(--panel); border: 1px solid var(--line); white-space: nowrap; }
   .footlinks a:active { background: var(--panel-2); }
 
+  /* ── PERSISTENT TOP BAR (fc-v86, bus #78269 op#34849) ─────────────────────
+     The three primary destinations, always pinned one thumb-tap away: Asks
+     (badge = waiting-on-you count, amber only when something waits), Lane
+     manager, irsyad. Sticky above the scrolling document; owns the notch
+     safe-area (body's old inset padding moved HERE so the bar fills the
+     island strip instead of leaving a transparent gap above it). Supersedes
+     the bottom .footlinks. */
+  .topbar { position: sticky; top: 0; z-index: 45; display: flex; gap: 7px;
+    padding: calc(9px + env(safe-area-inset-top)) 14px 9px;
+    background: linear-gradient(180deg, rgba(15,19,27,.96), rgba(12,15,22,.88));
+    backdrop-filter: saturate(140%) blur(14px); -webkit-backdrop-filter: saturate(140%) blur(14px);
+    border-bottom: 1px solid var(--line); }
+  .tbbtn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 10px 6px; border-radius: 12px; font: 600 12.5px/1 var(--sans); color: var(--dim);
+    background: var(--panel); border: 1px solid var(--line); white-space: nowrap; }
+  .tbbtn:active { background: var(--panel-2); }
+  .tbasks { color: var(--txt); }
+  .tbcnt { font: 700 11px/1 var(--mono); min-width: 20px; text-align: center;
+    padding: 3px 6px; border-radius: 999px;
+    background: rgba(55,211,154,.13); color: var(--good); border: 1px solid rgba(55,211,154,.25); }
+  .tbcnt.has-waits { background: rgba(246,196,83,.13); color: var(--warn);
+    border-color: rgba(246,196,83,.3); }
+
   /* ── BOTTOM ACTION DOCK — resting state ── */
   .dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
     padding: 11px 16px calc(11px + env(safe-area-inset-bottom));
@@ -606,6 +630,16 @@
 <body>
 <div id="ptr"><span class="spin">&darr;</span><span id="ptrTxt">Pull to refresh</span></div>
 
+<!-- fc-v86 (bus #78269, op#34849): persistent top bar — Asks (waiting-on-you
+     badge, mirrors pulse.asks_waiting) / Lane manager / irsyad, pinned one
+     thumb-tap away. The old bottom footlinks are gone; the full asks board
+     stays at /asks. -->
+<nav class="topbar" id="topbar" aria-label="primary">
+  <a class="tbbtn tbasks" href="/asks">📋 Asks <span id="tbAsksCount" class="tbcnt">—</span></a>
+  <a class="tbbtn" href="/lanes">🔑 Lane manager</a>
+  <a class="tbbtn" href="/irsyad">🧾 irsyad</a>
+</nav>
+
 <div class="wrap">
   <header id="pulse" class="pulse clear">
     <div class="top">
@@ -666,26 +700,31 @@
     </details>
   </section>
 
-  <!-- YOUR ASKS (fc-v55): the operator's live ask board. Status derived on the
-       bus each poll — never a stored snapshot. Assign here to delegate a new ask. -->
+  <!-- DELEGATE (fc-v86, op#34852): home's "Your asks" CARD is REMOVED — /asks
+       (top-bar Asks button) is the ONE asks view. What survives here is the
+       INPUT the card section used to host, collapsed by default: the "+ ask"
+       composer + the Retask rail (a lane action) both POST through it. No ask
+       LIST ever renders on home again; the top-bar Asks badge carries the
+       waiting-on-you count. -->
   <section>
-    <div class="sec-h"><h2>Your asks</h2><span id="asksCount" class="count"></span>
-      <button id="assignToggle" class="asbtn">+ ask</button></div>
-    <div id="assignForm" class="assign">
-      <select id="assignAgent" class="assel"><option value="">Delegate to…</option></select>
-      <input id="assignAsk" class="asinput" type="text" placeholder="What should they do?" autocomplete="off" />
-      <div class="asrow">
-        <select id="assignPri" class="assel aspri">
-          <option value="P2">P2</option><option value="P1">P1</option><option value="P0">P0</option>
-        </select>
-        <button id="assignSend" class="assend">Delegate →</button>
+    <details class="chatter" id="assignSec">
+      <summary>
+        <span>Delegate an ask</span>
+        <span class="chev">▸</span>
+      </summary>
+      <div class="cinner">
+        <div id="assignForm" class="assign">
+          <select id="assignAgent" class="assel"><option value="">Delegate to…</option></select>
+          <input id="assignAsk" class="asinput" type="text" placeholder="What should they do?" autocomplete="off" />
+          <div class="asrow">
+            <select id="assignPri" class="assel aspri">
+              <option value="P2">P2</option><option value="P1">P1</option><option value="P0">P0</option>
+            </select>
+            <button id="assignSend" class="assend">Delegate →</button>
+          </div>
+        </div>
       </div>
-    </div>
-    <div id="asks"><div class="empty">Loading…</div></div>
-    <div class="freshbar" id="asksFresh" style="display:none">
-      <span class="g"></span>
-      <span>status derived live from the bus on every refresh · never cached · pull to refresh</span>
-    </div>
+    </details>
   </section>
 
   <!-- Fleet chatter: the old DRAIN BOARD, demoted to a collapsed SRE glance. -->
@@ -703,11 +742,9 @@
     </details>
   </section>
 
-  <div class="footlinks">
-    <a href="/asks">📋 Asks board</a>
-    <a href="/lanes">🔑 Full lane manager</a>
-    <a href="/irsyad">🧾 irsyad</a>
-  </div>
+  <!-- fc-v86: footlinks removed — the persistent .topbar carries Asks /
+       Lane manager / irsyad now (bus #78269 op#34849); duplicates at the
+       bottom were exactly the noise this pass removes. -->
 </div>
 
 <!-- resting dock / bulk bar -->

@@ -899,6 +899,20 @@ def build_fleet_asks_query() -> Tuple[str, list]:
     return sql, []
 
 
+def needs_musa(row: dict) -> bool:
+    """ONE derivation for "this open ask needs Musa's own decision" — the /asks
+    Needs-Musa hero's predicate: waiting_on_operator OR the migration-118
+    needs_operator_decision flag (added because waiting_on_operator alone missed
+    20/24 genuine Musa-decisions, #75387). EVERY needs-Musa count goes through
+    HERE over build_fleet_asks_query rows — the board's counts.needs_musa AND
+    the top-bar badge (/api/fleet pulse.asks_waiting, /api/asks-waiting) — so
+    the badge and the hero it opens can never disagree (orch-console 78374
+    blocker, cc-quality 78363 finding 1: the badge previously counted
+    build_asks_query statuses, undercounting live 11 vs 33). The client hero
+    (asks.js needsMusa) mirrors this exact predicate."""
+    return bool(row.get("waiting_on_operator") or row.get("needs_operator_decision"))
+
+
 def fetch_fleet_asks() -> List[dict]:
     sql, params = build_fleet_asks_query()
     return _annotate_topic(_query(sql, params))
