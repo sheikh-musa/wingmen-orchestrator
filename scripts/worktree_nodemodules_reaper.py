@@ -239,7 +239,11 @@ def reap_one(wt: pathlib.Path, *, dry_run: bool):
     if verdict != "clear":
         return rep
     for d in find_reclaimable_dirs(wt):
-        if not d.is_dir():
+        # A symlinked node_modules (shared from a sibling worktree, bus #77680/#77730) holds no
+        # bytes here and its target may be live elsewhere: remove only the LINK, never follow
+        # it -- rmtree refuses symlinks, and _dir_size would count the target's bytes.
+        is_link = d.is_symlink()
+        if not is_link and not d.is_dir():
             continue
         if not _is_ignored(wt, d):
             rep["errors"].append(f"NOT-IGNORED (spared, would clobber tracked): {d}")
@@ -249,13 +253,16 @@ def reap_one(wt: pathlib.Path, *, dry_run: bool):
             rep["errors"].append(f"went LIVE at kill-time (spared): {wt}")
             rep["verdict"] = "skip:in-use(kill-time)"
             break
-        sz = _dir_size(d)
+        sz = 0 if is_link else _dir_size(d)
         if dry_run:
             rep["cleared"].append({"dir": str(d), "bytes": sz, "dry_run": True})
             rep["freed"] += sz
             continue
         try:
-            _rmtree(d)
+            if is_link:
+                os.unlink(d)
+            else:
+                _rmtree(d)
             rep["cleared"].append({"dir": str(d), "bytes": sz})
             rep["freed"] += sz
         except OSError as e:
