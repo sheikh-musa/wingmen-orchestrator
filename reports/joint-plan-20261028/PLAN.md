@@ -10,6 +10,15 @@ fleet's standing practice (see PR#490/#551/#553/#554 for the shape: tests
 first, real CI watched to completion, head re-checked immediately before
 merge).
 
+**Revision 1 (console's tightening pass, bus #78846, approved-with-5-
+changes): dated targets instead of durations (weekdays verified against
+`date -d`), migration 114's 4 gaps now explicitly owned by this lane
+(cc-substrate retired), a safer governance-floors.md first step (a
+generated block inside the file, not a full regen), Phase 5 unblocked
+using Musa's own ruling (operator_messages 32731/32732) instead of a
+guessed list, Phase 4 reframed as one plain decision for Musa. All 5
+folded in below.**
+
 ## 0. The target state (Musa's words, via #78481)
 
 1. ONE place of record — the substrate DB: rules/floors, decisions,
@@ -55,22 +64,24 @@ change path — is owned by cc-paperclip-spike-1's joint plan (#78481/
 #78476) and is deliberately not restated here." So sections 2-4 below are
 this plan's job, not a restatement of the cutover doc's.
 
-**Gaps found in migration 114 (noted, not yet fixed — relevant because
-this plan reuses 114's pattern and must not repeat its gaps):**
+**Gaps found in migration 114 — now owned by this lane (cc-substrate
+retired 2026-10-27; console's ruling, bus #78846 item 2), scheduled as
+Phase 1b below:**
 - no `AFTER DELETE` trigger on a source table → an orphaned mirror row
 - `requires_response` true→false on a source row can strand a live
   `work_item` row (no re-sync path)
 - `work_item_audit` is append-only **by convention only** — no REVOKE
-  stops a direct UPDATE/DELETE on it
+  stops a direct UPDATE/DELETE on it (fixed inside Phase 1a, same
+  migration as the new governance-floor audit table — identical pattern)
 - no console read-grant/RLS on `work_item` yet
 
-**The original ask (#4494, "kill the 7-log sprawl") — only partially
-enumerated.** I could not find an explicit list of all 7 logs anywhere in
-the repo or bus history; cc-substrate's own plan (bus #73176) narrowed
-scope to the tractable BIG-3 (asks/bus/commitments) without ever
-restating the other 4. **I'm flagging this as a real, unresolved gap
-rather than guessing names for it.** Phase 5 below depends on someone
-(not necessarily me) re-deriving that list from the original ask.
+**The original ask (#4494, "kill the 7-log sprawl") — defined, not
+unenumerated.** Console's own proposal to Musa (operator_messages id
+32731, 2026-10-21) names the full scope: every ask, bus task, commitment,
+build, and operator message. Musa ruled "big 3 first" the same day
+(operator_messages id 32732) — asks/bus/commitments are Phase 0 (done);
+build and operator-message-shaped items, plus whatever else a live-schema
+inventory surfaces, are Phase 5 below, not an unresolved mystery.
 
 **247 ABANDONED rows** — the reconciler's first live dry-run at a 72h-
 no-activity floor: 246 `operator_asks` (delegated, no due date, untouched
@@ -203,7 +214,10 @@ must close that gap instead of repeating it: `REVOKE UPDATE, DELETE ON
 governance_floor_audit FROM PUBLIC` (or no non-owner role gets those
 grants at all), insert-only via a trigger or RPC, every row citing the
 acting agent and an `op_ref` (NOT NULL — a floor change with no op# to
-cite is rejected at the DB layer, not just linted).
+cite is rejected at the DB layer, not just linted). Per console's
+tightening (bus #78846 item 2), `work_item_audit` itself gets the same
+REVOKE fix inside Phase 1 (one shared migration, same pattern, same PR) —
+not deferred, since it's the identical change applied to a second table.
 
 **Floors as executable rows (reusing NOVEL IDEA #1 verbatim).** A
 `governance_floor(id, sentence, op_ref, predicate_sql, enforced_in_code,
@@ -230,25 +244,60 @@ not propose new vault-write code.
 
 ## 3. Phased sequence, with dates and exit tests
 
+All dates verified weekday-against-date with `date -d` before writing
+them (the nazim_send weekday guard exists because this fleet got this
+wrong before — not repeating it here).
+
 **Phase 0 — DONE.** BIG-3 work_item SSOT (migration 114). Exit test:
 equivalence proof, already passed 2026-10-27 19:21Z. No action from this
 plan.
 
-**Phase 1 — governance floors as generated, audited rows.**
-Scope: `governance_floor` + `governance_floor_audit` tables (append-only
-by grant, not convention), the predicate reconciler, regenerating
-governance-floors.md via the shared mechanism, the 72h-ABANDONED check as
-floor #1 (reusing console's existing ruling on dry-run + page-state +
-one-time 247-row triage list — no new policy decision needed).
-Exit test: (a) an attempted floor-row change with no `op_ref` is rejected
-by the DB, proven by a planted-bad-insert test (same shape as the writer-
-gate's planted-INSERT tests); (b) the regenerated governance-floors.md,
-diffed against today's hand-authored version, matches it semantically
-(one manual review, since today's version is prose, not rows, so no
-automatic byte-diff is meaningful on the first run).
-Owner: cc-paperclip-spike-1. Target: first PR within 1 week of this plan
-gating (own TDD'd migration + reconciler script + tests, own small PR,
-own CI watch, same shape as PR#553/#554).
+**Phase 1a — governance floors: a generated block inside the existing
+file, not a full regen.**
+Per console's tightening (bus #78846 item 3): governance-floors.md
+carries rulings in hand-authored prose that rows cannot yet express, so
+Phase 1 does NOT regenerate the whole file. Instead: a `governance_floor`
++ `governance_floor_audit` table pair (append-only by grant — `REVOKE
+UPDATE, DELETE ... FROM PUBLIC`, insert-only via trigger/RPC, every row
+citing the acting agent and a NOT NULL `op_ref`), a small reconciler
+(same shape as `work_item_reconcile.py`), and ONE generated FENCED BLOCK
+inserted into governance-floors.md (reusing `gen_data_store_registry.py`'s
+exact block-insertion mechanism, the same `<!-- GENERATED:...:START/END
+-->` pattern) holding the floors table + a live "N of M floors passing"
+line. The surrounding prose stays hand-authored. Full-file regeneration
+is deferred until the rows can provably express every floor currently in
+prose — not attempted in Phase 1a. The 72h-ABANDONED check (already
+proven, 247-row dry-run, console's ruling in bus #78827: stays dry-run,
+seeds page-state so only new abandonment pages, the 247 go to owners as
+one triage list) becomes floor row #1. The same REVOKE fix also closes
+`work_item_audit`'s convention-only gap in this same migration (console's
+tightening item 2 — identical pattern, one shared PR).
+Exit test: (a) an attempted floor-row or work_item_audit change with no
+`op_ref`/outside the insert-only path is rejected by the DB, proven by a
+planted-bad-write test (same shape as the writer-gate's planted-INSERT
+tests); (b) the fenced block renders correctly inside governance-floors.md
+with the prose around it byte-identical to before.
+Owner: cc-paperclip-spike-1. **First PR by Tue 3 Nov 2026. Exit test
+passed by Fri 6 Nov 2026.**
+
+**Phase 1b — migration 114's 4 gaps, now owned by this lane.**
+Per console's tightening (bus #78846 item 2): cc-substrate was retired
+tonight (2026-10-27), so these are explicitly mine now, not an
+unclaimed follow-up:
+1. An `AFTER DELETE` trigger on each BIG-3 source table, so a deleted
+   source row doesn't orphan its `work_item` mirror. Test: delete a
+   source row, assert the mirror is marked dropped (not left dangling).
+2. Re-sync when `requires_response` flips true→false on a source row
+   after its `work_item` mirror was created. Test: flip it, assert the
+   mirror's state updates, not just the source.
+3. RLS on `work_item` and `work_item_audit` (console currently has no
+   read-grant). Test: a non-console/non-superuser role's `SELECT` is
+   denied or scoped per whatever policy this PR defines; console's own
+   role can read.
+Each gets its own TDD'd test, same migration/PR as above (Phase 1a and
+1b ship as one coherent PR — same table family, same reviewer context).
+Owner: cc-paperclip-spike-1. **Folded into the same PR and dates as
+Phase 1a (first PR by Tue 3 Nov, exit tests passed by Fri 6 Nov 2026).**
 
 **Phase 2 — PR-B (writer-gate migration 124) — already in flight,
 unchanged.** Not re-dated by this plan; console's own ruling stands
@@ -262,46 +311,68 @@ this lane's own ~30 memory files plus console's), pgvector recall must
 (a) not regress precision versus the existing BM25 stopgap's 10 TDD
 cases, and (b) surface at least N semantically-related-but-keyword-missed
 cases that BM25 misses today (N fixed once the labeled set exists).
-Owner: cc-paperclip-spike-1. Target: starts after phase 1 lands (reuses
-phase 1's generation+audit pattern for the fleet→vault one-way
-projection), estimate 1 week after phase 1's PR merges.
+Owner: cc-paperclip-spike-1. **Started by Mon 9 Nov 2026. Exit test
+passed by Mon 16 Nov 2026.**
 
-**Phase 4 — second-brain vault pipeline resumption.** Not this plan's
-build — the blocker is a dead lane + a human-held OS permission, not a
-missing design. This plan's job is to state the blocker precisely (done,
-section 1c) and hand Musa a decision: either revive the cc-second-brain
-session, or decide who else inherits the FDA-holding interactive-terminal
-role — the vault's one-pen rule means it must stay ONE sanctioned runner,
-not a parallel path. No date committed here; it is Musa's call, not a
-schedulable engineering task.
+**Phase 4 — second-brain vault pipeline resumption: one plain decision
+for Musa.**
+Not this plan's build — the pipeline itself is mostly already built
+(section 1c); the blocker is a dead lane plus a macOS permission that
+only an already-granted interactive terminal holds. Framed plainly, per
+console's tightening (item 5): **Musa needs to choose one of two
+things — restart the cc-second-brain session on the Mini, or say who
+else should hold that Mac's "Full Disk Access" permission so they can
+run the vault-sync scripts.** No date committed here; it is Musa's
+decision, not a schedulable engineering task.
 
-**Phase 5 — work_item scope beyond BIG-3 (the unenumerated rest of the 7
-logs).** Blocked on someone re-deriving the original #4494 list; I found
-no record of what the other 4 logs are. Not scheduled until that's
-resolved — flagged as an open item, not silently dropped and not guessed
-at here.
+**Phase 5 — work_item scope beyond BIG-3: a dated 1-day inventory, not a
+guess.**
+Per console's tightening (bus #78846 item 4): this is NOT blocked on an
+unenumerated old list. Console's own proposal to Musa (operator_messages
+id 32731, 2026-10-21) already defines the full scope — every ask, bus
+task, commitment, build, and operator message — and Musa ruled "big 3
+first" (operator_messages id 32732, same day). Scope: a 1-day task that
+queries the live schema for every table holding an item owed to someone
+(an owner/status/state-shaped column) and proposes the cutover order.
+A first pass of that query (run during this plan's drafting, not a final
+answer) already found 37 tables with an `owner`/`status`/`state`/
+`assignee`/`owned_by`/`assigned_to` column, including clear "build"-
+shaped candidates (`jobs`, `jobs_archive`, `change_requests`,
+`qa_findings`, `bug_reports`, `bug_pipeline_readiness`) and one real
+surprise worth flagging now rather than losing: `exec_work_items` already
+has its own separate `state` column — a possible SECOND un-folded
+fragmenter alongside the original BIG-3, not yet accounted for anywhere.
+A real caveat for whoever runs the actual inventory: `operator_messages`
+itself (one of the 5 named categories) has NO owner/status/state column
+at all — it uses `handled_at`/`deferred_at`/`cos_triage` instead, so a
+naive owner/status column grep misses it; the real inventory task needs
+a second detection pass for that shape, not just the column-name query
+used here as a first pass. **Dated after Phase 1** — no fixed date yet
+since it depends on Phase 1a/1b's PR landing first; console/Musa to
+confirm a date once Phase 1 ships.
 
 ## 4. Open risks / what this plan does not promise
 
-- The exact "7 logs" from ask #4494 cannot be enumerated from any record
-  I found. Phase 5 has no date because of this, not because of neglect.
 - The 247 ABANDONED rows need owners to actually act on the triage list;
   this plan reuses console's ruling on how to deliver it but does not
   itself resolve the backlog.
-- Second-brain resumption depends on a human decision (Musa) about who
-  holds the FDA grant; no engineering date exists for it.
-- Migration 114's four noted gaps (no DELETE trigger, no re-sync on
-  requires_response flip, convention-only audit table, no RLS) are
-  **not** fixed by this plan — they belong to whoever owns 114's own
-  follow-up, flagged here so they aren't lost, not claimed as mine.
+- Second-brain resumption depends on Musa's decision about who holds the
+  FDA grant; no engineering date exists for it (Phase 4).
+- Phase 5's 37-table first-pass is a STARTING POINT for the 1-day
+  inventory task, not its answer — most of those 37 are plausibly NOT
+  "items owed to someone" in the asks/commitments sense (e.g. `payments`,
+  `sites`, `receipts`, `revenue_ledger` are operational/financial state).
+  Real triage judgment is still owed, which is exactly why console scoped
+  it as a dedicated task rather than something to auto-execute here.
 
 ## 5. Ownership
 
-| Phase | Owner |
-|---|---|
-| 0 (BIG-3, done) | cc-substrate (complete) |
-| 1 (governance floors) | cc-paperclip-spike-1 |
-| 2 (PR-B, in flight) | cc-paperclip-spike-1 |
-| 3 (fleet memory) | cc-paperclip-spike-1 |
-| 4 (second brain resumption) | cc-second-brain + Musa's decision |
-| 5 (work_item scope expansion) | unassigned — needs the #4494 list first |
+| Phase | Owner | Target date |
+|---|---|---|
+| 0 (BIG-3, done) | cc-substrate (complete) | done 2026-10-27 |
+| 1a (governance floors, generated block) | cc-paperclip-spike-1 | PR by Tue 3 Nov 2026; exit test by Fri 6 Nov 2026 |
+| 1b (migration 114's 4 gaps) | cc-paperclip-spike-1 | same PR/dates as 1a |
+| 2 (PR-B, in flight) | cc-paperclip-spike-1 | no date (console's standing ruling) |
+| 3 (fleet memory) | cc-paperclip-spike-1 | started Mon 9 Nov 2026; exit test by Mon 16 Nov 2026 |
+| 4 (second brain resumption) | Musa (one decision) + cc-second-brain | no engineering date — Musa's call |
+| 5 (work_item scope inventory) | unassigned — needs a runner | dated after Phase 1 lands |
