@@ -64,6 +64,14 @@
 # legacy/ihsanos_drain/main.py is confirmed DEAD on the live fleet (console's
 # own launchctl check, bus #78757: no such launchd job, VPS hub off since
 # 09-27) -- candidate for deletion (ruling part 4), not migration.
+#
+# STEP 2, scripts/lane_nudge.sh, 2026-10-28 (Musa op#34845, console's "Step 2
+# order is fine starting with lane_nudge.sh" bus #78757/#78763/#78776): all 3
+# raw psycopg2-INSERT call sites (_probe_p1_escalate, _probe_revertfail_note,
+# _probe_revertfail_nudge_note) migrated onto scripts/bus_send.py's CLI,
+# preserving dedupe/guard/best-effort (`|| true`) semantics exactly. Deleted
+# from this file in the SAME PR as the migration per the shrink-only contract
+# above.
 
 scripts/irsyad_autoscaler.py
 scripts/irsyad_confirm_executor.py
@@ -73,7 +81,6 @@ scripts/irsyad_spin_worker.py
 scripts/irsyad_worker_reaper.py
 scripts/disk_space_monitor.sh
 scripts/fire_fix1a_grant_ping.sh
-scripts/lane_nudge.sh
 scripts/lane_reply.sh
 scripts/render_gate/render_gate.sh
 scripts/reset_auditor.sh

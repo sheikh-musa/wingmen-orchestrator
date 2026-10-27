@@ -177,27 +177,20 @@ _probe_p1_escalate() {   # $1 = capfile pointer (may be empty), $2 = before-flat
     find "$dedupe" -mmin -60 2>/dev/null | grep -q . && return 0
   fi
   mkdir -p "$LOGDIR" 2>/dev/null && : > "$dedupe" 2>/dev/null || true
+  local ev="NONE (capture also failed — inspect the live pane immediately)"
+  [ -n "$capref" ] && ev="logs/$capref"
   local py="${ORCH_DIR}/.venv/bin/python3"; [ -x "$py" ] || py=python3
-  "$py" - "$SESSION" "$beforeflat" "$capref" <<'PYEOF' 2>/dev/null || true
-import os, sys
-try:
-    import psycopg2
-    sess, flat, capref = sys.argv[1], sys.argv[2], sys.argv[3]
-    ev = f"logs/{capref}" if capref else "NONE (capture also failed — inspect the live pane immediately)"
-    c = psycopg2.connect(os.environ["DATABASE_URL"]); cur = c.cursor()
-    cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-    cur.execute(
-        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response) "
-        "VALUES ('cc-fleet-health','orch-console','blocker',%s,%s,true)",
-        (f"⚠ P1 lane_nudge PROBE REVERT-FAIL on {sess} — composer not restored byte-identical; refused",
-         f"The ghost-probe on '{sess}' typed its 1-byte sentinel but the BSpace did NOT restore the "
-         f"composer byte-identical. The content at risk (before the probe): '{flat}'. A real staged "
-         f"step MAY be corrupted; lane_nudge REFUSED (did not clear+deliver). "
-         f"Raw capture: {ev}. Inspect the pane '{sess}'."))
-    c.commit()
-except Exception:
-    pass
-PYEOF
+  # Musa op#34845, bus #78757/#78763 (PR-B step 2): was a raw psycopg2 INSERT
+  # INTO agent_messages in a heredoc -- migrated onto the sanctioned
+  # scripts/bus_send.py path (same CLI shape as scripts/secret_hash_sweep_run.sh's
+  # own bus_send.py calls). Best-effort by design (the comment above this
+  # function): `|| true` means safety never depends on the DB/bus being
+  # reachable, same as the original bare `except Exception: pass`.
+  "$py" "$ORCH_DIR/scripts/bus_send.py" --to orch-console --from cc-fleet-health \
+    --type blocker --priority P1 --req \
+    --subject "⚠ P1 lane_nudge PROBE REVERT-FAIL on $SESSION — composer not restored byte-identical; refused" \
+    --body "The ghost-probe on '$SESSION' typed its 1-byte sentinel but the BSpace did NOT restore the composer byte-identical. The content at risk (before the probe): '$beforeflat'. A real staged step MAY be corrupted; lane_nudge REFUSED (did not clear+deliver). Raw capture: $ev. Inspect the pane '$SESSION'." \
+    >/dev/null 2>&1 || true
 }
 
 # P3 DOWN-RANK of a revert-fail on a STABLE but ENTIRELY-DIM composer (op#29056 / storefront #29048).
@@ -216,33 +209,23 @@ _probe_revertfail_note() {   # $1 = capfile pointer (may be empty), $2 = before-
     find "$dedupe" -mmin -360 2>/dev/null | grep -q . && return 0
   fi
   mkdir -p "$LOGDIR" 2>/dev/null && : > "$dedupe" 2>/dev/null || true
+  local rowid="${LANE_NUDGE_ROW_ID:-unknown}"
+  local ev="NONE"
+  [ -n "$capref" ] && ev="logs/$capref"
   local py="${ORCH_DIR}/.venv/bin/python3"; [ -x "$py" ] || py=python3
-  "$py" - "$SESSION" "$beforeflat" "$capref" "${LANE_NUDGE_ROW_ID:-unknown}" <<'PYEOF' 2>/dev/null || true
-import os, sys
-try:
-    import psycopg2
-    sess, flat, capref, rowid = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-    ev = f"logs/{capref}" if capref else "NONE"
-    c = psycopg2.connect(os.environ["DATABASE_URL"]); cur = c.cursor()
-    cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-    # A refused wake is a DELIVERY FAILURE, never a "benign ghost" (Nazim #43083/#43143): the
-    # wake did NOT reach the lane, so name it as such AND the undelivered row id. Still P3 (the
-    # bus row is durable; it reads on the lane's next turn) and no P1 (the REFUSE preserved any
-    # possibly-real staged text) — but honestly labeled so a real stuck delivery is not hidden.
-    cur.execute(
-        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
-        "VALUES ('cc-fleet-health','orch-console','update',%s,%s,false,'P3')",
-        (f"lane_nudge DELIVERY FAILURE on {sess} (DIM-stable revert-fail) -- undelivered row={rowid}",
-         f"A wake to '{sess}' was NOT DELIVERED: the ghost-probe revert-failed on a STABLE ENTIRELY-DIM "
-         f"composer (a dim ghost and real UNFOCUSED staged text are byte-identical), so lane_nudge REFUSED "
-         f"rather than clobber possibly-real staged text. Undelivered row={rowid}. P3 (the bus row is durable "
-         f"-- it reads on the lane's next turn) and no P1 (the refuse preserved the composer), but this is a "
-         f"delivery failure, not a benign ghost. Content before probe: '{flat}'. Raw capture: {ev}. If a lane "
-         f"stays dim-deadlocked across turns, it needs a turn to re-render (see #43143)."))
-    c.commit()
-except Exception:
-    pass
-PYEOF
+  # Musa op#34845, bus #78757/#78763 (PR-B step 2): migrated off the raw
+  # psycopg2 INSERT onto scripts/bus_send.py, same as _probe_p1_escalate
+  # above. A refused wake is a DELIVERY FAILURE, never a "benign ghost"
+  # (Nazim #43083/#43143): the wake did NOT reach the lane, so name it as
+  # such AND the undelivered row id. Still P3 (the bus row is durable; it
+  # reads on the lane's next turn) and no P1 (the REFUSE preserved any
+  # possibly-real staged text) -- but honestly labeled so a real stuck
+  # delivery is not hidden.
+  "$py" "$ORCH_DIR/scripts/bus_send.py" --to orch-console --from cc-fleet-health \
+    --type update --priority P3 \
+    --subject "lane_nudge DELIVERY FAILURE on $SESSION (DIM-stable revert-fail) -- undelivered row=$rowid" \
+    --body "A wake to '$SESSION' was NOT DELIVERED: the ghost-probe revert-failed on a STABLE ENTIRELY-DIM composer (a dim ghost and real UNFOCUSED staged text are byte-identical), so lane_nudge REFUSED rather than clobber possibly-real staged text. Undelivered row=$rowid. P3 (the bus row is durable -- it reads on the lane's next turn) and no P1 (the refuse preserved the composer), but this is a delivery failure, not a benign ghost. Content before probe: '$beforeflat'. Raw capture: $ev. If a lane stays dim-deadlocked across turns, it needs a turn to re-render (see #43143)." \
+    >/dev/null 2>&1 || true
 }
 
 # Is $1 one of the CONSOLE (singleton) sessions? (Nazim #40324 scope: the down-rank below applies
@@ -280,28 +263,16 @@ _probe_revertfail_nudge_note() {   # $1 = capfile pointer (may be empty), $2 = b
     find "$dedupe" -mmin -360 2>/dev/null | grep -q . && return 0
   fi
   mkdir -p "$LOGDIR" 2>/dev/null && : > "$dedupe" 2>/dev/null || true
+  local ev="NONE"
+  [ -n "$capref" ] && ev="logs/$capref"
   local py="${ORCH_DIR}/.venv/bin/python3"; [ -x "$py" ] || py=python3
-  "$py" - "$SESSION" "$beforeflat" "$capref" <<'PYEOF' 2>/dev/null || true
-import os, sys
-try:
-    import psycopg2
-    sess, flat, capref = sys.argv[1], sys.argv[2], sys.argv[3]
-    ev = f"logs/{capref}" if capref else "NONE"
-    c = psycopg2.connect(os.environ["DATABASE_URL"]); cur = c.cursor()
-    cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-    cur.execute(
-        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
-        "VALUES ('cc-fleet-health','orch-console','update',%s,%s,false,'P3')",
-        (f"lane_nudge revert-fail on {sess} (console + nudge-template) -- down-ranked to P3/log, benign in-flight delivery",
-         f"The ghost-probe on the console '{sess}' revert-failed, but the pre-probe content IS a nudge/wake "
-         f"template we (or the realtime notifier) delivered, NOT a staged step of the console's — the singleton "
-         f"was mid-turn processing the very nudge. The REFUSE already PRESERVED it; nothing of the operator's was "
-         f"at risk. Recording (P3, no P1). Content before probe: '{flat}'. Raw capture: {ev}. Only inspect if this "
-         f"recurs with content that is NOT a nudge line."))
-    c.commit()
-except Exception:
-    pass
-PYEOF
+  # Musa op#34845, bus #78757/#78763 (PR-B step 2): migrated off the raw
+  # psycopg2 INSERT onto scripts/bus_send.py, same as the two functions above.
+  "$py" "$ORCH_DIR/scripts/bus_send.py" --to orch-console --from cc-fleet-health \
+    --type update --priority P3 \
+    --subject "lane_nudge revert-fail on $SESSION (console + nudge-template) -- down-ranked to P3/log, benign in-flight delivery" \
+    --body "The ghost-probe on the console '$SESSION' revert-failed, but the pre-probe content IS a nudge/wake template we (or the realtime notifier) delivered, NOT a staged step of the console's -- the singleton was mid-turn processing the very nudge. The REFUSE already PRESERVED it; nothing of the operator's was at risk. Recording (P3, no P1). Content before probe: '$beforeflat'. Raw capture: $ev. Only inspect if this recurs with content that is NOT a nudge line." \
+    >/dev/null 2>&1 || true
 }
 
 # A revert-fail on a pane that is MID-TURN (busy footer: 'esc to interrupt' / a thinking spinner)
