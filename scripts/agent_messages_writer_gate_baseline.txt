@@ -85,6 +85,28 @@
 # (test_supervised_reply_posts_the_draft_through_post_agent_message_rpc)
 # proves the RPC path actually ran (thread_id populated), verified RED
 # against the pre-migration code before the fix, GREEN after.
+#
+# STEP 2, the reset_*.sh family (reset_auditor.sh, reset_cai.sh,
+# reset_fleet_health.sh, reset_nazim.sh), 2026-10-28 (Musa op#34845, console's
+# "continue with the reset_*.sh family" bus #78846/#78857): each script's
+# LAYER-2 dead-man-verify FAIL escalation (its only raw-INSERT call site) used
+# a raw psycopg INSERT INTO agent_messages; migrated onto scripts/bus_send.py's
+# CLI, preserving each script's own quirks exactly -- hardcoded from_agent
+# identity (cc-fleet-health for reset_cai.sh/reset_nazim.sh, the
+# reset_fleet_health.sh self-send to/from orch-console, reset_auditor.sh's
+# $RESET_BY), the interpolated subject/body text, and best-effort (`|| true`
+# equivalent) semantics. Bundled as ONE PR per this file's own prior grouping
+# of the family as a single unit. 3 of these 4 scripts had no test file at
+# all; added tests/test_reset_family_bus_send_migration.py (static
+# source-level discriminator -- no raw INSERT remains, the migrated CLI
+# invocation shape is present -- same technique this gate itself uses to
+# detect a raw writer, inverted to assert the new path), verified RED against
+# the pre-migration content (via `git show HEAD:...`) before the fix, GREEN
+# after. reset_auditor.sh's existing 27-test suite re-run clean (no
+# regression); the LAYER-2 branch itself has never been dynamically testable
+# with the static tests/fixtures/stub_tmux.sh stub (needs a composer_capture
+# CC_GHOST+history-match state the stub can't produce) -- a genuine,
+# pre-existing, repo-wide gap, not newly introduced by this migration.
 
 scripts/irsyad_autoscaler.py
 scripts/irsyad_confirm_executor.py
@@ -95,10 +117,6 @@ scripts/irsyad_worker_reaper.py
 scripts/disk_space_monitor.sh
 scripts/fire_fix1a_grant_ping.sh
 scripts/render_gate/render_gate.sh
-scripts/reset_auditor.sh
-scripts/reset_cai.sh
-scripts/reset_fleet_health.sh
-scripts/reset_nazim.sh
 scripts/switch_lane_token.sh
 legacy/ihsanos_drain/main.py
 

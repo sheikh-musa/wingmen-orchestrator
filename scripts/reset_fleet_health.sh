@@ -198,22 +198,16 @@ done
 if [ "$_cleared" != 1 ]; then
   echo "[reset_fleet_health] LAYER-2 VERIFY: FAIL — /clear did NOT execute (still staged/high-context). NOT sending boot." >&2
   _escalated=0
-  if [ -x "$HOME/wingmen/orchestrator/.venv/bin/python3" ]; then
-    if "$HOME/wingmen/orchestrator/.venv/bin/python3" - 2>/dev/null <<'PYESC'
-import os, sys, psycopg
-dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
-if not dsn: sys.exit(1)
-body = ("LOUD: reset_fleet_health FIRED but the /clear did NOT execute (dim-queued/jam) — the SRE recycle is "
-        "STUCK, NOT done. The SRE is still on its bloated context and NO boot was injected. OPERATOR: please "
-        "re-fire on a clean composer. (message_type='blocker' — 'alert' violates the check constraint.)")
-with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-    cur.execute("SELECT set_config('app.current_agent_id','orch-console',true)")
-    cur.execute("INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response) "
-                "VALUES ('orch-console','orch-console','blocker',%s,%s,'P1',true)",
-                ("LOUD: reset_fleet_health STUCK — /clear did not take, SRE recycle NOT done (relay to operator)", body))
-    conn.commit()
-sys.exit(0)
-PYESC
+  _py="$HOME/wingmen/orchestrator/.venv/bin/python3"
+  if [ -x "$_py" ]; then
+    # Musa op#34845, bus #78757/#78763 (PR-B step 2): was a raw psycopg INSERT INTO
+    # agent_messages; routed through scripts/bus_send.py, same sanctioned path as
+    # every other migrated writer.
+    if "$_py" "$HOME/wingmen/orchestrator/scripts/bus_send.py" --to orch-console --from orch-console \
+         --type blocker --priority P1 --req \
+         --subject "LOUD: reset_fleet_health STUCK — /clear did not take, SRE recycle NOT done (relay to operator)" \
+         --body "LOUD: reset_fleet_health FIRED but the /clear did NOT execute (dim-queued/jam) — the SRE recycle is STUCK, NOT done. The SRE is still on its bloated context and NO boot was injected. OPERATOR: please re-fire on a clean composer. (message_type='blocker' — 'alert' violates the check constraint.)" \
+         >/dev/null 2>&1
     then _escalated=1; fi
   fi
   [ "$_escalated" = 1 ] && echo "[reset_fleet_health] escalated LOUD failure (operator relay). Exiting non-zero." >&2 \
