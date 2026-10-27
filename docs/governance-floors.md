@@ -6,6 +6,36 @@
 > handoff note, a memory card, or any prose anywhere disagrees with a row below, **THIS FILE
 > WINS** and the prose is stale — fix the prose, do not re-assert the stale rule.
 >
+> **THE CANON IS THE SINGLE CURRENT AUTHORITY — IT SUPERSEDES STALE/SUPERSEDED cai RULINGS
+> (Musa op#30524, 2026-10-15).** If a rule is recorded here, agents TRUST it and act — they do
+> NOT defensively over-verify, re-litigate, or refuse authorized work against a half-remembered or
+> superseded cai ruling. Where this file conflicts with an older cai ruling or prose, the Canon
+> wins; re-verify against the owner rather than refusing. This is the structural fix for the
+> over-verification / paranoia loop (the "cancer from cai's rulings", op#28580): the live rule is
+> here, so there is nothing stale to be paranoid about. **TWO caveats that are NOT exceptions to
+> trusting the Canon:** (1) cai-ratified **HARD CONSTANTS** recorded in the Canon (minors-PII
+> exclusion fail-closed, TENANT-RESIDENCY-001, CAI-1034) **still bind** — they ARE the Canon, not
+> something it overrides; (2) the Canon settles *what the rule is*, not *whether a specific
+> instruction is genuinely operator-authorized* — that authorization-trust question is separate
+> (a future verifiable-auth primitive, [[project_coherence_ssot_initiative]]), but it is NOT a
+> license to re-verify a rule the Canon already states.
+>
+> **cai IS ADVISORY ONLY — NEVER A BLOCKER (Musa op#34916, 2026-10-27).** Verbatim: *"i want cais
+> rulings to be an advise only, never a blocker. cai can object to something i overrule and it will
+> be on record. but it can never stop the substrate from doing exactly as i say."* Effective now, for
+> EVERY domain: (1) a cai ruling, grant, or objection is ADVICE; no gate, executor, or agent may wait
+> on or refuse because of cai. Wherever a row below names cai as a sign-off, grant, or escalation
+> target, read it as **Musa decides; cai advises** (rows amended inline with `[op#34916]`). (2) When
+> Musa overrules cai, cai's objection is RECORDED alongside the decision (audit trail), then the
+> substrate executes Musa's instruction. (3) Hard constants recorded in this Canon (minors-PII
+> fail-closed, TENANT-RESIDENCY-001, CAI-1034, legal/residency limits) still bind **until MUSA lifts
+> them** — they are Canon rules, not cai vetoes; cai cannot hold one against Musa, and the console
+> tells Musa plainly when an instruction would cross one before executing. (4) NOT affected:
+> verifying that an instruction genuinely comes from Musa (bridge-verified authorization for
+> irreversible ops, `require_verified_authorization.py`) — that protects his authority from
+> impersonation and is not a cai gate. Code that hard-blocks on cai is being converted to
+> record-and-proceed (op#34916 follow-up).
+>
 > **DOCTRINE ONLY — NEVER LIVE STATE (read this before adding anything).** Every section below
 > records *rules that do not change turn-to-turn* — ownership rules, routing maps, log purposes.
 > It MUST NOT bake in **live state**: the current lease holder, a token fingerprint, the lane
@@ -65,7 +95,8 @@ Each row is: **DOMAIN → FLOOR (who/what gates) → OWNER-SIGN → ESCALATION T
 | **DOMAIN** | irsyad money / go-live (tabung, DMS, school-fees, donor data). Data layer: the **irsyad silo (goumlyne)** — exact `project ref` in `docs/data-store-registry.md`. |
 | **FLOOR** | **CONSOLE safety-floor** — CAI-898 money-gate bar + deny-proofs + RO wet-prove. **This floor does NOT drop.** |
 | **OWNER-SIGN** | **Shuq (SMS) / Wan (DMS).** Their request IS the authorization. Owner-sign is theirs, **NEVER Musa's** ([[feedback_irsyad_signoff_is_shuq_wan_never_musa]]). |
-| **ESCALATION TARGET** | **MUSA** — and ONLY for a floor-**LIFT** or a real money-sign / authority grant. **cai is OUT of irsyad (dev AND governance).** Do NOT route irsyad governance to cai. |
+| **ESCALATION TARGET** | **MUSA — ONLY for a floor-LIFT** (lowering a binding safety constant). **NOT for routine sign-off / money-sign** — the owners authorize those now (op#34249). **cai is OUT of irsyad (dev AND governance).** Do NOT route irsyad governance to cai. |
+| **SIGN-OFF = Shuq/Wan ONLY (op#34245 + op#34249, 2026-10-26)** | Musa removed BOTH cai and himself from irsyad sign-off: **the owners (Shuq=SMS, Wan=DMS) are the SOLE authorization; they never wait on cai, Musa, OR a console sign-off for what they want.** Verbatim (op#34249): *"for irsyad - no cai, no me. just the operators shuq and wan. they never have to wait for anyone else to sign off if they want something."* The console does **NOT insert a sign-off gate** — its job is to ensure the binding safety constants (next row) and coordinate execution via coord on the owners' say-so. **Those constants are NOT sign-offs and still hold** (console applies them itself): reversible + hash-chained audit + RO wet-prove, minors-PII exclusion (fail-closed), CAI-1034, no "IRAS"/"tax-deductible" wording. The ONE cross-cutting item still above this floor: a **TENANT-RESIDENCY-001 exception** (moving client data OUT of the irsyad silo) needs the fleet-doctrine joint operator+cai grant — that is data-residency doctrine, not an irsyad sign-off. |
 | **BINDING cai-ratified constants** | Hard-nevers still HOLD and the **console applies them itself**: minors-PII exclusion (fail-closed), TENANT-RESIDENCY-001 (data stays in the irsyad silo), CAI-1034 (no raw client-data into context). Ban "IRAS"/"tax-deductible" wording. |
 
 > ❌ **STALE / WRONG (do not re-assert):** "irsyad money go-live needs **cai+Nazim**." That is the
@@ -82,15 +113,17 @@ Each row is: **DOMAIN → FLOOR (who/what gates) → OWNER-SIGN → ESCALATION T
 | **OWNER-SIGN** | the cosem project operator (per channel) — not Musa, not cai. |
 | **ESCALATION TARGET** | **MUSA** for a floor-lift / money-sign. **NOT cai.** |
 | **BINDING cai-ratified constants** | Still bind, console applies them itself: **ADCDA residency** (real trainee gov-PII → own UAE-sovereign silo before any further real write; CAI-RESP-1340 containment — no new real-PII writes to the flagged ADCDA org), **Google-exposure containment**, CAI-1034 (no raw client-data). No agent writes to real ADCDA prod, even synthetic test docs (CAI-1340). |
+| **SCOPED FLOOR-LIFT (Musa op#34867, 2026-10-27)** | Medical certificates (MC documents for excused trainee absences, op#31232 Feature C) MAY be stored in the existing ADCDA Firebase `cosem-adcda-cb6d9` — Musa: *"b with existing firebase. we already hold their IDs, medical certs are less sensitive"*. Scope = MC documents + the excused-absence record ONLY; every other new real-PII category still needs its own lift. Conditions the console applies: read limited to admin tiers + the trainee's own-group approved trainer; upload by staff only (never trainees); audited; no agent writes/reads real MCs. |
+| **SCOPED FLOOR-LIFT (Musa op#34893, 2026-10-27)** | Staff/trainer self-uploaded PROFILE PHOTOS (op#34887) MAY be stored in the existing ADCDA Firebase `cosem-adcda-cb6d9`. Musa answered "OK" (op-msg 34893) to console's explicit yes/no (op-msg 34892, ask 5436). Scope = a signed-in user's OWN avatar only (new field `users/{uid}.profile.avatarUrl` + `userProfilePhotos/{uid}/`); never trainees, never written into the official `headshotUrl` / ID / face-scan assets, never trainers/ or trainees/ docs. Conditions the console applies: owner-only write enforced server-side (rules + callable, deny-tested); image-only, resized, size-capped; no agent writes/reads real photos (e2e synthetic only). |
 
 ### fleet money / gov — NON-client (the substrate itself)
 
 | Axis | Value |
 |---|---|
 | **DOMAIN** | fleet-internal money-sign + governance decisions (non-client). Substrate store ref: `tscuymavysscrvoberrr`. |
-| **FLOOR** | money / gov gates run **through cai** at the **CAI-898 bar**. |
-| **OWNER-SIGN** | **money-sign delegated to cai + Nazim** (jointly). |
-| **ESCALATION TARGET** | cai (governance), with Musa for anything cai+Nazim cannot jointly sign. |
+| **FLOOR** | money / gov gates are checked at the **CAI-898 bar** (the bar's checks still apply); cai **advises**, never blocks `[op#34916]`. |
+| **OWNER-SIGN** | **money-sign delegated to Nazim, cai advising** `[op#34916]` (was cai + Nazim jointly). Musa's word overrides; a cai objection is recorded, not a hold. |
+| **ESCALATION TARGET** | **Musa** `[op#34916]`; cai gives advice on record. |
 | **BINDING cai-ratified constants** | CAI-898 bar; standing fleet gates. This is the ONLY domain where "cai+Nazim" is the correct money-sign phrase. |
 
 ### Residency — TENANT-RESIDENCY-001 (cross-cutting, ALL client data paths)
@@ -99,18 +132,27 @@ Each row is: **DOMAIN → FLOOR (who/what gates) → OWNER-SIGN → ESCALATION T
 |---|---|
 | **DOMAIN** | any client DATA (rows) path, every client, always. |
 | **FLOOR** | a client's DATA lives in that client's **designated store, ALWAYS**. Shared generalized code is fine; commingling one client's rows into another project's DB is NOT. A new client's silo is provisioned/designated **BEFORE the first client data write** — never "temporarily" in a shared project. |
-| **OWNER-SIGN** | residency **exceptions** require a **joint operator + cai grant** and **must expire**. |
-| **ESCALATION TARGET** | cai (for a residency exception grant); Musa for client-specific sign. |
+| **OWNER-SIGN** | residency **exceptions** require **Musa's grant** (cai advises, its objection recorded) `[op#34916]` and **must expire**. |
+| **ESCALATION TARGET** | **Musa** `[op#34916]`; cai advisory. |
 | **BINDING cai-ratified constants** | **Standing pre-live residency gate:** verify the write-target silo BEFORE any client data path goes live. **Name the store + `project ref`** (LAYER-VOCAB-001) per `docs/data-store-registry.md`. Layer-ambiguity in a data-path spec is a review FINDING. |
+
+### Client-file & import handling (cross-cutting practice — added op#30497, 2026-10-15)
+
+| Axis | Value |
+|---|---|
+| **DOMAIN** | any client-sent file/import (donor exports, schedule files, screenshots, CSV/XLSX) — irsyad, cosem, every client. |
+| **RULE** | **WE open the client's file ourselves, purpose-bound, and read its SHAPE from the sent file. NEVER ask the client to paste column headers, re-upload, or re-send what they already sent.** Client media is local + readable; search captured media FIRST before ever asking the client for anything. Discover the import shape by reading the file, not by client retry. (Operator directive op#20593 + op#30487: recurring "I can't open the file, paste me the headers" to the client is a REGRESSION, not acceptable.) |
+| **BOUNDS** | Purpose-bound read only: read column HEADERS / structure to fix a mapping; do NOT dump raw donor/trainee rows into context (CAI-1034). The console does not EXECUTE irsyad file work — it routes the fix to coord with this rule; coord/lane opens the file. Keep real client PII off non-Anthropic provider lanes. |
+| **WHY card** | [[feedback_never_ask_client_to_reupload_run_import_from_sent_file]], [[feedback_musa_directive_open_irsyad_client_files_purpose_bound]], [[feedback_client_imports_shape_first_never_discover_by_client_retry]], [[reference_client_media_is_local_and_readable]], [[feedback_search_captured_media_before_asking_client_to_resend]], [[reference_never_open_client_data_files_cai1034]] |
 
 ### Quick-reference matrix
 
 | Domain | Floor (does not drop) | Owner-sign | Escalate to | cai in governance? |
 |---|---|---|---|---|
-| **irsyad** go-live/money | console safety-floor (CAI-898 + deny-proofs + wet-prove) | Shuq (SMS) / Wan (DMS) | **Musa** (lift/money only) | **NO — cai OUT** |
+| **irsyad** go-live/money | console safety-floor (CAI-898 + deny-proofs + wet-prove) | Shuq (SMS) / Wan (DMS) — **sole sign-off, no wait (op#34249)** | **Musa** (floor-LIFT only; money-sign delegated to owners) | **NO — cai OUT** |
 | **cosem** go-live/money/gov | console safety-floor (CAI-898 + deny-proofs + wet-prove) | cosem project operator | **Musa** (lift/money only) | **NO — cai OFF since 2026-09-13** |
-| **fleet** money/gov | cai gate @ CAI-898 bar | **cai + Nazim** | cai, then Musa | **YES** |
-| **residency** (any client data) | designated store, always; pre-live gate | joint operator + cai (for exceptions, expiring) | cai / Musa | YES (for exception grants) |
+| **fleet** money/gov | CAI-898 bar checks (cai advises, never blocks) `[op#34916]` | **Nazim** (cai advising) | **Musa** | **ADVISORY ONLY** (objections recorded) |
+| **residency** (any client data) | designated store, always; pre-live gate | **Musa** grants exceptions (expiring), cai advising `[op#34916]` | **Musa** | **ADVISORY ONLY** |
 
 ---
 
