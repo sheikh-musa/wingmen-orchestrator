@@ -186,6 +186,8 @@ MAX_CLIENT_ASKS_CHASE_PER_RUN = _envint("SLA_CLIENT_ASKS_MAX_CHASE_PER_RUN", MAX
 SLOW_ASK_ACK_MIN = _envint("SLA_SLOW_ASK_ACK_MIN", 20)
 SLOW_ASK_HORIZON_MIN = _envint("SLA_SLOW_ASK_HORIZON_MIN", 120)
 MAX_SLOW_ASK_PAGES_PER_RUN = _envint("SLA_SLOW_ASK_MAX_PAGES_PER_RUN", 3)
+# Interim ack (console #78298 "B"): a delegation row to the lane within this window of the ask.
+SLOW_ASK_DELEGATION_WINDOW_MIN = _envint("SLA_SLOW_ASK_DELEGATION_WINDOW_MIN", 15)
 SLOW_ASK_SUBJECT_PREFIX = "[slow-ask]"
 
 # Agents to drop from actioning entirely (comma-separated). Lever for Nazim to
@@ -1520,13 +1522,31 @@ def _fetch_slow_ask_candidates(conn):
             # instance — platform-4 replied as base 'cc-cosem-platform'), never a
             # bystander/watchdog row that happens to share the thread
             "               AND regexp_replace(r.from_agent, '-[0-9]+$', '') "
+            "                 = regexp_replace(d.to_agent, '-[0-9]+$', '')) "
+            # INTERIM (console ruling #78298 "B", until every delegation subject
+            # cites its op# — ruling "A"): a console/hub row to the ask's DELEGATED
+            # lane family within SLOW_ASK_DELEGATION_WINDOW_MIN of the ask, plus a
+            # reply from that family in its thread, counts even when no subject
+            # cites the op# (op#34839/#78234, op#34840/#78246). Accepted ambiguity:
+            # two delegations to one lane inside the window share one ack.
+            "  OR EXISTS (SELECT 1 FROM agent_messages d "
+            "             JOIN agent_messages r ON r.thread_id = d.thread_id AND r.id <> d.id "
+            "             WHERE oa.delegated_to IS NOT NULL "
+            "               AND d.created_at >= oa.created_at "
+            "               AND d.created_at <= oa.created_at + make_interval(mins => %s) "
+            "               AND (d.from_agent = 'orch-console' "
+            "                    OR d.from_agent LIKE 'cc-orchestrator%%') "
+            "               AND regexp_replace(d.to_agent, '-[0-9]+$', '') "
+            "                 = regexp_replace(oa.delegated_to, '-[0-9]+$', '') "
+            "               AND r.created_at > d.created_at "
+            "               AND regexp_replace(r.from_agent, '-[0-9]+$', '') "
             "                 = regexp_replace(d.to_agent, '-[0-9]+$', '')) AS acked "
             "FROM operator_asks oa "
             "WHERE oa.closed_at IS NULL AND oa.triage_state = 'ask' "
             "  AND oa.ask_surface = 'operator' AND oa.source_msg_id IS NOT NULL "
             "  AND oa.slow_paged_at IS NULL "
             "  AND oa.created_at > now() - make_interval(mins => %s)",
-            (SLOW_ASK_SUBJECT_PREFIX + "%", SLOW_ASK_HORIZON_MIN))
+            (SLOW_ASK_SUBJECT_PREFIX + "%", SLOW_ASK_DELEGATION_WINDOW_MIN, SLOW_ASK_HORIZON_MIN))
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 

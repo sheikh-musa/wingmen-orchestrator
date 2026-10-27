@@ -169,3 +169,9 @@ def test_already_stamped_or_locked_row_is_skipped_without_sending():
 def test_page_subject_cannot_count_as_its_own_ack():
     # the fetch SQL excludes subjects with this prefix; the page subject must carry it
     assert w.SLOW_ASK_SUBJECT_PREFIX == "[slow-ask]"
+
+
+def test_interim_delegation_window_defaults_to_15_minutes():
+    # console #78298 ruling B: a delegation row to the lane within 15 min of the ask,
+    # plus a lane reply in its thread, counts as an ack until every subject cites the op#
+    assert w.SLOW_ASK_DELEGATION_WINDOW_MIN == 15
