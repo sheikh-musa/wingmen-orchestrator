@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=390, initial-scale=1"/>
+<title>Home · mock A — Today first</title>
+<style>
+:root{--bg:#090b10;--surface:#12161e;--surface2:#171c26;--hair:rgba(255,255,255,.07);
+--txt:#e8ebf1;--dim:#949cac;--faint:#5c6472;--jade:#37d39a;--rose:#fb7185;--amber:#f6c453;
+--indigo:#8aa6ff;--sans:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+--mono:ui-monospace,"SF Mono",Menlo,monospace}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;color:var(--txt);font:15px/1.45 var(--sans);letter-spacing:-.01em;
+background:radial-gradient(120% 55% at 50% -6%,rgba(55,211,154,.06),transparent 60%),linear-gradient(180deg,#0c0f16,#090b10 45%)}
+.wrap{max-width:640px;margin:0 auto;padding:0 16px 48px}
+header{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:10px;
+padding:calc(10px + env(safe-area-inset-top)) 0 11px;margin:0 -16px;padding-left:16px;padding-right:16px;
+background:linear-gradient(180deg,rgba(9,11,16,.94),rgba(9,11,16,.75));backdrop-filter:blur(14px);border-bottom:1px solid var(--hair)}
+h1{font-size:17px;margin:0;font-weight:800;letter-spacing:-.02em}
+.date{color:var(--faint);font:12px var(--mono);margin-top:2px}
+.spacer{flex:1}
+.tbbtn{flex:none;display:flex;align-items:center;gap:6px;text-decoration:none;color:var(--dim);
+font:600 12.5px var(--sans);padding:8px 11px;border-radius:12px;border:1px solid var(--hair);background:var(--surface)}
+.tbcnt{font:11px var(--mono);color:var(--bg);background:var(--amber);padding:2px 7px;border-radius:999px;font-weight:700}
+/* the ONE number */
+.onenumber{display:flex;align-items:baseline;gap:10px;margin:16px 0 4px;padding:14px 16px;border-radius:16px;
+border:1px solid rgba(55,211,154,.28);background:linear-gradient(180deg,rgba(55,211,154,.10),var(--surface) 70%)}
+.onenumber .big{font:800 30px/1 var(--sans);color:var(--jade);letter-spacing:-.03em}
+.onenumber .lbl{font:12px/1.35 var(--mono);color:var(--dim)}
+.onenumber .sub{margin-left:auto;font:10.5px/1.3 var(--mono);color:var(--faint);text-align:right}
+h2{display:flex;align-items:center;gap:8px;margin:22px 0 8px;font:800 11px/1 var(--sans);
+text-transform:uppercase;letter-spacing:.11em;color:var(--faint)}
+h2 .n{font:11px var(--mono);color:var(--dim);background:var(--surface2);padding:3px 8px;border-radius:999px}
+h2 .more{margin-left:auto;font:600 11px var(--sans);color:var(--indigo);text-transform:none;letter-spacing:0}
+.ship{display:flex;align-items:flex-start;gap:10px;padding:11px 13px;margin-bottom:7px;border-radius:12px;
+border:1px solid var(--hair);background:var(--surface)}
+.tick{flex:none;width:20px;height:20px;border-radius:50%;background:rgba(55,211,154,.15);color:var(--jade);
+display:flex;align-items:center;justify-content:center;font:700 12px var(--sans);margin-top:1px}
+.ship .who{flex:none;font:700 11.5px var(--sans);color:var(--indigo);min-width:86px;margin-top:1px}
+.ship .what{flex:1;font:600 13.5px/1.35 var(--sans)}
+.ship .when{flex:none;font:10.5px var(--mono);color:var(--faint);margin-top:3px}
+.grp{margin-bottom:10px;border:1px solid var(--hair);border-radius:14px;background:var(--surface2);overflow:hidden}
+.grp summary{list-style:none;display:flex;align-items:center;gap:9px;padding:12px 14px;cursor:pointer;font:700 12.5px var(--sans)}
+.grp summary::-webkit-details-marker{display:none}
+.grp .client{color:var(--txt)}
+.grp .cnt{font:11px var(--mono);color:var(--dim);background:var(--surface);padding:2px 8px;border-radius:999px;border:1px solid var(--hair)}
+.grp .duechip{margin-left:auto;font:10.5px var(--mono);color:var(--amber)}
+.wip{display:flex;align-items:baseline;gap:8px;padding:10px 14px;border-top:1px solid var(--hair)}
+.wip .t{flex:1;font:600 13px/1.35 var(--sans)}
+.wip .lane{flex:none;font:10.5px var(--mono);color:var(--faint)}
+.wip .due{flex:none;font:10.5px var(--mono);color:var(--amber)}
+.wait{position:relative;padding:12px 14px;margin-bottom:7px;border-radius:12px;border:1px solid rgba(251,113,133,.35);
+background:linear-gradient(180deg,rgba(251,113,133,.07),var(--surface) 65%);font:600 13.5px/1.4 var(--sans)}
+.wait .asked{font:10.5px var(--mono);color:var(--faint);margin-top:5px}
+.fleetlink{display:flex;align-items:center;gap:8px;margin-top:26px;padding:13px 15px;border-radius:13px;
+border:1px dashed var(--hair);background:transparent;color:var(--faint);font:600 12.5px var(--sans);text-decoration:none}
+.fleetlink .arr{margin-left:auto;color:var(--faint)}
+.note{margin-top:14px;font:10.5px/1.5 var(--mono);color:var(--faint)}
+</style></head><body><div class="wrap">
+<header>
+  <div><h1>Wingmen</h1><div class="date">Tue 28 Oct · 01:20</div></div>
+  <div class="spacer"></div>
+  <a class="tbbtn" href="/asks">📋 Asks <span class="tbcnt">15</span></a>
+  <a class="tbbtn" href="#">⚙️ Fleet</a>
+</header>
+
+<div class="onenumber">
+  <div class="big">2.1d</div>
+  <div class="lbl">median<br>ask → live</div>
+  <div class="sub">first 4 measured<br>stamps began 27 Oct</div>
+</div>
+
+<h2>Shipped today <span class="n">2</span></h2>
+<div class="ship"><div class="tick">✓</div><div class="who">fleet</div>
+  <div class="what">Console home redesign — deployed &amp; independently verified</div>
+  <div class="when">17:21</div></div>
+<div class="ship"><div class="tick">✓</div><div class="who">ADCDA</div>
+  <div class="what">Weeks 1–3 visible to every trainer</div>
+  <div class="when">09:40</div></div>
+
+<h2>In progress <span class="n">5</span></h2>
+<details class="grp" open><summary><span class="client">ADCDA</span><span class="cnt">2</span><span class="duechip">next: Thu</span></summary>
+  <div class="wip"><div class="t">Schedule editor — ORBAT fold-in (list/tiles toggle)</div><div class="lane">adcda lane</div><div class="due">Thu</div></div>
+  <div class="wip"><div class="t">Weeks 4+ approval flow — waiting on you</div><div class="lane">platform</div><div class="due">—</div></div>
+</details>
+<details class="grp"><summary><span class="client">cosem platform</span><span class="cnt">2</span><span class="duechip">next: Fri</span></summary>
+  <div class="wip"><div class="t">Trainer app release — week cap bump + JSON</div><div class="lane">platform lane</div><div class="due">Fri</div></div>
+  <div class="wip"><div class="t">Who may edit schedule rules — awaiting your word</div><div class="lane">platform</div><div class="due">—</div></div>
+</details>
+<details class="grp"><summary><span class="client">irsyad</span><span class="cnt">3</span><span class="duechip">next: 2 Nov</span></summary>
+  <div class="wip"><div class="t">Tabung go-live prep (quiet run-up)</div><div class="lane">irsyad lanes</div><div class="due">2 Nov</div></div>
+  <div class="wip"><div class="t">Custody UI pre-draft (design only)</div><div class="lane">irsyad lanes</div><div class="due">—</div></div>
+  <div class="wip"><div class="t">Duplicate-enrolment cleanup — Group 3</div><div class="lane">adcda lane</div><div class="due">—</div></div>
+</details>
+<details class="grp"><summary><span class="client">Bariq</span><span class="cnt">1</span></summary>
+  <div class="wip"><div class="t">Afiq bot — needs bot token + chat id from you</div><div class="lane">console</div><div class="due">—</div></div>
+</details>
+<details class="grp"><summary><span class="client">fleet</span><span class="cnt">2</span></summary>
+  <div class="wip"><div class="t">Builder model switch — GLM plan ends 6 Nov</div><div class="lane">console</div><div class="due">6 Nov</div></div>
+  <div class="wip"><div class="t">Break-glass secrets source — your pick pending</div><div class="lane">ops</div><div class="due">—</div></div>
+</details>
+
+<h2>Waiting on you <span class="n">15</span><span class="more">all 15 ›</span></h2>
+<div class="wait">Give the gist and recipient for the MUIS CEO email so it can finally be sent.
+  <div class="asked">asked 5d ago</div></div>
+<div class="wait">Approve weeks 4+ for everyone to see — weeks 1–3 are live; your approval per week is the gate.
+  <div class="asked">asked 1d ago · cosem platform</div></div>
+<div class="wait">Decide who may edit the schedule rules — your earlier message on this was cut off.
+  <div class="asked">asked 1d ago · cosem platform</div></div>
+<div class="wait">G5 BAPT trial: drag the published Ladder 1 back a week so BAPT lands W5, or accept W9?
+  <div class="asked">asked 14h ago · ADCDA</div></div>
+<div class="wait">Choose the break-glass console secrets source: Google Secret Manager or an offline bundle.
+  <div class="asked">asked 2d ago · fleet</div></div>
+<div class="wait">Hazmat 'Practical test review' (wk10–11): keep off-syllabus or add it to the syllabus?
+  <div class="asked">asked 1d ago · ADCDA</div></div>
+<div class="wait">Decide on the duplicate Arqam in Group 3: keep the new link or undo it.
+  <div class="asked">asked 2d ago · ADCDA</div></div>
+<div class="wait">Reseat the external drive (cable / port / power) and re-check — still not detected.
+  <div class="asked">asked 3d ago · fleet</div></div>
+
+<a class="fleetlink" href="#">🛠 Fleet internals — lanes, coordinators, governance<span class="arr">›</span></a>
+<div class="note">mock A — every number above is a real table shape; row content sampled from live rows on 28 Oct.</div>
+</div></body></html>

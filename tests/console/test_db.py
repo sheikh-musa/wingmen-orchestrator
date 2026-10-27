@@ -6,6 +6,7 @@ must NEVER attempt a write.
 """
 import os
 
+import psycopg
 import pytest
 
 from nervous_system.console import db
@@ -198,3 +199,68 @@ def test_fleet_asks_query_pins_needs_musa_rows_to_top():
         "CASE WHEN a.waiting_on_operator OR a.needs_operator_decision THEN 0 "
         "ELSE 1 END"
     ) in sql
+
+
+# ── fetch_ask_delivery_times: never-raw-captured-text (cc-quality #78556
+# blocker 2, same class as the asks-board #61117 fix) ──────────────────────────
+
+@pytest.fixture
+def asks_delivery_db(pg_dsn, monkeypatch):
+    """Ephemeral PG with operator_asks in the real column shape, wired into
+    db.resolve_dsn() so fetch_ask_delivery_times runs its REAL SQL."""
+    from tests.conftest import assert_dsn_is_not_production
+    import queue as _queue
+
+    assert_dsn_is_not_production(pg_dsn)
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP SCHEMA public CASCADE")
+        cur.execute("CREATE SCHEMA public")
+        cur.execute("""
+            CREATE TABLE operator_asks (
+                id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                ask              text NOT NULL,
+                triage_state     text NOT NULL DEFAULT 'captured',
+                triage_summary   text,
+                operator_summary text,
+                ask_surface      text,
+                created_at       timestamptz NOT NULL DEFAULT now(),
+                delivered_at     timestamptz,
+                closed_at        timestamptz
+            )
+        """)
+        cur.execute("""
+            INSERT INTO operator_asks
+              (ask, triage_state, triage_summary, operator_summary, delivered_at)
+            VALUES
+              ('RAW-CAPTURED-A please do the thing', 'ask', 'Triage decision line', NULL, now()),
+              ('RAW-CAPTURED-B other thing',        'ask', NULL,                 NULL, now()),
+              ('RAW-CAPTURED-C third thing',        'ask', 'unused triage',      'Plain operator line', now())
+        """)
+        cur.execute("""
+            INSERT INTO operator_asks (ask, triage_state, triage_summary, operator_summary)
+            VALUES ('RAW-CAPTURED-D open thing', 'ask', NULL, NULL)
+        """)
+    # point the console db layer at the ephemeral store and drain any warm pool
+    monkeypatch.setenv("CONSOLE_DB_URL", pg_dsn)
+    monkeypatch.setattr(db, "_idle", _queue.LifoQueue())
+    monkeypatch.setattr(db, "_pool_size", 0)
+    return pg_dsn
+
+
+def test_delivery_times_never_render_raw_captured_ask(asks_delivery_db):
+    """Display text NEVER falls back to the raw captured ask (#61117 class,
+    cc-quality #78556 blocker 2): operator_summary, else triage_summary, else
+    the neutral '(awaiting triage)' placeholder — never the raw capture."""
+    out = db.fetch_ask_delivery_times()
+    lines = [r["line"] for r in out["measured"]] + [r["line"] for r in out["not_measured"]]
+    assert len(lines) == 4
+    assert "RAW-CAPTURED" not in " | ".join(lines), (
+        "raw captured ask text leaked: " + " | ".join(lines)
+    )
+    by_line = {r["line"]: r for r in out["measured"]}
+    assert "Triage decision line" in by_line, "NULL operator_summary falls to triage_summary"
+    assert "(awaiting triage)" in by_line, "both summaries NULL -> neutral placeholder"
+    assert "Plain operator line" in by_line, "operator_summary wins when present"
+    nm = out["not_measured"][0]
+    assert nm["line"] == "(awaiting triage)", "not-measured rows honor the same rule"
+    assert "total_hours" not in nm, "honesty: not-measured rows carry no time field"

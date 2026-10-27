@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=390, initial-scale=1"/>
+<title>Grove · (a) desks show real work — still</title>
+<style>
+:root{--bg:#090b10;--surface:#12161e;--surface2:#171c26;--hair:rgba(255,255,255,.07);--txt:#e8ebf1;
+--dim:#949cac;--faint:#5c6472;--jade:#37d39a;--rose:#fb7185;--amber:#f6c453;--indigo:#8aa6ff;
+--sans:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;--mono:ui-monospace,Menlo,monospace}
+*{box-sizing:border-box}
+body{margin:0;color:var(--txt);font:15px/1.5 var(--sans);letter-spacing:-.01em;
+background:radial-gradient(100% 50% at 50% -6%,rgba(55,211,154,.05),transparent 60%),linear-gradient(180deg,#0c0f16,#090b10 50%)}
+.wrap{max-width:640px;margin:0 auto;padding:0 16px 44px}
+header{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:10px;padding:12px 0;
+margin:0 -16px;padding-left:16px;padding-right:16px;background:rgba(9,11,16,.9);backdrop-filter:blur(12px);border-bottom:1px solid var(--hair)}
+h1{font-size:17px;margin:0;font-weight:800}.sub{color:var(--faint);font:11.5px var(--mono)}
+h2{margin:20px 0 4px;font:800 11px/1 var(--sans);text-transform:uppercase;letter-spacing:.11em;color:var(--faint)}
+.floor{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px}
+.desk{position:relative;border:1px solid var(--hair);border-radius:16px;background:var(--surface);padding:14px 14px 12px;
+box-shadow:0 10px 30px -14px rgba(0,0,0,.7);transition:.3s}
+.desk .client{font:700 11px var(--sans);color:var(--indigo);text-transform:uppercase;letter-spacing:.08em}
+.desk .task{font:650 13.5px/1.35 var(--sans);margin-top:6px;min-height:36px}
+.desk .time{display:flex;align-items:center;gap:6px;margin-top:10px;font:10.5px var(--mono);color:var(--faint)}
+.desk .time .dot{width:6px;height:6px;border-radius:50%;background:var(--jade);box-shadow:0 0 7px var(--jade)}
+.desk.live{border-color:rgba(55,211,154,.5);background:linear-gradient(180deg,rgba(55,211,154,.12),var(--surface) 70%)}
+.desk.live::after{content:"went live 17:21";position:absolute;top:-9px;right:10px;font:700 9.5px var(--mono);
+color:var(--bg);background:var(--jade);padding:3px 8px;border-radius:999px}
+.desk.stuck{transform:rotate(-2.2deg) translateY(7px);border-color:rgba(246,196,83,.45);
+background:linear-gradient(180deg,rgba(246,196,83,.09),var(--surface) 75%)}
+.desk.stuck .time .dot{background:var(--amber);box-shadow:0 0 7px var(--amber)}
+.desk.stuck .flag{position:absolute;top:-9px;left:10px;font:700 9.5px var(--mono);color:var(--bg);
+background:var(--amber);padding:3px 8px;border-radius:999px}
+.desk.quiet{opacity:.55}
+.legend{display:flex;gap:14px;margin-top:16px;font:10.5px var(--mono);color:var(--faint);flex-wrap:wrap}
+.legend b{color:var(--dim);font-weight:600}
+.note{margin-top:16px;font:10.5px/1.5 var(--mono);color:var(--faint)}
+</style></head><body><div class="wrap">
+<header><div><h1>Fleet Grove</h1><div class="sub">Office · Tue 28 Oct, 01:20</div></div></header>
+
+<h2>Floor — who is on what, right now</h2>
+<div class="floor">
+  <div class="desk live"><div class="client">fleet</div><div class="task">Console home redesign</div>
+    <div class="time"><span class="dot"></span>done · verified 17:21</div></div>
+  <div class="desk"><div class="client">ADCDA</div><div class="task">Schedule editor — ORBAT fold-in</div>
+    <div class="time"><span class="dot"></span>2h 10m on it</div></div>
+  <div class="desk"><div class="client">cosem</div><div class="task">Trainer app release — week cap</div>
+    <div class="time"><span class="dot"></span>45m on it</div></div>
+  <div class="desk stuck"><div class="flag">sample · stuck 40m</div><div class="client">fleet</div>
+    <div class="task">Stuck desk — sample state</div>
+    <div class="time"><span class="dot"></span>no movement 40m</div></div>
+  <div class="desk"><div class="client">Bariq</div><div class="task">Afiq bot — waiting on your token</div>
+    <div class="time"><span class="dot"></span>waiting 2d</div></div>
+  <div class="desk quiet"><div class="client">fleet</div><div class="task">Spare builder — idle</div>
+    <div class="time">off</div></div>
+</div>
+<div class="legend">
+  <span><b>upright</b> = working</span><span><b>slumped + amber</b> = stuck past 30m</span>
+  <span><b>lit jade</b> = went live today</span><span><b>dim</b> = idle</span>
+</div>
+<div class="note">still, idea (a) — desk state derives from real signals: each desk's live activity + current task title, stuck = no movement past a threshold, live = today's verified ships. The stuck desk is a SAMPLE state (no fleet desk is stuck right now); all other desks are real.</div>
+</div></body></html>

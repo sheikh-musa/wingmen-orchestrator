@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=390, initial-scale=1"/>
+<title>Grove · (c) day replay — still</title>
+<style>
+:root{--bg:#090b10;--surface:#12161e;--surface2:#171c26;--hair:rgba(255,255,255,.07);--txt:#e8ebf1;
+--dim:#949cac;--faint:#5c6472;--jade:#37d39a;--rose:#fb7185;--amber:#f6c453;--indigo:#8aa6ff;
+--sans:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;--mono:ui-monospace,Menlo,monospace}
+*{box-sizing:border-box}
+body{margin:0;color:var(--txt);font:15px/1.5 var(--sans);letter-spacing:-.01em;
+background:radial-gradient(100% 40% at 50% -6%,rgba(55,211,154,.05),transparent 60%),linear-gradient(180deg,#0c0f16,#090b10 50%)}
+.wrap{max-width:640px;margin:0 auto;padding:0 16px 44px}
+header{display:flex;align-items:baseline;gap:10px;padding:14px 0 2px}
+h1{font-size:17px;margin:0;font-weight:800}.sub{color:var(--faint);font:11.5px var(--mono)}
+.deck{border:1px solid var(--hair);border-radius:20px;background:var(--surface);padding:16px 16px 18px;margin-top:10px}
+.player{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.play{width:44px;height:44px;border-radius:50%;border:1px solid rgba(55,211,154,.4);background:rgba(55,211,154,.12);color:var(--jade);font-size:17px;display:flex;align-items:center;justify-content:center}
+.clock{font:700 15px var(--mono)}
+.clock .d{display:block;font:10.5px var(--mono);color:var(--faint);font-weight:400}
+.strip{display:grid;grid-template-columns:repeat(6,1fr);gap:6px}
+.thumb{border:1px solid var(--hair);border-radius:10px;background:var(--surface2);aspect-ratio:3/4;position:relative;padding:5px 4px;overflow:hidden}
+.thumb.now{border-color:rgba(55,211,154,.55);box-shadow:0 0 12px rgba(55,211,154,.25)}
+.thumb .t{font:8px var(--mono);color:var(--faint)}
+.thumb .v{position:absolute;bottom:4px;left:4px;right:4px;display:flex;gap:2px}
+.thumb .v i{flex:1;height:6px;border-radius:2px;background:rgba(255,255,255,.12)}
+.thumb .v i.on{background:var(--jade)}
+.thumb .v i.amber{background:var(--amber)}
+.thumb.livepin{border-color:rgba(55,211,154,.55)}
+.thumb.livepin .pin{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font:700 8px var(--mono);color:var(--bg);background:var(--jade);padding:2px 5px;border-radius:999px}
+.scrub{margin-top:14px;height:30px;position:relative}
+.scrub .track{position:absolute;top:14px;left:0;right:0;height:3px;border-radius:2px;background:rgba(255,255,255,.1)}
+.scrub .fill{position:absolute;top:14px;left:0;width:78%;height:3px;border-radius:2px;background:linear-gradient(90deg,var(--indigo),var(--jade))}
+.scrub .knob{position:absolute;top:8px;left:78%;width:15px;height:15px;border-radius:50%;background:#fff;border:3px solid var(--jade);transform:translateX(-50%)}
+.scrub .kmark{position:absolute;top:-10px;font:8.5px var(--mono);color:var(--faint);transform:translateX(-50%)}
+.scrub .kmark.live{color:var(--jade);font-weight:700}
+.readout{margin-top:16px;border:1px solid var(--hair);border-radius:12px;background:var(--surface2);padding:10px 12px;font:11.5px/1.5 var(--sans);color:var(--dim)}
+.readout b{color:var(--txt)}
+.note{margin-top:14px;font:10.5px/1.5 var(--mono);color:var(--faint)}
+</style></head><body><div class="wrap">
+<header><h1>Fleet Grove</h1><div class="sub">Replay · Tue 28 Oct</div></header>
+
+<div class="deck">
+  <div class="player"><div class="play">▶</div>
+    <div class="clock">30-second replay<span class="d">whole day · 00:00 → 17:21 → now</span></div></div>
+  <div class="strip">
+    <div class="thumb"><div class="t">00:00</div><div class="v"><i></i><i></i><i></i><i></i></div></div>
+    <div class="thumb"><div class="t">09:40</div><div class="v"><i class="on"></i><i></i><i></i><i></i></div></div>
+    <div class="thumb"><div class="t">10:12</div><div class="v"><i class="on"></i><i class="on"></i><i></i><i></i></div></div>
+    <div class="thumb"><div class="t">12:30</div><div class="v"><i class="on"></i><i class="on"></i><i class="amber"></i><i></i></div></div>
+    <div class="thumb livepin"><div class="t">17:21</div><div class="pin">LIVE</div><div class="v"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></div></div>
+    <div class="thumb now"><div class="t">now</div><div class="v"><i class="on"></i><i></i><i class="on"></i><i></i></div></div>
+  </div>
+  <div class="scrub">
+    <div class="track"></div><div class="fill"></div><div class="knob"></div>
+    <div class="kmark" style="left:0">00:00</div>
+    <div class="kmark" style="left:40%">09:40</div>
+    <div class="kmark live" style="left:78%">17:21 console live</div>
+  </div>
+  <div class="readout"><b>17:21 — console redesign verified live.</b> Watch the fleet desk light up, the chime ripple, and the new build land on every screen. Scrub to any moment to see who held what and where it went.</div>
+</div>
+
+<div class="note">still, idea (c) — thumbnails are floor snapshots from the desks view (idea a) sampled across the day; scrub position maps to time. Marks derive from real events: first ship 09:40, verified live 17:21, desks from each agent's live activity.</div>
+</div></body></html>
