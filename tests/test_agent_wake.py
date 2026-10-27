@@ -213,6 +213,7 @@ class _FakeConn:
 
 
 def test_candidate_sessions_includes_offline_family_hijack_guard_at_resolve(monkeypatch):
+    monkeypatch.setattr(agent_wake, "is_singleton_base", lambda a: False)
     """Candidate SELECTION now includes OFFLINE base-family rows too (so a base-id wake can
     reach an offline-but-live-pane instance, e.g. cc-cosem-tdu-coord-1). The op#11297 self
     rule still holds (self kept unconditionally). The Nazim #40426 sibling-hijack guard is NOT
@@ -222,9 +223,11 @@ def test_candidate_sessions_includes_offline_family_hijack_guard_at_resolve(monk
     filter (which would re-break the tdu-coord recovery)."""
     captured = {}
     monkeypatch.setattr(agent_wake, "_DSN", "postgres://x")
+    # (Example family is cc-cosem-tdu-coord, the recovery case this pins: cc-orchestrator is a
+    # SINGLETON since orch-console #77922 and resolves to its own row only.)
     monkeypatch.setattr(agent_wake.psycopg, "connect",
-                        lambda *a, **k: _FakeConn(captured, [("cc-orchestrator", "orch", "online")]))
-    out = agent_wake._candidate_sessions("cc-orchestrator")
+                        lambda *a, **k: _FakeConn(captured, [("cc-cosem-tdu-coord", "orch", "online")]))
+    out = agent_wake._candidate_sessions("cc-cosem-tdu-coord")
     sql, params = captured["sql"], captured["params"]
     # Widened predicate: self OR any base-family row, offline or not.
     assert "(agent_id=%s OR base_agent_id=%s)" in sql
@@ -232,7 +235,7 @@ def test_candidate_sessions_includes_offline_family_hijack_guard_at_resolve(monk
     assert "base_agent_id=%s AND status<>'offline'" not in sql
     # Self is still not itself status-gated (op#11297).
     assert "(agent_id=%s AND status" not in sql
-    assert params == ("cc-orchestrator", "cc-orchestrator")
+    assert params == ("cc-cosem-tdu-coord", "cc-cosem-tdu-coord")
     assert out == ["orch"]  # flows through rank_candidates unchanged
 
 
@@ -377,3 +380,37 @@ def test_live_registered_session_is_not_affected_by_the_host_guard(monkeypatch):
     out = agent_wake.resolve_tmux_session(
         "cc-y", host_source=lambda a: pytest.fail("host guard must not run"), local_host="z")
     assert out == "mine"
+
+
+# ── singleton bases: own row only, never a cwd guess (orch-console #77922) ─────────────────
+def test_singleton_candidates_are_its_own_row_only(monkeypatch):
+    monkeypatch.setattr(agent_wake, "is_singleton_base", lambda a: a == "cc-orchestrator")
+    captured = {}
+    monkeypatch.setattr(agent_wake, "_DSN", "postgres://x")
+    monkeypatch.setattr(agent_wake.psycopg, "connect",
+                        lambda *a, **k: _FakeConn(captured, [("orch",)]))
+    out = agent_wake._candidate_sessions("cc-orchestrator")
+    assert "agent_id=%s" in captured["sql"] and "base_agent_id" not in captured["sql"]
+    assert captured["params"] == ("cc-orchestrator",)
+    assert out == ["orch"]
+
+
+def test_singleton_never_uses_the_cwd_fallback(monkeypatch):
+    monkeypatch.setattr(agent_wake, "is_singleton_base", lambda a: a == "cc-orchestrator")
+    _fallback_only(monkeypatch)
+    monkeypatch.setattr(agent_wake, "_live_claude_panes", lambda: [
+        {"session": "substrate-clean", "cwd": "/Users/x/wingmen/projects/orchestrator.wt-cleanup"}])
+    monkeypatch.setattr(agent_wake, "_expected_cwd_tokens", lambda a: ["orchestrator"])
+    out = agent_wake.resolve_tmux_session(
+        "cc-orchestrator", host_source=lambda a: ["Sheikhs-Mini"], local_host="Sheikhs-Mini")
+    assert out is None
+
+
+def test_non_singleton_family_query_unchanged(monkeypatch):
+    monkeypatch.setattr(agent_wake, "is_singleton_base", lambda a: False)
+    captured = {}
+    monkeypatch.setattr(agent_wake, "_DSN", "postgres://x")
+    monkeypatch.setattr(agent_wake.psycopg, "connect",
+                        lambda *a, **k: _FakeConn(captured, [("cc-irsyad-1", "s1", "online")]))
+    agent_wake._candidate_sessions("cc-irsyad")
+    assert "(agent_id=%s OR base_agent_id=%s)" in captured["sql"]

@@ -21,6 +21,7 @@ import subprocess
 import sys as _sys, os as _os
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 from scripts.lib import pane_busy  # footer-scoped busy check (one implementation)
+from scripts.lib.singleton_bases import is_singleton_base
 import time
 
 import psycopg
@@ -355,6 +356,16 @@ def _candidate_sessions(agent_id: str) -> list[str]:
     base = _base_family(agent_id)
     if not _DSN:
         return []
+    if is_singleton_base(agent_id):
+        # A singleton is only ever its OWN row: a stray '-N' registered under its base (the
+        # cc-orchestrator-1 worker on the Mini, orch-console #77922) must never be a wake target.
+        try:
+            with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+                cur.execute("SELECT tmux_session FROM agent_status "
+                            "WHERE agent_id=%s AND tmux_session IS NOT NULL", (agent_id,))
+                return [r[0] for r in cur.fetchall()]
+        except Exception:  # noqa: BLE001 — same fail-soft as the family query below
+            return []
     try:
         with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
             cur.execute(
@@ -465,6 +476,8 @@ def resolve_tmux_session(agent_id: str, *, host_source=None, local_host=None) ->
         return live
     # FALLBACK: cwd introspection — only helps scoped agents from a login shell (not
     # {*} roles, not under the launchd sandbox). Kept for non-launchd scoped callers.
+    if is_singleton_base(agent_id):
+        return None  # never guess a singleton's pane from cwd: that finds a worker, not the body
     tokens = _expected_cwd_tokens(agent_id)
     if not tokens:
         return None

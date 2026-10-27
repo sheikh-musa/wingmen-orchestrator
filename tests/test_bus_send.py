@@ -1239,3 +1239,24 @@ def test_no_caller_anywhere_passes_the_whole_environ_to_dburl():
                 offenders.append(sp)
     assert offenders == [], (
         f"dburl() called with the whole environ (the leak class this closed) in: {offenders}")
+
+
+# ── singleton bases never instance-redirect (orch-console #77922, 2026-10-27) ──────────────
+# A manual launch in orchestrator.wt-cleanup registered 'cc-orchestrator-1' on the Mini, and
+# bus_send then refused sends to the hub, suggesting that worker instead.
+@pytest.mark.parametrize("singleton", ["cc-orchestrator", "orch-console", "cai",
+                                       "cc-fleet-health", "cc-quality"])
+def test_send_to_a_singleton_base_is_never_redirected_to_an_instance(monkeypatch, singleton):
+    monkeypatch.setattr(bs, "is_singleton_base", lambda a: a in {
+        "cc-orchestrator", "orch-console", "cai", "cc-fleet-health", "cc-quality"})
+    monkeypatch.setattr(bs, "live_instance_ids",
+                        lambda to, dsn=None: pytest.fail("singletons must not even look"))
+    bs.refuse_if_base_has_live_instances(singleton, False)   # no SystemExit
+
+
+def test_non_singleton_base_still_redirects(monkeypatch):
+    monkeypatch.setattr(bs, "is_singleton_base", lambda a: False)
+    monkeypatch.setattr(bs, "live_instance_ids", lambda to, dsn=None: ["cc-irsyad-1"])
+    monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "x")
+    with pytest.raises(SystemExit, match="Did you mean --to cc-irsyad-1"):
+        bs.refuse_if_base_has_live_instances("cc-irsyad", False)
