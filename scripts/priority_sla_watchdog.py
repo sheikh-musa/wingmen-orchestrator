@@ -1536,6 +1536,12 @@ def slow_ask_targets(rows, *, now, ack_min=SLOW_ASK_ACK_MIN, horizon_min=SLOW_AS
         created_epoch = r.get("created_epoch")
         if created_epoch is None or r.get("acked") or r.get("slow_paged_at") is not None:
             continue
+        # console #78390/#78426: never page console about its OWN ledger -- an ask delegated
+        # to orch-console, or whose source op is an open console-owned held_commitment (a
+        # timed reminder: op#34877 / hc727 false-paged as #78386). An UNDELEGATED ask still
+        # pages: nobody routed it, which is the dropped-ask class this guard exists for.
+        if r.get("delegated_to") == "orch-console" or r.get("console_held"):
+            continue
         age = now - float(created_epoch)   # extract(epoch) arrives as Decimal
         if ack_min * 60 <= age < horizon_min * 60:
             due.append(r)
@@ -1576,6 +1582,9 @@ def _fetch_slow_ask_candidates(conn):
             "SELECT oa.id, oa.source_msg_id AS op, oa.delegated_to, "
             "  left(coalesce(oa.triage_summary, oa.ask), 200) AS summary, "
             "  extract(epoch FROM oa.created_at) AS created_epoch, oa.slow_paged_at, "
+            "  EXISTS (SELECT 1 FROM held_commitments h WHERE h.owner_agent = 'orch-console' "
+            "          AND h.status IN ('pending','fired') "
+            "          AND h.source_ref = 'operator_messages:' || oa.source_msg_id) AS console_held, "
             "  EXISTS (SELECT 1 FROM agent_messages m "
             "          WHERE m.created_at >= oa.created_at "
             "            AND m.subject ~ ('(^|[^0-9])' || oa.source_msg_id || '([^0-9]|$)') "
@@ -1619,15 +1628,6 @@ def _fetch_slow_ask_candidates(conn):
             "WHERE oa.closed_at IS NULL AND oa.triage_state = 'ask' "
             "  AND oa.ask_surface = 'operator' AND oa.source_msg_id IS NOT NULL "
             "  AND oa.slow_paged_at IS NULL "
-            # console #78390: never page console about its OWN ledger. An ask with no
-            # delegated lane (or delegated to console) has no lane to ack it, and one whose
-            # source op is held as an open console-owned commitment is a timed reminder
-            # (op#34877 / held_commitment 727 false-paged as #78386).
-            "  AND oa.delegated_to IS NOT NULL AND oa.delegated_to <> 'orch-console' "
-            "  AND NOT EXISTS (SELECT 1 FROM held_commitments h "
-            "                  WHERE h.owner_agent = 'orch-console' "
-            "                    AND h.status IN ('pending','fired') "
-            "                    AND h.source_ref = 'operator_messages:' || oa.source_msg_id) "
             "  AND oa.created_at > now() - make_interval(mins => %s)",
             (SLOW_ASK_SUBJECT_PREFIX + "%", SLOW_ASK_DELEGATION_WINDOW_MIN, SLOW_ASK_HORIZON_MIN))
         cols = [d[0] for d in cur.description]
