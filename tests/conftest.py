@@ -154,7 +154,7 @@ def assert_dsn_is_not_production(dsn) -> None:
 @pytest.fixture
 def operator_ledger_db(pg_dsn, monkeypatch):
     """Ephemeral Postgres carrying the real operator_messages/operator_asks
-    schema (mirrors migrations 007/020/021/044/072/082/084/085/118) — op#22669 ledger
+    schema (mirrors migrations 007/020/021/044/072/082/084/085/118/121) — op#22669 ledger
     tests must NEVER touch the live substrate (orch-console bus #44006,
     op#22741: a test using DATABASE_URL directly inserted + deleted rows in
     production and one fake operator message reached a body's live inbox
@@ -216,7 +216,9 @@ def operator_ledger_db(pg_dsn, monkeypatch):
                                     CHECK (committed_date IS NULL OR outbound_msg_id IS NOT NULL),
                 -- migration 118 (needs-Musa flag + plain-language hero line)
                 needs_operator_decision boolean NOT NULL DEFAULT false,
-                operator_summary    text
+                operator_summary    text,
+                delivered_at        timestamptz,
+                slow_paged_at       timestamptz
             )
         """)
         cur.execute("""
