@@ -82,3 +82,20 @@ scripts/reset_fleet_health.sh
 scripts/reset_nazim.sh
 scripts/switch_lane_token.sh
 legacy/ihsanos_drain/main.py
+
+# STEP 1b, 2026-10-27 (Musa op#34845, console's PR#551 GO + follow-up bus
+# #78763): the gate's SQL/-sh-only patterns still couldn't see category 3,
+# a supabase-py `.table('agent_messages').insert(...)`/`.upsert(...)` call,
+# or a raw POST to rest/v1/agent_messages -- added this turn. Found 4 new
+# files (one, legacy/cto_bot.py, flagged in the PR-B inventory's grep-only
+# first pass turned out on closer reading to be a `.select(...)` READ, not
+# a write -- correctly excluded by this gate's insert/upsert-only pattern,
+# not a gap). scripts/launch_dangerous_cc.sh is the universal lane launcher
+# (highest-stakes file in the whole inventory, per console) -- gets its own
+# PR with a real-lane boot test once migrated, per console's instruction.
+# legacy/wingmen_orch.py is presumed dead (same class as legacy/ihsanos_
+# drain/main.py, pending the same live-fleet confirmation before deletion).
+scripts/audit_mac_mini.py
+scripts/launch_dangerous_cc.sh
+nervous_system/deploy_verifier.py
+legacy/wingmen_orch.py

@@ -299,6 +299,78 @@ def test_sh_comment_mentioning_insert_is_ignored(tmp_path):
     assert findings == []
 
 
+def test_detects_supabase_table_insert_call_single_line(tmp_path):
+    """Musa op#34845, bus #78763 (console's PR#551 GO, step 1b ask): category
+    3's real shape in scripts/launch_dangerous_cc.sh (lines 549/582/732) --
+    a supabase-py client writing via .table('agent_messages').insert(...),
+    with the service-role key, inside a python -c heredoc. Migration 124
+    revokes INSERT from service_role, so this breaks at 124 while the old
+    gate (INSERT-INTO-SQL-only) reports zero bypasses -- exactly the
+    false-clean class console is closing."""
+    _write(tmp_path, "scripts/some_launcher.sh", """
+        #!/usr/bin/env bash
+        "$VENV_PY" -c "
+        sb = create_client(url, key)
+        sb.table('agent_messages').insert({'from_agent': 'x', 'to_agent': 'y'}).execute()
+        "
+    """)
+    findings = gate.scan(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].path.name == "some_launcher.sh"
+
+
+def test_detects_supabase_table_insert_call_split_across_lines(tmp_path):
+    """Real shape in scripts/audit_mac_mini.py:372 and nervous_system/
+    deploy_verifier.py:355 -- the builder chain is split across lines, with
+    .insert( indented on the line after .table(...)."""
+    _write(tmp_path, "scripts/audit_mac_mini.py", """
+        async def post_agent_message(supabase, subject, body):
+            result = (
+                await supabase.table("agent_messages")
+                .insert({"from_agent": "x", "subject": subject, "body": body})
+            )
+    """)
+    findings = gate.scan(tmp_path)
+    assert len(findings) == 1
+
+
+def test_detects_supabase_table_upsert_call(tmp_path):
+    _write(tmp_path, "scripts/some_upserter.py", """
+        sb.table('agent_messages').upsert({'id': 1, 'from_agent': 'x'}).execute()
+    """)
+    findings = gate.scan(tmp_path)
+    assert len(findings) == 1
+
+
+def test_ignores_supabase_table_select_call(tmp_path):
+    """Real shape in legacy/wingmen_orch.py:192/269/862 -- a READ via
+    .table('agent_messages').select(...) must NOT be flagged; migration 124
+    only revokes INSERT, so a select-only caller is unaffected."""
+    _write(tmp_path, "scripts/some_reader.py", """
+        result = (
+            supabase.table("agent_messages")
+            .select("from_agent, message_type, created_at")
+            .eq("thread_id", thread_id)
+        )
+    """)
+    findings = gate.scan(tmp_path)
+    assert findings == []
+
+
+def test_detects_raw_rest_v1_post_literal(tmp_path):
+    """Console's ask (bus #78763): also catch a raw POST to rest/v1/
+    agent_messages in curl or requests form, even though no current
+    in-repo example exists -- a future writer using this path must not be
+    a silent, undetected gap the way the supabase-py shape was."""
+    _write(tmp_path, "scripts/raw_rest_poster.sh", """
+        #!/usr/bin/env bash
+        curl -s -X POST "$SUPABASE_URL/rest/v1/agent_messages" \\
+          -H "apikey: $SUPABASE_SERVICE_KEY" -d '{"from_agent":"x"}'
+    """)
+    findings = gate.scan(tmp_path)
+    assert len(findings) == 1
+
+
 def test_legacy_directory_is_scanned_too(tmp_path):
     """Real gap found in the PR-B inventory: legacy/ihsanos_drain/main.py has
     a real raw INSERT INTO agent_messages that the original SCAN_DIRS
