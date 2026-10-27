@@ -15,13 +15,18 @@ Checks enforced here (refuse, don't warn — a config gap must never be the
 thing that exposes an outside party):
 
   - channel_key must not already exist.
-  - DEDICATED TOKEN POLICY (Musa's ruling, 2026-10-19, bus #71813): a
-    --audience client channel's --token-env-key must not already back ANY
-    other channel (client or internal), and an --audience internal channel's
-    token must not already back an existing CLIENT channel. The shared
-    wingmendevbot-style token is for internal/test tags ONLY, never a real
-    external client -- this directly kills the sibling-name-leak class the
-    coffeemedia-hamhuskies-test proof surfaced (bus #70768/#70771).
+  - SHARED-TOKEN PER-CHANNEL ISOLATION (Musa's settled model, op#33571,
+    2026-10-24 — supersedes the 2026-10-19 dedicated-token ruling bus
+    #71813): ONE shared bot, tenant isolation PER-CHANNEL in bot_channels.
+    A client channel MAY share a token with siblings; what this tool now
+    enforces instead of token dedication:
+      * the new channel's allowed_chat_ids must not overlap ANY sibling
+        channel's allowed_chat_ids on the same token (two channels bound to
+        the same chat is the cross-wire class);
+      * --self-description, when given, must not contain any other
+        channel_key (mechanical sibling-name-leak guard — the leak the old
+        ruling existed to kill; Refinement #4: the responder describes
+        itself from the channel's own row, so the row must be clean).
   - PINNED/ENABLED CONSISTENCY per token_env_key: every channel sharing a
     token must be uniformly Mini-pinned (INGEST_CHANNELS) or uniformly
     hub-managed (enabled=true, no pin) -- never mixed, which is the exact
@@ -96,6 +101,8 @@ def parse_args(argv=None):
     p.add_argument("--owner-lane", default=None)
     p.add_argument("--store", required=True, help="exact store name + project ref, or literal 'none'")
     p.add_argument("--powers", default="reply_text", help="comma list, default least-privilege reply_text")
+    p.add_argument("--self-description", default=None,
+                    help="per-channel responder self-description (Refinement #4); refused if it names any sibling channel")
     p.add_argument("--agent-reviewer", default=None)
     p.add_argument("--host", choices=["mini", "hub"], required=True)
     p.add_argument("--override-to-direct", action="store_true")
@@ -122,29 +129,37 @@ def check_channel_key_free(cur, channel_key: str) -> None:
         fail(f"channel_key {channel_key!r} already exists in bot_channels")
 
 
-def check_token_dedication(cur, token_env_key: str, audience: str, channel_key: str) -> None:
+def check_token_isolation(cur, token_env_key: str, channel_key: str, chat_ids: list[int]) -> None:
+    """op#33571 settled model: shared token allowed; isolation is per-channel.
+
+    Enforces (a) no allowed_chat_ids overlap between channels sharing a token,
+    (b) caller-side sibling-leak guard for self-descriptions.
+    """
     cur.execute(
-        "SELECT channel_key, audience FROM bot_channels WHERE token_env_key=%s AND channel_key != %s",
+        "SELECT channel_key, allowed_chat_ids FROM bot_channels WHERE token_env_key=%s AND channel_key != %s",
         (token_env_key, channel_key),
     )
-    rows = cur.fetchall()
-    if audience == "client":
-        if rows:
-            existing = ", ".join(f"{k} ({a})" for k, a in rows)
+    new_set = set(chat_ids)
+    for sib_key, sib_chats in cur.fetchall():
+        overlap = new_set & set(sib_chats or [])
+        if overlap:
             fail(
-                f"--audience client requires a DEDICATED token never shared with any other "
-                f"channel (Musa's 2026-10-19 ruling, bus #71813 -- kills the sibling-name-leak "
-                f"risk the TG2.0 test surfaced). {token_env_key} is already used by: {existing}. "
-                f"Provision a brand-new bot token + env var for this client."
+                f"allowed_chat_ids {sorted(overlap)} already bound to sibling channel "
+                f"{sib_key!r} on {token_env_key} -- two channels on one token may never "
+                f"share a chat (per-channel isolation, Musa op#33571)."
             )
-    else:
-        client_rows = [k for k, a in rows if a == "client"]
-        if client_rows:
-            fail(
-                f"{token_env_key} already backs CLIENT-facing channel(s) {client_rows} -- an "
-                f"internal/test channel may not share a token with a real client (same rule, "
-                f"other direction)."
-            )
+
+
+def check_self_description(cur, channel_key: str, self_description: str) -> None:
+    cur.execute("SELECT channel_key FROM bot_channels WHERE channel_key != %s", (channel_key,))
+    siblings = [k for (k,) in cur.fetchall()]
+    leaked = [s for s in siblings if s and s in self_description.lower()]
+    if leaked:
+        fail(
+            f"--self-description names sibling channel(s) {leaked} -- the responder "
+            f"describes itself from this row (Refinement #4); sibling names in it are "
+            f"exactly the leak class op#33571's per-channel isolation exists to kill."
+        )
 
 
 def pinned_channels() -> list[str]:
@@ -258,6 +273,8 @@ def build_group_routing(args, phase: str) -> dict:
     if reviewer:
         routing["agent_reviewer"] = reviewer
     routing["powers"] = powers_list
+    if args.self_description:
+        routing["self_description"] = args.self_description
     if args.override_to_direct:
         routing["direct_override_grant"] = args.override_gate_citation
     return routing
@@ -289,8 +306,13 @@ def render_migration(args, number: int, phase: str) -> tuple[str, str]:
     ]
     if args.audience == "client":
         comment_lines.append(
-            "-- DEDICATED token per Musa's 2026-10-19 ruling (bus #71813) -- never shared with "
-            "another channel."
+            "-- SHARED token per Musa's settled one-bot model (op#33571, 2026-10-24; supersedes"
+        )
+        comment_lines.append(
+            "-- bus #71813) -- isolation is per-channel: private chat_id binding (no overlap"
+        )
+        comment_lines.append(
+            "-- with siblings on this token), self-description free of sibling names."
         )
     if args.override_to_direct:
         comment_lines.append(
@@ -348,8 +370,10 @@ def main(argv=None) -> int:
     try:
         cur = conn.cursor()
         check_channel_key_free(cur, args.channel_key)
-        check_token_dedication(cur, args.token_env_key, args.audience, args.channel_key)
+        check_token_isolation(cur, args.token_env_key, args.channel_key, args.chat_ids)
         check_host_token_consistency(cur, args.token_env_key, args.host, args.channel_key)
+        if args.self_description:
+            check_self_description(cur, args.channel_key, args.self_description)
     finally:
         conn.close()
 
