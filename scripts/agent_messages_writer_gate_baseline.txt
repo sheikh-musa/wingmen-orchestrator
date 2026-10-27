@@ -42,6 +42,28 @@
 # confirming every LIVE daemon writer (wake_backstop_sweep + irsyad
 # shadow_watch bounced) is actually RUNNING the migrated code, not just
 # source-clean.
+#
+# SCOPE EXTENSION, 2026-10-27 (Musa op#34845, PR-B writer inventory, bus
+# #78753, console's live pg_proc + launchd ruling bus #78757): the gate's
+# original *.py-only rglob over scripts/nervous_system/ops was completely
+# blind to raw SQL embedded in .sh files (a `python3 <<'PY' ... PY` heredoc
+# running a psycopg INSERT, or a literal `psql ... -c "...INSERT..."` call)
+# and to anything under legacy/. These were REAL, PRE-EXISTING bypasses on
+# the live fleet the whole time -- the gate just never looked. Added below,
+# same shrink-only contract as everything above. Console's ruling, in order:
+# (1) this scope extension first [DONE, this PR], (2) migrate the live .sh
+# writers highest-stakes first in their own small PRs (each with its own
+# restart-gate step): launch_dangerous_cc.sh's REST calls (category 3, not
+# gated by THIS file -- see bus #78753/#78757), lane_nudge.sh, lane_reply.sh,
+# the reset_*.sh family, switch_lane_token.sh, disk_space_monitor.sh,
+# render_gate.sh, (3) rewrite the 5 live postgres-owned DB functions onto
+# post_agent_message, (4) delete or explicitly exclude the dead legacy/
+# writers, (5) only then draft migration 124 itself. fire_fix1a_grant_ping.sh
+# is a CAI-774-specific one-shot, very likely already fired/expired --
+# confirm dead-or-delete rather than migrate, same as the legacy/ writers.
+# legacy/ihsanos_drain/main.py is confirmed DEAD on the live fleet (console's
+# own launchctl check, bus #78757: no such launchd job, VPS hub off since
+# 09-27) -- candidate for deletion (ruling part 4), not migration.
 
 scripts/irsyad_autoscaler.py
 scripts/irsyad_confirm_executor.py
@@ -49,3 +71,31 @@ scripts/irsyad_pii_containment_monitor.py
 scripts/irsyad_shadow_watch.py
 scripts/irsyad_spin_worker.py
 scripts/irsyad_worker_reaper.py
+scripts/disk_space_monitor.sh
+scripts/fire_fix1a_grant_ping.sh
+scripts/lane_nudge.sh
+scripts/lane_reply.sh
+scripts/render_gate/render_gate.sh
+scripts/reset_auditor.sh
+scripts/reset_cai.sh
+scripts/reset_fleet_health.sh
+scripts/reset_nazim.sh
+scripts/switch_lane_token.sh
+legacy/ihsanos_drain/main.py
+
+# STEP 1b, 2026-10-27 (Musa op#34845, console's PR#551 GO + follow-up bus
+# #78763): the gate's SQL/-sh-only patterns still couldn't see category 3,
+# a supabase-py `.table('agent_messages').insert(...)`/`.upsert(...)` call,
+# or a raw POST to rest/v1/agent_messages -- added this turn. Found 4 new
+# files (one, legacy/cto_bot.py, flagged in the PR-B inventory's grep-only
+# first pass turned out on closer reading to be a `.select(...)` READ, not
+# a write -- correctly excluded by this gate's insert/upsert-only pattern,
+# not a gap). scripts/launch_dangerous_cc.sh is the universal lane launcher
+# (highest-stakes file in the whole inventory, per console) -- gets its own
+# PR with a real-lane boot test once migrated, per console's instruction.
+# legacy/wingmen_orch.py is presumed dead (same class as legacy/ihsanos_
+# drain/main.py, pending the same live-fleet confirmation before deletion).
+scripts/audit_mac_mini.py
+scripts/launch_dangerous_cc.sh
+nervous_system/deploy_verifier.py
+legacy/wingmen_orch.py

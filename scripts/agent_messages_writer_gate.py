@@ -10,10 +10,32 @@ gate, not a one-time audit, so it must run in CI (and pre-push) and stay green
 as new scripts are added -- a report can go stale the day after it's written;
 this can't.
 
-Scans scripts/ and nervous_system/ (where the ~50 original violators live,
-bus #74880/#74896) -- NOT tests/, since test fixtures legitimately build their
-own throwaway agent_messages tables against an isolated ephemeral PG, which is
-not a production write path.
+Scans scripts/, nervous_system/, ops/ and legacy/ (where the ~50 original
+violators live, bus #74880/#74896) -- NOT tests/, since test fixtures
+legitimately build their own throwaway agent_messages tables against an
+isolated ephemeral PG, which is not a production write path.
+
+Scans both *.py AND *.sh files (Musa op#34845, bus #78753/#78757 -- PR-B's
+writer inventory found the original *.py-only scan completely blind to raw
+SQL embedded in .sh scripts: a `python3 <<'PY' ... PY` heredoc running a
+psycopg INSERT, real shape in disk_space_monitor.sh/reset_*.sh/
+switch_lane_token.sh/lane_reply.sh/lane_nudge.sh, and a literal
+`psql ... -c "...INSERT..."` call, real shape in render_gate.sh -- plus
+legacy/ihsanos_drain/main.py, outside the original SCAN_DIRS entirely).
+'#' is a comment character in both languages, so the same line-stripping
+applies to .sh files; the Python-docstring-position heuristic below is
+*.py-only, since a shell script has no such thing.
+
+ALSO catches a THIRD writer shape (category 3, Musa op#34845, bus #78763,
+console's PR#551 GO + step 1b ask): a supabase-py client write --
+`<client>.table('agent_messages').insert(...)` / `.upsert(...)` -- or a raw
+POST straight to `rest/v1/agent_messages` (curl or requests/httpx),
+bypassing SQL entirely but still subject to migration 124's INSERT revoke
+on service_role. Real shape in scripts/launch_dangerous_cc.sh (inside a
+python -c heredoc, with the service-role key), scripts/audit_mac_mini.py,
+nervous_system/deploy_verifier.py, legacy/cto_bot.py and
+legacy/wingmen_orch.py. A `.select(`/`.update(`/`.delete(` chain is NOT a
+match -- only INSERT-shaped writes are in migration 124's blast radius.
 
 Usage:
   scripts/agent_messages_writer_gate.py [root ...]   # defaults to repo root
@@ -31,7 +53,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-SCAN_DIRS = ("scripts", "nervous_system", "ops")
+SCAN_DIRS = ("scripts", "nervous_system", "ops", "legacy")
+SCAN_GLOBS = ("*.py", "*.sh")
 EXCLUDE_DIR_NAMES = {"tests", ".venv", "__pycache__"}
 # The gate's own source necessarily contains the literal phrase it's looking
 # for (its regex pattern, its docstrings) -- self-matching is a known false
@@ -40,6 +63,25 @@ EXCLUDE_DIR_NAMES = {"tests", ".venv", "__pycache__"}
 EXCLUDE_FILE_NAMES = {"agent_messages_writer_gate.py"}
 
 _INSERT_RE = re.compile(r"INSERT\s+INTO\s+agent_messages", re.IGNORECASE)
+# Category 3 (Musa op#34845, bus #78763, console's PR#551 GO + step 1b ask):
+# a supabase-py client write, `<client>.table('agent_messages').insert(...)`
+# or `.upsert(...)` -- real shape in scripts/launch_dangerous_cc.sh (3 sites,
+# inside a python -c heredoc), scripts/audit_mac_mini.py,
+# nervous_system/deploy_verifier.py and legacy/{cto_bot,wingmen_orch}.py.
+# `.select(`/`.update(`/`.delete(` deliberately do NOT match -- migration 124
+# only revokes INSERT, so a read-only `.table(...).select(...)` caller (the
+# real shape in legacy/wingmen_orch.py:192/269/862) is out of scope and must
+# not be flagged. `\s*` already matches a newline, which is what lets this
+# catch the builder-chain-split-across-lines shape (audit_mac_mini.py/
+# deploy_verifier.py) without any special-casing.
+_TABLE_WRITE_RE = re.compile(
+    r"\.\s*table\(\s*['\"]agent_messages['\"]\s*\)\s*\.\s*(?:insert|upsert)\s*\(",
+)
+# A raw POST straight to the REST endpoint (curl or requests/httpx), bypassing
+# the supabase-py client entirely -- no current in-repo example, but console
+# asked for it explicitly (bus #78763) so a future writer using this path
+# isn't a silent, undetected gap the way the supabase-py shape just was.
+_REST_PATH_RE = re.compile(r"rest/v1/agent_messages")
 _ALLOW_COMMENT_RE = re.compile(r"^\s*#\s*writer-gate-allow:\s*\S", re.IGNORECASE)
 _TRIPLE_QUOTE_RE = re.compile(r'("""|\'\'\')(.*?)\1', re.DOTALL)
 
@@ -112,14 +154,23 @@ def _scan_file(path: Path) -> list[Finding]:
     # docstring's own closing triple-quote before docstring-stripping ever
     # runs (real bug, caught by the docstring test against bus_send.py's
     # actual content -- not a hypothetical).
-    stripped = _strip_comments(_strip_docstrings(text))
+    #
+    # Docstring-stripping is *.py-only -- a .sh file has no Python docstring
+    # position to protect, and a heredoc's '"""'-shaped content (if any) is
+    # SQL/data, never prose, so it must stay visible to the scan.
+    body = _strip_docstrings(text) if path.suffix == ".py" else text
+    stripped = _strip_comments(body)
 
     findings: list[Finding] = []
-    for match in _INSERT_RE.finditer(stripped):
-        line = stripped.count("\n", 0, match.start()) + 1
-        if line in allowed:
-            continue
-        findings.append(Finding(path=path, line=line))
+    seen_lines: set[int] = set()
+    for pattern in (_INSERT_RE, _TABLE_WRITE_RE, _REST_PATH_RE):
+        for match in pattern.finditer(stripped):
+            line = stripped.count("\n", 0, match.start()) + 1
+            if line in allowed or line in seen_lines:
+                continue
+            seen_lines.add(line)
+            findings.append(Finding(path=path, line=line))
+    findings.sort(key=lambda f: f.line)
     return findings
 
 
@@ -130,12 +181,13 @@ def scan(root: Path) -> list[Finding]:
         base = root / dirname
         if not base.is_dir():
             continue
-        for path in sorted(base.rglob("*.py")):
-            if EXCLUDE_DIR_NAMES & set(path.relative_to(root).parts):
-                continue
-            if path.name in EXCLUDE_FILE_NAMES:
-                continue
-            findings.extend(_scan_file(path))
+        for glob in SCAN_GLOBS:
+            for path in sorted(base.rglob(glob)):
+                if EXCLUDE_DIR_NAMES & set(path.relative_to(root).parts):
+                    continue
+                if path.name in EXCLUDE_FILE_NAMES:
+                    continue
+                findings.extend(_scan_file(path))
     return findings
 
 
