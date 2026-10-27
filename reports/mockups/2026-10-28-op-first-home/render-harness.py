@@ -58,7 +58,7 @@ PAGES = {
     "grove-a-desks": ("grove-a-desks.html", MOBILE, {
         "six desks": "() => document.querySelectorAll('.desk').length",
         "client + task + time on every desk": "() => { const d = document.querySelectorAll('.desk')[1]; return [d.querySelector('.client'), d.querySelector('.task'), d.querySelector('.time')].filter(Boolean).length; }",
-        "one stuck, flagged": "() => { const d = document.querySelector('.desk.stuck'); return d ? d.querySelector('.flag').textContent + '/' + d.querySelector('.client').textContent : 'NO STUCK DESK'; }",
+        "one stuck, flagged as sample, fleet not a client": "() => { const d = document.querySelector('.desk.stuck'); if (!d) return 'NO STUCK DESK'; const f = d.querySelector('.flag').textContent; return f.indexOf('sample') >= 0 && d.querySelector('.client').textContent === 'fleet' ? f + '/' + d.querySelector('.client').textContent : 'STUCK DESK NOT SAMPLE/FLEET: ' + f; }",
         "one live, badged jade": "() => { const d = document.querySelector('.desk.live'); return d ? getComputedStyle(d.querySelector('.time .dot')).backgroundColor : 'NO LIVE DESK'; }",
         "one quiet": "() => document.querySelectorAll('.desk.quiet').length",
         "legend explains all four states": "() => [...document.querySelectorAll('.legend span b')].map(b => b.textContent)",
@@ -69,15 +69,17 @@ PAGES = {
         "beat 3 live + chime": "() => { const f = document.querySelectorAll('.frame')[2]; return !!f.querySelector('.desk.live') + '/' + f.querySelector('.chime').textContent; }",
     }),
     "grove-b-parcel": ("grove-b-parcel.html", MOBILE, {
-        "parcel in building state": "() => document.querySelector('.parcel .s').textContent",
-        "parcel has your ask title": "() => document.querySelector('.parcel .t').textContent",
+        "parcel shows the real ask LIVE at its real time": "() => { const s = document.querySelector('.parcel .s').textContent; return s.indexOf('live') >= 0 && s.indexOf('14:21') >= 0 ? s : 'NOT REAL LIVE STATE: ' + s; }",
+        "parcel has the real ask title": "() => document.querySelector('.parcel .t').textContent",
+        "badge not clipped by card": "() => { const b = document.querySelector('.parcel .s').getBoundingClientRect(); const c = document.querySelector('.parcel').getBoundingClientRect(); return (c.bottom - b.bottom) >= 2 && (b.top - c.top) >= 2 && (c.right - b.right) >= 0 && (b.left - c.left) >= 0 ? 'clear by ' + Math.round(c.bottom - b.bottom) + 'px' : 'CLIPPED: badge bottom margin ' + (c.bottom - b.bottom); }",
         "three states explained": "() => [...document.querySelectorAll('.chip .n')].map(n => n.textContent)",
-        "tap card: status/asked/due/last move": "() => [...document.querySelectorAll('.tapcard .row .k')].map(k => k.textContent)",
-        "tap card last move": "() => [...document.querySelectorAll('.tapcard .row')].pop().textContent.trim().replace(/\\s+/g,' ')",
+        "tap card: status/asked/took/desk": "() => [...document.querySelectorAll('.tapcard .row .k')].map(k => k.textContent)",
+        "tap card cites real took time": "() => { const t = [...document.querySelectorAll('.tapcard .row')].find(r => r.textContent.indexOf('5h 07m') >= 0); return t ? t.textContent.trim().replace(/\\s+/g,' ') : 'NO REAL TOOK TIME'; }",
     }),
     "grove-b-seq": ("grove-b-seq.html", MOBILE, {
         "3 beats": "() => [...document.querySelectorAll('.frame .tag')].map(t => t.textContent)",
         "parcel class progresses amber->indigo->jade": "() => [...document.querySelectorAll('.frame')].map(f => f.querySelector('.parc').className)",
+        "beats carry the real timestamps": "() => { const w = [...document.querySelectorAll('.frame .when')].map(x => x.textContent); return w[0].indexOf('09:14') >= 0 && w[2].indexOf('14:21') >= 0 && w[2].indexOf('5h 07m') >= 0 ? w : 'TIMES NOT REAL: ' + w; }",
         "live beat has chime": "() => !!document.querySelectorAll('.frame')[2].querySelector('.chime')",
     }),
     "grove-c-replay": ("grove-c-replay.html", MOBILE, {

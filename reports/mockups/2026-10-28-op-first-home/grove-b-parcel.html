@@ -22,9 +22,9 @@ background:linear-gradient(180deg,rgba(138,166,255,.16),var(--surface2));display
 .end.desk .door{border-color:rgba(55,211,154,.4);background:linear-gradient(180deg,rgba(55,211,154,.14),var(--surface2))}
 .courier{position:absolute;left:50%;top:36px;transform:translateX(-50%);text-align:center}
 .courier .body{width:34px;height:34px;border-radius:50%;background:var(--indigo);display:flex;align-items:center;justify-content:center;font-size:16px;box-shadow:0 0 18px rgba(138,166,255,.5)}
-.parcel{position:relative;width:112px;margin:10px auto 0;border:1px solid var(--amber);border-radius:10px;background:var(--surface2);padding:9px 10px;text-align:center}
+.parcel{position:relative;width:112px;margin:10px auto 0;border:1px solid var(--jade);border-radius:10px;background:var(--surface2);padding:10px 10px 13px;text-align:center}
 .parcel .t{font:650 12px/1.25 var(--sans)}
-.parcel .s{font:700 9px var(--mono);color:var(--bg);background:var(--amber);display:inline-block;padding:2px 8px;border-radius:999px;margin-top:6px}
+.parcel .s{font:700 9px var(--mono);color:var(--bg);background:var(--jade);display:inline-block;padding:2px 8px;border-radius:999px;margin-top:7px;line-height:1.5}
 .parcel .s.building{background:var(--indigo)}
 .parcel .s.live{background:var(--jade)}
 .states{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:10px}
@@ -44,10 +44,10 @@ background:linear-gradient(180deg,rgba(138,166,255,.16),var(--surface2));display
 <h2>One ask, one parcel</h2>
 <div class="street">
   <div class="road">
-    <div class="end" style="left:0"><div class="door">🏠</div><div class="lbl">you asked<br>16:32</div></div>
-    <div class="end desk" style="right:0"><div class="door">🖥</div><div class="lbl">ADCDA desk<br>took it 16:36</div></div>
+    <div class="end" style="left:0"><div class="door">🏠</div><div class="lbl">you asked<br>09:14</div></div>
+    <div class="end desk" style="right:0"><div class="door">🖥</div><div class="lbl">ADCDA desk<br>took it that morning</div></div>
     <div class="courier"><div class="body">🛵</div>
-      <div class="parcel"><div class="t">MUIS CEO — intro email</div><div class="s building">building</div></div>
+      <div class="parcel"><div class="t">Personal-issue field — change from your photo</div><div class="s live">live 14:21</div></div>
     </div>
   </div>
 </div>
@@ -60,12 +60,12 @@ background:linear-gradient(180deg,rgba(138,166,255,.16),var(--surface2));display
 
 <h2>Tap the parcel</h2>
 <div class="tapcard">
-  <div class="h"><span>MUIS CEO — intro email</span><span class="who">#12</span></div>
-  <div class="row"><span class="k">status</span><span style="color:var(--indigo)">building — on the ADCDA desk</span></div>
-  <div class="row"><span class="k">asked</span><span>16:32 · 9h ago</span></div>
-  <div class="row"><span class="k">due</span><span>tomorrow evening</span></div>
-  <div class="row"><span class="k">last move</span><span>23:50 — draft email written, waiting on your wording pick</span></div>
+  <div class="h"><span>Personal-issue field — change from your photo</span><span class="who">#5343</span></div>
+  <div class="row"><span class="k">status</span><span style="color:var(--jade)">live — went live 14:21, verified</span></div>
+  <div class="row"><span class="k">asked</span><span>09:14 this morning</span></div>
+  <div class="row"><span class="k">took</span><span>5h 07m from your message to live</span></div>
+  <div class="row"><span class="k">desk</span><span>ADCDA — built and verified it</span></div>
 </div>
 
-<div class="note">still, idea (b) — parcel identity = the ask row (title, asked-at, due, last activity); courier path is the routing from you to the owning desk. All fields exist today except the courier art itself.</div>
+<div class="note">still, idea (b) — a REAL ask shown with its REAL timeline: asked 09:14, taken by the ADCDA desk (its actual owner), live 14:21 — every time above is from the ask row. Title is the plain-words rendering of its own text. Only the courier art is invented.</div>
 </div></body></html>
