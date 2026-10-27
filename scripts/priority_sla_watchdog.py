@@ -1187,7 +1187,8 @@ def _send_aged_repage(conn, owner: str, row: dict) -> bool:
         return False
 
 
-def resolve_recipient(owner: Optional[str], valid_agent_ids, tmux_to_agent, down_lanes):
+def resolve_recipient(owner: Optional[str], valid_agent_ids, tmux_to_agent, down_lanes,
+                      live_instances=None):
     """PURE: resolve a chase net's `owner`/`delegated_to` value to a live-
     addressable agents.id, or (None, reason) if the net should SKIP rather than
     attempt an insert that would either FK-violate or page a lane that cannot
@@ -1199,19 +1200,34 @@ def resolve_recipient(owner: Optional[str], valid_agent_ids, tmux_to_agent, down
     can never actually act on the nudge (cc-oeh, bus#67757). Resolve through
     `tmux_to_agent` (built from fleet_lanes.lane -> base_agent_id) rather than
     failing at insert time, and skip outright if the lane is down either way
-    `owner` was spelled."""
+    `owner` was spelled.
+
+    `live_instances` (base -> [live -N instance ids, freshest first], from agent_status on
+    ANY host): a lane row's desired_state is THIS registry's intent, not liveness. The Mini
+    rows 'irsyad-coord'/'cosem-port' read 'down' while cc-irsyad-coord-1 is alive on gzb,
+    so 32 irsyad client-channel asks went unchased and every send was logged SKIPPED
+    (10-27). A "down" owner whose base has a live instance is chased at that instance
+    (an instance, not the base: these are raw inserts and base mail sits unread) -- but only
+    when there is exactly ONE; several is ambiguous and skips with that reason."""
     if not owner:
         return None, "no owner given"
-    if owner in down_lanes:
-        return None, f"lane {owner!r} is desired_state=down, cannot act"
-    if owner in valid_agent_ids:
-        resolved = owner
-    elif owner in tmux_to_agent:
-        resolved = tmux_to_agent[owner]
-    else:
-        return None, f"delegated_to={owner!r} is not a registered agents.id or a known lane"
-    if resolved in down_lanes:
+    resolved = (owner if owner in valid_agent_ids
+                else tmux_to_agent.get(owner))
+    if owner in down_lanes or (resolved is not None and resolved in down_lanes):
+        base = re.sub(r"-\d+$", "", resolved or owner)
+        live = (live_instances or {}).get(base) or []
+        if len(live) == 1:
+            return live[0], f"lane row down but {live[0]} is live"
+        if len(live) > 1:
+            # never guess between instances: freshest-heartbeat would e.g. hand
+            # cc-cosem-adcda chases to the dedicated monolith-split lane (-3)
+            return None, (f"lane row down and {base} has {len(live)} live instances "
+                          f"({', '.join(live)}): ambiguous, re-delegate to one")
+        if owner in down_lanes:
+            return None, f"lane {owner!r} is desired_state=down, cannot act"
         return None, f"lane for {owner!r} (-> {resolved}) is desired_state=down, cannot act"
+    if resolved is None:
+        return None, f"delegated_to={owner!r} is not a registered agents.id or a known lane"
     return resolved, "ok"
 
 
@@ -1233,7 +1249,15 @@ def fetch_recipient_resolution(conn):
                 down_lanes.add(lane)
                 if base_agent_id:
                     down_lanes.add(base_agent_id)
-    return valid_agent_ids, tmux_to_agent, down_lanes
+        # live -N instances on ANY host, freshest first (see resolve_recipient)
+        cur.execute(
+            "SELECT agent_id FROM agent_status WHERE COALESCE(status,'') <> 'offline' "
+            "AND last_heartbeat > now() - interval '20 minutes' AND agent_id ~ '-[0-9]+$' "
+            "ORDER BY last_heartbeat DESC")
+        live_instances = {}
+        for (aid,) in cur.fetchall():
+            live_instances.setdefault(re.sub(r"-\d+$", "", aid), []).append(aid)
+    return valid_agent_ids, tmux_to_agent, down_lanes, live_instances
 
 
 def dry_identity_guard(conn) -> bool:
