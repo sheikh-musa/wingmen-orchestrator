@@ -352,6 +352,133 @@ def asks_job_exit_watch(dry=False):
     return paged
 
 
+# 8. IDLE-IN-TRANSACTION WATCH (console #78501/#78690/#78695, step A = MEASURE mode).
+# pid 490867 sat idle in transaction ~2d21h holding a lock on agent_messages: a hand-rolled
+# bus-watch loop inside a lane's session that never committed (scripts/bus_watch.py is now
+# the sanctioned loop). Every session idle in tx past 5 min goes to a measure log, so the
+# 7-day soak can show what an idle_in_transaction_session_timeout would break; past 30 min
+# it WARNs in the sweep output; past 1 h it pages orch-console P2 ONCE per episode
+# (pid + xact_start, so a reused pid is a new episode). It NEVER terminates anything:
+# terminating a backend stays console's call.
+IDLE_TX_MEASURE_S, IDLE_TX_WARN_S, IDLE_TX_PAGE_S = 300, 1800, 3600
+IDLE_TX_QUERY_CHARS = 120
+IDLE_TX_STATE = _ORCH_DIR / "logs" / "idle_in_tx_watch.json"
+IDLE_TX_MEASURE_LOG = _ORCH_DIR / "logs" / "idle_in_tx_measure.jsonl"
+_SQL_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
+
+
+def mask_query(query, n=IDLE_TX_QUERY_CHARS):
+    """Query prefix with every string literal masked to '?' (a literal can carry a secret,
+    e.g. ALTER ROLE ... PASSWORD '...'), whitespace collapsed, bounded to n chars."""
+    q = _SQL_LITERAL_RE.sub("'?'", query or "")
+    return " ".join(q.split())[:n]
+
+
+def idle_tx_key(s):
+    return f"{s['pid']}:{int(s['xact_epoch'])}"
+
+
+def idle_tx_plan(sessions, state, *, measure_s=IDLE_TX_MEASURE_S, warn_s=IDLE_TX_WARN_S,
+                 page_s=IDLE_TX_PAGE_S):
+    """PURE: classify idle-in-tx sessions. Returns measure (>= measure_s), warn (>= warn_s,
+    below page_s), page (>= page_s, not yet paged this episode) and the new state, which
+    keeps only episodes still idle past page_s so an ended episode drops out."""
+    measure, warn, page, new = [], [], [], {}
+    for s in sessions:
+        idle = s["idle_s"]
+        if idle < measure_s:
+            continue
+        measure.append(s)
+        if idle < warn_s:
+            continue
+        if idle < page_s:
+            warn.append(s)
+            continue
+        key = idle_tx_key(s)
+        if state.get(key) == "paged":
+            new[key] = "paged"
+        else:
+            page.append(s)
+    return {"measure": measure, "warn": warn, "page": page, "state": new}
+
+
+def idle_tx_page_body(s):
+    return (f"TL;DR: backend pid {s['pid']} has been idle in transaction for "
+            f"{int(s['idle_s']) // 60} min. That holds its locks and holds back vacuum.\n\n"
+            f"- user={s['usename']} app={s['app']} client={s['client_addr']} "
+            f"tx age={int(s['tx_age_s']) // 60} min\n"
+            f"- last query (literals masked): {mask_query(s['query'])}\n"
+            "- This backend was never terminated: fleet_health only reports, and terminating "
+            "is your call. The usual cause is a psycopg poll loop without autocommit "
+            "(scripts/bus_watch.py is the sanctioned one).\n"
+            "This pages once per episode (pid + transaction start).")
+
+
+def _fetch_idle_tx_sessions():
+    """Impure: sessions idle in transaction, read on our own AUTOCOMMIT connection so the
+    sweep never shows up as one itself."""
+    with psycopg.connect(DSN, autocommit=True) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT pid, extract(epoch FROM now() - state_change), extract(epoch FROM xact_start), "
+            "  extract(epoch FROM now() - xact_start), coalesce(usename, ''), "
+            "  coalesce(nullif(application_name, ''), '(none)'), coalesce(host(client_addr), ''), "
+            "  coalesce(query, '') "
+            "FROM pg_stat_activity "
+            "WHERE state LIKE 'idle in transaction%%' AND pid <> pg_backend_pid() "
+            "  AND xact_start IS NOT NULL")
+        return [{"pid": r[0], "idle_s": float(r[1]), "xact_epoch": float(r[2]),
+                 "tx_age_s": float(r[3]), "usename": r[4], "app": r[5], "client_addr": r[6],
+                 "query": r[7]} for r in cur.fetchall()]
+
+
+def idle_in_tx_watch(dry=False):
+    """Impure. Returns (warn lines, paged pids). Any failure is printed loud, never fatal."""
+    import json
+    import datetime
+    try:
+        sessions = _fetch_idle_tx_sessions()
+        state = json.loads(IDLE_TX_STATE.read_text()) if IDLE_TX_STATE.exists() else {}
+    except Exception as e:  # noqa: BLE001
+        print(f"IDLE-IN-TX WATCH could not read pg_stat_activity/state: {type(e).__name__}: {e}")
+        return [], []
+    plan = idle_tx_plan(sessions, state)
+    new = plan["state"]
+    if plan["measure"] and not dry:
+        ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        try:
+            with open(IDLE_TX_MEASURE_LOG, "a", encoding="utf-8") as f:
+                for s in plan["measure"]:
+                    f.write(json.dumps({"ts": ts, "pid": s["pid"], "idle_s": round(s["idle_s"]),
+                                        "tx_age_s": round(s["tx_age_s"]), "usename": s["usename"],
+                                        "app": s["app"], "client_addr": s["client_addr"],
+                                        "query": mask_query(s["query"])}) + "\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"IDLE-IN-TX WATCH measure-log write FAILED: {type(e).__name__}: {e}")
+    warns = [f"pid {s['pid']} idle in tx {int(s['idle_s']) // 60}m ({s['usename']}/{s['app']}): "
+             f"{mask_query(s['query'], 60)}" for s in plan["warn"]]
+    paged = []
+    for s in plan["page"]:
+        if dry:
+            print(f"[dry] IDLE-IN-TX WATCH would page: pid {s['pid']}")
+            continue
+        try:
+            from scripts import bus_send
+            bus_send.send("cc-fleet-health", "orch-console", "blocker",
+                          f"idle in transaction {int(s['idle_s']) // 60}m: pid {s['pid']} "
+                          f"({s['usename']}/{s['app']})",
+                          idle_tx_page_body(s), "P2")
+            new[idle_tx_key(s)] = "paged"
+            paged.append(s["pid"])
+        except (Exception, SystemExit) as e:  # noqa: BLE001 -- unstamped, retried next sweep
+            print(f"IDLE-IN-TX WATCH page FAILED for pid {s['pid']}: {type(e).__name__}: {e}")
+    if not dry:
+        try:
+            IDLE_TX_STATE.write_text(json.dumps(new))
+        except Exception as e:  # noqa: BLE001
+            print(f"IDLE-IN-TX WATCH state write FAILED: {type(e).__name__}: {e}")
+    return warns, paged
+
+
 def main():
     quiet = "--quiet" in sys.argv
     sessions = live_tmux_sessions()
@@ -486,6 +613,12 @@ def main():
     exit_paged = asks_job_exit_watch()
     if exit_paged:
         print("ASKS-JOB EXIT WATCH paged orch-console: " + ", ".join(exit_paged))
+
+    idle_warns, idle_paged = idle_in_tx_watch()
+    for w in idle_warns:
+        print("IDLE-IN-TX WARN: " + w)
+    if idle_paged:
+        print("IDLE-IN-TX WATCH paged orch-console: pids " + ", ".join(map(str, idle_paged)))
 
     if not quiet:
         if marked:
