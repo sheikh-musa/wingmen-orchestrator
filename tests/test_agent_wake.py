@@ -213,6 +213,7 @@ class _FakeConn:
 
 
 def test_candidate_sessions_includes_offline_family_hijack_guard_at_resolve(monkeypatch):
+    monkeypatch.setattr(agent_wake, "is_singleton_base", lambda a: False)
     """Candidate SELECTION now includes OFFLINE base-family rows too (so a base-id wake can
     reach an offline-but-live-pane instance, e.g. cc-cosem-tdu-coord-1). The op#11297 self
     rule still holds (self kept unconditionally). The Nazim #40426 sibling-hijack guard is NOT
@@ -383,6 +384,7 @@ def test_live_registered_session_is_not_affected_by_the_host_guard(monkeypatch):
 
 # ── singleton bases: own row only, never a cwd guess (orch-console #77922) ─────────────────
 def test_singleton_candidates_are_its_own_row_only(monkeypatch):
+    monkeypatch.setattr(agent_wake, "is_singleton_base", lambda a: a == "cc-orchestrator")
     captured = {}
     monkeypatch.setattr(agent_wake, "_DSN", "postgres://x")
     monkeypatch.setattr(agent_wake.psycopg, "connect",
@@ -394,6 +396,7 @@ def test_singleton_candidates_are_its_own_row_only(monkeypatch):
 
 
 def test_singleton_never_uses_the_cwd_fallback(monkeypatch):
+    monkeypatch.setattr(agent_wake, "is_singleton_base", lambda a: a == "cc-orchestrator")
     _fallback_only(monkeypatch)
     monkeypatch.setattr(agent_wake, "_live_claude_panes", lambda: [
         {"session": "substrate-clean", "cwd": "/Users/x/wingmen/projects/orchestrator.wt-cleanup"}])
@@ -404,6 +407,7 @@ def test_singleton_never_uses_the_cwd_fallback(monkeypatch):
 
 
 def test_non_singleton_family_query_unchanged(monkeypatch):
+    monkeypatch.setattr(agent_wake, "is_singleton_base", lambda a: False)
     captured = {}
     monkeypatch.setattr(agent_wake, "_DSN", "postgres://x")
     monkeypatch.setattr(agent_wake.psycopg, "connect",
