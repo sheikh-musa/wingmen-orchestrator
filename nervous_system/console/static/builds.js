@@ -61,14 +61,21 @@
     return (h / 24).toFixed(1) + "d";
   }
   var MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  // OPERATOR-FACING times render in Asia/Dubai (UTC+4, no DST) — NOT
+  // UTC-as-if-local (orch-console 78520 note 2: 09:14Z must read 13:14 for
+  // Musa). Deterministic +4 shift instead of a locale call so node and every
+  // browser agree; the hero says "Dubai time" so the zone is never implied.
+  var DUBAI_OFFSET_MS = 4 * 3600 * 1000;
   function fmtDate(s) {
     if (!s) return "";
     var d = new Date(s);
     if (isNaN(d.getTime())) return String(s);
-    return d.getUTCDate() + " " + MON[d.getUTCMonth()] +
-      " " + String(d.getUTCHours()).padStart(2, "0") + ":" + String(d.getUTCMinutes()).padStart(2, "0");
+    var dub = new Date(d.getTime() + DUBAI_OFFSET_MS);
+    return dub.getUTCDate() + " " + MON[dub.getUTCMonth()] +
+      " " + String(dub.getUTCHours()).padStart(2, "0") + ":" + String(dub.getUTCMinutes()).padStart(2, "0");
   }
-  function fmtDay(s) { // date-only field (next_checkpoint, phase date)
+  function fmtDay(s) { // date-only field (next_checkpoint, phase date): a
+    // calendar date, no clock to shift — read as-is at UTC midnight.
     if (!s) return "";
     var d = new Date(s + "T00:00:00Z");
     if (isNaN(d.getTime())) return String(s);
@@ -137,7 +144,7 @@
     html += '<div class="hero"><span class="big">' + esc(String(cov.measured || measured.length)) + "</span> measured" +
       '<span class="sep">·</span><span class="big warn">' + esc(String(cov.not_measured || notMeasured.length)) +
       "</span> not yet measured" +
-      '<div class="herosub">times come from live-verified ships only — older asks have no clock yet</div></div>';
+      '<div class="herosub">times come from live-verified ships only — older asks have no clock yet · Dubai time (UTC+4)</div></div>';
     if (measured.length) {
       html += '<div class="items">' + measured.map(deliveryRow).join("") + "</div>";
     }

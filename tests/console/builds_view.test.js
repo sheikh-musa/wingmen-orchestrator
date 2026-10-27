@@ -95,6 +95,18 @@ assert.strictEqual(api.fmtHours(undefined), "", "fmtHours(undefined) -> empty");
 assert.strictEqual(api.fmtHours(5.1), "5.1h", "sub-day stays hours");
 assert.strictEqual(api.fmtHours(0.5), "0.5h", "half hour is still a real hour value");
 assert.strictEqual(api.fmtHours(48.5), "2.0d", "day-scale reads as days");
+// fmtDate: OPERATOR-FACING times render in Asia/Dubai (UTC+4, no DST), not
+// UTC-as-if-local (orch-console 78520 note 2 — 09:14Z must read 13:14 for
+// Musa). Deterministic +4 shift, not a locale call (node must agree).
+assert.strictEqual(api.fmtDate("2026-10-27T09:14:32+00:00"), "27 Oct 13:14",
+  "timestamp shifts to Dubai");
+assert.strictEqual(api.fmtDate("2026-10-27T20:16:07Z"), "28 Oct 00:16",
+  "UTC 20:16 crosses into the NEXT Dubai day at 00:16");
+assert.strictEqual(api.fmtDate("2026-10-27T19:59:59Z"), "27 Oct 23:59",
+  "one second before the Dubai day boundary");
+assert.strictEqual(api.fmtDate(null), "", "fmtDate(null) -> empty");
+// fmtDay: date-ONLY fields stay calendar dates (no clock to shift)
+assert.strictEqual(api.fmtDay("2026-11-04"), "4 Nov", "date-only stays a date");
 console.log("builds.js helpers: ok");
 
 // ---- deep-link flow: persist BEFORE read, strip exactly once ----------------
@@ -185,7 +197,14 @@ console.log("tokenFromHash flow: ok");
     "programme freshness (fmtAge) visible");
 
   // delivery times — the honesty contract
-  assert.ok(html.indexOf("Personal-issue field") !== -1, "measured ask line visible");
+  // 78520 note 1: the FULL ask line must be present (no mid-title truncation)
+  assert.ok(html.indexOf("Personal-issue field — change from your photo") !== -1,
+    "measured ask line visible in full");
+  // 78520 note 2: 09:14Z renders as 13:14 Dubai, and 14:21Z as 18:21
+  assert.ok(html.indexOf("13:14") !== -1 && html.indexOf("18:21") !== -1,
+    "delivery times render in Dubai (UTC+4)");
+  assert.ok(html.indexOf("09:14") === -1 && html.indexOf("14:21") === -1,
+    "no UTC-as-if-local times leak through");
   assert.ok(html.indexOf("5.1h") !== -1, "measured ask shows its real total");
   const nm = html.split("nm-row");
   assert.ok(nm.length >= 2, "a not-measured row exists (class nm-row)");
