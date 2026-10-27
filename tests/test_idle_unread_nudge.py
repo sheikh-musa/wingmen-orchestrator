@@ -20,10 +20,19 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 NS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "nervous_system")
 sys.path.insert(0, NS)
 
 import wake_backstop_sweep as wbs  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    # The idle-confirmation re-samples sleep between pane reads; every test here injects
+    # pane_busy, so a real sleep would only slow the suite.
+    monkeypatch.setattr(wbs.time, "sleep", lambda s: None)
 
 _NOW = datetime(2026, 9, 30, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -524,3 +533,82 @@ def test_idle_unread_sweep_default_pane_busy_is_the_nudge_safe_variant():
     import inspect
     sig = inspect.signature(wbs.idle_unread_sweep)
     assert sig.parameters["pane_busy"].default is wbs._pane_busy_nudge_safe
+
+
+# ---- IDLE CONFIRMATION (cc-fleet-health, 2026-10-27) -------------------------------------
+# One capture-pane sample caught cc-cosem-platform-4 between render frames mid-turn and read
+# it "idle" 11+ times in a night. Before a nudge/warn fires, the pane is re-sampled; any busy
+# reading means busy.
+
+def _sequence_busy(*readings):
+    """pane_busy that returns each reading in turn (then repeats the last), counting calls."""
+    calls = []
+
+    def pane_busy(session):
+        calls.append(session)
+        return readings[min(len(calls) - 1, len(readings) - 1)]
+
+    return pane_busy, calls
+
+
+def test_mid_turn_render_gap_is_skipped_as_busy_no_nudge_no_warn():
+    nudged, warned, nudge, warn = _collector()
+    pane_busy, calls = _sequence_busy(False, True)   # first snapshot idle, re-sample busy
+    nudged_seen, warned_seen = {}, {}
+    res = wbs.idle_unread_sweep(rows=[_row(1, "cc-cosem-platform-4", 2000, priority="P1")],
+                                resolve_session=lambda a: "sess", pane_busy=pane_busy,
+                                nudge=nudge, warn=warn, now_dt=_NOW,
+                                nudged_seen=nudged_seen, warned_seen=warned_seen)
+    assert nudged == [] and warned == []
+    assert res["skipped_busy"] == ["cc-cosem-platform-4"]
+    assert nudged_seen == {} and warned_seen == {}   # dedup untouched: next real idle still fires
+
+
+def test_busy_on_the_last_confirm_sample_still_skips():
+    nudged, warned, nudge, warn = _collector()
+    pane_busy, calls = _sequence_busy(False, False, True)
+    res = wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 1000)],
+                                resolve_session=lambda a: "sess", pane_busy=pane_busy,
+                                nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={},
+                                warned_seen={}, idle_confirm_samples=2)
+    assert nudged == []
+    assert len(calls) == 3
+
+
+def test_confirmed_idle_fires_after_spaced_resamples():
+    nudged, warned, nudge, warn = _collector()
+    pane_busy, calls = _sequence_busy(False)
+    slept = []
+    wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 1000)],
+                          resolve_session=lambda a: "sess", pane_busy=pane_busy,
+                          nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={},
+                          idle_confirm_samples=2, idle_confirm_gap_s=3, sleep=slept.append)
+    assert nudged == [("cc-oeh", (1,))]
+    assert len(calls) == 3
+    assert slept == [3, 3]
+
+
+def test_no_resample_when_nothing_would_fire():
+    # A dedup'd tick (same id-set already nudged, warn not yet due) must not pay the
+    # confirmation cost.
+    nudged, warned, nudge, warn = _collector()
+    pane_busy, calls = _sequence_busy(False)
+    slept = []
+    wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 1000)],
+                          resolve_session=lambda a: "sess", pane_busy=pane_busy,
+                          nudge=nudge, warn=warn, now_dt=_NOW,
+                          nudged_seen={"cc-oeh": frozenset({1})}, warned_seen={},
+                          sleep=slept.append)
+    assert nudged == [] and warned == []
+    assert len(calls) == 1 and slept == []
+
+
+def test_zero_confirm_samples_is_the_old_single_snapshot_behavior():
+    nudged, warned, nudge, warn = _collector()
+    pane_busy, calls = _sequence_busy(False, True)
+    wbs.idle_unread_sweep(rows=[_row(1, "cc-oeh", 1000)],
+                          resolve_session=lambda a: "sess", pane_busy=pane_busy,
+                          nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={},
+                          idle_confirm_samples=0)
+    assert nudged == [("cc-oeh", (1,))]
+    assert len(calls) == 1
