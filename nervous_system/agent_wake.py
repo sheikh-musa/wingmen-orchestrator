@@ -425,7 +425,31 @@ def _first_live_session(candidates, has_session=None, agent_id=None,
     return None
 
 
-def resolve_tmux_session(agent_id: str) -> str | None:
+def _local_host() -> str:
+    import socket
+    return socket.gethostname().split(".")[0]
+
+
+def _registered_hosts(agent_id: str):
+    """Hosts agent_status records for this agent: its OWN row's host if it has one, else its
+    base family's. [] = nothing recorded; None = lookup failed (caller keeps old behavior)."""
+    if not _DSN:
+        return None
+    try:
+        with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+            cur.execute("SELECT host FROM agent_status WHERE agent_id=%s AND host IS NOT NULL",
+                        (agent_id,))
+            own = [r[0] for r in cur.fetchall()]
+            if own:
+                return own
+            cur.execute("SELECT DISTINCT host FROM agent_status "
+                        "WHERE base_agent_id=%s AND host IS NOT NULL", (_base_family(agent_id),))
+            return [r[0] for r in cur.fetchall()]
+    except Exception:  # noqa: BLE001 — unknown, not foreign
+        return None
+
+
+def resolve_tmux_session(agent_id: str, *, host_source=None, local_host=None) -> str | None:
     """Resolve on the LIVE-SESSION FACT (op#11297 #16880): a registered tmux_session
     whose pane is actually live — DECOUPLED from the status field AND from cwd-intro-
     spection. This closes all three miss-classes at once: offline-while-alive (status
@@ -443,6 +467,16 @@ def resolve_tmux_session(agent_id: str) -> str | None:
     # {*} roles, not under the launchd sandbox). Kept for non-launchd scoped callers.
     tokens = _expected_cwd_tokens(agent_id)
     if not tokens:
+        return None
+    # CROSS-HOST GUARD (cc-fleet-health, 2026-10-27): an agent registered ONLY on another host
+    # has no pane here, so the cwd match can only land on a DIFFERENT local lane. gzb resolved
+    # the Mini's cc-cosem-platform-4 onto its own idle cosem-convergence pane, so every gzb
+    # idle-unread pass read "idle", nudged that wrong pane and warned cc-fleet-health -- the
+    # long-unexplained [idle-unread] refires. Only positive foreign-host evidence skips; an
+    # unknown host (lookup failed / nothing recorded) keeps the old behavior.
+    hosts = (host_source or _registered_hosts)(agent_id)
+    here = (local_host or _local_host()).lower()
+    if hosts and all(str(h).split(".")[0].lower() != here for h in hosts):
         return None
     for pane in _live_claude_panes():
         if any(f"/{t}" in pane["cwd"] for t in tokens):
