@@ -437,3 +437,65 @@ def test_reclaim_library_caches_skips_nonempty_dir_race_without_raising(tmp_path
     assert racing.exists(), "the racing/non-empty entry must be left in place, not half-removed"
     assert not removable.exists(), "a removable entry must still be reclaimed"
     assert freed >= 1024
+
+
+# ---- Chrome code-sign clones (orch-console #77809, 2026-10-27) ------------------------
+# Chrome leaves a full self-copy per launch under .../X/com.google.Chrome.code_sign_clone and
+# never cleans up (19 piled up on the Mini). Keep the newest, skip any a live Chrome holds.
+def _clone(root, name, mtime, size=4096):
+    d = root / f"code_sign_clone.{name}"
+    (d / "Google Chrome.app").mkdir(parents=True)
+    (d / "Google Chrome.app" / "blob").write_bytes(b"x" * size)
+    os.utime(d, (mtime, mtime))
+    return d
+
+
+def test_chrome_clone_candidates_keep_the_newest_and_skip_non_clones(tmp_path):
+    root = tmp_path / "com.google.Chrome.code_sign_clone"
+    old = _clone(root, "old", 1_000)
+    mid = _clone(root, "mid", 2_000)
+    newest = _clone(root, "new", 3_000)
+    (root / "unrelated").mkdir()
+    (root / "code_sign_clone.link").symlink_to(newest)
+    assert set(dar.chrome_clone_candidates(root)) == {old, mid}
+
+
+def test_chrome_clone_candidates_missing_or_unresolved_root_is_empty(tmp_path):
+    assert dar.chrome_clone_candidates(tmp_path / "nope") == []
+    assert dar.chrome_clone_candidates(None) == []
+
+
+def test_reclaim_chrome_clones_apply_spares_newest_and_held(tmp_path, monkeypatch):
+    root = tmp_path / "com.google.Chrome.code_sign_clone"
+    stale = _clone(root, "stale", 1_000)
+    held = _clone(root, "held", 2_000)
+    newest = _clone(root, "new", 3_000)
+    monkeypatch.setattr(dar, "CHROME_CLONE_ROOT", root)
+    monkeypatch.setattr(dar, "_lsof_in_use", lambda p: pathlib.Path(p) == held)
+    frees = iter([10 * GB, 14 * GB])
+    monkeypatch.setattr(dar, "_disk_free", lambda *a, **k: next(frees))
+    freed = dar._reclaim_chrome_clones(dry_run=False)
+    assert not stale.exists()
+    assert held.exists(), "a clone a running Chrome holds must never be removed"
+    assert newest.exists(), "the newest clone is always kept"
+    assert freed == 4 * GB, "freed must be the disk-free delta (clones share APFS blocks)"
+
+
+def test_reclaim_chrome_clones_dry_run_deletes_nothing(tmp_path, monkeypatch):
+    root = tmp_path / "com.google.Chrome.code_sign_clone"
+    stale = _clone(root, "stale", 1_000)
+    _clone(root, "new", 3_000)
+    monkeypatch.setattr(dar, "CHROME_CLONE_ROOT", root)
+    freed = dar._reclaim_chrome_clones(dry_run=True)
+    assert stale.exists()
+    assert freed >= 4096
+
+
+def test_reclaim_chrome_clones_no_root_is_a_noop(monkeypatch):
+    monkeypatch.setattr(dar, "CHROME_CLONE_ROOT", None)
+    monkeypatch.setattr(dar, "_resolve_chrome_clone_root", lambda: None)
+    assert dar._reclaim_chrome_clones(dry_run=False) == 0
+
+
+def test_chrome_clones_reclaimer_is_registered():
+    assert "chrome-clones" in [r["name"] for r in dar.build_reclaimers()]

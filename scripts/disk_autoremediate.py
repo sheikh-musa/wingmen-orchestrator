@@ -365,6 +365,68 @@ def _reclaim_chrome_cache(dry_run):
     return freed
 
 
+# Chrome code-sign clones (orch-console #77809, 2026-10-27): Chrome copies itself into
+# <DARWIN_USER_DIR>/X/com.google.Chrome.code_sign_clone/code_sign_clone.XXXXXX on launch and
+# never removes the old copies -- 19 had piled up (du 36GB, ~4GB real since the APFS clones
+# share blocks) when found on a 98%-full Mini. The newest clone is ALWAYS kept (a Chrome
+# mid-launch may not hold its files yet), and any clone a running Chrome holds is skipped by
+# the kill-time lsof guard. None = resolve lazily from getconf (no subprocess at import).
+CHROME_CLONE_ROOT = (pathlib.Path(os.environ["DISK_CHROME_CLONE_ROOT"])
+                     if os.environ.get("DISK_CHROME_CLONE_ROOT") else None)
+
+
+def _resolve_chrome_clone_root():
+    if CHROME_CLONE_ROOT is not None:
+        return CHROME_CLONE_ROOT
+    try:
+        r = subprocess.run(["getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True,
+                           text=True, timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    tmp = r.stdout.strip() if r.returncode == 0 else ""
+    if not tmp:
+        return None  # not macOS (or getconf refused) -- nothing to reap
+    return pathlib.Path(tmp).parent / "X" / "com.google.Chrome.code_sign_clone"
+
+
+def chrome_clone_candidates(root):
+    """Every `code_sign_clone.*` dir under `root` EXCEPT the newest (by mtime). Pure --
+    listdir/stat only. Symlinks and non-matching names are never candidates. Missing root ->
+    empty."""
+    if root is None:
+        return []
+    root = pathlib.Path(root)
+    try:
+        clones = [p for p in root.iterdir()
+                  if p.name.startswith("code_sign_clone.") and p.is_dir() and not p.is_symlink()]
+    except OSError:
+        return []
+    clones.sort(key=lambda p: p.stat().st_mtime)
+    return clones[:-1]
+
+
+def _reclaim_chrome_clones(dry_run):
+    """Remove stale Chrome code-sign clones. Apply measures the DISK-FREE delta, not the dir
+    sizes: the clones share APFS blocks, so summing _dir_size would claim ~9x what's freed.
+    Dry-run still reports the (overstated) dir-size estimate -- there's no effect to measure."""
+    cands = chrome_clone_candidates(_resolve_chrome_clone_root())
+    if dry_run:
+        return sum(_dir_size(d) for d in cands)
+    before = _disk_free()
+    for d in cands:
+        if _lsof_in_use(d):  # KILL-TIME re-verify — a running Chrome holds this clone
+            log(f"    chrome-clone {d} in use (lsof) — skipped")
+            continue
+        try:
+            shutil.rmtree(d)
+        except OSError as e:
+            raise RuntimeError(f"rmtree {d} failed: {e}") from e
+    after = _disk_free()
+    if before is None or after is None:
+        return 0
+    return max(0, after - before)
+
+
 def daily_backup_candidates(root, keep_n):
     """Dirs under `root` sorted by name (date-named -> lexicographic == chronological);
     return all but the newest `keep_n`. Pure -- listdir only, no deletion. Missing root
@@ -487,6 +549,7 @@ def build_reclaimers():
 
     reclaimers.append({"name": "next-cache", "apply": _reclaim_next_cache})
     reclaimers.append({"name": "chrome-cache", "apply": _reclaim_chrome_cache})
+    reclaimers.append({"name": "chrome-clones", "apply": _reclaim_chrome_clones})
     reclaimers.append({"name": "library-caches", "apply": _reclaim_library_caches})
     reclaimers.append({"name": "daily-backups", "apply": _reclaim_daily_backups})
     return reclaimers
