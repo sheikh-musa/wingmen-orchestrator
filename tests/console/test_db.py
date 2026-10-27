@@ -264,3 +264,19 @@ def test_delivery_times_never_render_raw_captured_ask(asks_delivery_db):
     nm = out["not_measured"][0]
     assert nm["line"] == "(awaiting triage)", "not-measured rows honor the same rule"
     assert "total_hours" not in nm, "honesty: not-measured rows carry no time field"
+
+
+def test_delivery_times_json_serializable(asks_delivery_db):
+    """The /api/build-status contract: every field is JSON-serializable AS-IS
+    (app.py's _json uses plain json.dumps — a raw datetime 500s the whole
+    route, the live fc-v87 first-ship bug caught on the real console)."""
+    import json as _json
+
+    out = db.fetch_ask_delivery_times()
+    # the exact call app.py makes
+    _json.dumps({"programmes": [], "delivery_times": out})
+    for r in out["measured"]:
+        assert isinstance(r["asked_at"], str), f"asked_at must be ISO text: {r['asked_at']!r}"
+        assert isinstance(r["delivered_at"], str)
+    for r in out["not_measured"]:
+        assert isinstance(r["asked_at"], str)

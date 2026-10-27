@@ -758,7 +758,7 @@ def fetch_ask_delivery_times(limit: int = 50) -> dict:
         "  COALESCE(a.operator_summary, a.triage_summary, '(awaiting triage)') "
         "AS line, "
         "  a.created_at AS asked_at, a.delivered_at, "
-        "  round(extract(epoch FROM (a.delivered_at - a.created_at))/3600.0, 1) AS total_hours, "
+        "  round(extract(epoch FROM (a.delivered_at - a.created_at))/3600.0, 1)::float8 AS total_hours, "
         "  a.ask_surface AS surface "
         "FROM operator_asks a "
         "WHERE a.delivered_at IS NOT NULL "
@@ -776,6 +776,13 @@ def fetch_ask_delivery_times(limit: int = 50) -> dict:
     )
     measured = _query(measured_sql, [limit])
     not_measured = _query(not_measured_sql, [limit])
+    # app.py's _json is plain json.dumps — datetimes must leave here as ISO
+    # text or the whole /api/build-status route 500s (the live fc-v87
+    # first-ship bug; locked by test_delivery_times_json_serializable).
+    for r in measured + not_measured:
+        for k in ("asked_at", "delivered_at"):
+            if r.get(k) is not None and not isinstance(r[k], str):
+                r[k] = r[k].isoformat()
     return {
         "measured": measured,
         "not_measured": not_measured,
