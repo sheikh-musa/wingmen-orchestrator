@@ -60,6 +60,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.lib.agent_identity import IdentityError, resolve_agent_id  # noqa: E402
 from scripts.lib.bus_pii_redact import redact_pii  # noqa: E402
+from scripts.lib.singleton_bases import is_singleton_base  # noqa: E402
 
 _VALID_PRIORITIES = ("P0", "P1", "P2", "P3")
 _VALID_TYPES = (
@@ -140,8 +141,8 @@ def refuse_if_base_has_live_instances(to: str, to_base: bool, dsn: str | None = 
     their own instance address, not the base -- orch-console lost 5 rows to
     this on 2026-10-01 even with a memory rule in place (a promise doesn't
     survive a context reset, same lesson as the --priority fix above)."""
-    if to_base:
-        return
+    if to_base or is_singleton_base(to):
+        return  # a singleton's base address IS the body (orch-console #77922)
     instances = live_instance_ids(to, dsn=dsn)
     if not instances:
         return
