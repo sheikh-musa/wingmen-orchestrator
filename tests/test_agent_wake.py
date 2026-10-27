@@ -325,3 +325,55 @@ class TestIsWakeSuppressedByPause:
         raise, not suppress) — same fail-open contract as the injectable path."""
         monkeypatch.setattr(agent_wake, "_DSN", None)
         assert agent_wake.is_wake_suppressed_by_pause("cc-ihsanos", "P2") is False
+
+
+# ── cross-host guard on the cwd fallback (cc-fleet-health, 2026-10-27) ─────────────────────
+# gzb resolved the Mini's cc-cosem-platform-4 (sessions not live on gzb) onto ITS OWN idle
+# cosem-convergence pane via the cwd fallback, so gzb's idle-unread sweep read the wrong pane
+# as "idle", nudged it and warned cc-fleet-health for hours.
+def _fallback_only(monkeypatch):
+    monkeypatch.setattr(agent_wake, "_candidate_sessions", lambda a: [])
+    monkeypatch.setattr(agent_wake, "_first_live_session", lambda c, **k: None)
+    monkeypatch.setattr(agent_wake, "_expected_cwd_tokens", lambda a: ["cosem-platform"])
+    monkeypatch.setattr(agent_wake, "_live_claude_panes", lambda: [
+        {"session": "cosem-convergence", "cwd": "/home/u/wingmen/projects/cosem-platform.wt-x"}])
+
+
+def test_cwd_fallback_never_resolves_an_agent_registered_only_on_another_host(monkeypatch):
+    _fallback_only(monkeypatch)
+    out = agent_wake.resolve_tmux_session(
+        "cc-cosem-platform-4", host_source=lambda a: ["Sheikhs-Mini"], local_host="gzbai")
+    assert out is None
+
+
+def test_cwd_fallback_still_resolves_an_agent_registered_on_this_host(monkeypatch):
+    _fallback_only(monkeypatch)
+    out = agent_wake.resolve_tmux_session(
+        "cc-cosem-platform-4", host_source=lambda a: ["gzbai"], local_host="gzbai")
+    assert out == "cosem-convergence"
+
+
+def test_cwd_fallback_unchanged_when_host_is_unknown(monkeypatch):
+    # Lookup failure (None) or no recorded host ([]) is not evidence of foreignness: keep the
+    # old behavior so a DB hiccup can never cost a wake.
+    _fallback_only(monkeypatch)
+    for hosts in (None, []):
+        out = agent_wake.resolve_tmux_session(
+            "cc-x", host_source=lambda a, h=hosts: h, local_host="gzbai")
+        assert out == "cosem-convergence"
+
+
+def test_cwd_fallback_resolves_when_any_family_host_is_local(monkeypatch):
+    _fallback_only(monkeypatch)
+    out = agent_wake.resolve_tmux_session(
+        "cc-cosem-platform", host_source=lambda a: ["Sheikhs-Mini", "gzbai.local"],
+        local_host="gzbai")
+    assert out == "cosem-convergence"
+
+
+def test_live_registered_session_is_not_affected_by_the_host_guard(monkeypatch):
+    monkeypatch.setattr(agent_wake, "_candidate_sessions", lambda a: ["mine"])
+    monkeypatch.setattr(agent_wake, "_first_live_session", lambda c, **k: "mine")
+    out = agent_wake.resolve_tmux_session(
+        "cc-y", host_source=lambda a: pytest.fail("host guard must not run"), local_host="z")
+    assert out == "mine"
