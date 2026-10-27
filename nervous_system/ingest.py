@@ -699,6 +699,21 @@ def empty_allowlist_rows(group: list[Channel]) -> list[str]:
     return [ch.key for ch in group if not (ch.allowed_chat_ids or ch.allowed_usernames)]
 
 
+def invite_pending(conn, channel_key: str) -> bool:
+    """op#34846: True while an unused, unexpired invite is outstanding for the
+    channel — the window in which its empty allowlist is the designed pre-bind
+    state (the pre-GATE bind hook answers the '/start <token>' deep-link tap),
+    not a misconfiguration."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM bot_channel_invites "
+            "WHERE channel_key = %s AND used_at IS NULL AND expires_at > now() "
+            "LIMIT 1",
+            (channel_key,),
+        )
+        return cur.fetchone() is not None
+
+
 def match_channel_in_group(group: list[Channel], chat_id: int | None,
                             username: str | None) -> Channel | None:
     """Which row in this token's group handles an update, by chat_id/username
@@ -1658,7 +1673,26 @@ async def _run_token_cycle(token_env_key: str, channels: dict[str, Channel],
         _log_line(f"WATCHDOG: {token_env_key}: overlapping allowed_chat_ids across "
                   f"{sorted(c.key for c in group)} ({overlap}) — refusing to poll until fixed")
         return last_db_alert, ERROR_BACKOFF
-    for misconfigured_key in empty_allowlist_rows(group):
+    misconfigured = empty_allowlist_rows(group)
+    if misconfigured:
+        # op#34846 fast-follow (console-revamp #78815): an empty allowlist is
+        # the DESIGNED pre-bind state while an unused, unexpired invite is
+        # outstanding — the pre-GATE bind hook answers the deep-link tap, so
+        # the "never match any message" claim below is stale for exactly that
+        # window. The check costs one connection only when a group actually
+        # has an empty-allowlist row.
+        # (#78884, orch-console 78883 — GO condition on PR #556): this
+        # connect runs inside the inbound daemon cycle, and the Mini
+        # demonstrably loses DNS for minutes at a time — any failure here
+        # logs one line and falls back to the pre-fix behavior (keep the
+        # warning). Fail loud, never crash the poller.
+        try:
+            with psycopg.connect(_dsn()) as wconn:
+                misconfigured = [k for k in misconfigured if not invite_pending(wconn, k)]
+        except Exception as exc:  # noqa: BLE001 — the whole point is "never crash here"
+            _log_line(f"WATCHDOG: invite-pending check failed ({type(exc).__name__}) -- "
+                      "warning on all empty-allowlist rows")
+    for misconfigured_key in misconfigured:
         _log_line(f"WATCHDOG: {token_env_key}: '{misconfigured_key}' has an EMPTY "
                   f"allowed_chat_ids/allowed_usernames in a {len(group)}-channel "
                   "token group — it will never match any message")

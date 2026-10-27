@@ -125,6 +125,19 @@ _BOT_CHANNELS_DDL = """
       updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
     )
 """
+# migration 126's table (sha256-at-rest invites); the invite-bind tests
+# import this from here so there is exactly ONE definition of the shape.
+_INVITES_DDL = """CREATE TABLE bot_channel_invites (
+      id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      channel_key   TEXT NOT NULL REFERENCES bot_channels(channel_key) ON DELETE CASCADE,
+      token_hash    TEXT NOT NULL UNIQUE,
+      expires_at    TIMESTAMPTZ NOT NULL,
+      used_at       TIMESTAMPTZ,
+      bound_chat_id BIGINT,
+      created_by    TEXT,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+"""
 _SUPPORT_DDL = (
     """CREATE TABLE ingest_dedup (
          channel_key        TEXT NOT NULL REFERENCES bot_channels(channel_key) ON DELETE CASCADE,
@@ -159,6 +172,11 @@ _SUPPORT_DDL = (
          attempts INT NOT NULL DEFAULT 0, last_error TEXT,
          created_at TIMESTAMPTZ NOT NULL DEFAULT now(), sent_at TIMESTAMPTZ
        )""",
+    # migration 126: the empty-allowlist watchdog reads this table too now
+    # (invite_pending, op#34846 fast-follow b), not just try_invite_bind —
+    # every harness that drives _run_token_cycle needs it or the watchdog's
+    # pending-invite check dies on UndefinedTable before it can warn.
+    _INVITES_DDL,
 )
 
 
