@@ -61,6 +61,11 @@ _date_weekday_guard "$TEXT" || exit 6
 
 ORCH_DIR="$ORCH_DIR" PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" - "$CHANNEL" "$TEXT" <<'PY'
 import os, re, sys, shutil, subprocess, psycopg
+# Musa op#34845, bus #78757/#78763 (PR-B step 2): the SUPERVISED-phase draft used
+# to be a raw psycopg INSERT INTO agent_messages; routed through scripts.bus_send's
+# send() (-> post_agent_message RPC) instead, same sanctioned path as every other
+# migrated writer.
+from scripts.bus_send import send as bus_send
 
 CHANNEL, TEXT = sys.argv[1], sys.argv[2]
 ORCH = os.environ.get("ORCH_DIR", os.path.expanduser("~/wingmen/orchestrator"))
@@ -142,13 +147,10 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         sys.exit(0)
 
     if phase == "supervised":
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent, sub_tag, to_agent, message_type, subject, "
-            "body, priority, requires_response) VALUES (%s,%s,%s,'review_request',%s,%s,'P1',true) "
-            "RETURNING id",
-            (AGENT, SUB_TAG, reviewer,
-             f"{CHANNEL} reply DRAFT — review + send", TEXT))
-        msg_id = cur.fetchone()[0]
+        msg_id, _thread_id = bus_send(
+            AGENT, reviewer, "review_request",
+            f"{CHANNEL} reply DRAFT — review + send", TEXT, "P1",
+            req=True, sub_tag=SUB_TAG, dsn=dsn)
         log_out(f"{tag}-draft", str(chat_ids[0]) if chat_ids else None, False)
         conn.commit()
         print(f"SUPERVISED phase — draft filed for {reviewer} as agent_messages #{msg_id}. "

@@ -88,9 +88,31 @@ def db(pg_dsn):
             id serial PRIMARY KEY, direction text, channel text, chat_id text,
             tag text, text text, delivered boolean, from_name text)""")
         cur.execute("""CREATE TABLE agent_messages (
-            id serial PRIMARY KEY, from_agent text, sub_tag text, to_agent text,
+            id bigserial PRIMARY KEY, from_agent text, sub_tag text, to_agent text,
             message_type text, subject text, body text, priority text,
-            requires_response boolean)""")
+            requires_response boolean, thread_id uuid, is_test boolean DEFAULT false,
+            posted_by_identity text)""")
+        # Minimal post_agent_message RPC, same 11-param signature/shape as the real one
+        # (migration 122) -- bus_send.py's send() calls this RPC, never a raw INSERT
+        # (PR-B step 2, Musa op#34845). Mirrors migrations/122_post_agent_message_
+        # optional_params.sql's body exactly, just without the ownership/grant statements
+        # this throwaway schema has no roles for.
+        cur.execute("""CREATE FUNCTION post_agent_message(
+            p_from_agent TEXT, p_to_agent TEXT, p_message_type TEXT, p_subject TEXT,
+            p_body TEXT, p_priority TEXT, p_requires_response BOOLEAN, p_thread_id UUID,
+            p_sub_tag TEXT, p_is_test BOOLEAN DEFAULT FALSE, p_posted_by_identity TEXT DEFAULT NULL
+        ) RETURNS TABLE(id BIGINT, thread_id UUID) LANGUAGE plpgsql AS $fn$
+        BEGIN
+            RETURN QUERY
+            INSERT INTO agent_messages
+                (from_agent, to_agent, message_type, subject, body, priority,
+                 requires_response, thread_id, sub_tag, is_test, posted_by_identity)
+            VALUES
+                (p_from_agent, p_to_agent, p_message_type, p_subject, p_body, p_priority,
+                 p_requires_response, p_thread_id, p_sub_tag, p_is_test, p_posted_by_identity)
+            RETURNING agent_messages.id, agent_messages.thread_id;
+        END;
+        $fn$""")
         cur.execute("""INSERT INTO bot_channels VALUES
             ('t-supervised','FAKE_TOKEN',ARRAY[999]::bigint[],'tsup',
              '{"agent_phase":"supervised","agent_reviewer":"orch-console"}'::jsonb),
@@ -107,6 +129,19 @@ def _run(channel, text, dsn):
     env.pop("CC_BASE_AGENT_ID", None)
     return subprocess.run([str(SCRIPT), channel, text],
                           capture_output=True, text=True, timeout=90, env=env)
+
+
+def test_supervised_reply_posts_the_draft_through_post_agent_message_rpc(db):
+    # Musa op#34845 (PR-B step 2): the draft must go through post_agent_message
+    # (bus_send.py's send()), never a raw INSERT INTO agent_messages. A raw INSERT
+    # against this fixture's table would leave thread_id NULL -- only the RPC sets
+    # it -- so this is a real discriminator between the two code paths, not just a
+    # same-either-way check.
+    r = _run("t-supervised", f"the prod db is {DSN_SECRET} — please migrate", db)
+    assert r.returncode == 0, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+    with psycopg.connect(db) as c, c.cursor() as cur:
+        cur.execute("SELECT thread_id FROM agent_messages ORDER BY id DESC LIMIT 1")
+        assert cur.fetchone()[0] is not None, "thread_id is NULL -- draft bypassed post_agent_message"
 
 
 def test_supervised_reply_redacts_dsn_in_draft_and_log(db):
