@@ -121,6 +121,31 @@ BEGIN
     END IF;
 END $$;
 
+-- Musa op#34845, bus #78576 (console's live repro on PG17.11, NOT GO on head 471296d):
+-- live's applying role (postgres) is rolsuper=FALSE, rolcreaterole=TRUE, with
+-- createrole_self_grant empty. Since PG16, a CREATEROLE (non-superuser) role that
+-- creates another role gets ADMIN on it automatically but NOT SET, unless
+-- createrole_self_grant includes 'set' -- live's is empty. Without SET, the ALTER
+-- FUNCTION ... OWNER TO bus_writer lines below fail with "must be able to SET ROLE
+-- bus_writer" and the whole migration transaction rolls back. This GRANT gives the
+-- applying role SET explicitly (it already holds ADMIN automatically, so it may grant
+-- itself SET); INHERIT FALSE on purpose, so the applying role does not silently gain
+-- bus_writer's privileges in its ambient session -- it must explicitly SET ROLE to act
+-- as bus_writer, same as any other caller would.
+GRANT bus_writer TO CURRENT_USER WITH SET TRUE, INHERIT FALSE;
+
+-- PostgreSQL's own rule for ALTER ... OWNER TO (any object, any version): the new
+-- owner role must hold CREATE on the object's schema, "so altering the owner doesn't
+-- do anything you couldn't do by dropping and recreating the object." Without this,
+-- the ALTER FUNCTION ... OWNER TO lines below fail with "permission denied for schema
+-- public" -- caught by the same live-shape test fixture as the SET-ROLE fix above
+-- (Musa op#34845, bus #78576), a second real gap that error surfaced once the first
+-- (SET ROLE) was fixed. This does widen bus_writer's footprint slightly (it could now
+-- create new objects in public), which is an unavoidable consequence of a non-
+-- superuser NOLOGIN role owning schema-resident functions at all, not something a
+-- narrower grant can substitute for.
+GRANT CREATE ON SCHEMA public TO bus_writer;
+
 GRANT INSERT ON agent_messages TO bus_writer;
 GRANT SELECT (id, thread_id, from_agent) ON agent_messages TO bus_writer;
 GRANT UPDATE (delivered_at, lease_expires_at, acked_at) ON agent_messages TO bus_writer;
@@ -177,5 +202,17 @@ ALTER FUNCTION ack_message(bigint) OWNER TO bus_writer;
 -- Musa op#34845, bus #78531: close the anon/authenticated EXECUTE hole (see header).
 -- FROM PUBLIC repeated here too (harmless no-op if migration 117's own REVOKE already
 -- holds) so this file is self-contained and correct regardless of 117's state.
+-- ORDER/AUTHORITY (Musa op#34845, bus #78576 fix #2 -- REVISED from the originally
+-- instructed "REVOKE before OWNER TO"): that literal ordering broke idempotency --
+-- on a RE-RUN, bus_writer already owns both functions from the first apply, so a
+-- REVOKE run as the applying role (which only has SET on bus_writer, not ownership
+-- or GRANT OPTION once transferred) fails with "permission denied for function
+-- mark_delivered". Caught by the required re-run test, not by re-reading the
+-- instruction alone. Fixed by running the REVOKE explicitly AS bus_writer instead,
+-- AFTER the OWNER TO lines above -- unambiguous authority (bus_writer always owns
+-- these two functions at this point, both on a fresh apply and a re-run) via a
+-- deliberate role switch rather than ordering-dependent ownership timing.
+SET ROLE bus_writer;
 REVOKE EXECUTE ON FUNCTION mark_delivered(bigint,integer) FROM PUBLIC, anon, authenticated;
 REVOKE EXECUTE ON FUNCTION ack_message(bigint) FROM PUBLIC, anon, authenticated;
+RESET ROLE;

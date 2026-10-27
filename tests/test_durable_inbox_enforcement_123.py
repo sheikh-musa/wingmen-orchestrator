@@ -203,7 +203,12 @@ def _setup_base_and_123(cur):
     extension), then 123 (the additive half -- filename order is now dependency
     order, see 122's own header for the renumbering story). 124 (the revoke)
     does not ship in this PR (Musa op#34845, bus #78393 ruling) -- see
-    migrations/123_durable_inbox_enforce_bus_writer.sql's header."""
+    migrations/123_durable_inbox_enforce_bus_writer.sql's header.
+
+    `cur` must already be connected AS live_applier (see additive_db below), not the
+    initdb superuser -- this function creates the public schema, agent_messages,
+    work_item and the RPCs itself, so live_applier ends up owning all of it, exactly
+    mirroring how postgres owns these objects on the real substrate."""
     migration_117 = (MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text()
     migration_123 = (MIGRATIONS_DIR / "123_durable_inbox_enforce_bus_writer.sql").read_text()
     migration_122 = (MIGRATIONS_DIR / "122_post_agent_message_optional_params.sql").read_text()
@@ -223,6 +228,14 @@ def _setup_base_and_123(cur):
         cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
         if cur.fetchone() is None:
             cur.execute(f"CREATE ROLE {role}")
+    # live_applier (CREATEROLE) gets automatic ADMIN on these from creating them (PG16+),
+    # but NOT SET -- same createrole_self_grant-empty rule as bus_writer (Musa op#34845,
+    # bus #78576). Tests below `SET ROLE service_role/anon/authenticated` to simulate
+    # different real callers, which needs SET; this is test-fixture-only plumbing (on the
+    # real substrate these roles pre-exist, postgres doesn't create them), so it is NOT
+    # part of migration 123 -- granted here, not in the migration file. INHERIT FALSE so
+    # live_applier never ambiently gains their privileges outside an explicit SET ROLE.
+    cur.execute("GRANT anon, authenticated, service_role TO live_applier WITH INHERIT FALSE, SET TRUE")
 
     # Supabase's standing ALTER DEFAULT PRIVILEGES rule (Musa op#34845, bus #78531
     # console live finding): grants EXECUTE on every NEW function to anon/authenticated/
@@ -264,11 +277,44 @@ def additive_db(pg_dsn):
     124, the revoke) is pending a full writer inventory (Musa op#34845, bus #78393
     ruling), not an intermediate stage. service_role (and postgres) must still be able
     to write directly; that is the whole point of splitting the revoke out (bus #74885,
-    reaffirmed by bus #78393)."""
-    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+    reaffirmed by bus #78393).
+
+    Musa op#34845, bus #78576 (console's live repro on PG17.11, NOT GO on 471296d):
+    live's applying role (postgres) is rolsuper=FALSE, rolcreaterole=TRUE,
+    rolbypassrls=TRUE, with createrole_self_grant empty -- NOT the initdb superuser
+    pg_dsn's own connection uses. Since PG16, a CREATEROLE (non-superuser) role that
+    creates another role gets ADMIN on it automatically but NOT SET, unless
+    createrole_self_grant includes 'set' (live's is empty) -- so `ALTER FUNCTION ...
+    OWNER TO bus_writer` (which requires SET on bus_writer) fails live with "must be
+    able to SET ROLE bus_writer", rolled back whole-transaction. Running setup as the
+    initdb superuser (the old approach) always has SET on every role implicitly, so it
+    never caught this. `live_applier` mirrors live's postgres role shape exactly;
+    everything from the public schema down is created BY it (not just granted to it),
+    so it owns it all, same as postgres does live -- that ownership is what lets it run
+    migrations 117/122/123 at all without being superuser."""
+    with psycopg.connect(pg_dsn, autocommit=True) as super_conn, super_conn.cursor() as super_cur:
+        super_cur.execute(
+            "SELECT 1 FROM pg_roles WHERE rolname='live_applier'"
+        )
+        if super_cur.fetchone() is None:
+            super_cur.execute(
+                "CREATE ROLE live_applier LOGIN NOSUPERUSER CREATEROLE BYPASSRLS"
+            )
+        # initdb's own 'public' schema is owned by the cluster superuser, not by any
+        # CREATEROLE role -- hand it to live_applier so it can DROP/recreate it itself
+        # below (_setup_base_and_123 does this every run for a clean reset), same as
+        # live's postgres owns the real substrate's public schema.
+        super_cur.execute("ALTER SCHEMA public OWNER TO live_applier")
+        # CREATE SCHEMA needs CREATE on the database itself (PG15+ no longer grants
+        # this to PUBLIC by default) -- live's postgres role has it on the real
+        # substrate database or it could never have created anything there.
+        super_cur.execute("GRANT CREATE ON DATABASE postgres TO live_applier")
+
+    applier_dsn = pg_dsn.replace("user=postgres", "user=live_applier")
+    with psycopg.connect(applier_dsn, autocommit=True) as conn, conn.cursor() as cur:
         _setup_base_and_123(cur)
 
-    conn = psycopg.connect(pg_dsn)
+    conn = psycopg.connect(applier_dsn)
     yield conn
     conn.close()
 
