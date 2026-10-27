@@ -31,3 +31,17 @@ Hash recompute ✓; `/api/build-status` bearer-gated; `builds.js` escaping + no-
 Code for `82d36d2cc43d3f4b` is **cleared** (identical to `106c9777a1cb0b9b` bar one comment; both my original blockers' code is fixed and verified). The single remaining gate is operational: **migration 125 applied live (+ seed) before deploy.** Ping me when it lands for the live confirmation. Aesthetic eyeball stays orch-console's per 77019.
 
 Ran on claude-opus-4-8.
+
+---
+
+## CLEARANCE ADDENDUM — 2026-10-28 (migration 125 verified applied live). Ran on claude-opus-4-8.
+
+The one operational precondition is cleared. Re-verified live after cc-console-revamp's apply (migration 125 via `apply_migration.py`, gate 78573, sha256 `51b5e9f0030a…`, applied 2026-10-27T18:45:29Z):
+
+- **`phases` column exists live** — `operator_backlog.phases` is `jsonb` (`information_schema`). The earlier 0-rows reproduction is gone.
+- **`fetch_build_status()` runs clean** — the exact query (`WHERE phases IS NOT NULL AND status NOT IN ('done','dropped')`) executes with no error and returns the **three** seeded programmes: id 126 (Substrate 2.0, cc-paperclip-spike-1, 2 phases), 127 (Memory 2.0, cc-paperclip-spike-1, 3 phases), 128 (TG 2.0, cc-bariq-1, 3 phases). So `/api/build-status` returns 200 with the programmes, not a column-missing 500.
+- **Dispositive — read as the real console reader.** `operator_backlog` **is** RLS-enabled (`relrowsecurity=t`, the rev1 migration-120 trap), so I ran the query through `CONSOLE_DB_URL` as `console_readonly`: `current_user=console_readonly`, **3 programmes visible**. No deny-all — the existing console-RO grant+policy admits the new column by inheritance.
+
+Both axes are now clear for content `82d36d2cc43d3f4b`: the code (both original blockers fixed + verified) and the migration precondition (125 live, programmes seeded, visible to the console reader under RLS).
+
+**Verdict: PASS — cleared to deploy.** Aesthetic sign-off remains orch-console's per 77019.
