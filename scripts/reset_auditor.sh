@@ -226,20 +226,14 @@ for _i in 1 2 3 4; do
 done
 if [ "$_cleared" != 1 ]; then
   echo "[reset_auditor] LAYER-2 VERIFY: FAIL — /clear did NOT execute on $BASE. NOT sending boot." >&2
-  if "$PY" - "$RESET_BY" "$BASE" <<'PYESC' 2>/dev/null
-import sys
-sys.path.insert(0, __import__("os").path.join(__import__("os").environ.get("ORCH_DIR", ""), "scripts", "lib"))
-from substrate_dsn import dsn_from_env_file
-import psycopg
-by, base = sys.argv[1], sys.argv[2]
-with psycopg.connect(dsn_from_env_file()) as c, c.cursor() as cur:
-    cur.execute("INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response) "
-                "VALUES (%s,'orch-console','blocker',%s,%s,'P1',true)",
-                (by, f"LOUD: reset_auditor {base} STUCK — /clear did not take, recycle NOT done",
-                 f"reset_auditor.sh fired on {base} but the /clear did not execute; NO boot was sent. "
-                 f"The body is still on its old context. Re-fire on a clean composer."))
-    c.commit()
-PYESC
+  # Musa op#34845, bus #78757/#78763 (PR-B step 2): was a raw psycopg INSERT INTO
+  # agent_messages; routed through scripts/bus_send.py, same sanctioned path as
+  # every other migrated writer.
+  if "$PY" "$ORCH_DIR/scripts/bus_send.py" --to orch-console --from "$RESET_BY" \
+       --type blocker --priority P1 --req \
+       --subject "LOUD: reset_auditor $BASE STUCK — /clear did not take, recycle NOT done" \
+       --body "reset_auditor.sh fired on $BASE but the /clear did not execute; NO boot was sent. The body is still on its old context. Re-fire on a clean composer." \
+       >/dev/null 2>&1
   then echo "[reset_auditor] escalated LOUD failure to orch-console." >&2
   else echo "[reset_auditor] WARNING: could NOT write the escalation row — escalate MANUALLY. The recycle FAILED." >&2
   fi

@@ -302,27 +302,16 @@ if [ "$_cleared" != 1 ]; then
   # after the row commits; exit 1 if DSN unset OR the write raises — so we never CLAIM an
   # operator escalation that didn't land (the very false-'done' Layer 2 exists to kill).
   _escalated=0
-  if [ -x "$HOME/wingmen/orchestrator/.venv/bin/python3" ]; then
-    if "$HOME/wingmen/orchestrator/.venv/bin/python3" - "$SESS" 2>/dev/null <<'PYESC'
-import os, sys, psycopg
-dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
-sess = sys.argv[1] if len(sys.argv) > 1 else "nazim"
-if not dsn:
-    sys.exit(1)  # could NOT escalate
-body = (f"LOUD: reset_{sess} FIRED but the /clear did NOT execute (dim-queued/jam, op#11594) — the "
-        f"recycle is STUCK, NOT done. The body is still on its bloated context and NO boot instruction "
-        f"was injected. OPERATOR: the last recycle did not take — please re-fire on a clean composer. "
-        f"(Auto-escalated by the hardened reset; L1 pause + L3 gate should prevent this, so a recurrence "
-        f"warrants investigation.)")
-with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-    cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-    cur.execute(
-        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response) "
-        "VALUES ('cc-fleet-health','orch-console','blocker',%s,%s,'P1',true)",
-        (f"LOUD: reset_{sess} STUCK — /clear did not take, recycle NOT done (relay to operator)", body))
-    conn.commit()
-sys.exit(0)  # escalated OK
-PYESC
+  _py="$HOME/wingmen/orchestrator/.venv/bin/python3"
+  if [ -x "$_py" ]; then
+    # Musa op#34845, bus #78757/#78763 (PR-B step 2): was a raw psycopg INSERT INTO
+    # agent_messages; routed through scripts/bus_send.py, same sanctioned path as
+    # every other migrated writer.
+    if "$_py" "$HOME/wingmen/orchestrator/scripts/bus_send.py" --to orch-console --from cc-fleet-health \
+         --type blocker --priority P1 --req \
+         --subject "LOUD: reset_${SESS} STUCK — /clear did not take, recycle NOT done (relay to operator)" \
+         --body "LOUD: reset_${SESS} FIRED but the /clear did NOT execute (dim-queued/jam, op#11594) — the recycle is STUCK, NOT done. The body is still on its bloated context and NO boot instruction was injected. OPERATOR: the last recycle did not take — please re-fire on a clean composer. (Auto-escalated by the hardened reset; L1 pause + L3 gate should prevent this, so a recurrence warrants investigation.)" \
+         >/dev/null 2>&1
     then _escalated=1; fi
   fi
   if [ "$_escalated" = 1 ]; then
