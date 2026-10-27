@@ -539,3 +539,41 @@ def test_answers_on_already_closed_target_is_idempotent_ok(operator_ledger_db):
     with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
         cur.execute("SELECT closed_reason FROM operator_asks WHERE id=%s", (target,))
         assert cur.fetchone() == ("done",)
+
+
+def test_answers_cli_on_already_closed_target_exits_zero(operator_ledger_db, capsys):
+    """cc-quality 78363/78368 finding 2 (wet-proven): the ANSWER row is still
+    triage-eligible but the TARGET ask is already closed — the idempotent
+    re-run shape a sweeper hits. The CLI must report ok/exit 0 (the goal
+    state holds), never the old exit-2 "0 rows updated", which reads as a
+    hard failure on a correct DB."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        target = _insert_captured(c, "[__test__] the ask already closed")
+        cur = c.cursor()
+        cur.execute(
+            "UPDATE operator_asks SET triage_state='done', closed_at=now(), "
+            "closed_reason='done' WHERE id=%s", (target,))
+        ans = _insert_captured(c, "[__test__] the answering message")
+        c.commit()
+    rc = at.main([str(ans), "not", "--answers", str(target)])
+    out = capsys.readouterr().out
+    assert rc == 0, f"already-closed target is idempotent ok, not a failure (out={out!r})"
+    assert out.startswith("ok")
+
+
+def test_answers_primary_miss_exits_2_and_leaves_target_open(operator_ledger_db, capsys):
+    """cc-quality 78363/78368 finding 2, second face: when the PRIMARY triage
+    update touches nothing (typo'd item id), the CLI must fail — and the
+    --answers close must NOT have fired either: a triage that didn't happen
+    cannot be the evidence that an ask was answered."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        target = _insert_captured(c, "[__test__] open target ask")
+        c.commit()
+    rc = at.main([str(987654), "not", "--answers", str(target)])
+    assert rc == 2
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT closed_at FROM operator_asks WHERE id=%s", (target,))
+        assert cur.fetchone()[0] is None, \
+            "target must stay open when the primary triage no-ops"

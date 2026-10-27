@@ -21,7 +21,9 @@ Usage:
   (any action) [--answers ASK_ID] — the row being triaged IS Musa's answer to
   open ask ASK_ID: confirm+close it, linking the answering operator message
   (bus #78269 — he answers with fresh messages, not TG replies, so the
-  reply-link auto-close misses those).
+  reply-link auto-close misses those). Idempotent: an already-closed target
+  is exit-0 ok (goal state holds); the close only fires when the triage
+  itself applied (cc-quality 78363 finding 2).
 
 Migration 118 (orch-console bus #75387) adds the needs-Musa axis, orthogonal
 to the triage axis and usable with ANY action: --needs-musa on|off sets /
@@ -152,16 +154,21 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
 
     with psycopg.connect(dsn, autocommit=True, connect_timeout=10) as conn:
         with conn.cursor() as cur:
-            # --answers pre-check (bus #78269): validate the TARGET ask exists and
-            # grab the answering message ref BEFORE any write lands (autocommit —
-            # a post-UPDATE failure would leave the triage applied but the ask
-            # open). Fail fast so a typo'd ASK_ID changes nothing at all.
+            # --answers pre-check (bus #78269): validate the TARGET ask exists
+            # (and whether it is ALREADY closed — the idempotency input for the
+            # close below) and grab the answering message ref BEFORE any write
+            # lands (autocommit — a post-UPDATE failure would leave the triage
+            # applied but the ask open). Fail fast so a typo'd ASK_ID changes
+            # nothing at all.
             ans_ref = None
+            target_already_closed = False
             if answers is not None:
                 cur.execute(
-                    "SELECT id FROM operator_asks WHERE id=%s", (answers,))
-                if cur.fetchone() is None:
+                    "SELECT closed_at FROM operator_asks WHERE id=%s", (answers,))
+                tgt = cur.fetchone()
+                if tgt is None:
                     raise ValueError(f"--answers: operator_asks #{answers} does not exist")
+                target_already_closed = tgt[0] is not None
                 cur.execute(
                     "SELECT source_msg_id FROM operator_asks WHERE id=%s", (item_id,))
                 src = cur.fetchone()
@@ -249,6 +256,12 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                 params = (triaged_by, needs_musa, needs_musa, musa_summary, item_id)
 
             cur.execute(sql, params)
+            # The PRIMARY action's count is what the CLI exit code hangs on —
+            # never the --answers close's (cc-quality 78363 finding 2: with
+            # --answers, triage() used to return the close's rowcount, so an
+            # already-closed target exited 2 "0 rows updated" and a primary
+            # miss that still closed something exited 0 "ok").
+            n = cur.rowcount
 
             # --answers ASK_ID (bus #78269): the row just triaged IS Musa's
             # answer to open ask ASK_ID (he replied with a fresh message, not a
@@ -257,9 +270,12 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
             # (asks_close.py 'confirm': confirmed_at + closed_at +
             # closed_reason='operator_done'), evidence-linked to the answering
             # operator_messages row (ans_ref, resolved in the pre-check above).
-            # Idempotent on an already-closed target — the goal state already
-            # holds; the closed_at IS NULL guard leaves its existing close alone.
-            if answers is not None:
+            # Only when the primary triage APPLIED (n == 1) — a triage that
+            # touched nothing cannot be the evidence an ask was answered.
+            # Idempotent on an already-closed target (target_already_closed
+            # from the pre-check): the goal state holds, skip the write, and
+            # still report the primary's ok.
+            if answers is not None and n == 1 and not target_already_closed:
                 cur.execute(
                     "UPDATE operator_asks SET "
                     "  confirmed_at = now(), closed_at = now(), "
@@ -268,7 +284,7 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                     "WHERE id = %s AND closed_at IS NULL",
                     (ans_ref, triaged_by, answers),
                 )
-            return cur.rowcount
+            return n
 
 
 def main(argv=None) -> int:
@@ -284,7 +300,9 @@ def main(argv=None) -> int:
         return 2
     if n == 1:
         if args.answers is not None:
-            print(f"ok (ask #{args.answers} confirmed closed — answered here)")
+            # True on both close paths — just-now confirmed or already closed
+            # (idempotent re-run): the ask is closed and this row answers it.
+            print(f"ok (ask #{args.answers} closed — answered by this message)")
         else:
             print("ok")
         return 0

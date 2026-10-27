@@ -1722,14 +1722,26 @@ def test_api_fleet_no_asks_rows_waiting_count(server, monkeypatch):
              "updated_age_s": 30, "asked_age_s": 300},
         ],
     )
+    # fc-v86 orch-console 78374: the badge counts the BOARD's rows (the /asks
+    # hero derivation — db.needs_musa), NOT fetch_asks statuses.
+    monkeypatch.setattr(
+        _db, "fetch_fleet_asks",
+        lambda: [
+            {"id": 1, "text": "structural wait", "waiting_on_operator": True,
+             "needs_operator_decision": False},
+            {"id": 2, "text": "flagged at triage (migration 118)", "waiting_on_operator": False,
+             "needs_operator_decision": True},
+        ],
+    )
     r = httpx.get(server + "/api/fleet", headers=H(), timeout=10)
     assert r.status_code == 200
     body = r.json()
     # fc-v86 op#34852: the home card is GONE — /api/fleet ships NO asks rows at
     # all (the board lives at /api/asks-board; home shows only the badge count).
     assert "your_asks" not in body
-    # the top-bar badge count = the waiting rows, not the noisy open total
-    assert body["pulse"]["asks_waiting"] == 1
+    # the top-bar badge count = the needs-Musa rows (hero derivation), not the
+    # noisy open total and not fetch_asks' waiting_on_musa statuses
+    assert body["pulse"]["asks_waiting"] == 2
     # historical pulse keys keep their meaning (computed over the FULL board)
     assert body["pulse"]["asks_open"] == 3
     assert body["pulse"]["asks_needs"] == 0
@@ -1742,17 +1754,81 @@ def test_api_asks_waiting_requires_auth(server):
 
 
 def test_api_asks_waiting_count(server, monkeypatch):
-    """Lightweight count endpoint for the lanes.html top bar — same derivation
-    as the home card (status waiting_on_musa), so both badges always agree."""
+    """Lightweight count endpoint for the lanes.html top bar — the EXACT
+    derivation the /asks hero uses (db.needs_musa over fetch_fleet_asks
+    rows, orch-console 78374), so both badges always agree with the hero."""
     from nervous_system.console import db as _db
     monkeypatch.setattr(
-        _db, "fetch_asks",
+        _db, "fetch_fleet_asks",
         lambda: [
-            {"id": 1, "ask": "a", "status": "waiting_on_musa"},
-            {"id": 2, "ask": "b", "status": "waiting_on_musa"},
-            {"id": 3, "ask": "c", "status": "pending"},
+            {"id": 1, "text": "a", "waiting_on_operator": True,
+             "needs_operator_decision": False},
+            {"id": 2, "text": "b", "waiting_on_operator": False,
+             "needs_operator_decision": True},
+            {"id": 3, "text": "c", "waiting_on_operator": False,
+             "needs_operator_decision": False},
         ],
     )
     r = httpx.get(server + "/api/asks-waiting", headers=H(), timeout=5)
     assert r.status_code == 200
     assert r.json() == {"count": 2}
+
+
+def test_asks_badge_and_hero_share_one_needs_musa_derivation(server, monkeypatch):
+    """orch-console 78374 blocker (cc-quality 78363 finding 1): the top-bar
+    Asks badge undercounted the /asks Needs-Musa hero on LIVE data (badge 11,
+    hero 33) because the badge counted build_asks_query statuses
+    (waiting_on_operator only, operator surface) while the hero counts
+    build_fleet_asks_query rows with waiting_on_operator OR the migration-118
+    needs_operator_decision flag, across surfaces. The badge must call the
+    exact derivation the hero uses — same rows, same predicate function — and
+    this test seeds the divergent shape directly: rows with ONLY
+    needs_operator_decision set, plus a fetch_asks stub the badge must NOT
+    follow. The stub cannot be the proof, so the seed IS the divergence."""
+    from nervous_system.console import db as _db
+    fleet_rows = [
+        {"id": 1, "text": "structural wait (asks_open --ask)", "delegated_to": "orch-console",
+         "waiting_on_operator": True, "needs_operator_decision": False},
+        {"id": 2, "text": "flagged at triage (migration 118)", "delegated_to": "cc-irsyad",
+         "waiting_on_operator": False, "needs_operator_decision": True},
+        {"id": 3, "text": "flagged too, client-channel surface", "delegated_to": None,
+         "waiting_on_operator": False, "needs_operator_decision": True},
+        {"id": 4, "text": "build-time, not Musa's call", "delegated_to": "cc-cosem",
+         "waiting_on_operator": False, "needs_operator_decision": False},
+    ]
+    monkeypatch.setattr(_db, "fetch_fleet_asks", lambda: fleet_rows)
+    monkeypatch.setattr(_db, "fetch_recently_answered", lambda: [])
+    # /api/fleet keeps its own fetch_asks (historical pulse keys) — seeded to
+    # DISAGREE with the fleet rows so this test fails if the badge ever
+    # follows it again (that disagreement is the old defect, live 11 vs 33).
+    for fn in ("fetch_deploys", "fetch_needs_you", "fetch_coordinators",
+               "fetch_backlog", "fetch_pane_context", "fetch_pool_usage",
+               "fetch_queue", "fetch_inbox_backlog"):
+        monkeypatch.setattr(_db, fn, lambda: [])
+    monkeypatch.setattr(
+        _db, "fetch_asks",
+        lambda: [
+            {"id": 1, "ask": "the one structural wait", "delegated_to": "orch-console",
+             "waiting_on_operator": True, "chase_by": None, "status": "waiting_on_musa",
+             "updated_age_s": 10, "asked_age_s": 100},
+            {"id": 2, "ask": "lane building", "delegated_to": "cc-ihsanos",
+             "waiting_on_operator": False, "chase_by": None, "status": "in_progress",
+             "updated_age_s": 20, "asked_age_s": 200},
+        ],
+    )
+
+    # the hero's own count: /api/asks-board counts.needs_musa over the rows
+    # the client hero filters (needsMusa: waiting_on_operator OR flag)
+    board = httpx.get(server + "/api/asks-board", headers=H(), timeout=5).json()
+    hero = sum(1 for r in board["open"]
+               if r.get("waiting_on_operator") or r.get("needs_operator_decision"))
+    assert hero == 3, "hero counts the flag-only rows (11-vs-33 defect shape)"
+    assert board["counts"]["needs_musa"] == 3
+
+    # both badge surfaces must equal the hero count — NOT fetch_asks' statuses
+    r = httpx.get(server + "/api/asks-waiting", headers=H(), timeout=5)
+    assert r.status_code == 200
+    assert r.json() == {"count": 3}
+    r = httpx.get(server + "/api/fleet", headers=H(), timeout=10)
+    assert r.status_code == 200
+    assert r.json()["pulse"]["asks_waiting"] == 3
