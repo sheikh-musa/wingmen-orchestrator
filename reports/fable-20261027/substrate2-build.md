@@ -81,3 +81,35 @@ Preconditions: reconcile scheduled under launchd every 10 min (dry-run + page), 
 - `pytest tests/migrations/test_work_item_reconcile.py tests/migrations/test_114_work_item_ssot.py` → 33 passed (run with DATABASE_URL unset; the conftest guard refuses the production DSN).
 - `scripts/work_item_equivalence_proof.py --out …` → PASS, exit 0 (live, read-only, 19:21Z).
 - `scripts/work_item_reconcile.py --json` → `{'ABANDONED': 247}`, exit 2 (live, read-only, 19:24Z), no repair, no page.
+
+## NOVEL IDEAS (Musa op#34981-82, from the substrate 2.0 vantage point)
+
+### 1. Floors as executable rows: every governance floor is a SQL predicate that evaluates itself
+Today `docs/governance-floors.md` is prose that agents promise to remember. Migration 114 already shows the alternative: the state truth table IS the `work_item_derive_*()` function, so the doc and the code cannot drift. Generalize it: a `floor` table where each row carries a human sentence, the op# that ratified it, and a SQL predicate that must return zero rows. The reconcile loop evaluates every predicate every 10 minutes and pages on the first violating row, and the floors doc becomes a generated view of that table with a live "0 violations, checked 3 min ago" column per floor.
+- Feasible for us: the substrate, the reconcile loop, the page path and the audited-change pattern all exist now; the first floor row is the ABANDONED check built this run.
+- First step: a follow-up migration with `floor(id, sentence, op_ref, predicate_sql, enforced_in_code bool)` plus 5 rows ported from the floors doc; the reconcile script gains a `floors` pass.
+- Unlocks: a floor that cannot be written as a predicate is flagged as "promise, not code" at ratification time, and the joint one-system plan (#78481) gets its binding-rules table for free.
+
+### 2. work_item becomes the fleet's dispatch queue, and liveness comes from heartbeats, not source edits
+The 247 ABANDONED rows show the real gap: the ledger says "owned" while the owner's activity happens outside it. Flip the direction: the autoscaler boots lanes FROM `captured` rows, a lane claims a row by compare-and-swap, and its existing heartbeat touches `updated_at` on every row it owns. Abandonment then means "no heartbeat", which is exact, and lane count follows open work instead of a fixed roster.
+- Feasible for us: the autoscaler, the lane heartbeat and the work_item partial indexes already exist; this is one UPDATE added to the heartbeat and one SELECT added to the autoscaler.
+- First step: heartbeat stamps `work_item.updated_at` for rows where `owner_agent` is this lane; re-run the dry-run reconcile after 24h and compare the ABANDONED count.
+- Unlocks: token spend proportional to open work (Max-plan singletons, builder lanes scaled to the backlog), and the drop invariant becomes a liveness guarantee rather than a heuristic.
+
+### 3. Backtest a floor before ratifying it: `work_item_as_of(ts)` over the audit trail
+`work_item_audit` records every transition, so the open-work state at any past instant is reconstructible. A single SQL function `work_item_as_of(ts)` plus a backtest script answers "a 72h floor would have paged N rows last week, M of which were real drops" before orch-console ratifies a number. The same function gives Musa a mechanically true daily "what moved, what did not" for the second-brain daily note (#78476).
+- Feasible for us: the audit table exists with 5 days of history already; the function is a window query, no new storage.
+- First step: write the function and backtest the ABANDONED floor at 48h, 72h and 7d over 10-23 to 10-27, attach the table to the floor-ratification request.
+- Unlocks: evidence-based floor tuning, and an honest "what happened today" feed that no agent can embellish.
+
+### 4. The ledger as a client-facing product: a live, signed commitments page per tenant
+`work_item` already holds every open commitment with owner, age and due date. Tag each row with its tenant (derived from the ask's channel) and render a read-only page per client on share.wingmen.dev: "here is everything Wingmen owes you right now, who holds it, and when it is due." The fleet's audit discipline becomes the thing clients buy, and the substrate-as-product roadmap gets its first external surface.
+- Feasible for us: source_ref and channel tags exist, share.wingmen.dev exists, and the console-ro GRANT + RLS pattern is the only new DB work.
+- First step: a `tenant` column on work_item derived at mirror time, a `work_item_tenant_ro` view, one static render for one consenting client (irsyad, with Shuq and Wan as the sign-off per the floors SSOT).
+- Unlocks: a sellable always-on ops desk with a live ledger, and residency discipline by construction, since a tenant tag forces the silo check on every row.
+
+### 5. Self-proving migrations: "applied" means "proven"
+Decision 962 happened because a tool could silently strip view arms and nothing checked afterwards. Make `apply_migration.py` refuse to record a migration as applied until a paired `proofs/<n>_proof.py` runs clean against the live store immediately after apply (read-only) and its artifact is written into the ledger row. Migration 114 now has exactly such a proof; this makes it the rule instead of the exception.
+- Feasible for us: apply_migration already gates on the 12-char sha and writes a ledger row; the proof for 114 is this run's script.
+- First step: add `--proof <module>` to apply_migration, require it for any migration that touches a view or trigger, backfill 114's proof as the first paired artifact.
+- Unlocks: view and trigger drift of the decision-962 class is caught at apply time, and the gate reviewer reads a proof result instead of a promise.
