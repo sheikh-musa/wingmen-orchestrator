@@ -172,6 +172,22 @@ DEFAULT_CAPTURED_OWNER = "orch-console"
 CLIENT_ASKS_CHASE_EVERY_MIN = _envint("SLA_CLIENT_ASKS_CHASE_EVERY_MIN", ASKS_CHASE_EVERY_MIN)
 MAX_CLIENT_ASKS_CHASE_PER_RUN = _envint("SLA_CLIENT_ASKS_MAX_CHASE_PER_RUN", MAX_ASKS_CHASE_PER_RUN)
 
+# op#34803 part B slow-ask page (Musa op#34841 via console #78235; console #78229
+# after a misroute dropped 2 Musa asks ~9h on 10-27): an OPEN operator ask
+# (ask_surface='operator', triage_state='ask') with NO lane bus SUBJECT citing
+# its op number (whole numeric token) within SLOW_ASK_ACK_MIN of being asked pages
+# orch-console ONCE. Lanes get the doorbell immediately, so 20 min is the
+# standard; it's a config constant so Musa can tighten it. Dedup is
+# operator_asks.slow_paged_at (migration 121), stamped in the SAME tx as the
+# page. Only asks younger than SLOW_ASK_HORIZON_MIN are eligible, which bounds
+# the pre-existing unacked backlog at arm time (16 operator asks in the 24h
+# before arming) instead of flooding console with it. Console/hub subjects
+# (they delegate, citing the op#) are not acks; neither is this page's own.
+SLOW_ASK_ACK_MIN = _envint("SLA_SLOW_ASK_ACK_MIN", 20)
+SLOW_ASK_HORIZON_MIN = _envint("SLA_SLOW_ASK_HORIZON_MIN", 120)
+MAX_SLOW_ASK_PAGES_PER_RUN = _envint("SLA_SLOW_ASK_MAX_PAGES_PER_RUN", 3)
+SLOW_ASK_SUBJECT_PREFIX = "[slow-ask]"
+
 # Agents to drop from actioning entirely (comma-separated). Lever for Nazim to
 # exclude e.g. the operator-attended hub itself if paging on the hub's own
 # chronic unread proves circular/noisy. Empty by default (nothing excluded).
@@ -1434,6 +1450,135 @@ def _send_asks_chase(conn, owner: str, row: dict, recipient_resolution=None) -> 
         return False
 
 
+def slow_ask_targets(rows, *, now, ack_min=SLOW_ASK_ACK_MIN, horizon_min=SLOW_ASK_HORIZON_MIN):
+    """PURE: open operator asks past ack_min with no lane ack, never slow-paged,
+    and still younger than horizon_min (the arm-time backlog bound). Rows carry
+    created_epoch (SQL extract(epoch ...)), `acked` (bool, the SQL op#-subject
+    check) and slow_paged_at (None until paged)."""
+    due = []
+    for r in rows:
+        created_epoch = r.get("created_epoch")
+        if created_epoch is None or r.get("acked") or r.get("slow_paged_at") is not None:
+            continue
+        age = now - float(created_epoch)   # extract(epoch) arrives as Decimal
+        if ack_min * 60 <= age < horizon_min * 60:
+            due.append(r)
+    return due
+
+
+def page_slow_asks(targets, *, dry, send_page, max_pages=MAX_SLOW_ASK_PAGES_PER_RUN):
+    """Page orch-console once per target. Dedup lives in the DB (slow_paged_at,
+    stamped by send_page in the page's own tx), so there's no chase_state here.
+    A failed page is left UNSTAMPED and the next scan retries (dead-man's
+    switch). Dry-run sends nothing. `send_page(row)->bool` injected for tests."""
+    sent = 0
+    for t in targets:
+        if sent >= max_pages:
+            log(f"slow-ask HELD (per-scan cap {max_pages}) ask#{t.get('id')} op#{t.get('op')}")
+            continue
+        if dry:
+            continue
+        if send_page(t):
+            sent += 1
+        else:
+            log(f"slow-ask PAGE FAILED ask#{t.get('id')} op#{t.get('op')} "
+                f"(left UNSTAMPED for retry — dead-man's switch)")
+    return sent
+
+
+def _fetch_slow_ask_candidates(conn):
+    """Impure: open operator-surface asks younger than the horizon, with the
+    lane-ack check done in SQL. An ack is any bus SUBJECT citing the op number
+    N as a whole numeric token (subjects only — BODY mentions are false acks,
+    #77970) sent at/after the ask, from anyone but the delegating bodies
+    (orch-console, cc-orchestrator*) and excluding this page's own subject.
+    Whole-token, not `op#N`: lanes batch acks as "op#34792/34794" or
+    "People batch: 34792+34794" (cc-cosem-adcda-1, 10-27) and the strict
+    form false-paged that real ack in the first live dry-run."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT oa.id, oa.source_msg_id AS op, oa.delegated_to, "
+            "  left(coalesce(oa.triage_summary, oa.ask), 200) AS summary, "
+            "  extract(epoch FROM oa.created_at) AS created_epoch, oa.slow_paged_at, "
+            "  EXISTS (SELECT 1 FROM agent_messages m "
+            "          WHERE m.created_at >= oa.created_at "
+            "            AND m.subject ~ ('(^|[^0-9])' || oa.source_msg_id || '([^0-9]|$)') "
+            "            AND m.from_agent <> 'orch-console' "
+            "            AND m.from_agent NOT LIKE 'cc-orchestrator%%' "
+            "            AND m.subject NOT LIKE %s) "
+            # ...or a lane REPLY in the thread of the console/hub row that delegated it
+            # (lanes often answer under their own subject — platform-4 acked op#34799 as
+            # 'PR#530 MERGED' in #78158's thread, console #78265)
+            "  OR EXISTS (SELECT 1 FROM agent_messages d "
+            "             JOIN agent_messages r ON r.thread_id = d.thread_id AND r.id <> d.id "
+            "             WHERE d.created_at >= oa.created_at "
+            "               AND (d.from_agent = 'orch-console' "
+            "                    OR d.from_agent LIKE 'cc-orchestrator%%') "
+            "               AND d.subject ~ ('(^|[^0-9])' || oa.source_msg_id || '([^0-9]|$)') "
+            "               AND r.created_at > d.created_at "
+            # the reply must come from the DELEGATED lane's family (base or any
+            # instance — platform-4 replied as base 'cc-cosem-platform'), never a
+            # bystander/watchdog row that happens to share the thread
+            "               AND regexp_replace(r.from_agent, '-[0-9]+$', '') "
+            "                 = regexp_replace(d.to_agent, '-[0-9]+$', '')) AS acked "
+            "FROM operator_asks oa "
+            "WHERE oa.closed_at IS NULL AND oa.triage_state = 'ask' "
+            "  AND oa.ask_surface = 'operator' AND oa.source_msg_id IS NOT NULL "
+            "  AND oa.slow_paged_at IS NULL "
+            "  AND oa.created_at > now() - make_interval(mins => %s)",
+            (SLOW_ASK_SUBJECT_PREFIX + "%", SLOW_ASK_HORIZON_MIN))
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _send_slow_ask_page(conn, row: dict, send=None) -> bool:
+    """Impure: page orch-console ONCE for an unacked operator ask. In one tx:
+    lock the ask row (re-checking slow_paged_at IS NULL, SKIP LOCKED so a
+    concurrent scan can't double-page), send via bus_send.send(), stamp
+    slow_paged_at, commit. Send failure rolls back -> unstamped -> retried next
+    scan. A crash between send and commit can only re-page, never go silent.
+    `send` defaults to scripts.bus_send.send (injected for tests)."""
+    aid, op = row.get("id"), row.get("op")
+    lane = row.get("delegated_to") or "(no lane delegated)"
+    if send is None:
+        from scripts.bus_send import send
+    subj = (f"{SLOW_ASK_SUBJECT_PREFIX} op#{op} (ask #{aid}) has no lane ack after "
+            f"{SLOW_ASK_ACK_MIN}m — delegated to {lane}")
+    body = (
+        f"TL;DR: Musa's op#{op} has had no lane bus subject citing it for "
+        f"{SLOW_ASK_ACK_MIN}+ min. It may be misrouted or stuck.\n\n"
+        f"- Ask #{aid}: \"{row.get('summary') or ''}\"\n"
+        f"- Delegated to: {lane}\n"
+        f"- What to do: check the lane actually has it (a wrong lane never acks — "
+        f"the 10-27 9h drop), re-route or nudge it, and have the lane ack with a "
+        f"subject citing op#{op}. This page fires once per ask (slow_paged_at)."
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM operator_asks WHERE id = %s AND slow_paged_at IS NULL "
+                "FOR UPDATE SKIP LOCKED", (aid,))
+            if cur.fetchone() is None:
+                conn.rollback()
+                log(f"slow-ask SKIPPED ask#{aid}: already paged or locked by another scan")
+                return False
+            msg_id, _thread = send("cc-fleet-health", "orch-console", PAGE_MESSAGE_TYPE,
+                                   subj, body, "P1")
+            cur.execute("UPDATE operator_asks SET slow_paged_at = now() WHERE id = %s", (aid,))
+        conn.commit()
+        log(f"slow-ask SENT ask#{aid} op#{op} -> orch-console (msg #{msg_id})")
+        return True
+    except BaseException as e:  # bus_send refusals raise SystemExit — catch, fail loud, retry
+        log(f"slow-ask PAGE failed ask#{aid} op#{op}: {type(e).__name__}: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        if isinstance(e, KeyboardInterrupt):
+            raise
+        return False
+
+
 def client_chase_targets(rows, *, now, chase_state, chase_every_min=CLIENT_ASKS_CHASE_EVERY_MIN):
     """PURE: OPEN ask_surface='client-channel' rows past their chase_by —
     migration 085's net (Musa op#23944). Every client-channel row gets a
@@ -1965,6 +2110,24 @@ def run(dry: bool, injected: list[dict] | None = None,
                     + ", ".join(f"#{t['id']}->{t.get('delegated_to')}" for t in asks_targets))
         except Exception as e:  # fail LOUD, keep the scan alive
             log(f"asks-chase ERROR: {e!r}")
+
+        # op#34803 part B slow-ask page (Musa op#34841): an operator ask with no
+        # op#-citing lane subject within SLOW_ASK_ACK_MIN pages orch-console once.
+        # Ships INERT until ARMED via SLA_SLOW_ASK_ENABLED=1 at console go-live.
+        slow_dry = _gated_dry(dry, "SLA_SLOW_ASK_ENABLED")
+        try:
+            slow_targets = slow_ask_targets(_fetch_slow_ask_candidates(conn), now=now)
+            if slow_targets:
+                n = page_slow_asks(slow_targets, dry=slow_dry,
+                                   send_page=lambda t: _send_slow_ask_page(conn, t))
+                for t in slow_targets:
+                    actions.append(f"{'[DRY] ' if slow_dry else ''}SLOW-ASK op#{t['op']} "
+                                   f"ask#{t['id']} -> orch-console (lane {t.get('delegated_to')})")
+                log(f"slow-ask [{'DRY/observe' if slow_dry else 'ARMED'}] "
+                    f"sent={0 if slow_dry else n}/{len(slow_targets)} due: "
+                    + ", ".join(f"op#{t['op']}->{t.get('delegated_to')}" for t in slow_targets))
+        except Exception as e:  # fail LOUD, keep the scan alive
+            log(f"slow-ask ERROR: {e!r}")
 
         # migration 085 (Musa op#23944, bus #47105 -> #47110/#47114): every OPEN
         # ask_surface='client-channel' row past its (REQUIRED at open) chase_by
