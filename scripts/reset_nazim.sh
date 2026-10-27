@@ -27,7 +27,12 @@ HANDOFF="$(ls -t reports/nazim-handoff-*.md 2>/dev/null | head -1)"
 # The fleet's ONE "what is staged in the live composer?" definition (dim-ghost vs
 # real text) — same lib reset_cai.sh + reset_fleet_health.sh source. Used by the
 # Layer-2 post-/clear verify below so it reads the LIVE composer, not scrollback.
-_RESET_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
+# Self-relative, same as reset_auditor.sh -- bus #78935/#78954: hardcoding
+# $HOME/wingmen/orchestrator here is what let a sandboxed test process reach
+# the LIVE bus_send.py + LIVE .env despite the test's own $HOME override.
+_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORCH_DIR="${ORCH_DIR:-$(cd "$_SCRIPTS_DIR/.." && pwd)}"
+_RESET_LIB_DIR="$_SCRIPTS_DIR/lib"
 # shellcheck source=lib/composer_capture.sh
 . "$_RESET_LIB_DIR/composer_capture.sh" || { echo "ERROR: composer_capture.sh missing" >&2; exit 9; }
 
@@ -165,7 +170,7 @@ fi
 # autosuggestion can read as real staged text) — same as the siblings; central fix is the
 # composer_capture ghost belt (round 2). It fails SAFE here: worst case a false STAGED_NOTE,
 # or the verify-empty below declines to /clear (console keeps its context, operator re-fires).
-LOGDIR="$HOME/wingmen/orchestrator/logs"
+LOGDIR="$ORCH_DIR/logs"
 STAGED_NOTE=""
 composer_parse_pane "$TM" "$PANE"
 if [ "$CC_EMPTY" != 1 ]; then
@@ -302,12 +307,15 @@ if [ "$_cleared" != 1 ]; then
   # after the row commits; exit 1 if DSN unset OR the write raises — so we never CLAIM an
   # operator escalation that didn't land (the very false-'done' Layer 2 exists to kill).
   _escalated=0
-  _py="$HOME/wingmen/orchestrator/.venv/bin/python3"
+  _py="$ORCH_DIR/.venv/bin/python3"; [ -x "$_py" ] || _py="$HOME/wingmen/orchestrator/.venv/bin/python3"
   if [ -x "$_py" ]; then
     # Musa op#34845, bus #78757/#78763 (PR-B step 2): was a raw psycopg INSERT INTO
     # agent_messages; routed through scripts/bus_send.py, same sanctioned path as
-    # every other migrated writer.
-    if "$_py" "$HOME/wingmen/orchestrator/scripts/bus_send.py" --to orch-console --from cc-fleet-health \
+    # every other migrated writer. Self-relative via ORCH_DIR (bus #78935/#78954),
+    # same as reset_auditor.sh -- the interpreter may fall back to the live venv,
+    # but the SCRIPT argument below never does, so a sandboxed test pointed at a
+    # .env-less test repo can never reach the live .env.
+    if "$_py" "$ORCH_DIR/scripts/bus_send.py" --to orch-console --from cc-fleet-health \
          --type blocker --priority P1 --req \
          --subject "LOUD: reset_${SESS} STUCK — /clear did not take, recycle NOT done (relay to operator)" \
          --body "LOUD: reset_${SESS} FIRED but the /clear did NOT execute (dim-queued/jam, op#11594) — the recycle is STUCK, NOT done. The body is still on its bloated context and NO boot instruction was injected. OPERATOR: the last recycle did not take — please re-fire on a clean composer. (Auto-escalated by the hardened reset; L1 pause + L3 gate should prevent this, so a recurrence warrants investigation.)" \

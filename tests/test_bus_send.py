@@ -1289,6 +1289,63 @@ def test_dburl_failure_frame_holds_no_environ_shaped_local():
                 f"{len(value)} keys -- environ-shaped, exactly the leak this closes")
 
 
+# ---- WINGMEN_TEST_SANDBOX refusal (bus #78935/#78954: a test-process leak
+# posted a real escalation row to the live substrate). A caller that sets this
+# flag is asserting "I MUST be isolated from the live checkout" -- dburl() must
+# REFUSE rather than silently connect if the .env it is about to read is still
+# inside the live orchestrator root, instead of a redirect hook (console's
+# ruling: a redirect's failure mode is a stray env var silently sending REAL
+# escalations to a test DB, which is worse than a fake one appearing). This is
+# the backstop that makes a leak impossible on top of (2)'s self-relative path
+# fix in the shell scripts themselves (see scripts/reset_cai.sh etc).
+
+def test_refuse_if_sandboxed_but_live_raises_when_path_is_under_live_root(tmp_path, monkeypatch):
+    live_root = tmp_path / "live-checkout"
+    live_root.mkdir()
+    monkeypatch.setattr(bs, "LIVE_ORCH_ROOT", str(live_root))
+    monkeypatch.setenv("WINGMEN_TEST_SANDBOX", "1")
+    with pytest.raises(SystemExit):
+        bs._refuse_if_sandboxed_but_live(str(live_root / ".env"))
+
+
+def test_refuse_if_sandboxed_but_live_noop_when_path_is_elsewhere(tmp_path, monkeypatch):
+    live_root = tmp_path / "live-checkout"
+    live_root.mkdir()
+    monkeypatch.setattr(bs, "LIVE_ORCH_ROOT", str(live_root))
+    monkeypatch.setenv("WINGMEN_TEST_SANDBOX", "1")
+    bs._refuse_if_sandboxed_but_live(str(tmp_path / "fake-home" / ".env"))  # must not raise
+
+
+def test_refuse_if_sandboxed_but_live_noop_when_flag_unset(tmp_path, monkeypatch):
+    live_root = tmp_path / "live-checkout"
+    live_root.mkdir()
+    monkeypatch.setattr(bs, "LIVE_ORCH_ROOT", str(live_root))
+    monkeypatch.delenv("WINGMEN_TEST_SANDBOX", raising=False)
+    bs._refuse_if_sandboxed_but_live(str(live_root / ".env"))  # must not raise
+
+
+def test_dburl_refuses_end_to_end_when_sandboxed_and_own_file_resolves_live(monkeypatch):
+    # dburl()'s own env_path is os.path.dirname(__file__)/../.env -- point
+    # LIVE_ORCH_ROOT at THIS repo (bus_send.py's real home) to exercise the
+    # check through dburl() itself, not just the helper in isolation.
+    monkeypatch.setattr(bs, "LIVE_ORCH_ROOT", str(_ROOT))
+    monkeypatch.setenv("WINGMEN_TEST_SANDBOX", "1")
+    with pytest.raises(SystemExit):
+        bs.dburl("postgres://fallback/db")
+
+
+def test_dburl_does_not_refuse_when_sandbox_flag_unset(monkeypatch):
+    monkeypatch.setattr(bs, "LIVE_ORCH_ROOT", str(_ROOT))
+    monkeypatch.delenv("WINGMEN_TEST_SANDBOX", raising=False)
+    assert bs.dburl("postgres://fallback/db") == "postgres://fallback/db"
+
+
+def test_dburl_does_not_refuse_when_live_root_does_not_match(monkeypatch, tmp_path):
+    monkeypatch.setattr(bs, "LIVE_ORCH_ROOT", str(tmp_path / "not-the-real-checkout"))
+    monkeypatch.setenv("WINGMEN_TEST_SANDBOX", "1")
+    assert bs.dburl("postgres://fallback/db") == "postgres://fallback/db"
+
+
 def test_no_caller_anywhere_passes_the_whole_environ_to_dburl():
     import pathlib
     import re
