@@ -271,6 +271,17 @@ def test_status_page_serves(server):
     assert r2.status_code == 200
 
 
+def test_builds_page_serves(server):
+    # fc-v87 (op#34918/34919, orch-console 78503 plan / 78505 GO): the
+    # build-status view, same open-SPA-shell tier as /asks + /status — page
+    # shell pre-auth, bearer only in the /api/build-status header.
+    r = httpx.get(server + "/builds", timeout=5)
+    assert r.status_code == 200
+    assert "Building" in r.text
+    r2 = httpx.get(server + "/static/builds.js", timeout=5)
+    assert r2.status_code == 200
+
+
 def test_static_index_served(server):
     r = httpx.get(server + "/", timeout=5)
     assert r.status_code == 200
@@ -459,10 +470,16 @@ def test_console_build_id_lockstep():
     static = pathlib.Path(__file__).resolve().parents[2] / "nervous_system" / "console" / "static"
     sw = re.search(r'const VERSION = "(fc-v\d+)"', (static / "sw.js").read_text()).group(1)
     fl = re.search(r"APP_BUILD = '(fc-v\d+)'", (static / "fleet.js").read_text()).group(1)
-    lanes = [ln for ln in (static / "lanes.html").read_text().splitlines() if 'id="build"' in ln]
-    assert lanes, "lanes.html must carry the id=build badge"
-    lb = re.findall(r"fc-v\d+", lanes[-1])[-1]
-    assert sw == fl == lb, f"version constants out of sync: sw={sw} fleet={fl} lanes={lb}"
+    # fc-v87: every badge-carrying page joins the lockstep assert (deploy gate 1
+    # compares eight surfaces; this test holds the same set to the same bar).
+    badges = {}
+    for page in ("lanes.html", "asks.html", "docs.html", "media.html", "status.html", "builds.html"):
+        lines = [ln for ln in (static / page).read_text().splitlines() if 'id="build"' in ln]
+        assert lines, page + " must carry the id=build badge"
+        badges[page] = re.findall(r"fc-v\d+", lines[-1])[-1]
+    assert sw == fl, f"version constants out of sync: sw={sw} fleet={fl}"
+    for page, v in badges.items():
+        assert v == sw, f"version badge out of sync in {page}: {v} != {sw}"
 
 
 def test_icons_served_unauthenticated(server):
@@ -1832,3 +1849,75 @@ def test_asks_badge_and_hero_share_one_needs_musa_derivation(server, monkeypatch
     r = httpx.get(server + "/api/fleet", headers=H(), timeout=10)
     assert r.status_code == 200
     assert r.json()["pulse"]["asks_waiting"] == 3
+
+
+# ── /api/build-status (fc-v87, Musa op#34918/34919, orch-console 78503/78505) ─
+
+def test_api_build_status_requires_auth(server):
+    r = httpx.get(server + "/api/build-status", timeout=5)
+    assert r.status_code in (401, 403)
+
+
+def test_api_build_status_programmes_and_honest_times(server, monkeypatch):
+    """The build-status view's ONE endpoint: programmes with owner/phases/last
+    progress/checkpoint, plus per-ask delivery times where an UNMEASURED ask
+    reads not_measured — never zero, never done (op#34919)."""
+    from nervous_system.console import db as _db
+
+    def _fake_programmes():
+        return [
+            {
+                "id": 901, "ask": "Substrate 2.0", "status": "in_progress",
+                "owner": "cc-paperclip-spike-1",
+                "phases": [
+                    {"name": "Vault read-only", "status": "done", "date": "2026-10-27"},
+                    {"name": "Fleet memory design", "status": "building", "date": "2026-11-01"},
+                ],
+                "last_progress": {"at": "2026-10-27T17:40:00Z",
+                                  "line": "second-brain anti-junk rules agreed"},
+                "next_checkpoint": "2026-11-01",
+            },
+        ]
+
+    def _fake_times():
+        return {
+            "measured": [
+                {"ask_id": 5343, "line": "Personal-issue field change",
+                 "asked_at": "2026-10-27T09:14:32Z",
+                 "delivered_at": "2026-10-27T14:21:00Z",
+                 "total_hours": 5.1, "surface": "adcda"},
+            ],
+            "not_measured": [
+                {"ask_id": 4196, "line": "MUIS CEO email gist",
+                 "asked_at": "2026-10-22T10:00:00Z", "surface": "operator"},
+            ],
+            "coverage": {"measured": 1, "not_measured": 1},
+        }
+
+    monkeypatch.setattr(_db, "fetch_build_status", _fake_programmes)
+    monkeypatch.setattr(_db, "fetch_ask_delivery_times", _fake_times)
+
+    r = httpx.get(server + "/api/build-status", headers=H(), timeout=5)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["programmes"][0]["owner"] == "cc-paperclip-spike-1"
+    assert body["programmes"][0]["phases"][1]["status"] == "building"
+    assert body["delivery_times"]["measured"][0]["total_hours"] == 5.1
+    # the honesty contract: an ask with no delivery stamp is NOT measured —
+    # it is listed under not_measured and carries no zero/total field at all
+    nm = body["delivery_times"]["not_measured"][0]
+    assert "delivered_at" not in nm and "total_hours" not in nm
+    assert body["delivery_times"]["coverage"] == {"measured": 1, "not_measured": 1}
+
+
+def test_api_build_status_never_breaks_on_missing_programmes(server, monkeypatch):
+    """No phases rows yet (migration applied, lanes haven't filled phases):
+    the endpoint answers an empty list, it does not 500 — the view renders
+    'programmes coming as lanes fill them' rather than an error."""
+    from nervous_system.console import db as _db
+    monkeypatch.setattr(_db, "fetch_build_status", lambda: [])
+    monkeypatch.setattr(_db, "fetch_ask_delivery_times",
+                        lambda: {"measured": [], "not_measured": [], "coverage": {"measured": 0, "not_measured": 0}})
+    r = httpx.get(server + "/api/build-status", headers=H(), timeout=5)
+    assert r.status_code == 200
+    assert r.json()["programmes"] == []

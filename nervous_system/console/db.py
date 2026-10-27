@@ -710,6 +710,73 @@ def fetch_backlog() -> List[dict]:
     return _query(sql, params)
 
 
+def fetch_build_status() -> List[dict]:
+    """The build-status view's programme rows (fc-v87, Musa op#34918, orch-
+    console 78503/78505). One row per operator_backlog programme carrying a
+    phases jsonb (migration 122): owner, phase list, last real progress, next
+    checkpoint. Owning lanes maintain phases via scripts/update_programme_
+    phases.py; programme_stall_guard keeps its clock job (an open programme
+    with no live checkpoint still pages) — this read NEVER writes.
+
+    Rows without phases are invisible here by construction, so the view can
+    only ever show what a lane has actually declared."""
+    sql = (
+        "SELECT id, ask, status, op_ref, sort_order, phases, "
+        "  round(extract(epoch FROM (now()-updated_at)))::int AS updated_age_s "
+        "FROM operator_backlog "
+        "WHERE phases IS NOT NULL AND status NOT IN ('done', 'dropped') "
+        "ORDER BY sort_order, id"
+    )
+    rows = _query(sql, [])
+    out = []
+    for r in rows:
+        ph = r.get("phases") or {}
+        out.append({
+            "id": r["id"],
+            "ask": r["ask"],
+            "status": r["status"],
+            "owner": ph.get("owner"),
+            "phases": ph.get("phases") or [],
+            "last_progress": ph.get("last_progress"),
+            "next_checkpoint": ph.get("next_checkpoint"),
+            "updated_age_s": r.get("updated_age_s"),
+        })
+    return out
+
+
+def fetch_ask_delivery_times(limit: int = 50) -> dict:
+    """Per-ask ask->live times for the build-status view (op#34919). HONESTY
+    CONTRACT: an ask with no delivered_at stamp is NOT MEASURED — it lands in
+    not_measured with no time fields at all, never a zero and never a done
+    (coverage is near zero today; fleet-health is automating the stamps)."""
+    measured_sql = (
+        "SELECT a.id, "
+        "  COALESCE(a.operator_summary, left(a.ask, 80)) AS line, "
+        "  a.created_at AS asked_at, a.delivered_at, "
+        "  round(extract(epoch FROM (a.delivered_at - a.created_at))/3600.0, 1) AS total_hours, "
+        "  a.ask_surface AS surface "
+        "FROM operator_asks a "
+        "WHERE a.delivered_at IS NOT NULL "
+        "ORDER BY a.delivered_at DESC LIMIT %s"
+    )
+    not_measured_sql = (
+        "SELECT a.id, "
+        "  COALESCE(a.operator_summary, left(a.ask, 80)) AS line, "
+        "  a.created_at AS asked_at, "
+        "  a.ask_surface AS surface "
+        "FROM operator_asks a "
+        "WHERE a.delivered_at IS NULL AND a.closed_at IS NULL AND a.triage_state = 'ask' "
+        "ORDER BY a.created_at ASC LIMIT %s"
+    )
+    measured = _query(measured_sql, [limit])
+    not_measured = _query(not_measured_sql, [limit])
+    return {
+        "measured": measured,
+        "not_measured": not_measured,
+        "coverage": {"measured": len(measured), "not_measured": len(not_measured)},
+    }
+
+
 def build_asks_query() -> Tuple[str, list]:
     """The operator's LIVE "Your asks" board (op#13250 — replaces the stale
     operator_backlog "Your asks"). One row per OPEN operator_asks ledger row

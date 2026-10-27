@@ -1,0 +1,199 @@
+// Node test (no deps) for the build-status view (op#34918/34919 — orch-console
+// 78503 plan / 78505 GO): /builds page + /api/build-status. Same vm-sandbox
+// idiom as status_board.test.js. Run:
+//   node tests/console/builds_view.test.js
+//
+// LOCKS:
+//  - tokenFromHash: identical semantics to asks/docs/media/status (fc-v82-85)
+//    — the #t=<8+> one-tap deep link, floor = the REAL CONSOLE_TOKEN length
+//    class (bus 76254), no percent-decode, persist-then-strip exactly once.
+//  - esc(): 4-glyph (titles interpolate into double-quoted attrs).
+//  - fmtHours: 5.1 -> "5.1h", 48.5 -> "2.0d", null -> "" (NEVER "0h" — a
+//    missing time is not zero).
+//  - HONESTY CONTRACT (the 78505 ruling): a not_measured ask paints with NO
+//    time — no zero, no dash pretending to be a clock; it says why it has no
+//    time yet. measured rows carry total_hours from REAL delivered_at stamps.
+//  - render(): fetches /api/build-status with the bearer HEADER (never the
+//    URL), paints programme cards with owner + phase chips classed
+//    done|building|next|blocked (the only four VALID_STATUSES the update
+//    helper accepts), last real movement line, and next check-in.
+"use strict";
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+const assert = require("assert");
+
+const STATIC = path.join(__dirname, "..", "..", "nervous_system", "console", "static");
+
+function makeEl() {
+  return {
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    style: {}, dataset: {}, value: "",
+    setAttribute() {}, removeAttribute() {}, getAttribute() { return null; },
+    addEventListener() {}, removeEventListener() {},
+    appendChild() {}, removeChild() {}, remove() {},
+    querySelector() { return null; }, querySelectorAll() { return []; },
+    closest() { return null; }, focus() {}, blur() {}, click() {},
+    innerHTML: "", textContent: "",
+    scrollTop: 0, scrollHeight: 0, offsetHeight: 0,
+    getBoundingClientRect: function () { return { top: 0, left: 0, width: 0, height: 0, bottom: 0, right: 0 }; },
+  };
+}
+
+function loadPage(file, opts) {
+  opts = opts || {};
+  const store = opts.localStorage ||
+    { getItem() { return null; }, setItem() {}, removeItem() {} };
+  const sess = opts.sessionStorage ||
+    { getItem() { return null; }, setItem() {}, removeItem() {} };
+  const loc = Object.assign(
+    { reload() {}, href: "", pathname: "/", hash: "", search: "" }, opts.location || {});
+  const els = opts.els || {};
+  const documentStub = {
+    getElementById: function (id) { return els[id] || makeEl(); },
+    querySelector() { return null; }, querySelectorAll() { return []; },
+    createElement() { return makeEl(); }, addEventListener() {}, removeEventListener() {},
+    documentElement: makeEl(), body: makeEl(), readyState: "complete",
+  };
+  const sandbox = {
+    window: { addEventListener() {}, removeEventListener() {}, location: loc },
+    document: documentStub,
+    localStorage: store, sessionStorage: sess,
+    location: loc, history: opts.history || { replaceState() {} },
+    fetch: opts.fetch || function () { return new Promise(function () {}); },
+    setInterval: opts.setInterval || function () { return 0; },
+    clearInterval() {}, setTimeout() { return 0; }, clearTimeout() {},
+    IntersectionObserver: function () { this.observe = function () {}; this.unobserve = function () {}; this.disconnect = function () {}; },
+    URL: { createObjectURL() { return "blob:x"; }, revokeObjectURL() {} },
+    console, module: { exports: {} },
+  };
+  sandbox.self = sandbox.globalThis = sandbox;
+  vm.runInNewContext(fs.readFileSync(path.join(STATIC, file), "utf8"), sandbox);
+  return sandbox.module.exports;
+}
+
+const TOK = "wingmen-console-token-0123456789abcdef";
+const REAL = "w1ngmen8"; // 8 chars — the production token's length class (bus 76254)
+
+// ---- helpers exported for tests --------------------------------------------
+const api = loadPage("builds.js");
+assert.ok(api, "builds.js must export module.exports for tests");
+assert.ok(api.tokenFromHash, "builds.js must export tokenFromHash");
+
+assert.strictEqual(api.tokenFromHash("#t=" + TOK), TOK, "reads a #t= fragment");
+assert.strictEqual(api.tokenFromHash("#t=" + REAL), REAL, "accepts the real-length (8-char) token");
+assert.strictEqual(api.tokenFromHash("#t=1234567"), null, "rejects a <8-char fragment");
+assert.strictEqual(api.tokenFromHash("#x=" + TOK), null, "ignores non-token fragments");
+assert.strictEqual(api.tokenFromHash(""), null, "no hash -> null");
+assert.strictEqual(api.tokenFromHash("#t=" + TOK + "%23x"), TOK + "%23x", "no percent-decode");
+assert.strictEqual(api.esc('"'), "&quot;", "esc escapes double quotes");
+assert.strictEqual(api.esc("<a&b>"), "&lt;a&amp;b&gt;", "esc keeps the classic three");
+
+// fmtHours: honest clock — hours under a day, days above, NEVER zero-fill
+assert.strictEqual(api.fmtHours(null), "", "fmtHours(null) -> empty, not a fake 0");
+assert.strictEqual(api.fmtHours(undefined), "", "fmtHours(undefined) -> empty");
+assert.strictEqual(api.fmtHours(5.1), "5.1h", "sub-day stays hours");
+assert.strictEqual(api.fmtHours(0.5), "0.5h", "half hour is still a real hour value");
+assert.strictEqual(api.fmtHours(48.5), "2.0d", "day-scale reads as days");
+console.log("builds.js helpers: ok");
+
+// ---- deep-link flow: persist BEFORE read, strip exactly once ----------------
+const wrote = [];
+const stripped = [];
+loadPage("builds.js", {
+  localStorage: {
+    getItem: function (k) { return wrote.length && k === "console_token" ? wrote[wrote.length - 1][1] : null; },
+    setItem: function (k, v) { wrote.push([k, v]); }, removeItem() {},
+  },
+  location: { hash: "#t=" + TOK, reload() {}, href: "/builds#t=" + TOK, pathname: "/builds", search: "" },
+  history: { replaceState: function () { stripped.push(Array.prototype.slice.call(arguments)); } },
+});
+assert.strictEqual(JSON.stringify(wrote), JSON.stringify([["console_token", TOK]]),
+  "valid #t= persists the token exactly once");
+assert.strictEqual(stripped.length, 1, "fragment stripped exactly once");
+const wroteShort = [];
+loadPage("builds.js", {
+  localStorage: { getItem() { return null; }, setItem: function (k, v) { wroteShort.push([k, v]); }, removeItem() {} },
+  location: { hash: "#t=short", reload() {}, href: "", pathname: "/builds", search: "" },
+});
+assert.strictEqual(wroteShort.length, 0, "short/garbage fragment writes nothing");
+console.log("tokenFromHash flow: ok");
+
+// ---- render: bearer header, programme cards, HONEST times -------------------
+(async function () {
+  const payload = {
+    programmes: [
+      { id: 101, ask: 'Substrate 2.0 — one joint plan <b>"durable"</b>',
+        status: "in_progress", owner: "cc-paperclip-spike-1",
+        phases: [
+          { name: "Durable inbox step 2", status: "done", date: "2026-10-27" },
+          { name: "Substrate 2.0 fully operational", status: "next" },
+        ],
+        last_progress: { at: "2026-10-27T16:16:07Z", line: "PR#490 renumbered, CI green" },
+        next_checkpoint: "2026-11-04", updated_age_s: 5 * 3600 },
+      { id: 102, ask: "TG 2.0 — per-client channels",
+        status: "in_progress", owner: "cc-bariq-1",
+        phases: [
+          { name: "Per-client channel design", status: "next" },
+          { name: "Channel live", status: "blocked", date: "2026-11-09" },
+        ],
+        last_progress: { at: "2026-10-27T17:31:33Z", line: "Tenant-provisioner plan approved in shape" },
+        next_checkpoint: "2026-11-04", updated_age_s: 45 },
+    ],
+    delivery_times: {
+      measured: [
+        { id: 5343, line: "Personal-issue field — change from your photo",
+          asked_at: "2026-10-27T09:14:32+00:00", delivered_at: "2026-10-27T14:21:00+00:00",
+          total_hours: 5.1, surface: "telegram" },
+      ],
+      not_measured: [
+        { id: 5350, line: "Approve weeks 4+ for everyone to see",
+          asked_at: "2026-10-27T08:00:00+00:00", surface: "telegram" },
+      ],
+      coverage: { measured: 1, not_measured: 1 },
+    },
+  };
+  const fetches = [];
+  const main = makeEl();
+  loadPage("builds.js", {
+    els: { main: main, token: Object.assign(makeEl(), { value: TOK }) },
+    localStorage: { getItem() { return TOK; }, setItem() {}, removeItem() {} },
+    fetch: function (url, init) {
+      fetches.push([url, init]);
+      return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve(payload); } });
+    },
+  });
+  await new Promise(function (r) { setImmediate(r); });
+  await new Promise(function (r) { setImmediate(r); });
+  assert.strictEqual(fetches.length, 1, "exactly one fetch on load");
+  assert.ok(fetches[0][0].indexOf("/api/build-status") !== -1, "fetches the build-status endpoint");
+  assert.strictEqual(fetches[0][1].headers.Authorization, "Bearer " + TOK,
+    "bearer token rides the Authorization header, never the URL");
+  assert.ok(String(fetches[0][0]).indexOf("token=") === -1, "no token in the query string");
+
+  const html = main.innerHTML;
+  // programme cards
+  assert.ok(html.indexOf("&quot;durable&quot;") !== -1, "ask title quote is escaped in the paint");
+  assert.ok(html.indexOf("cc-paperclip-spike-1") !== -1, "programme owner visible");
+  assert.ok(html.indexOf("cc-bariq-1") !== -1, "second programme owner visible");
+  assert.ok(html.indexOf("ph done") !== -1 && html.indexOf("ph building") === -1,
+    "phase chips carry their status class");
+  assert.ok(html.indexOf("ph blocked") !== -1, "blocked chip classed");
+  assert.ok(html.indexOf("PR#490 renumbered, CI green") !== -1, "last real movement line visible");
+  assert.ok(html.indexOf("4 Nov") !== -1, "next check-in visible (fmtDay form)");
+  assert.ok(html.indexOf("5h ago") !== -1 && html.indexOf("just now") !== -1,
+    "programme freshness (fmtAge) visible");
+
+  // delivery times — the honesty contract
+  assert.ok(html.indexOf("Personal-issue field") !== -1, "measured ask line visible");
+  assert.ok(html.indexOf("5.1h") !== -1, "measured ask shows its real total");
+  const nm = html.split("nm-row");
+  assert.ok(nm.length >= 2, "a not-measured row exists (class nm-row)");
+  assert.ok(nm[1].indexOf("Approve weeks 4+") !== -1, "not-measured row shows the ask");
+  assert.ok(!/\d+(\.\d+)?h/.test(nm[1]), "not-measured row paints NO time value");
+  assert.ok(nm[1].indexOf("no clock yet") !== -1,
+    "not-measured row says WHY it has no time, not a zero");
+  assert.ok(html.indexOf("unauthorized") === -1, "not an error paint");
+  console.log("render flow: ok");
+  console.log("\nall passed");
+})().catch(function (e) { console.error(e.message); process.exit(1); });

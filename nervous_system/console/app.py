@@ -2122,6 +2122,15 @@ def _make_handler(feedloop: "_FeedLoop"):
             if path in ("/status", "/status/"):
                 return self._serve_static("status.html", path)
 
+            # BUILD STATUS (fc-v87, op#34918/34919 — orch-console 78503 plan
+            # + 78505 GO): the programmes view (substrate 2.0 / memory 2.0 /
+            # TG 2.0 phases, owner-maintained via scripts/
+            # update_programme_phases.py) + the honest ask->live delivery
+            # times. Same open-SPA-shell tier as /asks + /status; the page
+            # fetches /api/build-status with the stored bearer token.
+            if path in ("/builds", "/builds/"):
+                return self._serve_static("builds.html", path)
+
             if path.startswith("/static/"):
                 name = path[len("/static/"):]
                 return self._serve_static(name, path)
@@ -2260,6 +2269,19 @@ def _make_handler(feedloop: "_FeedLoop"):
                         "counts": counts,
                     }))
 
+                if path == "/api/build-status":
+                    # fc-v87 (op#34918/34919, orch-console 78503 plan + 78505
+                    # GO): the read-only build-status view — programmes with
+                    # owner/phases/last-progress/checkpoint, plus per-ask
+                    # delivery times where an unmeasured ask reads
+                    # not_measured, never zero (op#34919).
+                    programmes = db.fetch_build_status()
+                    times = db.fetch_ask_delivery_times()
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, {
+                        "programmes": programmes,
+                        "delivery_times": times,
+                    })
                 if path == "/api/asks-waiting":
                     # fc-v86 (bus #78269): the waiting-on-you count for the
                     # lanes.html top bar — the EXACT derivation the /asks hero
