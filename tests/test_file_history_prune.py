@@ -205,21 +205,26 @@ def test_bus_page_import_resolves_under_real_launchd_invocation(tmp_path):
     sees this because pytest.ini's `pythonpath = .` makes `scripts` importable regardless.
 
     Forces the real alert path deterministically without touching any real file-history data
-    or real disk state: an empty CLAUDE_FILE_HISTORY_DIR (no sessions, nothing to prune) plus
-    FH_HARD_FREE_GB/FH_EMERGENCY_FREE_GB set far above any real free-disk figure, so this
-    machine's actual free space is always "below" both thresholds and plan_prune's genuine
-    disk-free alert fires loud=True through the real CLI (main() -> plan_prune -> _alert),
-    exactly the path the launchd job takes."""
+    or real disk state. NOT via the disk-free floor (FH_HARD_FREE_GB/FH_EMERGENCY_FREE_GB):
+    _disk_free() statvfs's the hardcoded macOS path "/System/Volumes/Data", which doesn't
+    exist on the Linux CI runner -- OSError there, _disk_free returns None, and plan_prune
+    never evaluates the free-space branch at all regardless of threshold values (caught by
+    this exact test failing green-locally/red-on-CI). Instead this forces the OTHER, fully
+    portable alert path: one session file over FH_ALERT_OVER_GB (set to 0 so any size
+    qualifies) -- a lane "snapshotting a large growing file" -- which plan_prune evaluates
+    from the scanned session sizes alone, no OS disk-free call involved.
+    """
     repo_root = Path(__file__).resolve().parent.parent
     script = repo_root / "scripts" / "file_history_prune.py"
-    empty_fh_dir = tmp_path / "file-history-empty"
-    empty_fh_dir.mkdir()
+    fh_dir = tmp_path / "file-history-bloated"
+    session_dir = fh_dir / "fake-session"
+    session_dir.mkdir(parents=True)
+    (session_dir / "abc123@v1").write_bytes(b"x")
     clean_env = {
         "HOME": os.environ.get("HOME", ""),
         "PATH": os.environ.get("PATH", ""),
-        "CLAUDE_FILE_HISTORY_DIR": str(empty_fh_dir),
-        "FH_HARD_FREE_GB": "999999999",
-        "FH_EMERGENCY_FREE_GB": "999999999",
+        "CLAUDE_FILE_HISTORY_DIR": str(fh_dir),
+        "FH_ALERT_OVER_GB": "0",
         "DATABASE_URL": "x",  # truthy, non-DSN-shaped -- just needs to clear `if dsn:`
     }
     result = subprocess.run(
@@ -228,8 +233,8 @@ def test_bus_page_import_resolves_under_real_launchd_invocation(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "DISK-WEDGE RISK" in result.stderr, (
-        f"the forced disk-free condition never reached the loud alert path -- test setup is "
-        f"wrong, this isn't proving anything: {result.stderr}"
+        f"the forced session-bloat condition never reached the loud alert path -- test setup "
+        f"is wrong, this isn't proving anything: {result.stderr}"
     )
     assert "ModuleNotFoundError" not in result.stderr and "No module named" not in result.stderr, (
         f"the bus page's own import failed and was silently swallowed as a WARN -- "
