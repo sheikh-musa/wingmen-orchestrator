@@ -381,7 +381,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v85';
+  var APP_BUILD = 'fc-v86';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -1320,6 +1320,7 @@
   // operator swipe-to-confirms it. The card only carries {id, ask, delegated_to,
   // status, updated_age_s, asked_age_s}; we render the copy per status here.
   var ASK_TAG = {
+    waiting_on_musa: { cls: "needs", label: "waiting on you" },
     needs_you:     { cls: "needs", label: "needs you" },
     delegate_done: { cls: "rev",   label: "review" },
     in_progress:   { cls: "prog",  label: "in progress" },
@@ -1333,14 +1334,16 @@
     var upd = a.updated_age_s, warn = (upd != null && upd >= 3600);
     var ageCls = warn ? "aage warnage" : "aage";
     var moved;
-    if (a.status === "needs_you") moved = "bounced back " + fmtAge(upd) + " ago";
+    if (a.status === "waiting_on_musa") moved = "asked " + fmtAge(a.asked_age_s) + " ago";
+    else if (a.status === "needs_you") moved = "bounced back " + fmtAge(upd) + " ago";
     else if (a.status === "delegate_done") moved = "replied " + fmtAge(upd) + " ago";
     else if (a.status === "pending") moved = "sent " + fmtAge(upd) + " ago · unopened";
     else if (a.status === "on_nazim") moved = "asked " + fmtAge(a.asked_age_s) + " ago";
     else moved = "updated " + fmtAge(upd) + " ago";
     var parts = [to, '<span class="' + ageCls + '">' + esc(moved) + '</span>'];
-    // Show when it was originally asked too (except on_nazim, where that IS moved).
-    if (a.status !== "on_nazim" && a.asked_age_s != null)
+    // Show when it was originally asked too — except where that IS moved
+    // (on_nazim + fc-v86 waiting_on_musa, whose moved line is the asked-age).
+    if (a.status !== "on_nazim" && a.status !== "waiting_on_musa" && a.asked_age_s != null)
       parts.push('<span>asked ' + esc(fmtAge(a.asked_age_s)) + ' ago</span>');
     return '<div class="ameta">' + parts.join('<span class="adot">·</span>') + '</div>';
   }
@@ -1362,22 +1365,30 @@
     var el = $("asks");
     if (!el) return;
     var cnt = $("asksCount"), fresh = $("asksFresh");
+    // fc-v86 (bus #78269, op#34848): home de-noise — the server now sends ONLY
+    // the waiting-on-you rows (status waiting_on_musa; lane-owned / in-progress
+    // / review live at /asks, the full board). The card copy says so.
     if (!rows || !rows.length) {
-      el.innerHTML = '<div class="empty">No open asks. ✨</div>';
-      if (cnt) cnt.textContent = "";
+      el.innerHTML = '<div class="empty">Nothing waits on you — the full board lives at <a href="/asks">Asks</a>.</div>';
+      if (cnt) cnt.textContent = "none waiting";
       if (fresh) fresh.style.display = "none";
       return;
     }
-    var needs = rows.filter(function (a) { return a.status === "needs_you"; }).length;
-    var review = rows.filter(function (a) { return a.status === "delegate_done"; }).length;
-    if (cnt) {
-      var bits = [rows.length + " open"];
-      if (needs) bits.push(needs + " needs you");
-      if (review) bits.push(review + " to review");
-      cnt.textContent = bits.join(" · ");
-    }
+    if (cnt) cnt.textContent = rows.length + " waiting on you";
     el.innerHTML = rows.map(askCard).join("");
     if (fresh) fresh.style.display = "flex";
+  }
+
+  // fc-v86: the persistent top bar's Asks badge — mirrors pulse.asks_waiting
+  // (server-derived, same source as the home card), styled as attention only
+  // when something actually waits. Missing pulse = honest dash, never 0-lie.
+  function renderTopbar(p) {
+    var el = $("tbAsksCount");
+    if (!el) return;
+    var n = p && p.asks_waiting;
+    if (n == null) { el.textContent = "—"; el.className = "tbcnt"; return; }
+    el.textContent = String(n);
+    el.className = "tbcnt" + (n > 0 ? " has-waits" : "");
   }
 
   // swipe/tap-to-confirm — the operator's authoritative "done" on a review card.
@@ -1527,6 +1538,7 @@
     var bloatCount = (glance || []).filter(function (r) { return r && (r.level === "amber" || r.level === "red"); }).length;
     renderPulse(d.pulse || {});
     renderStat(d.pulse || {}, bloatCount);
+    renderTopbar(d.pulse || {});   // fc-v86: top-bar Asks badge (asks_waiting)
     renderTopBloat(glance);
     renderPoolUsage(d.pool_usage || [], d.glm_usage);
     renderNeeds(d.needs_you || []);
@@ -1937,6 +1949,7 @@
       mdlChip: mdlChip, shortModel: shortModel, routineSummary: routineSummary, collapsedHtml: collapsedHtml,
       tileHtml: tileHtml, coordChip: coordChip, armedHeaders: armedHeaders, ARMED_KEY_LS: ARMED_KEY_LS,
       confirmTyped: confirmTyped, CONFIRM_COPY: CONFIRM_COPY, resetBodyFor: resetBodyFor,
+      renderAsks: renderAsks, renderTopbar: renderTopbar,
       govCardHtml: govCardHtml, govStripCopy: govStripCopy, govStripHtml: govStripHtml, GOV_MONEY_ACK: GOV_MONEY_ACK };
   }
 

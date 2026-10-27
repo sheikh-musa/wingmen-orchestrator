@@ -617,6 +617,7 @@
     var ctrl = new AbortController();
     var timer = setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT_MS);
     $("refresh").disabled = true;
+    loadAsksWaiting();   // fc-v86: top-bar Asks badge (bus #78269) rides the same poll
     return fetch("/api/token-truth", { headers: authHeaders(), signal: ctrl.signal })
       .then(function (r) {
         if (r.status === 401) throw new Error("unauthorized");
@@ -631,6 +632,21 @@
         $("sub").innerHTML = '<b class="bad">' + esc(msg) + '</b>';
       })
       .finally(function () { clearTimeout(timer); $("refresh").disabled = false; });
+  }
+
+  // fc-v86 (bus #78269): the waiting-on-you count for the header Asks button —
+  // same derivation as the home card (/api/asks-waiting), so both badges agree.
+  // Best-effort: a failure leaves the honest dash, never a wrong number.
+  function loadAsksWaiting() {
+    fetch("/api/asks-waiting", { headers: authHeaders() })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        var el = $("tbAsksCount");
+        if (!el || !j || j.count == null) return;
+        el.textContent = String(j.count);
+        el.className = "tncnt" + (j.count > 0 ? " has-waits" : "");
+      })
+      .catch(function () { /* dash stays — never a false count */ });
   }
 
   $("refresh").addEventListener("click", load);

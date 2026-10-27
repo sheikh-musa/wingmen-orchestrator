@@ -18,6 +18,11 @@ Usage:
   asks_triage.py <id> done [--evidence "<bus/op ids>"]
                            [--committed-date ISO] [--outbound-msg-id ID]
 
+  (any action) [--answers ASK_ID] — the row being triaged IS Musa's answer to
+  open ask ASK_ID: confirm+close it, linking the answering operator message
+  (bus #78269 — he answers with fresh messages, not TG replies, so the
+  reply-link auto-close misses those).
+
 Migration 118 (orch-console bus #75387) adds the needs-Musa axis, orthogonal
 to the triage axis and usable with ANY action: --needs-musa on|off sets /
 clears needs_operator_decision (genuinely needs Musa's own decision/action —
@@ -118,6 +123,14 @@ def build_parser() -> argparse.ArgumentParser:
                      help="operator_summary — the plain-language, decision-first line "
                           "the Needs-Musa hero renders instead of triage_summary "
                           "(no agent code-names/hc#/op#; orch-console bus #75387)")
+    ap.add_argument("--answers", type=int, default=None, metavar="ASK_ID",
+                     help="the operator message being triaged IS the answer to open "
+                          "ask ASK_ID — confirm+close it (same close as the console "
+                          "swipe: confirmed_at + closed_reason='operator_done'), "
+                          "linking this row's source_msg_id as evidence. Root-cause "
+                          "fix for the stale-pending drift: Musa answers with a "
+                          "fresh message, not a TG reply, so the reply-link "
+                          "auto-close never fires (orch-console bus #78269)")
     return ap
 
 
@@ -125,9 +138,13 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
            delegated_to: str | None = None, evidence: str | None = None,
            committed_date: str | None = None, outbound_msg_id: int | None = None,
            needs_musa: str | None = None, musa_summary: str | None = None,
-           dsn: str | None = None, triaged_by: str | None = None) -> int:
+           answers: int | None = None, dsn: str | None = None,
+           triaged_by: str | None = None) -> int:
     if action == "ask" and not (summary and summary.strip()):
         raise ValueError("--summary is required for action=ask")
+    if answers is not None and answers == item_id:
+        raise ValueError("--answers cannot name the row being triaged — the "
+                         "answer and the ask are different rows")
     dsn = dsn or _dsn()
     if not dsn:
         raise RuntimeError("no DATABASE_URL/SUPABASE_DB_URL")
@@ -135,6 +152,21 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
 
     with psycopg.connect(dsn, autocommit=True, connect_timeout=10) as conn:
         with conn.cursor() as cur:
+            # --answers pre-check (bus #78269): validate the TARGET ask exists and
+            # grab the answering message ref BEFORE any write lands (autocommit —
+            # a post-UPDATE failure would leave the triage applied but the ask
+            # open). Fail fast so a typo'd ASK_ID changes nothing at all.
+            ans_ref = None
+            if answers is not None:
+                cur.execute(
+                    "SELECT id FROM operator_asks WHERE id=%s", (answers,))
+                if cur.fetchone() is None:
+                    raise ValueError(f"--answers: operator_asks #{answers} does not exist")
+                cur.execute(
+                    "SELECT source_msg_id FROM operator_asks WHERE id=%s", (item_id,))
+                src = cur.fetchone()
+                ans_ref = (f"answered by operator msg #{src[0]}" if src and src[0] is not None
+                           else f"answered at triage of operator_asks #{item_id}")
             if action == "done":
                 # Client-channel gate (migration 085, bus #47114 item 3a/3c): a dated
                 # commitment only counts if it was actually SENT — evidence OR
@@ -179,7 +211,7 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                 # not_an_ask insert/triage cleared it) gets a fresh default
                 # 24h window restored here on re-triage back to 'ask' — same
                 # default as operator_log.maybe_track_client_ask's chase_hours.
-                cur.execute(
+                sql = (
                     "UPDATE operator_asks SET "
                     "  triage_state = 'ask', triage_summary = %(summary)s, "
                     "  delegated_to = COALESCE(%(delegated_to)s, delegated_to), "
@@ -195,12 +227,13 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                     "                  THEN GREATEST(COALESCE(chase_by, %(cd)s::timestamptz), %(cd)s::timestamptz) "
                     "                  WHEN chase_by IS NULL THEN now() + interval '24 hours' "
                     "                  ELSE chase_by END "
-                    "WHERE id = %(id)s",
-                    {"summary": summary, "delegated_to": delegated_to, "triaged_by": triaged_by,
-                     "cd": committed_date, "ob": outbound_msg_id, "id": item_id,
-                     "nm": needs_musa, "ms": musa_summary},
+                    "WHERE id = %(id)s"
                 )
-                return cur.rowcount
+                params = {"summary": summary, "delegated_to": delegated_to, "triaged_by": triaged_by,
+                          "cd": committed_date, "ob": outbound_msg_id, "id": item_id,
+                          "nm": needs_musa, "ms": musa_summary}
+                # no early return: the common tail below still needs to run the
+                # --answers close (bus #78269) for action=ask too
             else:  # not
                 sql = (
                     "UPDATE operator_asks SET "
@@ -216,6 +249,25 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                 params = (triaged_by, needs_musa, needs_musa, musa_summary, item_id)
 
             cur.execute(sql, params)
+
+            # --answers ASK_ID (bus #78269): the row just triaged IS Musa's
+            # answer to open ask ASK_ID (he replied with a fresh message, not a
+            # TG reply, so the reply-link auto-close never fired). Confirm+close
+            # the target with the SAME write the console swipe-to-confirm makes
+            # (asks_close.py 'confirm': confirmed_at + closed_at +
+            # closed_reason='operator_done'), evidence-linked to the answering
+            # operator_messages row (ans_ref, resolved in the pre-check above).
+            # Idempotent on an already-closed target — the goal state already
+            # holds; the closed_at IS NULL guard leaves its existing close alone.
+            if answers is not None:
+                cur.execute(
+                    "UPDATE operator_asks SET "
+                    "  confirmed_at = now(), closed_at = now(), "
+                    "  closed_reason = 'operator_done', triage_evidence_ref = %s, "
+                    "  triaged_at = now(), triaged_by = %s "
+                    "WHERE id = %s AND closed_at IS NULL",
+                    (ans_ref, triaged_by, answers),
+                )
             return cur.rowcount
 
 
@@ -226,12 +278,15 @@ def main(argv=None) -> int:
                    delegated_to=args.delegated_to, evidence=args.evidence,
                    committed_date=args.committed_date, outbound_msg_id=args.outbound_msg_id,
                    needs_musa=args.needs_musa, musa_summary=args.musa_summary,
-                   triaged_by=args.triaged_by)
+                   answers=args.answers, triaged_by=args.triaged_by)
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"error: {type(e).__name__}: {e}\n")
         return 2
     if n == 1:
-        print("ok")
+        if args.answers is not None:
+            print(f"ok (ask #{args.answers} confirmed closed — answered here)")
+        else:
+            print("ok")
         return 0
     sys.stderr.write(f"error: {n} rows updated (id {args.id} not found or not eligible?)\n")
     return 2

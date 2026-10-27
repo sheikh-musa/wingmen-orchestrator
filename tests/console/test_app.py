@@ -1693,3 +1693,66 @@ def test_dedupe_distinct_lanes_untouched():
     ]
     out = console_app._dedupe_lanes_by_family(rows)
     assert len(out) == 2
+
+
+# ── fc-v86 (orch-console bus #78269, op#34848): home de-noise ──────────────────
+# "Your asks" on home shows ONLY what waits on Musa (status waiting_on_musa,
+# i.e. waiting_on_operator rows); lane-owned/in-progress/review asks move off
+# home — the full board stays at /asks. The pulse gains the honest waiting
+# count the top-bar Asks badge renders.
+def test_api_fleet_your_asks_waiting_only(server, monkeypatch):
+    from nervous_system.console import db as _db
+    # stub the rest of the /api/fleet aggregate empty (endpoint-level test —
+    # only the asks side carries signal here; others guard-fallback anyway)
+    for fn in ("fetch_deploys", "fetch_needs_you", "fetch_coordinators",
+               "fetch_backlog", "fetch_pane_context", "fetch_pool_usage",
+               "fetch_queue", "fetch_inbox_backlog"):
+        monkeypatch.setattr(_db, fn, lambda: [])
+    monkeypatch.setattr(
+        _db, "fetch_asks",
+        lambda: [
+            {"id": 1, "ask": "decide the ADCDA release", "delegated_to": "orch-console",
+             "waiting_on_operator": True, "chase_by": None, "status": "waiting_on_musa",
+             "updated_age_s": 10, "asked_age_s": 100},
+            {"id": 2, "ask": "lane building", "delegated_to": "cc-ihsanos",
+             "waiting_on_operator": False, "chase_by": None, "status": "in_progress",
+             "updated_age_s": 20, "asked_age_s": 200},
+            {"id": 3, "ask": "review the reply", "delegated_to": "cc-cosem",
+             "waiting_on_operator": False, "chase_by": None, "status": "delegate_done",
+             "updated_age_s": 30, "asked_age_s": 300},
+        ],
+    )
+    r = httpx.get(server + "/api/fleet", headers=H(), timeout=10)
+    assert r.status_code == 200
+    body = r.json()
+    # home card rows: waiting_on_musa ONLY — nothing else leaks onto home
+    assert [a["id"] for a in body["your_asks"]] == [1]
+    assert all(a["status"] == "waiting_on_musa" for a in body["your_asks"])
+    # the top-bar badge count = the waiting rows, not the noisy open total
+    assert body["pulse"]["asks_waiting"] == 1
+    # historical pulse keys keep their meaning (computed over the FULL board)
+    assert body["pulse"]["asks_open"] == 3
+    assert body["pulse"]["asks_needs"] == 0
+    assert body["pulse"]["asks_review"] == 1
+
+
+def test_api_asks_waiting_requires_auth(server):
+    r = httpx.get(server + "/api/asks-waiting", timeout=5)
+    assert r.status_code == 401
+
+
+def test_api_asks_waiting_count(server, monkeypatch):
+    """Lightweight count endpoint for the lanes.html top bar — same derivation
+    as the home card (status waiting_on_musa), so both badges always agree."""
+    from nervous_system.console import db as _db
+    monkeypatch.setattr(
+        _db, "fetch_asks",
+        lambda: [
+            {"id": 1, "ask": "a", "status": "waiting_on_musa"},
+            {"id": 2, "ask": "b", "status": "waiting_on_musa"},
+            {"id": 3, "ask": "c", "status": "pending"},
+        ],
+    )
+    r = httpx.get(server + "/api/asks-waiting", headers=H(), timeout=5)
+    assert r.status_code == 200
+    assert r.json() == {"count": 2}

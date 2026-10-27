@@ -1815,6 +1815,14 @@ def _fleet_payload():
     # ("N needs your call") + the "N open · N needs you · N to review" subline.
     asks_needs = sum(1 for a in your_asks if a.get("status") == "needs_you")
     asks_review = sum(1 for a in your_asks if a.get("status") == "delegate_done")
+    # fc-v86 (bus #78269, op#34848): home de-noise. The home "Your asks" card
+    # shows ONLY what waits on Musa (waiting_on_musa = the waiting_on_operator
+    # rows, the one structural FACT recorded at ask-open time) — lane-owned,
+    # in-progress and review asks leave home (nothing dropped: the full board
+    # stays at /asks). Counts above stay computed over the FULL board so their
+    # meaning is unchanged; the payload rows are filtered AFTER, and the pulse
+    # carries the honest waiting count the top-bar Asks badge renders.
+    asks_waiting_rows = [a for a in your_asks if a.get("status") == "waiting_on_musa"]
 
     return {
         "pulse": {**counts, "needs_you": len(needs),
@@ -1823,11 +1831,14 @@ def _fleet_payload():
                   "pane_health": pane_header["state"], "pane_worst": pane_header["worst"],
                   # fc-v55: operator-ask headline counts (the "Your asks" hero).
                   "asks_open": len(your_asks), "asks_needs": asks_needs,
-                  "asks_review": asks_review},
+                  "asks_review": asks_review,
+                  # fc-v86: the waiting-on-YOU count — the only asks number home shows.
+                  "asks_waiting": len(asks_waiting_rows)},
         # fc-v55: the operator's LIVE "Your asks" board (status derived in SQL,
         # never stored). Primary operator surface; the drain board is demoted to
         # a collapsed "Fleet chatter (SRE view)" below it.
-        "your_asks": _jsonable(your_asks),
+        # fc-v86: home carries ONLY the waiting-on-you rows (see above).
+        "your_asks": _jsonable(asks_waiting_rows),
         "needs_you": _jsonable(needs),
         "backlog": _jsonable(backlog),
         "coordinators": _jsonable(coordinators),
@@ -2239,6 +2250,16 @@ def _make_handler(feedloop: "_FeedLoop"):
                         "answered": answered_rows,
                         "counts": counts,
                     }))
+
+                if path == "/api/asks-waiting":
+                    # fc-v86 (bus #78269): the waiting-on-you count for the
+                    # lanes.html top bar — SAME derivation as the home card
+                    # (status waiting_on_musa), so the two badges always agree.
+                    # Lightweight: {count} only, no rows.
+                    rows = db.fetch_asks()
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, {"count": sum(
+                        1 for a in rows if a.get("status") == "waiting_on_musa")})
 
                 if path == "/api/status-board":
                     # "nothing goes dark" Phase 1 (bus 77019): ONE live view of
