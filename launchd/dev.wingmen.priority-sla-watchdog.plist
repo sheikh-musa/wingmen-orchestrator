@@ -21,6 +21,10 @@
          from actioning. Pre-existed live-only; now tracked. -->
     <key>SLA_EXCLUDE_AGENTS</key><string></string>
     <key>SLA_READ_PARKED_ENABLED</key><string>0</string>
+    <!-- SLOW-ASK PAGE ARMED (op#34803 part B, console ruling #78298, 2026-10-27): an operator
+         ask with no lane ack within SLA_SLOW_ASK_ACK_MIN (default 20) pages orch-console once
+         (slow_paged_at). Armed after #536's interim delegation-thread ack landed. -->
+    <key>SLA_SLOW_ASK_ENABLED</key><string>1</string>
     <!-- RULING-3 AGED-RR RE-PAGE ARMED (Nazim #40752, 2026-09-16, after the clean soak
          #40750: 0 aged rr rows in observe = empty blast radius). Promotes PR#108's
          aged-unanswered-rr net from observe/inert to live: a P0/P1 rr the hub or SRE
