@@ -7,10 +7,12 @@ POST /api/assign shells out to THIS script (writable orchestrator env) to do the
 write — the same vetted-script pattern /api/reset and backlog_swipe.py use.
 
 What it does, in ONE transaction:
-  (1) inserts ONE real bus row into `agent_messages` addressed to the target body
-      (from_agent='orch-console', message_type='decision', requires_response=true,
-      is_test=false) with a fresh `thread_id` (gen_random_uuid()). Because it's a
-      real, non-test inbox row, the target body sees it in its normal inbox
+  (1) posts ONE real bus row via post_agent_message() (backlog#124: the RPC on the
+      existing cursor/transaction, not a raw INSERT — bus #74939) addressed to the
+      target body (from_agent='orch-console', message_type='decision',
+      requires_response=true, is_test=false by column default) with a fresh
+      `thread_id`. Because it's a real, non-test inbox row, the target body sees it
+      in its normal inbox
       (`to_agent=<id> AND read_at IS NULL`) and drains it exactly like any other
       work — so the console's drain board shrinks as the body catches up.
   (2) LINKS `operator_asks` (migration 044) to that SAME `thread_id`, but ONLY
@@ -45,6 +47,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import uuid
 
 import psycopg
 
@@ -82,23 +85,31 @@ def assign(agent: str, ask: str, priority: str, source_msg_id: "int | None" = No
             "moves it to review. If you need the operator's decision, reply back to "
             "orch-console with requires_response=true — that surfaces it as 'needs you'."
         )
-        # thread_id is a fresh uuid (agent_messages.thread_id is uuid, set via
-        # gen_random_uuid() elsewhere — fleet_stall_watch.py / watchdog_tripwire).
-        # The lane's reply rides the SAME thread_id, which is exactly what the
-        # "Your asks" board joins on to derive live status. RETURNING both so the
-        # link row stores the same uuid.
+        # thread_id is a fresh uuid, generated here (not gen_random_uuid() in SQL) so it
+        # matches bus_send.py's own send() convention (str(uuid.uuid4())) now that the
+        # row goes through the SAME RPC. The lane's reply rides this SAME thread_id,
+        # which is exactly what the "Your asks" board joins on to derive live status.
+        #
+        # RPC on the EXISTING cursor/transaction (orch-console ruling, bus #74939), NOT
+        # bus_send.py's send() — send() opens its OWN separate connection and commits
+        # immediately, which would let an operator_asks failure below leave an ORPHAN
+        # bus row (the exact failure mode this script exists to prevent — see module
+        # docstring "no orphan bus row"). Calling post_agent_message() here keeps the
+        # bus row and the operator_asks write in ONE transaction while still satisfying
+        # the enforce-in-code gate (it keys on raw INSERT INTO agent_messages, not RPC
+        # calls — backlog#124).
+        #
+        # message_type MUST be one of agent_messages_message_type_check's eight values.
+        # It shipped as 'directive' — which is NOT one of them, so EVERY console assign
+        # has raised CheckViolation since fc-v52 and the operator's assign button has
+        # never once written a row (found 2026-08-16 by using it). 'decision' is the
+        # closest allowed type for an instruction that expects a reply; do NOT
+        # reintroduce a value the constraint does not allow.
+        thread_id = str(uuid.uuid4())
         cur.execute(
-            "INSERT INTO agent_messages (from_agent, to_agent, thread_id, message_type, "
-            "subject, body, priority, requires_response, is_test) "
-            # message_type MUST be one of agent_messages_message_type_check's eight
-            # values. It shipped as 'directive' — which is NOT one of them, so EVERY
-            # console assign has raised CheckViolation since fc-v52 and the operator's
-            # assign button has never once written a row (found 2026-08-16 by using it).
-            # 'decision' is the closest allowed type for an instruction that expects a
-            # reply; do NOT reintroduce a value the constraint does not allow.
-            "VALUES ('orch-console', %s, gen_random_uuid(), 'decision', %s, %s, %s, true, false) "
-            "RETURNING id, thread_id",
-            (agent, subject, body, priority),
+            "SELECT * FROM post_agent_message(%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            ("orch-console", agent, "decision", subject, body, priority, True,
+             thread_id, None),
         )
         new_id, thread_id = cur.fetchone()
         # SAME-TRANSACTION link (migration 044) — ONLY when source_msg_id traces

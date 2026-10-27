@@ -8,6 +8,7 @@ call (_ingest._download_media) is stubbed; nothing here touches
 api.telegram.org.
 """
 import datetime as _dt
+import pathlib
 
 import psycopg
 import pytest
@@ -16,6 +17,7 @@ from psycopg.rows import dict_row
 from nervous_system import ingest as _ingest
 from nervous_system import media_reaper
 
+MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parent.parent / "migrations"
 
 _DDL = (
     """CREATE TABLE agents (
@@ -28,6 +30,10 @@ _DDL = (
          message_type TEXT NOT NULL, subject TEXT, body TEXT,
          requires_response BOOLEAN NOT NULL DEFAULT false,
          priority TEXT NOT NULL DEFAULT 'P2',
+         thread_id UUID NOT NULL DEFAULT gen_random_uuid(),
+         sub_tag TEXT,
+         is_test BOOLEAN NOT NULL DEFAULT false,
+         posted_by_identity TEXT,
          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
        )""",
     """CREATE TABLE bot_channels (
@@ -53,11 +59,18 @@ def reaper_dsn(pg_dsn, monkeypatch):
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP SCHEMA public CASCADE")
         cur.execute("CREATE SCHEMA public")
+        cur.execute("GRANT USAGE ON SCHEMA public TO PUBLIC")
+        cur.execute("SELECT 1 FROM pg_roles WHERE rolname='service_role'")
+        if cur.fetchone() is None:
+            cur.execute("CREATE ROLE service_role")
         for ddl in _DDL:
             cur.execute(ddl)
         cur.execute("INSERT INTO agents (id, display_name, status) "
                     "VALUES ('media-reaper', 'reaper', 'active'), "
                     "('orch-console', 'console', 'active')")
+        # _notify() now posts via bus_send.send() -> post_agent_message() (backlog#124).
+        cur.execute((MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text())
+        cur.execute((MIGRATIONS_DIR / "122_post_agent_message_optional_params.sql").read_text())
     return pg_dsn
 
 

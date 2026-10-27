@@ -29,8 +29,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.lib.unreleased_client_drafts import find_unreleased_drafts, CouldNotMeasure  # noqa: E402
-
-import psycopg2  # noqa: E402
+from scripts import bus_send  # noqa: E402
 
 ORCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_PATH = os.path.join(ORCH, "state", "supervised_draft_deadman_state.json")
@@ -64,13 +63,8 @@ def _save_state(st: dict) -> None:
 
 
 def _page(dsn: str, subject: str, body: str) -> None:
-    with psycopg2.connect(dsn) as c, c.cursor() as cur:
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
-            "priority, requires_response) VALUES ('supervised-draft-deadman',%s,'blocker',%s,%s,'P1',true)",
-            (TO_AGENT, subject[:200], body),
-        )
-        c.commit()
+    bus_send.send(from_agent="supervised-draft-deadman", to=TO_AGENT, mtype="blocker",
+                   subject=subject[:200], body=body, priority="P1", req=True, dsn=dsn)
 
 
 def main() -> int:

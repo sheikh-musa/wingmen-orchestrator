@@ -1499,13 +1499,15 @@ def test_console_assign_stamps_link_row_in_same_transaction(monkeypatch):
     assert conn.committed is True
 
     sqls = [e[0] for e in cur.executed]
-    # 1) agents guard, 2) directive insert, 3) existing-row check, 4) link insert
+    # 1) agents guard, 2) directive post, 3) existing-row check, 4) link insert
     assert len(cur.executed) == 4
     assert "from agents" in sqls[0].lower()
     directive = cur.executed[1]
-    assert "insert into agent_messages" in directive[0].lower()
-    assert "thread_id" in directive[0].lower() and "gen_random_uuid()" in directive[0].lower()
-    assert "returning id, thread_id" in directive[0].lower()
+    # backlog#124/bus #74939: the directive now posts via the post_agent_message()
+    # RPC on this SAME cursor/connection, not a raw INSERT -- thread_id is generated
+    # client-side (a fresh uuid4) and passed as a param, not a SQL literal.
+    assert "post_agent_message" in directive[0].lower()
+    assert "insert into agent_messages" not in directive[0].lower()
     existing_check = cur.executed[2]
     assert "select id from operator_asks" in existing_check[0].lower()
     assert existing_check[1] == (99, "ship the thing")

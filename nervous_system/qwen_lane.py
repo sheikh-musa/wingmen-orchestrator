@@ -44,9 +44,10 @@ PROTOCOL CONTRACT (studied from the live bus, not guessed)
 =====================================================================
 Bus = `agent_messages` on the substrate DB (env DATABASE_URL, psycopg v3).
  - INBOX read:  SELECT ... WHERE to_agent=<my id> AND read_at IS NULL
- - REPLY write: INSERT (from_agent,to_agent,thread_id,message_type,subject,body,
-                requires_response,priority,is_test) — same column set the hub's
-                emitters use (see scripts/fleet_stall_watch.py). Reuses the
+ - REPLY write: post_agent_message() RPC (migration 117, extended by 122 with the
+                is_test/posted_by_identity params this reply needs -- backlog#124,
+                bus #74939), called on the SAME cursor/connection as _mark_handled()'s
+                UPDATE so both commit atomically per message (drain_once). Reuses the
                 inbound thread_id so the reply threads to the request.
  - message_type is CHECK-constrained; valid set includes 'update'/'question'/
    'blocker' (also review_request/decision/agreed/challenge/counter). We reply
@@ -249,19 +250,24 @@ def _attributable_reply(conn, inbound: dict, answer_text: str) -> int:
     with conn.cursor() as cur:
         # Documented emitter contract: name the speaker for the provenance trigger.
         cur.execute("SELECT set_config('app.current_agent_id', %s, true)", (SANDBOX_AGENT_ID,))
+        # RPC on the EXISTING cursor/connection (backlog#124, bus #74939), not
+        # bus_send.py's send() -- send() opens its OWN separate connection and would
+        # commit independently of _mark_handled()'s UPDATE below (drain_once commits
+        # both together per message, rolling both back on any failure). Calling
+        # post_agent_message() here keeps that same atomicity while still satisfying
+        # the enforce-in-code gate (it's the RPC, not a raw INSERT).
         cur.execute(
-            "INSERT INTO agent_messages "
-            "  (from_agent, to_agent, thread_id, message_type, subject, body, "
-            "   requires_response, priority, is_test) "
-            "VALUES (%s, %s, %s, 'update', %s, %s, false, 'P3', true) "
-            "RETURNING id",
+            "SELECT * FROM post_agent_message(%s, %s, 'update', %s, %s, 'P3', false, "
+            "%s, %s, %s, %s)",
             (
                 SANDBOX_AGENT_ID,          # G2: harness-stamped, model-independent
                 to_agent,
-                inbound["thread_id"],      # thread the reply to the request
                 reply_subject,
                 reply_body,
-                # requires_response=false, priority=P3, is_test=true all fixed here
+                inbound["thread_id"],      # thread the reply to the request
+                None,                      # sub_tag
+                True,                      # is_test=true forced, model cannot flip it (G1)
+                None,                      # posted_by_identity: let the trigger auto-populate
             ),
         )
         return cur.fetchone()[0]

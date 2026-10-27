@@ -722,7 +722,7 @@ def send(
     from_agent: str, to: str, mtype: str, subject: str, body: str, priority: str,
     req: bool = False, thread: str | None = None, reply_to: int | None = None,
     link_ask: int | None = None, dsn: str | None = None, allow_undeliverable: bool = False,
-    sub_tag: str | None = None,
+    sub_tag: str | None = None, is_test: bool = False, posted_by_identity: str | None = None,
 ) -> tuple[int, str]:
     """Do the actual INSERT. The one place the SQL lives — CLI (`main`) and
     every shim (`_bus_tmp.py`, `scratchpad/bus_send.py`) call this so there is
@@ -755,13 +755,18 @@ def send(
     if not thread:
         thread = str(uuid.uuid4())
 
+    # backlog#124 step 2/4 (bus #74863): post THROUGH the RPC, never a raw INSERT --
+    # this is the fleet-wide cutover that must be live everywhere before migration
+    # 124's revoke (direct INSERT -> service_role) can safely apply.
+    # Same 9 columns, same order, as the INSERT this replaces -- post_agent_message's
+    # signature was audited against this exact call shape (bus #74860) before being
+    # written. is_test/posted_by_identity are migration 122's trailing optional params
+    # (backlog#124, bus #74939) -- defaults (False/None) reproduce the pre-122 RPC
+    # exactly for every caller that doesn't pass them.
     cur.execute(
-        """INSERT INTO agent_messages
-             (from_agent, to_agent, message_type, subject, body,
-              priority, requires_response, thread_id, sub_tag)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-           RETURNING id, thread_id""",
-        (from_agent, to, mtype, subject, body, priority, req, thread, sub_tag),
+        "SELECT * FROM post_agent_message(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (from_agent, to, mtype, subject, body, priority, req, thread, sub_tag,
+         is_test, posted_by_identity),
     )
     row_id, thread_id = cur.fetchone()
 

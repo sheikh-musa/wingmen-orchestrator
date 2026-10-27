@@ -375,9 +375,8 @@ def test_send_passes_sub_tag_through_to_the_insert(monkeypatch):
         "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
         sub_tag="cc-cosem-platform-4",
     )
-    insert = next(e for e in cur.executed if "insert into agent_messages" in e[0].lower())
-    assert "sub_tag" in insert[0].lower()
-    assert insert[1][-1] == "cc-cosem-platform-4"
+    rpc = next(e for e in cur.executed if "post_agent_message" in e[0].lower())
+    assert rpc[1][8] == "cc-cosem-platform-4"
 
 
 def test_send_sub_tag_defaults_to_none(monkeypatch):
@@ -388,8 +387,71 @@ def test_send_sub_tag_defaults_to_none(monkeypatch):
         "cc-fleet-health", "orch-console", "update", "status",
         "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
     )
-    insert = next(e for e in cur.executed if "insert into agent_messages" in e[0].lower())
-    assert insert[1][-1] is None
+    rpc = next(e for e in cur.executed if "post_agent_message" in e[0].lower())
+    assert rpc[1][8] is None
+
+
+def test_send_posts_through_the_rpc_not_a_raw_insert(monkeypatch):
+    # backlog#124 step 2/4 (bus #74863): the fleet-wide cutover that must land
+    # BEFORE migration 124 (the revoke) can safely apply -- send() must
+    # call post_agent_message(), never INSERT INTO agent_messages directly, or
+    # every writer still on the old path breaks the instant 124 ships.
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
+    row_id, thread_id = bs.send(
+        "cc-substrate", "orch-console", "update", "status",
+        "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
+    )
+    assert (row_id, thread_id) == (4242, "th-uuid-abc")
+    assert conn.committed is True
+    assert not any("insert into agent_messages" in e[0].lower() for e in cur.executed)
+    rpc = next(e for e in cur.executed if "post_agent_message" in e[0].lower())
+    assert rpc[1] == ("cc-substrate", "orch-console", "update", "status",
+                       "x" * bs._MIN_BODY_BYTES, "P2", False, rpc[1][7], None, False, None)
+
+
+def test_send_is_test_defaults_to_false(monkeypatch):
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
+    bs.send(
+        "cc-fleet-health", "orch-console", "update", "status",
+        "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
+    )
+    rpc = next(e for e in cur.executed if "post_agent_message" in e[0].lower())
+    assert rpc[1][9] is False
+
+
+def test_send_passes_is_test_through(monkeypatch):
+    # backlog#124 (bus #74939): lane_drill_seed.py / qwen_lane.py need is_test=true
+    # to move off raw INSERT without a lossy change.
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
+    bs.send(
+        "orch-console", "cc-irsyad", "question", "drill",
+        "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused", is_test=True,
+    )
+    rpc = next(e for e in cur.executed if "post_agent_message" in e[0].lower())
+    assert rpc[1][9] is True
+
+
+def test_send_posted_by_identity_defaults_to_none(monkeypatch):
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
+    bs.send(
+        "cc-fleet-health", "orch-console", "update", "status",
+        "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
+    )
+    rpc = next(e for e in cur.executed if "post_agent_message" in e[0].lower())
+    assert rpc[1][10] is None
+
+
+def test_send_passes_posted_by_identity_through(monkeypatch):
+    # backlog#124 (bus #74939): opus_reprobe_storefront.py needs a fixed
+    # posted_by_identity literal to move off raw INSERT without a lossy change.
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
+    bs.send(
+        "cc-fleet-health", "cc-storefront", "update", "status",
+        "x" * bs._MIN_BODY_BYTES, "P1", dsn="postgresql://unused",
+        posted_by_identity="cc-fleet-health",
+    )
+    rpc = next(e for e in cur.executed if "post_agent_message" in e[0].lower())
+    assert rpc[1][10] == "cc-fleet-health"
 
 
 def test_send_with_link_ask_updates_the_existing_row(monkeypatch):

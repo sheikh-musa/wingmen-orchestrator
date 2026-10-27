@@ -147,7 +147,7 @@ class _FakeCur:
             self._rows = list(self._host_of.items())
         elif "FROM agents" in sql:
             self._rows = [(a,) for a in self._agents]
-        elif sql.strip().upper().startswith("INSERT"):
+        elif sql.strip().upper().startswith("INSERT") or "post_agent_message" in sql:
             self._inserts.append((sql, params))
     def fetchall(self): return self._rows
 

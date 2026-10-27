@@ -30,6 +30,10 @@ in that context (see [[ci-orphaned-jobs-studio-runner-flap]] launchd-gh-auth cav
 swap to a GH token.
 """
 import os, sys, json, subprocess, urllib.request, urllib.error
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts import bus_send  # noqa: E402
 
 VERCEL_API = "https://api.vercel.com"
 TEAM_ID = "team_mYxOkemmlg8a3HnKFAE9di7N"  # wingmen-aa9356e1 (NOT the default VERCEL_TEAM_ID)
@@ -167,19 +171,11 @@ def _save_state(st):
 
 
 def _post_bus(subject, body):
-    import psycopg2
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         _die("--alert needs DATABASE_URL")
-    conn = psycopg2.connect(dsn)
-    cur = conn.cursor()
-    cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-    cur.execute(
-        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,created_at) "
-        "VALUES ('cc-fleet-health',%s,'update',%s,%s,'P2',now()) RETURNING id",
-        (ALERT_TO, subject, body))
-    mid = cur.fetchone()[0]
-    conn.commit(); cur.close(); conn.close()
+    mid, _thread = bus_send.send(from_agent="cc-fleet-health", to=ALERT_TO, mtype="update",
+                                  subject=subject, body=body, priority="P2", req=False, dsn=dsn)
     return mid
 
 

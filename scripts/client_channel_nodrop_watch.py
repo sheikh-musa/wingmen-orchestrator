@@ -46,8 +46,12 @@ import os
 import re
 import sys
 import time
+from pathlib import Path
 
 import psycopg2
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts import bus_send  # noqa: E402
 
 ORCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_PATH = os.path.join(ORCH, "state", "client_channel_nodrop_watch.json")
@@ -282,13 +286,9 @@ def fetch_recent(dsn: str, tag: str, limit: int = FETCH_LIMIT) -> list:
 
 
 def _bus(dsn: str, action: dict) -> None:
-    with psycopg2.connect(dsn) as c, c.cursor() as cur:
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
-            "priority, requires_response) VALUES ('client-nodrop-watch',%s,%s,%s,%s,%s,true)",
-            (action["to"], action["type"], action["subject"][:200], action["body"], action["priority"]),
-        )
-        c.commit()
+    bus_send.send(from_agent="client-nodrop-watch", to=action["to"], mtype=action["type"],
+                   subject=action["subject"][:200], body=action["body"],
+                   priority=action["priority"], req=True, dsn=dsn)
 
 
 def _fail_closed_page(dsn, tag, err, armed):

@@ -82,6 +82,26 @@ def test_page_loud_false_never_attempts_db_write(monkeypatch, capsys):
     assert "log-only, no bus row" in err
 
 
+def test_page_survives_bus_send_raising_system_exit(monkeypatch, capsys):
+    """Musa op#34845, bus #78369 finding E: bus_send.send() can raise bare SystemExit
+    (e.g. dburl() when no DATABASE_URL resolves -- bus_send.py:533), which is a
+    BaseException, not an Exception -- a bare `except Exception` around the send()
+    call does NOT catch it, so the whole prune/monitor/reclaimer process would crash
+    instead of logging a WARN and continuing, exactly contradicting this function's own
+    'page best-effort; stderr banner already stands' comment. Simulates the real
+    failure shape (dburl() raising SystemExit, bus_send.py:533) directly on
+    bus_send.send rather than fighting over DATABASE_URL/.env resolution order."""
+    from scripts import bus_send
+    def _raise_system_exit(*a, **k):
+        raise SystemExit("no DATABASE_URL: set it in the environment or .env")
+    monkeypatch.setattr(bus_send, "send", _raise_system_exit)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
+    summary = {"results": [], "errors": []}
+    dar._page(10 * GB, 5 * GB, summary, loud=True)  # must not raise
+    err = capsys.readouterr().err
+    assert "WARN bus-page failed" in err
+
+
 def test_page_loud_true_still_attempts_db_write(monkeypatch, capsys):
     import psycopg2
     calls = {"connect": 0}

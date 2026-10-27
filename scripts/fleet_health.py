@@ -43,7 +43,7 @@ Only touches agent_status (status + delete), agent_messages.read_at (archive),
 and any drifted sequence's last_value (setval). Run on demand:
     python3 scripts/fleet_health.py [--quiet] [--no-archive]
 """
-import os, re, subprocess, sys
+import os, re, subprocess, sys, uuid
 from pathlib import Path
 import psycopg
 from dotenv import load_dotenv
@@ -206,10 +206,13 @@ def surface_dead_letters(cur, dry=False):
                         f"be fixed (retarget the producer) or the address retired, not hidden. "
                         f"Surfaced once/day by the cc-fleet-health dead-letter detector.")
             cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-            cur.execute("""INSERT INTO agent_messages
-                           (from_agent,to_agent,message_type,subject,body,priority,requires_response)
-                           VALUES ('cc-fleet-health','orch-console','update',%s,%s,'P2',false)""",
-                        (subj, body))
+            # RPC on the EXISTING cursor (backlog#124, bus #74939), not bus_send.send() --
+            # this loop can post multiple to_agents before the ONE conn.commit() in main()
+            # after this function returns; send()'s own connection would break that batch.
+            cur.execute(
+                "SELECT * FROM post_agent_message('cc-fleet-health','orch-console','update',"
+                "%s,%s,'P2',false,%s,%s,%s,%s)",
+                (subj, body, str(uuid.uuid4()), None, False, None))
         surfaced.append(to_agent)
     return surfaced
 

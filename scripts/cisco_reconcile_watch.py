@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import uuid
 
 GOUMLYNE_ENV = "GOUMLYNE_RO_DATABASE_URL"  # CAI-1225 RO-move: read-only auditor_ro (was write-DSN); this monitor is SELECT-only
 TABLE = "public.tabung_coin_deposits"
@@ -117,14 +118,20 @@ def _already_paged(cur, key: str, cooldown_min: int) -> bool:
 
 def _page(cur, subject: str, body: str, priority: str) -> None:
     """NON-DESTRUCTIVE page to RECIPIENTS on the substrate. Carries status/counts/timestamps
-    ONLY — never a PII value. Caller dedups + commits."""
+    ONLY — never a PII value. Caller dedups + commits.
+
+    RPC on the EXISTING cursor (backlog#124, bus #74939), not bus_send.py's send() --
+    send() opens its OWN separate connection and would commit each recipient/event
+    independently, breaking the single-commit-at-the-end batch run_once() relies on
+    (today: the first-reconcile page + every stuck-row page in one pass land together
+    or not at all)."""
     for to_agent in RECIPIENTS:
         if DRY:
             print(f"[cisco-watch DRY] would page {to_agent} [{priority}] :: {subject}")
         else:
             cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
-                "VALUES (%s,%s,'update',%s,%s,true,%s)", (SRE_FROM, to_agent, subject, body, priority))
+                "SELECT * FROM post_agent_message(%s, %s, 'update', %s, %s, %s, true, %s, %s, %s, %s)",
+                (SRE_FROM, to_agent, subject, body, priority, str(uuid.uuid4()), None, False, None))
 
 
 def _page_loud_cannot_measure(reason: str) -> int:

@@ -126,11 +126,15 @@ def test_run_alerts_an_error_storm_channel(monkeypatch):
     rows = [{"channel_key": "gazzabyte-irsyad", "host": "Sheikhs-Mini",
              "consec_errors": 9, "last_ok_age_s": 700, "updated_age_s": 4}]
     saved = {}
+    sent = []
+    monkeypatch.setattr(clw.bus_send, "send",
+                         lambda **kw: (sent.append(kw), (1, "thread"))[1])
     cur, conn = _wire(monkeypatch, rows, saved=saved)
     clw.run(conn, dry=False)
-    assert len(cur.inserts) == 1
-    params = cur.inserts[0]
-    assert f"{clw.SUBJECT_PREFIX} gazzabyte-irsyad@Sheikhs-Mini: error_storm" in params[0]
+    assert len(sent) == 1
+    assert sent[0]["to"] == "orch-console" and sent[0]["priority"] == "P1"
+    assert f"{clw.SUBJECT_PREFIX} gazzabyte-irsyad@Sheikhs-Mini: error_storm" in sent[0]["subject"]
+    assert cur.inserts == [], "the alert must go through bus_send.send(), not a raw INSERT"
     assert "_heartbeat_epoch" in saved            # dead-man heartbeat stamped
 
 

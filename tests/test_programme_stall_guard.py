@@ -100,27 +100,24 @@ class FindCorruptCheckpointsTest(unittest.TestCase):
 
 
 class _FakeConn:
+    """Captures guard.bus_send.send() calls (backlog#124: check() now posts via the
+    sanctioned RPC path, not a raw INSERT on its own psycopg.connect)."""
     def __init__(self):
         self.executed = []
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def execute(self, sql, params=None):
-        self.executed.append((" ".join(sql.split()), params))
+    def send(self, *, from_agent, to, mtype, subject, body, priority, req, dsn=None):
+        self.executed.append((None, (from_agent, subject, body)))
+        return (1, "fake-thread")
 
 
 def _run_check(monkeypatch, tmp_path, programmes, commitments, state=None):
-    """check()'s live INSERT path, DB fully mocked (no real DSN, nothing on the substrate)."""
+    """check()'s live post path, bus_send.send() mocked (no real DSN, nothing on the substrate)."""
     fake_conn = _FakeConn()
     monkeypatch.setattr(guard, "_dsn", lambda: "postgresql://fake")
     monkeypatch.setattr(guard, "_load", lambda: (programmes, commitments))
     monkeypatch.setattr(guard, "_read_state", lambda: dict(state or {}))
     monkeypatch.setattr(guard, "STATE", tmp_path / "programme_stall_guard_test.json")
-    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: fake_conn)
+    monkeypatch.setattr(guard.bus_send, "send", fake_conn.send)
     rc = guard.check(dry_run=False)
     assert rc == 0
     return fake_conn

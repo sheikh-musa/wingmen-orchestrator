@@ -46,3 +46,22 @@ def test_recipient_capped_false_for_missing_or_empty_session(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda cmd, **k: _R(1))  # has-session returns non-zero
     assert s._recipient_capped("nope") is False
     assert s._recipient_capped("") is False
+
+
+class _FakeConn:
+    def rollback(self):
+        pass
+
+
+def test_audit_survives_bus_send_raising_system_exit(monkeypatch, capsys):
+    """Musa op#34845, bus #78369 finding E: bus_send.send() can raise bare SystemExit
+    (e.g. dburl() when no DATABASE_URL resolves -- bus_send.py:533), a BaseException the
+    bare `except Exception` here does not catch -- would crash the whole SLA-watchdog
+    daemon instead of logging 'audit-insert-failed' and continuing, as every other
+    failure mode in this function already does."""
+    def _raise_system_exit(*a, **k):
+        raise SystemExit("no DATABASE_URL: set it in the environment or .env")
+    monkeypatch.setattr(s.bus_send, "send", _raise_system_exit)
+    s.audit(_FakeConn(), "subj", "body")  # must not raise
+    out = capsys.readouterr().out
+    assert "audit-insert-failed" in out

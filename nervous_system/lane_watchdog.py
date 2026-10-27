@@ -189,16 +189,15 @@ def escalate(sess: str, state: str, detail: str) -> None:
     try:
         sys.path.insert(0, str(ORCH))
         from dotenv import load_dotenv
-        import psycopg
+        from scripts import bus_send
         load_dotenv(str(ORCH / ".env"))
         dsn = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL")
-        with psycopg.connect(dsn, connect_timeout=10) as c, c.cursor() as cur:
-            cur.execute(
-                """insert into agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority)
-                   values ('cc-orchestrator','cc-orchestrator','update',%s,%s,false,'P2')""",
-                (f"[watchdog] lane '{sess}' needs attention: {state}",
-                 f"lane_watchdog: '{sess}' is {state}. {detail} (Auto-recovery not applicable / exhausted — hub judgment needed.)"))
-            c.commit()
+        bus_send.send(
+            from_agent="cc-orchestrator", to="cc-orchestrator", mtype="update",
+            subject=f"[watchdog] lane '{sess}' needs attention: {state}",
+            body=(f"lane_watchdog: '{sess}' is {state}. {detail} (Auto-recovery not "
+                  f"applicable / exhausted — hub judgment needed.)"),
+            priority="P2", req=False, dsn=dsn)
     except Exception as e:
         log(f"escalate-bus-failed {sess}: {e}")
 

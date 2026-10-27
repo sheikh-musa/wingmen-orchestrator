@@ -6,6 +6,7 @@ enqueue failure. DB + Telegram send are stubbed (no network, no real DB).
 """
 from __future__ import annotations
 
+import psycopg2
 import pytest
 
 from nervous_system import bug_report_channel_poll as brc
@@ -57,6 +58,12 @@ class _FakeCursor:
         elif "INSERT INTO agent_messages" in s:
             self.db.alerts.append(params)
             self._result = []
+        elif "post_agent_message" in s:
+            # bus_send.send() -- _alert_console posts through the RPC now
+            # (backlog#124). params: (from_agent, to, mtype, subject, body,
+            # priority, req, thread, sub_tag, is_test, posted_by_identity).
+            self.db.alerts.append((params[3], params[4]))
+            self._result = [(9000 + len(self.db.alerts), "00000000-0000-0000-0000-000000000000")]
         else:
             self._result = []
 
@@ -80,6 +87,9 @@ class _FakeConn:
     def cursor(self):
         return _FakeCursor(self.db)
 
+    def close(self):
+        pass
+
     def commit(self):
         self.db.commits += 1
 
@@ -100,6 +110,10 @@ def wired(monkeypatch):
     def install(db, enqueue_calls, raise_on_enqueue=False):
         monkeypatch.setattr(brc, "_dsn", lambda: "postgresql://fake")
         monkeypatch.setattr(brc.psycopg, "connect", lambda *a, **k: _FakeConn(db))
+        # _alert_console now posts via bus_send.send(), which uses psycopg2
+        # (not psycopg v3) internally -- patch both so the RPC call lands on
+        # the same fake DB instead of a real network connection.
+        monkeypatch.setattr(psycopg2, "connect", lambda *a, **k: _FakeConn(db))
 
         def _fake_enqueue(channel, text=None, **k):
             enqueue_calls.append((channel, text))

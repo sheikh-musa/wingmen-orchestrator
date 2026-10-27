@@ -59,6 +59,12 @@ from agent_wake import (  # noqa: E402  (same-dir module; nervous_system on sys.
 _ORCH_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 pending_rows_default = pending_rows   # the import; sweep_once's `pending_rows` param shadows it
 
+try:
+    from scripts import bus_send
+except ImportError:
+    sys.path.insert(0, _ORCH_ROOT)
+    from scripts import bus_send
+
 _DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 WAKE_SWEEP_SEC = int(os.environ.get("WAKE_SWEEP_SEC", "60"))     # cadence
 WAKE_SWEEP_GRACE_S = int(os.environ.get("WAKE_SWEEP_GRACE_S", "90"))  # let realtime win first
@@ -618,13 +624,9 @@ def _escalate_operator(subject: str, body: str, *, console_alive=None) -> None:
         text = (f"[console-dead-redirect] {_ESCALATE_TO} has no fresh heartbeat — routed to "
                 f"you instead (audit-20261006 item 4, bus#54648).\n\n{body}")
     try:
-        with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
-            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,"
-                "body,requires_response) VALUES ('cc-fleet-health',%s,'blocker',%s,%s,%s,%s)",
-                (to_agent, priority, subject, text, requires_response))
-            conn.commit()
+        bus_send.send(from_agent="cc-fleet-health", to=to_agent, mtype="blocker",
+                      subject=subject, body=text, priority=priority,
+                      req=requires_response, dsn=_DSN)
     except Exception as e:  # noqa: BLE001 — page best-effort
         print(f"wake_backstop_sweep: escalation page failed ({e})", file=sys.stderr, flush=True)
 
@@ -1074,19 +1076,14 @@ def _fetch_idle_unread_rows(min_age_s: int):
 
 
 def _bus_insert(from_agent, to_agent, mtype, priority, subject, body, req: bool = False):
-    """One parameterized INSERT (mirrors _escalate_operator's shape/identity stamp) — the
-    ONE place this module writes a bus row for the idle-unread signal."""
+    """One sanctioned post via bus_send.send() (backlog#124, bus #74954) — the ONE place
+    this module writes a bus row for the idle-unread signal."""
     if not _DSN:
         return None
-    with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
-        cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (from_agent,))
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,"
-            "subject,body,requires_response) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-            (from_agent, to_agent, mtype, priority, subject[:180], body, req))
-        row_id = cur.fetchone()[0]
-        conn.commit()
-        return row_id
+    row_id, _thread = bus_send.send(from_agent=from_agent, to=to_agent, mtype=mtype,
+                                    subject=subject[:180], body=body, priority=priority,
+                                    req=req, dsn=_DSN)
+    return row_id
 
 
 def _still_unread(ids) -> list:

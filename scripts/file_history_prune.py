@@ -223,17 +223,27 @@ def _alert(msgs, *, loud=True):
     banner = header + "\n  " + "\n  ".join(msgs)
     print(banner, file=sys.stderr, flush=True)
     try:
-        import psycopg2
+        # Musa op#34845, bus #78369 finding C (verified): boot_file_history_prune.sh runs
+        # this file by its plain absolute path, no PYTHONPATH -- sys.path[0] is then this
+        # file's own directory (scripts/), where bus_send.py is a direct sibling, so the
+        # plain `import bus_send` fallback resolves even though `from scripts import
+        # bus_send` (needing scripts/'s PARENT on sys.path) does not. Only pytest's own
+        # `pythonpath = .` (pytest.ini) made the unguarded form look fine locally -- it
+        # silently swallowed as a WARN under the real launchd invocation (this except
+        # clause), losing the bus page for a genuine P1 disk-wedge-risk event every time.
+        try:
+            from scripts import bus_send
+        except ImportError:
+            import bus_send  # type: ignore
         dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
         if dsn:
-            c = psycopg2.connect(dsn)
-            cur = c.cursor()
-            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-            cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-                           VALUES ('cc-fleet-health','orch-console',%s,%s,%s,%s)""",
-                        (mtype, priority, subject, body))
-            c.commit()
-    except Exception as e:  # noqa: BLE001 — page is best-effort; the stderr banner already fired
+            bus_send.send(from_agent="cc-fleet-health", to="orch-console", mtype=mtype,
+                          subject=subject, body=body, priority=priority, req=False, dsn=dsn)
+    except (Exception, SystemExit) as e:  # noqa: BLE001 — page is best-effort; the stderr
+        # banner already fired. Musa op#34845, bus #78369 finding E: bus_send.send() can
+        # raise bare SystemExit (dburl(), bus_send.py:533), a BaseException a plain
+        # `except Exception` would not catch -- same established pattern as bus_send.py's
+        # own internal callers.
         print(f"[file-history-prune] WARN bus-page failed ({e}); stderr banner stands", file=sys.stderr)
 
 

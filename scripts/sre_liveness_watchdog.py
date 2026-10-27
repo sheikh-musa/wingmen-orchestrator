@@ -54,6 +54,7 @@ ORCH = pathlib.Path.home() / "wingmen" / "orchestrator"
 if str(ORCH) not in sys.path:
     sys.path.insert(0, str(ORCH))
 from scripts.lib.console_alive import console_alive  # noqa: E402  (audit-20261006 item 4)
+from scripts import bus_send  # noqa: E402
 COMPOSER_LIB = ORCH / "scripts" / "lib" / "composer_capture.sh"
 NAZIM_SEND = ORCH / "scripts" / "nazim_send.sh"
 STATE = ORCH / "logs" / "sre_liveness.state"
@@ -235,13 +236,9 @@ def _nudge(episode: str, verdict: str) -> bool:
             f"(to_agent='cc-fleet-health') + resume. If this row IS the thing you were stuck "
             f"unable to submit, ignore it and carry on. Episode {episode}.")
     try:
-        import psycopg
-        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response)"
-                " VALUES (%s,%s,'update',%s,%s,'P1',true)",
-                (POST_FROM, AGENT, "[sre-liveness] wedge nudge — auto-wake trigger", body))
-            conn.commit()
+        bus_send.send(from_agent=POST_FROM, to=AGENT, mtype="update",
+                      subject="[sre-liveness] wedge nudge — auto-wake trigger",
+                      body=body, priority="P1", req=True, dsn=dsn)
         _log(f"NUDGE posted to {AGENT} (episode {episode}, verdict {verdict})")
         return True
     except Exception as e:
@@ -266,13 +263,9 @@ def _escalate(episode: str, verdict: str, nudges: int) -> None:
     bus_to = "orch-console" if console_is_alive else "cc-orchestrator"
     if dsn:
         try:
-            import psycopg
-            with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response)"
-                    " VALUES (%s,%s,'blocker',%s,%s,'P1',true)",
-                    (POST_FROM, bus_to, "SRE nudge-proof WEDGE — needs human relaunch", human))
-                conn.commit()
+            bus_send.send(from_agent=POST_FROM, to=bus_to, mtype="blocker",
+                          subject="SRE nudge-proof WEDGE — needs human relaunch",
+                          body=human, priority="P1", req=True, dsn=dsn)
         except Exception as e:
             _log(f"escalate bus row failed: {e}")
     # ...AND page the operator directly — a safety page is never silenced by assuming a relay is alive.

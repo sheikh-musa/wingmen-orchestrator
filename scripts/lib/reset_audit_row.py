@@ -13,13 +13,20 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from substrate_dsn import dsn_from_env_file
 
-
-def _connect(dsn):
-    import psycopg
-    return psycopg.connect(dsn)
+# Musa op#34845, bus #78369 finding C: reset_auditor.sh:168 runs this file by its plain path
+# ($PY "$_LIB/reset_audit_row.py" ...), no PYTHONPATH -- so sys.path[0] is this file's own
+# directory (scripts/lib/), which has neither a `scripts` package nor bus_send.py (one level
+# up, in scripts/). Neither `from scripts import bus_send` nor a plain `import bus_send`
+# resolves there; only pytest's own `pythonpath = .` (pytest.ini) masked this. Same house
+# pattern as scripts/lib/handoff_compaction_policy.py.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+import bus_send  # noqa: E402
 
 
 def main(argv=None) -> int:
@@ -46,12 +53,8 @@ def main(argv=None) -> int:
             f"Reason: {a.reason}")
     try:
         dsn = dsn_from_env_file()
-        with _connect(dsn) as conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
-                "priority, requires_response) VALUES (%s, %s, 'update', %s, %s, 'P2', false)",
-                (a.by, a.by, subject, body))
-            conn.commit()
+        bus_send.send(from_agent=a.by, to=a.by, mtype="update",
+                      subject=subject, body=body, priority="P2", req=False, dsn=dsn)
     except Exception as e:  # noqa: BLE001 — fail LOUD, caller aborts
         print(f"reset_audit_row: FAILED to write audit row: {e!r}", file=sys.stderr)
         return 1

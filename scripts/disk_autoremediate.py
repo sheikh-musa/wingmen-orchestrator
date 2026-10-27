@@ -610,17 +610,20 @@ def _page(free_before, free_after, summary, *, loud=True):
     banner = header + "\n  " + "\n  ".join(lines)
     print(banner, file=sys.stderr, flush=True)
     try:
-        import psycopg2
+        try:
+            from scripts import bus_send
+        except ImportError:
+            import bus_send  # type: ignore
         dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
         if dsn:
-            c = psycopg2.connect(dsn)
-            cur = c.cursor()
-            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-            cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-                           VALUES ('cc-fleet-health','orch-console',%s,%s,%s,%s)""",
-                        (mtype, priority, subject, "\n".join(lines)))
-            c.commit()
-    except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already stands
+            bus_send.send(from_agent="cc-fleet-health", to="orch-console", mtype=mtype,
+                          subject=subject, body="\n".join(lines), priority=priority,
+                          req=False, dsn=dsn)
+    except (Exception, SystemExit) as e:  # noqa: BLE001 — page best-effort; stderr
+        # banner already stands. Musa op#34845, bus #78369 finding E: bus_send.send()
+        # can raise bare SystemExit (dburl(), bus_send.py:533), a BaseException a plain
+        # `except Exception` would not catch -- same established pattern as
+        # bus_send.py's own internal callers (its line ~384's comment).
         print(f"[disk-autoremediate] WARN bus-page failed ({e}); banner stands", file=sys.stderr)
 
 
@@ -704,18 +707,23 @@ def _page_spotlight(findings):
               "`mdutil -s` and a df delta."]
     print("\n".join(lines), file=sys.stderr, flush=True)
     try:
-        import psycopg2
+        # RPC, not a raw INSERT (backlog#124, bus #74939/#78234) -- a raw INSERT INTO
+        # agent_messages breaks the instant migration 124's revoke ships.
+        try:
+            from scripts import bus_send
+        except ImportError:
+            import bus_send  # type: ignore
         dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
         if dsn:
-            c = psycopg2.connect(dsn)
-            cur = c.cursor()
-            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-            cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-                           VALUES ('cc-fleet-health','orch-console','blocker','P2',%s,%s)""",
-                        ("Spotlight index regrowing on the Mini — needs root mdutil -X",
-                         "\n".join(lines)))
-            c.commit()
-    except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already stands
+            bus_send.send(
+                from_agent="cc-fleet-health", to="orch-console", mtype="blocker",
+                subject="Spotlight index regrowing on the Mini — needs root mdutil -X",
+                body="\n".join(lines), priority="P2", dsn=dsn)
+    except (Exception, SystemExit) as e:  # noqa: BLE001 — page best-effort; stderr
+        # banner already stands. Musa op#34845, bus #78369 finding E: bus_send.send()
+        # can raise bare SystemExit (dburl(), bus_send.py:533), a BaseException a plain
+        # `except Exception` would not catch -- same established pattern as
+        # bus_send.py's own internal callers (its line ~384's comment).
         print(f"[disk-autoremediate] WARN spotlight page failed ({e}); banner stands",
               file=sys.stderr)
 
