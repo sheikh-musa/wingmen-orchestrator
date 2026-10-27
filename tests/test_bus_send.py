@@ -124,6 +124,18 @@ def test_resolve_sub_tag_none_for_singleton_with_no_sub_tag_env():
     assert bs.resolve_sub_tag("cc-fleet-health", env) is None
 
 
+def test_resolve_sub_tag_none_when_cc_agent_id_is_a_different_family():
+    # Real bug caught by a near-miss (bus #78926/#78927): CC_AGENT_ID is the
+    # CALLER's own identity, left over in the environment from whatever lane
+    # context invoked this process -- it has no relation to --from's family
+    # just because it differs from it. agent_messages_sub_tag_family_prefix_chk
+    # requires sub_tag to start with from_agent + "-"; a cross-family sub_tag
+    # like this one would be silently REJECTED by that constraint (dropping
+    # the whole row, not just the sub_tag) if it were ever returned here.
+    env = {"CC_AGENT_ID": "cc-paperclip-spike-1"}
+    assert bs.resolve_sub_tag("cc-fleet-health", env) is None
+
+
 # ---- empty-body guard (Nazim shipped 3 blank rows on 2026-09-05) -----------
 
 def test_read_body_refuses_short_body():
