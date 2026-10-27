@@ -243,3 +243,74 @@ def test_inline_allowlist_comment_suppresses_a_finding(tmp_path):
     """)
     findings = gate.scan(tmp_path)
     assert findings == []
+
+
+def test_detects_raw_insert_inside_a_python_heredoc_in_a_sh_script(tmp_path):
+    """PR-B inventory finding (Musa op#34845, bus #78753/#78757, console's live
+    pg_proc + launchd check confirmed the scope): the gate's original *.py-only
+    rglob was completely blind to raw SQL embedded in .sh files -- the real
+    shape found in scripts/disk_space_monitor.sh, reset_auditor.sh,
+    reset_fleet_health.sh, reset_cai.sh, reset_nazim.sh, switch_lane_token.sh,
+    lane_reply.sh and lane_nudge.sh: a bash script with a `python3 <<'PY' ...
+    PY` heredoc whose body does a raw psycopg INSERT."""
+    _write(tmp_path, "scripts/some_reset.sh", """
+        #!/usr/bin/env bash
+        python3 <<'PY'
+        import psycopg
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response) "
+                "VALUES ('cc-fleet-health','orch-console','blocker',%s,%s,'P1',true)",
+                (subj, body))
+            conn.commit()
+        PY
+    """)
+    findings = gate.scan(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].path.name == "some_reset.sh"
+
+
+def test_detects_raw_insert_in_a_literal_psql_dash_c_call(tmp_path):
+    """Real shape found in scripts/render_gate/render_gate.sh: no python at
+    all, a literal `psql "$DATABASE_URL" -c "...INSERT INTO agent_messages..."`."""
+    _write(tmp_path, "scripts/render_gate/render_gate.sh", """
+        #!/usr/bin/env bash
+        psql "$DATABASE_URL" -v ON_ERROR_STOP=0 -c \\
+          "SELECT set_config('app.current_agent_id','cc-fleet-health',true);
+           INSERT INTO agent_messages(from_agent,to_agent,message_type,subject,body)
+           VALUES ('cc-fleet-health','orch-console','update','s','b');"
+    """)
+    findings = gate.scan(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].path.name == "render_gate.sh"
+
+
+def test_sh_comment_mentioning_insert_is_ignored(tmp_path):
+    """Same '#' comment-stripping that already protects .py prose must also
+    protect a .sh script's own explanatory comments -- '#' is a shell
+    comment exactly as it is a Python one."""
+    _write(tmp_path, "scripts/clean.sh", """
+        #!/usr/bin/env bash
+        # Historically this did INSERT INTO agent_messages directly; migrated
+        # to scripts/bus_send.py in backlog#124.
+        scripts/bus_send.py --to x --type update --subject s --priority P3
+    """)
+    findings = gate.scan(tmp_path)
+    assert findings == []
+
+
+def test_legacy_directory_is_scanned_too(tmp_path):
+    """Real gap found in the PR-B inventory: legacy/ihsanos_drain/main.py has
+    a real raw INSERT INTO agent_messages that the original SCAN_DIRS
+    (scripts, nervous_system, ops) never covered -- console confirmed (bus
+    #78757) that job is actually dead on the live fleet, but the gate must
+    not rely on that being true forever; it has to actually look."""
+    _write(tmp_path, "legacy/ihsanos_drain/main.py", """
+        _INSERT_MESSAGE = "INSERT INTO agent_messages (from_agent) VALUES (%s)"
+
+        def run_cycle(cur):
+            cur.execute(_INSERT_MESSAGE, (agent,))
+    """)
+    findings = gate.scan(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].path.name == "main.py"
