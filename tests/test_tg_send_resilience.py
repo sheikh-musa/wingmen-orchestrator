@@ -42,9 +42,12 @@ def test_429_retries_once_and_succeeds_respecting_retry_after():
     assert r["ok"] and len(rec.calls) == 2 and rec.slept == [7]      # slept the retry_after
 
 
+_NOJITTER = lambda lo, hi: 1.0
+
+
 def test_5xx_retries_once_with_default_backoff():
     rec = _Recorder([R(status=503, desc="Bad Gateway"), R(ok=True, status=200)])
-    r = m.send_with_resilience("t", "c", "b", post=rec.post, sleep=rec.sleep)
+    r = m.send_with_resilience("t", "c", "b", post=rec.post, sleep=rec.sleep, rand=_NOJITTER)
     assert r["ok"] and len(rec.calls) == 2 and rec.slept == [m.RETRY_SLEEP_DEFAULT]
 
 
@@ -54,10 +57,41 @@ def test_network_error_status_none_retries_once():
     assert r["ok"] and len(rec.calls) == 2
 
 
-def test_retry_that_also_fails_returns_the_failure():
-    rec = _Recorder([R(status=429, desc="x"), R(status=429, desc="still throttled")])
+def test_retries_that_all_fail_return_the_last_failure():
+    rec = _Recorder([R(status=429, desc="x")] * 3 + [R(status=429, desc="still throttled")])
     r = m.send_with_resilience("t", "c", "b", post=rec.post, sleep=rec.sleep)
-    assert not r["ok"] and r["status"] == 429 and len(rec.calls) == 2
+    assert not r["ok"] and r["description"] == "still throttled"
+    assert len(rec.calls) == 1 + len(m.RETRY_DELAYS)
+
+
+# ── reset bursts (orch-console #77889): 3 retries, 2s/6s/15s, jittered ──────────────────
+def test_reset_burst_longer_than_one_retry_still_delivers():
+    # Two of today's nazim_send replies failed BOTH attempts of the old single retry.
+    reset = R(status=None, desc="<urlopen error [Errno 54] Connection reset by peer>")
+    rec = _Recorder([reset, reset, reset, R(ok=True, status=200)])
+    r = m.send_with_resilience("t", "c", "b", post=rec.post, sleep=rec.sleep, rand=_NOJITTER)
+    assert r["ok"] and len(rec.calls) == 4
+    assert rec.slept == [2, 6, 15]
+
+
+def test_backoff_is_jittered_within_bounds():
+    reset = R(status=None, desc="reset")
+    rec = _Recorder([reset, reset, R(ok=True, status=200)])
+    m.send_with_resilience("t", "c", "b", post=rec.post, sleep=rec.sleep)
+    for slept, base in zip(rec.slept, m.RETRY_DELAYS):
+        assert base * (1 - m.RETRY_JITTER) <= slept <= base * (1 + m.RETRY_JITTER)
+
+
+def test_retry_after_is_honored_exactly_on_every_retry():
+    rec = _Recorder([R(status=429, ra=4), R(status=429, ra=9), R(ok=True, status=200)])
+    m.send_with_resilience("t", "c", "b", post=rec.post, sleep=rec.sleep)
+    assert rec.slept == [4, 9]
+
+
+def test_non_retryable_answer_mid_burst_stops_retrying():
+    rec = _Recorder([R(status=None, desc="reset"), R(status=403, desc="bot blocked")])
+    r = m.send_with_resilience("t", "c", "b", post=rec.post, sleep=rec.sleep, rand=_NOJITTER)
+    assert r["status"] == 403 and len(rec.calls) == 2 and rec.slept == [2]
 
 
 def test_non_retryable_403_does_not_retry():
