@@ -1505,7 +1505,22 @@ def _fetch_slow_ask_candidates(conn):
             "            AND m.subject ~ ('(^|[^0-9])' || oa.source_msg_id || '([^0-9]|$)') "
             "            AND m.from_agent <> 'orch-console' "
             "            AND m.from_agent NOT LIKE 'cc-orchestrator%%' "
-            "            AND m.subject NOT LIKE %s) AS acked "
+            "            AND m.subject NOT LIKE %s) "
+            # ...or a lane REPLY in the thread of the console/hub row that delegated it
+            # (lanes often answer under their own subject — platform-4 acked op#34799 as
+            # 'PR#530 MERGED' in #78158's thread, console #78265)
+            "  OR EXISTS (SELECT 1 FROM agent_messages d "
+            "             JOIN agent_messages r ON r.thread_id = d.thread_id AND r.id <> d.id "
+            "             WHERE d.created_at >= oa.created_at "
+            "               AND (d.from_agent = 'orch-console' "
+            "                    OR d.from_agent LIKE 'cc-orchestrator%%') "
+            "               AND d.subject ~ ('(^|[^0-9])' || oa.source_msg_id || '([^0-9]|$)') "
+            "               AND r.created_at > d.created_at "
+            # the reply must come from the DELEGATED lane's family (base or any
+            # instance — platform-4 replied as base 'cc-cosem-platform'), never a
+            # bystander/watchdog row that happens to share the thread
+            "               AND regexp_replace(r.from_agent, '-[0-9]+$', '') "
+            "                 = regexp_replace(d.to_agent, '-[0-9]+$', '')) AS acked "
             "FROM operator_asks oa "
             "WHERE oa.closed_at IS NULL AND oa.triage_state = 'ask' "
             "  AND oa.ask_surface = 'operator' AND oa.source_msg_id IS NOT NULL "
