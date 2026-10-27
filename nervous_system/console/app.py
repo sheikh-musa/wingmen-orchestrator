@@ -443,15 +443,17 @@ def _token_registry() -> list:
 # --- R4 ARMED APPLY (op#10706, CAI-RESP-746/747 tiered arm) — DISABLED/unbuilt-live ---
 # The ONLY path that performs a REAL armed relaunch (re-token / model-apply). It
 # ships DISABLED and is provably inert three ways, ALL required:
-#   1. Feature flag OFF by default: CONSOLE_R4_ENABLED != "1" -> the endpoint 503s.
-#      Turning it on is gated on cai sign-off + Nazim review (NOT mine to flip).
+#   1. OFF by default -> the endpoint 503s. Musa op#34916 (cai advises, never blocks):
+#      it turns on via `_r4_enabled()` = the CONSOLE_R4_ENABLED=1 switch OR a
+#      bridge-verified Musa Telegram "ENABLE LANE APPLY" within 4h (governance writes
+#      need their own "ENABLE GOVERNANCE WRITES"). No cai sign-off.
 #   2. A LIVE bridge-verified operator ARM must exist — an INBOUND operator Telegram
 #      approval (require_verified_authorization), scoped + time-bounded. The console
 #      only READS it (read-only DB); it NEVER writes a grant (ops-not-governance).
 #   3. Per-apply: a typed body-name confirm (fat-finger guard) + gazzabyte fail-closed
 #      + routes through the SAME switch script (one rail, cai cond 1) which verifies
 #      auth_fp after + emits the identity-stamped audit/alert (cai conds 2/3/4).
-# I NEVER arm it. This block builds the confirm LAYER only, for cai+Nazim review.
+# I NEVER arm it. This block builds the confirm LAYER only.
 #
 # op#20692 + op#20689 (Musa, 2026-09-16) — SCOPED RELAXATION, reversible token/model
 # switch ONLY: condition (2) — the bridge-verified operator ARM — is NO LONGER required
@@ -463,7 +465,50 @@ def _token_registry() -> list:
 # per-lane inflight/cooldown guard. `_r4_current_arm` / require_verified_authorization
 # are UNCHANGED and still the bar for every MONEY or IRREVERSIBLE op — this relaxation
 # is scoped to the reversible token/model switch and must not be generalised.
-_R4_ENABLED = os.environ.get("CONSOLE_R4_ENABLED") == "1"
+_R4_ENABLED = os.environ.get("CONSOLE_R4_ENABLED") == "1"   # the env switch (boot-time value)
+_R4_ENABLE_PHRASE = "ENABLE LANE APPLY"          # Musa's Telegram enable for /api/apply-armed (op#34916)
+_GOV_ENABLE_PHRASE = "ENABLE GOVERNANCE WRITES"  # a SEPARATE enable for /api/governance-set
+_R4_ENABLE_WINDOW_H = 4                          # matches the per-apply arm's 4h cap; then it disables itself
+_R4_ENABLE_CACHE_S = 60
+_R4_ENABLE_CACHE: dict = {}
+_R4_SCOPES = {
+    "apply": ("console-r4-enable", _R4_ENABLE_PHRASE, ["enable", "lane", "apply"]),
+    "governance": ("console-governance-enable", _GOV_ENABLE_PHRASE, ["enable", "governance", "writes"]),
+}
+
+
+def _r4_enabled(scope: str = "apply", *, env_on=None, verify=None, now=None) -> "tuple[bool, str]":
+    """Is this R4 scope on? (ok, why). Musa op#34916: on the CONSOLE_R4_ENABLED=1 switch
+    OR a bridge-verified Musa enable for THIS scope (require_verified_authorization,
+    inbound Telegram, within _R4_ENABLE_WINDOW_H). Never a cai sign-off. Fail-CLOSED
+    on any error. `env_on` lets a call site keep its own switch source (the endpoints
+    use the boot-time _R4_ENABLED; default = the live env, as the queue watcher always
+    has). Apply and governance have separate phrases, so one never opens the other.
+    Cached briefly per scope: the queued-apply watcher re-checks every pass."""
+    if env_on is None:
+        env_on = os.environ.get("CONSOLE_R4_ENABLED") == "1"
+    if env_on:
+        return True, "CONSOLE_R4_ENABLED=1"
+    import time as _t, datetime as _dt
+    hit = _R4_ENABLE_CACHE.get(scope)
+    if hit and _t.monotonic() - hit[0] < _R4_ENABLE_CACHE_S:
+        return hit[1]
+    op_id, phrase, tokens = _R4_SCOPES[scope]
+    try:
+        if verify is None:
+            import sys as _sys
+            if str(_REPO_ROOT) not in _sys.path:
+                _sys.path.insert(0, str(_REPO_ROOT))
+            from scripts.lib.require_verified_authorization import verified_authorization as verify
+        now = now or _dt.datetime.now(_dt.timezone.utc)
+        res = verify(op_id, after=now - _dt.timedelta(hours=_R4_ENABLE_WINDOW_H),
+                     approval_phrases=[phrase], op_tokens=tokens)
+        out = ((True, f"musa-verified enable (operator_messages #{(res.row or {}).get('id')})")
+               if res.ok else (False, f"no verified Musa enable ({res.reason})"))
+    except Exception as e:  # fail closed
+        out = (False, f"enable-check-error:{type(e).__name__}")
+    _R4_ENABLE_CACHE[scope] = (_t.monotonic(), out)
+    return out
 _R4_ARM_MAX_WINDOW_MIN = 240          # hard cap on an arm's life (auto-disarm)
 _R4_ARM_PHRASE = "ARM LANE APPLY"      # the operator's Telegram approval phrase
 
@@ -614,7 +659,7 @@ def _apply_queue_tick() -> None:
         # op#20692: the bridge-arm is no longer the gate for the reversible token/model
         # switch; RE-VALIDATE the R4 feature flag + the resolve rules at fire time
         # instead (a queued apply never fires after the flag is pulled).
-        enabled = os.environ.get("CONSOLE_R4_ENABLED") == "1"
+        enabled = _r4_enabled("apply")[0]
         cmd, _account, err = _resolve_armed_apply(item["session"], item["kind"], None)
         if not enabled or err or cmd is None:
             reason = ("R4 disabled while waiting — re-enable to apply" if not enabled
@@ -2415,7 +2460,7 @@ def _make_handler(feedloop: "_FeedLoop"):
             if path == "/api/apply-dry-run":
                 return self._handle_apply_dry_run()
             # R4 ARMED apply: the REAL relaunch — DISABLED by default (503) unless
-            # cai+Nazim flip CONSOLE_R4_ENABLED AND a live operator arm exists.
+            # _r4_enabled() (env switch or Musa's verified enable, op#34916).
             if path == "/api/apply-armed":
                 return self._handle_apply_armed()
             # op#20702 Stage E: per-project governance toggle write (ARMED: bearer
@@ -2802,9 +2847,13 @@ def _make_handler(feedloop: "_FeedLoop"):
             here — scoped to this REVERSIBLE token/model switch only (see the R4 header
             comment). Money / irreversible ops keep require_verified_authorization."""
             # (1) Feature flag — DISABLED by default. This alone makes R4 inert.
-            if not _R4_ENABLED:
+            r4_on, r4_why = _r4_enabled("apply", env_on=_R4_ENABLED)
+            if not r4_on:
                 auth.audit(self._client(), "/api/apply-armed", "503")
-                return self._json(503, {"error": "R4 armed apply is DISABLED (unbuilt-live) — pending cai sign-off + Nazim review"})
+                return self._json(503, {"error": "R4 armed apply is DISABLED — needs Musa's verified "
+                                                 f"enable (Telegram '{_R4_ENABLE_PHRASE}', valid "
+                                                 f"{_R4_ENABLE_WINDOW_H}h) or CONSOLE_R4_ENABLED=1; "
+                                                 f"cai advises, on record (op#34916). [{r4_why}]"})
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) if length > 0 else b"{}"
@@ -2896,9 +2945,13 @@ def _make_handler(feedloop: "_FeedLoop"):
             UPDATEs the row as the writable role and verifies the trigger's audit row
             in the same transaction. updated_by is server-stamped from the client
             identity — never taken from the request."""
-            if not _R4_ENABLED:
+            r4_on, r4_why = _r4_enabled("governance", env_on=_R4_ENABLED)
+            if not r4_on:
                 auth.audit(self._client(), "/api/governance-set", "503")
-                return self._json(503, {"error": "governance writes are DISABLED on this console (CONSOLE_R4_ENABLED off)"})
+                return self._json(503, {"error": "governance writes are DISABLED on this console "
+                                                 "(CONSOLE_R4_ENABLED off, and no verified Musa "
+                                                 f"'{_GOV_ENABLE_PHRASE}' within {_R4_ENABLE_WINDOW_H}h; "
+                                                 f"op#34916). [{r4_why}]"})
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) if length > 0 else b"{}"
@@ -2963,7 +3016,7 @@ def _make_handler(feedloop: "_FeedLoop"):
             """POST /api/apply-dry-run {session, kind:token|model} — PREVIEW making a
             body's configured default LIVE, by running the switch script in --dry-run.
             Changes NOTHING (no kill, no relaunch); returns the plan incl. the resume
-            id (op#10706 R3). The armed apply (R4) is separate + cai-gated."""
+            id (op#10706 R3). The armed apply (R4) is separate, enabled by _r4_enabled() (op#34916)."""
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) if length > 0 else b"{}"

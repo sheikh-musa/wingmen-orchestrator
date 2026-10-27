@@ -432,3 +432,37 @@ def test_fleet_static_carries_the_governance_surface():
     assert "ENABLE MONEY CLEARANCE" in js and "armedHeaders()" in js
     # both consoles share the same static files: nothing host-specific in the section
     assert "100.83.21.34" not in js
+
+
+# ── op#34916: governance writes enable on their OWN Musa phrase, never the apply one ─
+def _musa_enable(monkeypatch, phrase_ok):
+    from scripts.lib import require_verified_authorization as rva
+    class _A:
+        def __init__(self, ok):
+            self.ok, self.reason, self.row = ok, ("ok" if ok else "none"), ({"id": 78} if ok else None)
+    monkeypatch.setattr(rva, "verified_authorization",
+                        lambda op_id, **kw: _A(phrase_ok(op_id, kw["approval_phrases"])))
+    console_app._R4_ENABLE_CACHE.clear()
+
+
+def test_set_enabled_by_musa_verified_governance_phrase(server, monkeypatch):
+    base, run, tmp_path = server
+    monkeypatch.setattr(console_app, "_R4_ENABLED", False)
+    monkeypatch.delenv("CONSOLE_R4_ENABLED", raising=False)
+    _musa_enable(monkeypatch, lambda op_id, ph: op_id == "console-governance-enable"
+                 and "ENABLE GOVERNANCE WRITES" in ph)
+    r = _post(base, HA(), GOOD())
+    console_app._R4_ENABLE_CACHE.clear()
+    assert r.status_code != 503
+    run.assert_called()
+
+
+def test_set_NOT_enabled_by_the_apply_phrase(server, monkeypatch):
+    base, run, tmp_path = server
+    monkeypatch.setattr(console_app, "_R4_ENABLED", False)
+    monkeypatch.delenv("CONSOLE_R4_ENABLED", raising=False)
+    _musa_enable(monkeypatch, lambda op_id, ph: op_id == "console-r4-enable")   # only the APPLY enable exists
+    r = _post(base, HA(), GOOD())
+    console_app._R4_ENABLE_CACHE.clear()
+    assert r.status_code == 503 and "CONSOLE_R4_ENABLED off" in r.json()["error"]
+    run.assert_not_called()

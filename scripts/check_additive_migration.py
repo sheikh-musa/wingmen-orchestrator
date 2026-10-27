@@ -4,8 +4,9 @@
 Per CAI-RESP-102, cc-orchestrator can pre-apply ADDITIVE migrations without
 cai review. This linter is the missing safety net: if a migration contains
 DROP/TRUNCATE/blanket-UPDATE/blanket-DELETE/DISABLE-RLS, or a REVOKE against
-the shared `postgres` operational role, exit 1 and require explicit cai
-approval first.
+the shared `postgres` operational role, exit 1 and require Musa's verified
+authorization (through the console's apply gate) first. Musa op#34916: cai's
+view is advisory and goes on record; it is never the approver that blocks.
 
 Usage:
   scripts/check_additive_migration.py path/to/migration.sql
@@ -542,7 +543,8 @@ def main() -> None:
     if all_findings:
         exit_code = 1
         print(
-            "BLOCKED — destructive operations detected. Requires cai approval before pre-apply:",
+            "BLOCKED — destructive operations detected. Requires Musa's verified authorization "
+            "(console apply gate) before pre-apply; cai may advise, on record (op#34916):",
             file=sys.stderr,
         )
         for finding in all_findings:

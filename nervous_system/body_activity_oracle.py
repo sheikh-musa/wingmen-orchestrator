@@ -44,9 +44,35 @@ Verdict = namedtuple("Verdict", "state reason")
 
 LOCAL_HOST = "_local_"
 
-# The mutating probe (fork-2) is DISARMED until cai signs. Flipping this True
-# without the cai safety sign is a boundary violation.
+# The mutating probe (fork-2) ships DISARMED. Musa op#34916: it arms on MUSA's
+# bridge-verified word (an inbound Telegram "ARM ORACLE PROBE" within the window,
+# checked by require_verified_authorization), never on a cai sign. cai's view is
+# advisory and goes on record. This constant stays the coded default: False.
 PROBE_ARMED = False
+PROBE_ARM_PHRASE = "ARM ORACLE PROBE"
+PROBE_ARM_WINDOW_H = 168   # a verified arm lasts 7 days, then the probe disarms itself
+
+
+def probe_arm_status(now=None, verify=None):
+    """(armed, why). True only on a bridge-verified Musa authorization inside the
+    window. Fail-CLOSED on any error: an unreachable DB or a missing config is 'not armed'."""
+    import datetime as _dt
+    try:
+        if verify is None:
+            import sys as _sys
+            _root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+            if _root not in _sys.path:
+                _sys.path.insert(0, _root)
+            from scripts.lib.require_verified_authorization import verified_authorization as verify
+        now = now or _dt.datetime.now(_dt.timezone.utc)
+        res = verify("oracle-probe-arm", after=now - _dt.timedelta(hours=PROBE_ARM_WINDOW_H),
+                     approval_phrases=[PROBE_ARM_PHRASE], op_tokens=["oracle", "probe"])
+    except Exception as e:  # fail closed
+        return False, f"arm-check-error:{type(e).__name__}"
+    if not res.ok:
+        return False, f"no verified Musa arm ({res.reason})"
+    row = res.row or {}
+    return True, f"musa-verified arm (operator_messages #{row.get('id')})"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _COMPOSER_LIB = os.path.join(_HERE, "..", "scripts", "lib", "composer_capture.sh")
@@ -144,29 +170,31 @@ def activity(agent_id: str, *, capture=None, resolve_host=None,
     return classify(signals)
 
 
-# ── the mutating probe: BUILT-BUT-INERT until fork-2 (cai safety sign) ───────
+# ── the mutating probe: INERT until Musa's verified arm (op#34916) ─────────
 def probe_confirm_empty(session: str, *, armed: bool = None,
-                        sendkeys=None, tmux_bin: str = None) -> Verdict:
+                        sendkeys=None, tmux_bin: str = None, arm_check=None) -> Verdict:
     """Disambiguate the invisible-submit ghost class that the non-mutating signals
     cannot (the class that needed reset_fleet_health --RESET_FORCE, op#18548): type
     a self-undoing sentinel and see whether it REPLACES ghost text (ghost) or
     APPENDS to real text (staged).
 
-    INERT until fork-2: with `armed` False (the default, `PROBE_ARMED`), this returns
-    UNSURE and sends NOTHING to the pane. When cai signs fork-2 the armed path runs
-    under HARD invariants (req A/B): SRE-lease-gated caller, self-undoing type-then-
-    delete only, fail-CLOSED (only when the oracle is already high-confidence
-    NOT-WORKING; any ambiguity -> abort + leave the pane untouched + alert)."""
-    armed = PROBE_ARMED if armed is None else armed
+    INERT until armed: unless `armed` is True, or Musa's bridge-verified arm is live
+    (`probe_arm_status`, op#34916), this returns UNSURE and sends NOTHING to the pane.
+    Once built, the armed path runs under HARD invariants (req A/B): SRE-lease-gated
+    caller, self-undoing type-then-delete only, fail-CLOSED (only when the oracle is
+    already high-confidence NOT-WORKING; any ambiguity -> abort + leave the pane
+    untouched + alert)."""
+    if armed is None:
+        armed = PROBE_ARMED or (arm_check or probe_arm_status)()[0]
     if not armed:
         # DO NOT touch the pane. This is the whole point of built-but-inert.
-        return Verdict(UNSURE, "probe-disarmed (fork-2 not signed)")
-    # --- armed path (runs only after cai fork-2 sign + a live-tmux proof) ---
-    # Enforced-in-code invariants live at the CALLER (Phase 1): lease-gate (req A)
-    # + attributable verified-submit for any real re-drive (req B). The probe here
-    # only ever types a transient self-undoing sentinel, never persistent text.
-    raise NotImplementedError(
-        "armed mutating probe is pending fork-2 (cai) sign + live-tmux TDD")
+        return Verdict(UNSURE, "probe-disarmed (no verified Musa arm)")
+    # --- armed path ---
+    # The mutating probe itself is NOT BUILT yet (needs live-tmux TDD). An arm must
+    # never crash the oracle or touch a live pane, so it fails SAFE to UNSURE until
+    # the probe is implemented. Enforced-in-code invariants live at the CALLER
+    # (Phase 1): lease-gate (req A) + attributable verified-submit (req B).
+    return Verdict(UNSURE, "probe-armed-but-unbuilt (pane untouched)")
 
 
 # ── default real backends (not unit-tested here — need live tmux/ssh) ────────

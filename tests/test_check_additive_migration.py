@@ -472,3 +472,17 @@ def test_inline_allowlist_only_suppresses_next_line(tmp_path):
     assert result.returncode == 1
     out = result.stdout + result.stderr
     assert "DROP TABLE" in out
+
+
+# ── Musa op#34916: cai is advisory, never the approver of record ─────────────
+def test_destructive_block_names_musas_verified_authorization_not_cai(tmp_path):
+    result = run_linter("DROP TABLE public.foo;", tmp_path)
+    assert result.returncode == 1                       # the safety check stays
+    assert "cai approval" not in result.stderr
+    assert "Musa" in result.stderr and "verified" in result.stderr
+    assert "advis" in result.stderr                     # cai's view is advisory, on record
+
+
+def test_additive_migration_still_passes_untouched(tmp_path):
+    result = run_linter("ALTER TABLE public.foo ADD COLUMN IF NOT EXISTS bar int;", tmp_path)
+    assert result.returncode == 0
