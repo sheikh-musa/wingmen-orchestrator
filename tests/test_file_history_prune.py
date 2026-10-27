@@ -7,6 +7,11 @@ ALERTS before a wedge. plan_prune is the PURE decision (imported, not re-typed).
 
 Run (from ~/wingmen/orchestrator): .venv/bin/python -m pytest tests/test_file_history_prune.py -q
 """
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 from scripts import file_history_prune as fhp
 from scripts.file_history_prune import alert_body, plan_prune
 
@@ -170,3 +175,63 @@ def test_alert_loud_true_still_attempts_db_write(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
     fhp._alert(["disk free 3GB < hard floor 6GB — pruning file-history + escalate"], loud=True)
     assert calls["connect"] == 1, "loud=True must still attempt the bus row"
+
+
+def test_alert_survives_bus_send_raising_system_exit(monkeypatch, capsys):
+    """Musa op#34845, bus #78369 finding E: bus_send.send() can raise bare SystemExit
+    (e.g. dburl() when no DATABASE_URL resolves -- bus_send.py:533), a BaseException a
+    plain `except Exception` does not catch -- would crash the whole prune instead of
+    logging a WARN, contradicting _alert's own docstring ('a delivery failure must not
+    crash the prune')."""
+    from scripts import bus_send
+    def _raise_system_exit(*a, **k):
+        raise SystemExit("no DATABASE_URL: set it in the environment or .env")
+    monkeypatch.setattr(bus_send, "send", _raise_system_exit)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
+    fhp._alert(["disk free 3GB < hard floor 6GB — pruning file-history + escalate"], loud=True)
+    err = capsys.readouterr().err
+    assert "WARN bus-page failed" in err
+
+
+def test_bus_page_import_resolves_under_real_launchd_invocation(tmp_path):
+    """Musa op#34845, bus #78369 finding C (verified): boot_file_history_prune.sh runs this
+    file by its plain absolute path (`exec .venv/bin/python3 $ORCH_DIR/scripts/file_history_
+    prune.py --apply`), no PYTHONPATH -- sys.path[0] under that invocation is scripts/ (this
+    file's own directory), so `from scripts import bus_send` (the only import attempt, no
+    fallback) raises ModuleNotFoundError, caught by _alert's own `except Exception` and
+    logged as a bare WARN -- the stderr banner for the real P1 disk-wedge-risk condition
+    still prints (it fires before the try block), but the bus page to orch-console that is
+    supposed to wake someone up is silently lost every time this runs for real. pytest never
+    sees this because pytest.ini's `pythonpath = .` makes `scripts` importable regardless.
+
+    Forces the real alert path deterministically without touching any real file-history data
+    or real disk state: an empty CLAUDE_FILE_HISTORY_DIR (no sessions, nothing to prune) plus
+    FH_HARD_FREE_GB/FH_EMERGENCY_FREE_GB set far above any real free-disk figure, so this
+    machine's actual free space is always "below" both thresholds and plan_prune's genuine
+    disk-free alert fires loud=True through the real CLI (main() -> plan_prune -> _alert),
+    exactly the path the launchd job takes."""
+    repo_root = Path(__file__).resolve().parent.parent
+    script = repo_root / "scripts" / "file_history_prune.py"
+    empty_fh_dir = tmp_path / "file-history-empty"
+    empty_fh_dir.mkdir()
+    clean_env = {
+        "HOME": os.environ.get("HOME", ""),
+        "PATH": os.environ.get("PATH", ""),
+        "CLAUDE_FILE_HISTORY_DIR": str(empty_fh_dir),
+        "FH_HARD_FREE_GB": "999999999",
+        "FH_EMERGENCY_FREE_GB": "999999999",
+        "DATABASE_URL": "x",  # truthy, non-DSN-shaped -- just needs to clear `if dsn:`
+    }
+    result = subprocess.run(
+        [sys.executable, str(script), "--apply"],
+        cwd="/tmp", env=clean_env, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "DISK-WEDGE RISK" in result.stderr, (
+        f"the forced disk-free condition never reached the loud alert path -- test setup is "
+        f"wrong, this isn't proving anything: {result.stderr}"
+    )
+    assert "ModuleNotFoundError" not in result.stderr and "No module named" not in result.stderr, (
+        f"the bus page's own import failed and was silently swallowed as a WARN -- "
+        f"orch-console never gets paged for a real disk-wedge-risk event:\n{result.stderr}"
+    )

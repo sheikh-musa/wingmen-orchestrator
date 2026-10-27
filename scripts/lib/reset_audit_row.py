@@ -13,13 +13,20 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from substrate_dsn import dsn_from_env_file
 
-try:
-    from scripts import bus_send
-except ImportError:
-    import bus_send  # type: ignore
+# Musa op#34845, bus #78369 finding C: reset_auditor.sh:168 runs this file by its plain path
+# ($PY "$_LIB/reset_audit_row.py" ...), no PYTHONPATH -- so sys.path[0] is this file's own
+# directory (scripts/lib/), which has neither a `scripts` package nor bus_send.py (one level
+# up, in scripts/). Neither `from scripts import bus_send` nor a plain `import bus_send`
+# resolves there; only pytest's own `pythonpath = .` (pytest.ini) masked this. Same house
+# pattern as scripts/lib/handoff_compaction_policy.py.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+import bus_send  # noqa: E402
 
 
 def main(argv=None) -> int:

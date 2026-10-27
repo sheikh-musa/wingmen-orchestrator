@@ -79,6 +79,16 @@
 -- behaves exactly as before, (2) p_is_test=true sets is_test on the row, (3) an
 -- explicit p_posted_by_identity is honored (not overridden by the trigger), (4)
 -- omitting it still lets the trigger auto-populate current_user exactly as today.
+--
+-- EXECUTE-grant side effect (bus #78352 finding #4, reviewed and acknowledged -- not a
+-- silent accident): dropping the old 9-param function also drops ANY EXECUTE grant on
+-- that exact signature -- Postgres privileges are tied to a specific (name, parameter
+-- list) pair, not the function name alone, so DROP FUNCTION takes its grants down with
+-- it; the new 11-param function below starts with nothing explicit until the REVOKE/
+-- GRANT lines after CREATE FUNCTION run. See those lines' own comment for bus #78369
+-- finding D -- the real, deeper version of this same concern: a standing Supabase
+-- default-privileges rule re-grants anon/authenticated on the NEW function regardless
+-- of what the old one had, and the caller census done for it.
 
 DROP FUNCTION IF EXISTS post_agent_message(text,text,text,text,text,text,boolean,uuid,text);
 DROP FUNCTION IF EXISTS post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text);
@@ -118,5 +128,19 @@ COMMENT ON FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uui
     'callers can move off raw INSERT without a lossy behavior change. A 9-arg call '
     'defaults both to the exact pre-122 behavior.';
 
-REVOKE EXECUTE ON FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text) FROM PUBLIC;
+-- Musa op#34845, bus #78369 finding D (verified on the live substrate): REVOKE ... FROM
+-- PUBLIC alone is NOT enough. Supabase's own bootstrap sets a standing
+-- `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon,
+-- authenticated, service_role` -- this grants each of those roles its OWN individual
+-- EXECUTE entry on every function at CREATE time, a separate ACL entry from PUBLIC's.
+-- DROP + CREATE (above) makes a brand-new function object, which picks up that standing
+-- rule immediately -- so without the explicit REVOKE below, anon and authenticated keep
+-- their own grant regardless of the PUBLIC revoke, and this SECURITY DEFINER RPC stays
+-- reachable with the anon key. Caller census (bus #78352 finding #4): grepped the
+-- entire ~/wingmen/orchestrator repo, all worktrees, for any PostgREST-style RPC call
+-- that could reach this function with an anon/authenticated key -- zero matches, with
+-- the caveat that an external, inaccessible codebase (e.g. a browser app holding a
+-- Supabase anon key) cannot be ruled out from here. This REVOKE closes the gap either
+-- way, independent of whatever that census did or didn't find.
+REVOKE EXECUTE ON FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text) TO service_role;

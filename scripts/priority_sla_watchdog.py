@@ -735,7 +735,11 @@ def audit(conn, subject: str, body: str, priority: str = "P3") -> None:
         with conn.cursor() as cur:
             cur.execute("UPDATE agent_messages SET read_at=now() WHERE id=%s", (mid,))
         conn.commit()
-    except Exception as e:
+    except (Exception, SystemExit) as e:
+        # Musa op#34845, bus #78369 finding E: bus_send.send() can raise bare SystemExit
+        # (dburl(), bus_send.py:533), a BaseException a plain `except Exception` would
+        # not catch -- would crash this daemon instead of logging and continuing like
+        # every other failure mode here.
         log(f"audit-insert-failed: {e}")
         try:
             conn.rollback()

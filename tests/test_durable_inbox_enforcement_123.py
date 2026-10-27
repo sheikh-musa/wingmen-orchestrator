@@ -1,19 +1,23 @@
-"""Tests for migrations 123 and 124 (backlog#124, durable-inbox final step, split per
-orch-console ruling bus #74885; renumbered three times -- 118/119 -> 119/120 after a
-PR#490 CI finding, then -> 120/121 after a second collision (orch-console bus #76518:
-base branch had separately merged its own migrations/118_operator_asks_needs_musa.sql),
-then -> 123/124 after a third collision (orch-console bus #78234: base branch had
-independently taken 119/120/121 for 3 unrelated migrations) --
-see migrations/122_post_agent_message_optional_params.sql's header): a dedicated
-bus_writer role owns post_agent_message/mark_delivered/ack_message and holds the
-INSERT-capable grants (migration 123, purely additive), so that revoking direct
-INSERT (+ sequence USAGE) from service_role on agent_messages (migration 124, the
-breaking half, gated on the fleet-wide enforce-in-code check going green) cannot
-self-defeat the RPCs that must survive it (orch-console design review, bus #74858).
+"""Tests for migration 123 (backlog#124, durable-inbox final step, split per orch-console
+ruling bus #74885; renumbered three times -- 118/119 -> 119/120 after a PR#490 CI finding,
+then -> 120/121 after a second collision (orch-console bus #76518: base branch had
+separately merged its own migrations/118_operator_asks_needs_musa.sql), then -> 123/124
+after a third collision (orch-console bus #78234: base branch had independently taken
+119/120/121 for 3 unrelated migrations) -- see
+migrations/122_post_agent_message_optional_params.sql's header): a dedicated bus_writer
+role owns post_agent_message/mark_delivered/ack_message and holds the INSERT-capable
+grants. Purely additive -- creates bus_writer and moves the RPCs onto it, but does NOT
+revoke service_role's (or postgres's) direct INSERT.
 
-`additive_db` exercises 123 alone -- the state the substrate will be in as soon as
-this merges. `enforced_db` exercises 123+124 -- the gated end-state nothing applies
-until orch-console releases it.
+PR SPLIT (Musa op#34845, bus #78393 ruling): migration 124 (the revoke -- the breaking
+half) does NOT ship in this PR; it ships later as its own PR-B once a full writer
+inventory across 4 categories is complete (python psycopg, .sh/psql heredocs,
+PostgREST/service-key REST calls, and 6 postgres-owned DB functions that INSERT into
+this table directly). This file dropped its 124-dependent tests and `enforced_db`
+fixture accordingly -- see migrations/123_durable_inbox_enforce_bus_writer.sql's own
+header for the full ruling. `additive_db` (123 alone) is therefore this file's only
+fixture now, and it is also the real substrate's actual end-state for as long as PR-B
+is pending, not an intermediate stage.
 
 Real risk this file's last test exists to catch (my own audit finding, bus #74860):
 agent_messages' AFTER-trigger work_item_mirror_bus_trg (and work_item_mirror() itself)
@@ -24,6 +28,15 @@ work_item_audit, which service_role has today only via Supabase's blanket defaul
 automatically. Without an explicit grant this degrades silently (the trigger's own
 try/catch, orch-console bus #73195, swallows the error) -- invisible to any suite that
 never touches work_item.
+
+Row level security (Musa op#34845, bus #78352 NO-GO, real finding): `_setup_base_and_123`
+now permanently enables RLS on agent_messages and seeds the same service_role-only
+policy the live substrate already has, console's own exact repro. This is a permanent
+fixture change (console's ask #2), not a temporary repro to be reverted -- the live
+table has had RLS enabled the whole time; no local/CI Postgres cluster did, which is
+why bus_writer's missing policy (and its missing from_agent column grant, see
+test_work_item_mirror_resolves_from_agent_when_responded_at_preset_with_123_alone)
+never surfaced until Musa's own repro against the real substrate.
 """
 import pathlib
 import uuid
@@ -187,9 +200,10 @@ _WORK_ITEM_SCHEMA = """
 
 def _setup_base_and_123(cur):
     """Schema + role bootstrap, migration 117, then 122 (RPC optional-params
-    extension), then ONLY 123 (the additive half -- filename order is now
-    dependency order, see 122's own header for the renumbering story). Shared
-    by both fixtures below -- enforced_db just applies 124 on top."""
+    extension), then 123 (the additive half -- filename order is now dependency
+    order, see 122's own header for the renumbering story). 124 (the revoke)
+    does not ship in this PR (Musa op#34845, bus #78393 ruling) -- see
+    migrations/123_durable_inbox_enforce_bus_writer.sql's header."""
     migration_117 = (MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text()
     migration_123 = (MIGRATIONS_DIR / "123_durable_inbox_enforce_bus_writer.sql").read_text()
     migration_122 = (MIGRATIONS_DIR / "122_post_agent_message_optional_params.sql").read_text()
@@ -211,6 +225,11 @@ def _setup_base_and_123(cur):
             cur.execute(f"CREATE ROLE {role}")
 
     cur.execute(_AGENT_MESSAGES_SCHEMA)
+    cur.execute("ALTER TABLE agent_messages ENABLE ROW LEVEL SECURITY")
+    cur.execute(
+        "CREATE POLICY agent_messages_service_only ON agent_messages "
+        "FOR ALL TO service_role USING (true) WITH CHECK (true)"
+    )
     cur.execute(migration_117)
     cur.execute(migration_122)
     cur.execute(_WORK_ITEM_SCHEMA)
@@ -230,25 +249,13 @@ def _setup_base_and_123(cur):
 
 @pytest.fixture
 def additive_db(pg_dsn):
-    """123 only -- the state the real substrate will be in once this PR merges,
-    before orch-console releases 124. service_role must still be able to write
-    directly; that is the whole point of splitting the revoke out (bus #74885)."""
+    """123 only -- the real substrate's actual end-state for as long as PR-B (migration
+    124, the revoke) is pending a full writer inventory (Musa op#34845, bus #78393
+    ruling), not an intermediate stage. service_role (and postgres) must still be able
+    to write directly; that is the whole point of splitting the revoke out (bus #74885,
+    reaffirmed by bus #78393)."""
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
         _setup_base_and_123(cur)
-
-    conn = psycopg.connect(pg_dsn)
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def enforced_db(pg_dsn):
-    """123 + 124 -- the state after orch-console's release gate (fleet-wide
-    enforce-in-code check green) lets the revoke apply."""
-    migration_124 = (MIGRATIONS_DIR / "124_durable_inbox_revoke_direct_insert.sql").read_text()
-    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
-        _setup_base_and_123(cur)
-        cur.execute(migration_124)
 
     conn = psycopg.connect(pg_dsn)
     yield conn
@@ -358,39 +365,99 @@ def test_work_item_mirror_still_fires_via_rpc_with_123_alone(additive_db):
     assert row[0] == "captured"
 
 
-def test_direct_insert_as_service_role_fails_after_full_enforcement(enforced_db):
-    """124 is the actual breaking change -- this is what it buys, and only this."""
-    with enforced_db.cursor() as cur:
-        cur.execute("SET ROLE service_role")
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            cur.execute(
-                "INSERT INTO agent_messages "
-                "(from_agent, to_agent, message_type, subject, body, priority, "
-                " requires_response, thread_id) "
-                "VALUES ('x','y','update','direct write','b','P2', false, gen_random_uuid())"
-            )
-    enforced_db.rollback()
+def test_work_item_mirror_resolves_from_agent_when_responded_at_preset_with_123_alone(
+    additive_db,
+):
+    """Musa op#34845, bus #78352 finding #3: the test above only proves the mirror
+    fires on a FRESH insert (responded_at NULL), which never reaches
+    work_item_derive_bus's `responded_at IS NOT NULL` branch -- so it never actually
+    exercised the from_agent grant this migration adds.
 
+    The reachable path: an unrelated, earlier UPDATE (the fleet-wide respond
+    convention -- same class as read_at, deliberately outside 123/124's scope, see
+    test_direct_update_for_read_at_still_works_with_123_alone -- performed by
+    service_role, which already has full column access) sets responded_at/
+    response_ref on a requires_response row. That first mirror succeeds and sets
+    work_item to 'done' regardless of bus_writer's grants -- asserting on final
+    state alone (an earlier, since-corrected version of this test did exactly that)
+    proves NOTHING about bus_writer, because the row was already 'done' before
+    bus_writer touched it.
 
-def test_post_agent_message_still_succeeds_after_full_enforcement(enforced_db):
-    """The actual no-self-defeat proof under the real end-state: service_role (the real
-    caller identity) can still write through the RPC even with its direct INSERT gone."""
-    with enforced_db.cursor() as cur:
+    The actual bug surface is the SECOND time the trigger fires: bus_writer's own
+    SECURITY DEFINER ack_message() UPDATEs the same row (only acked_at), but
+    work_item_mirror_bus_trg is SECURITY INVOKER and re-fires on ANY UPDATE of a
+    requires_response row, with NEW.responded_at still non-NULL from the first
+    UPDATE -- so it re-enters the from_agent branch, this time AS bus_writer. If
+    bus_writer lacks the from_agent grant, THIS SELECT raises InsufficientPrivilege,
+    caught and swallowed by the trigger's own exception handler (bus #73195) as a
+    bare WARNING -- work_item's state doesn't change because it was already 'done',
+    so no assertion on work_item rows can see this regression. The only observable
+    signal is the WARNING itself, captured here via psycopg's notice handler (same
+    pattern as test_migration_assertion_gate_passes in
+    test_boot_briefing_substrate_visibility.py)."""
+    notices: list[str] = []
+
+    def _collect(diag: psycopg.errors.Diagnostic) -> None:
+        if diag.message_primary:
+            notices.append(diag.message_primary.strip())
+
+    additive_db.add_notice_handler(_collect)
+
+    with additive_db.cursor() as cur:
         cur.execute("SET ROLE service_role")
         cur.execute(
+            "INSERT INTO agent_messages "
+            "(from_agent, to_agent, message_type, subject, body, priority, "
+            " requires_response, thread_id) "
+            "VALUES ('orig-replier','y','update','original','b','P2', false, "
+            "gen_random_uuid()) RETURNING id"
+        )
+        (orig_id,) = cur.fetchone()
+        cur.execute(
             "SELECT * FROM post_agent_message(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            ("x", "y", "update", "via rpc", "b", "P2", False, str(uuid.uuid4()), None),
+            ("x", "y", "update", "needs reply", "b", "P1", True, str(uuid.uuid4()), None),
+        )
+        (reply_id, _thread) = cur.fetchone()
+        # The unrelated, earlier UPDATE -- fires the trigger AS service_role, which
+        # already has full column access, so this mirror succeeds regardless of
+        # bus_writer's grants and sets state to 'done' BEFORE bus_writer is ever
+        # involved. This is deliberate: it's what makes the later ack_message()
+        # call's re-fire the ONLY thing that can still go wrong.
+        cur.execute(
+            "UPDATE agent_messages SET responded_at=now(), response_ref=%s WHERE id=%s",
+            (str(orig_id), reply_id),
+        )
+    additive_db.commit()
+
+    with additive_db.cursor() as cur:
+        cur.execute(
+            "SELECT state, done_by FROM work_item "
+            "WHERE source_table='agent_messages' AND source_id=%s",
+            (reply_id,),
         )
         row = cur.fetchone()
-    enforced_db.commit()
-    assert row[0] is not None
+    assert row == ("done", "orig-replier"), (
+        "sanity check failed before bus_writer is even involved -- the earlier "
+        f"service_role UPDATE's own mirror didn't land as expected: {row}"
+    )
 
+    notices.clear()  # only care about what ack_message's own re-fire produces
 
-def test_124_is_idempotent_on_rerun(enforced_db):
-    migration_124 = (MIGRATIONS_DIR / "124_durable_inbox_revoke_direct_insert.sql").read_text()
-    with enforced_db.cursor() as cur:
-        cur.execute(migration_124)  # re-run on an already-revoked schema -- must not raise
-    enforced_db.commit()
+    with additive_db.cursor() as cur:
+        cur.execute("SET ROLE service_role")
+        # SECURITY DEFINER -- runs AS bus_writer (the function owner since 123),
+        # re-firing work_item_mirror_bus_trg AS bus_writer with NEW.responded_at
+        # still non-NULL from the UPDATE above. This is the actual path console's
+        # finding #3 is about.
+        cur.execute("SELECT ack_message(%s)", (reply_id,))
+    additive_db.commit()
+
+    mirror_failures = [n for n in notices if "mirror failed" in n.lower()]
+    assert not mirror_failures, (
+        "bus_writer's own re-fire of work_item_mirror_bus_trg raised a (swallowed) "
+        f"WARNING -- bus_writer is likely missing the from_agent column grant: "
+        f"{mirror_failures}"
+    )
 
 
 

@@ -32,9 +32,24 @@ def db(pg_dsn):
         cur.execute("DROP SCHEMA public CASCADE")
         cur.execute("CREATE SCHEMA public")
         cur.execute("GRANT USAGE ON SCHEMA public TO PUBLIC")
-        cur.execute("SELECT 1 FROM pg_roles WHERE rolname='service_role'")
-        if cur.fetchone() is None:
-            cur.execute("CREATE ROLE service_role")
+        for role in ("service_role", "anon", "authenticated"):
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+            if cur.fetchone() is None:
+                cur.execute(f"CREATE ROLE {role}")
+        # Musa op#34845, bus #78369 finding D (verified on the live substrate): Supabase's
+        # own bootstrap sets a standing ALTER DEFAULT PRIVILEGES rule granting EXECUTE on
+        # every NEW function in public to anon/authenticated/service_role, as an INDIVIDUAL
+        # grant to each role -- separate from, and not touched by, a plain
+        # `REVOKE EXECUTE ... FROM PUBLIC`. No local/CI Postgres cluster sets this up by
+        # default, which is why migration 122's DROP+CREATE silently came back
+        # anon/authenticated-callable even after its own REVOKE FROM PUBLIC line -- that
+        # line only ever removed the ordinary CREATE-FUNCTION-defaults-to-PUBLIC grant,
+        # never this standing default-privileges rule. Mirrored here permanently, the same
+        # way RLS got mirrored into the 123/124 fixture for finding #3 of bus #78352.
+        cur.execute(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+            "GRANT EXECUTE ON FUNCTIONS TO anon, authenticated, service_role"
+        )
         cur.execute("""
             CREATE TABLE agent_messages (
                 id                 BIGSERIAL PRIMARY KEY,
@@ -148,6 +163,35 @@ def test_old_9_param_signature_is_gone(db):
             "'public.post_agent_message(text,text,text,text,text,text,boolean,uuid,text)')"
         )
         assert cur.fetchone()[0] is None
+
+
+def test_anon_and_authenticated_cannot_execute_the_new_function(db):
+    """Musa op#34845, bus #78369 finding D: Supabase's standing ALTER DEFAULT PRIVILEGES
+    rule (mirrored in the `db` fixture above) grants EVERY new function in public an
+    individual EXECUTE grant to anon/authenticated/service_role at CREATE time -- a grant
+    this migration's `REVOKE EXECUTE ... FROM PUBLIC` line does not touch (PUBLIC and an
+    individual role grant are separate ACL entries). Asserts the FINAL ACL state directly
+    via has_function_privilege, not just "no caller found" -- a caller census can never
+    prove a negative, only the database's own grant state can."""
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT has_function_privilege('anon', "
+            "'post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text)', "
+            "'EXECUTE')"
+        )
+        assert cur.fetchone()[0] is False, "anon can still EXECUTE post_agent_message"
+        cur.execute(
+            "SELECT has_function_privilege('authenticated', "
+            "'post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text)', "
+            "'EXECUTE')"
+        )
+        assert cur.fetchone()[0] is False, "authenticated can still EXECUTE post_agent_message"
+        cur.execute(
+            "SELECT has_function_privilege('service_role', "
+            "'post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text)', "
+            "'EXECUTE')"
+        )
+        assert cur.fetchone()[0] is True, "service_role must keep its intended EXECUTE grant"
 
 
 def test_migration_122_is_idempotent_on_rerun(db):

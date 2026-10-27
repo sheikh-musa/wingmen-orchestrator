@@ -619,7 +619,11 @@ def _page(free_before, free_after, summary, *, loud=True):
             bus_send.send(from_agent="cc-fleet-health", to="orch-console", mtype=mtype,
                           subject=subject, body="\n".join(lines), priority=priority,
                           req=False, dsn=dsn)
-    except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already stands
+    except (Exception, SystemExit) as e:  # noqa: BLE001 — page best-effort; stderr
+        # banner already stands. Musa op#34845, bus #78369 finding E: bus_send.send()
+        # can raise bare SystemExit (dburl(), bus_send.py:533), a BaseException a plain
+        # `except Exception` would not catch -- same established pattern as
+        # bus_send.py's own internal callers (its line ~384's comment).
         print(f"[disk-autoremediate] WARN bus-page failed ({e}); banner stands", file=sys.stderr)
 
 
@@ -715,7 +719,11 @@ def _page_spotlight(findings):
                 from_agent="cc-fleet-health", to="orch-console", mtype="blocker",
                 subject="Spotlight index regrowing on the Mini — needs root mdutil -X",
                 body="\n".join(lines), priority="P2", dsn=dsn)
-    except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already stands
+    except (Exception, SystemExit) as e:  # noqa: BLE001 — page best-effort; stderr
+        # banner already stands. Musa op#34845, bus #78369 finding E: bus_send.send()
+        # can raise bare SystemExit (dburl(), bus_send.py:533), a BaseException a plain
+        # `except Exception` would not catch -- same established pattern as
+        # bus_send.py's own internal callers (its line ~384's comment).
         print(f"[disk-autoremediate] WARN spotlight page failed ({e}); banner stands",
               file=sys.stderr)
 

@@ -4,6 +4,19 @@
 -- No -- assert: line needed -- this file contains no REVOKE/DROP FUNCTION (that
 -- convention trigger) now that the revoke is split out to migration 124.
 --
+-- PR SPLIT (Musa op#34845, bus #78393 ruling, superseding the plan below of "124 lands
+-- once the writer gate is green"): migration 124 does NOT ship in this PR. orch-console's
+-- own live query found postgres is rolsuper=FALSE but rolbypassrls=TRUE -- so a plain
+-- REVOKE INSERT on this table's owner (postgres) IS a real, revocable ACL entry (my
+-- earlier design proposal wrongly assumed ownership was an unconditional bypass; it is
+-- not -- only RLS bypass is unconditional here, via BYPASSRLS, and only for roles that
+-- have it). That makes 124 a real guardrail once it revokes from BOTH postgres and
+-- service_role, but it ships only as its own later PR-B, gated on a full writer inventory
+-- across 4 categories (python psycopg, .sh/psql heredocs, PostgREST/service-key REST
+-- calls, and 6 postgres-owned DB functions that INSERT into this table directly) -- none
+-- of which is complete yet. This migration (123) is unaffected: it was always additive,
+-- never revoking anything, so it ships now regardless of 124's timeline.
+--
 -- RENUMBERED THREE TIMES (PR#490 CI findings, backlog#124): first 118->119, then
 -- (orch-console bus #76518: base branch separately merged its own, unrelated
 -- migrations/118_operator_asks_needs_musa.sql -- a logical number collision)
@@ -51,6 +64,25 @@
 --     columns, so their new owner needs UPDATE on them too, not just the INSERT this
 --     migration's headline is about. Caught by TDD (test_mark_delivered_and_ack_
 --     unaffected_by_enforcement), not by reasoning about the ownership decision alone.
+--   * SELECT (from_agent) ON agent_messages (Musa op#34845, bus #78352 finding #3) --
+--     work_item_derive_bus's "`responded_at IS NOT NULL` AND response_ref looks numeric"
+--     branch does `SELECT from_agent FROM agent_messages WHERE id=p_response_ref::bigint`.
+--     That branch is reachable AS bus_writer: work_item_mirror_bus_trg is SECURITY
+--     INVOKER and fires on ANY UPDATE of a requires_response row, including
+--     mark_delivered/ack_message's UPDATEs -- if a row's responded_at was already set
+--     by an earlier, unrelated UPDATE before bus_writer's ack/deliver call lands, the
+--     trigger re-fires AS bus_writer with NEW.responded_at already non-NULL. Without
+--     this grant the SELECT fails, and the trigger's own exception handler (bus #73195)
+--     swallows it as a WARNING -- a silent mirror failure, never a loud one. Caught
+--     by a dedicated regression test, not by re-reading the ownership decision alone.
+--
+-- RLS (Musa op#34845, bus #78352, NO-GO at head 0a64d3e -- real finding, not a false
+-- positive): see the policy block below. Column-level grants are necessary but not
+-- sufficient once row level security is enabled on the table, which live agent_messages
+-- already has. Without a matching policy, bus_writer's grants above are moot -- every
+-- RPC write would be denied on the live substrate despite passing every local/CI test,
+-- because no local/CI Postgres cluster had RLS enabled to surface this. The fixture now
+-- mirrors live RLS permanently so this class of gap is caught going forward.
 --
 -- Safe to merge and apply as soon as this is green -- it changes nothing about who can
 -- already write to agent_messages, only adds a second, narrower-privileged path.
@@ -72,11 +104,53 @@ BEGIN
 END $$;
 
 GRANT INSERT ON agent_messages TO bus_writer;
-GRANT SELECT (id, thread_id) ON agent_messages TO bus_writer;
+GRANT SELECT (id, thread_id, from_agent) ON agent_messages TO bus_writer;
 GRANT UPDATE (delivered_at, lease_expires_at, acked_at) ON agent_messages TO bus_writer;
 GRANT USAGE ON SEQUENCE agent_messages_id_seq TO bus_writer;
 GRANT SELECT, INSERT, UPDATE ON work_item TO bus_writer;
 GRANT INSERT ON work_item_audit TO bus_writer;
+
+-- RLS (Musa op#34845, bus #78352 NO-GO, proven via a repro that enables RLS in the test
+-- fixture the way live agent_messages already has it): the live table has row level
+-- security ENABLED with policies scoped to service_role/console_readonly/cto_desktop only.
+-- Column-level GRANTs alone are necessary but NOT sufficient once RLS is on -- a role with
+-- no matching policy is denied regardless of its table/column grants. bus_writer had no
+-- policy at all, so EVERY RPC write (post_agent_message's INSERT, mark_delivered/
+-- ack_message's UPDATEs) would be silently denied the instant this migration's OWNER TO
+-- took effect on the live substrate -- this never showed up locally because this fixture,
+-- like every other local/CI Postgres cluster, never had RLS enabled to begin with.
+-- Idempotent (CREATE POLICY has no IF NOT EXISTS) via the same pg_catalog-guard shape as
+-- the role creation above. Scoped to exactly the 3 operations bus_writer's column grants
+-- already allow -- USING/WITH CHECK (true) because row-level filtering was never the
+-- point here (every row in this table is fleet-internal), only gating which ROLE may act,
+-- which the column grants already do.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = 'agent_messages'
+          AND policyname = 'bus_writer_insert'
+    ) THEN
+        CREATE POLICY bus_writer_insert ON agent_messages
+            FOR INSERT TO bus_writer WITH CHECK (true);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = 'agent_messages'
+          AND policyname = 'bus_writer_select'
+    ) THEN
+        CREATE POLICY bus_writer_select ON agent_messages
+            FOR SELECT TO bus_writer USING (true);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = 'agent_messages'
+          AND policyname = 'bus_writer_update'
+    ) THEN
+        CREATE POLICY bus_writer_update ON agent_messages
+            FOR UPDATE TO bus_writer USING (true) WITH CHECK (true);
+    END IF;
+END $$;
 
 ALTER FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text) OWNER TO bus_writer;
 ALTER FUNCTION mark_delivered(bigint,integer) OWNER TO bus_writer;
