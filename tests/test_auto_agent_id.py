@@ -978,15 +978,17 @@ def test_alloc_with_session_reuses_sticky_n(monkeypatch):
 
 def test_cli_passes_tmux_session_and_host(monkeypatch):
     seen = {}
-    monkeypatch.setattr(auto_agent_id, "load_family_map", lambda dsn: {"orchestrator": "cc-orchestrator"})
-    monkeypatch.setattr(auto_agent_id, "resolve_base_agent_id", lambda pwd, m: "cc-orchestrator")
+    # (Non-singleton example family: a pwd-derived cc-orchestrator is now REFUSED, #77922.)
+    monkeypatch.setattr(auto_agent_id, "load_family_map", lambda dsn: {"substrate": "cc-substrate"})
+    monkeypatch.setattr(auto_agent_id, "resolve_base_agent_id", lambda pwd, m: "cc-substrate")
+    monkeypatch.setattr(auto_agent_id, "singleton_base_ids", lambda dsn=None: frozenset({"cc-orchestrator"}))
     monkeypatch.setattr(auto_agent_id, "reap_stale_family", lambda base, dsn: None)
     monkeypatch.setattr(auto_agent_id, "scan_overlap_siblings", lambda **k: [])
     monkeypatch.setattr(auto_agent_id, "list_alive_tmux_sessions", lambda: {"a", "b"})
 
     def _alloc(**k):
         seen.update(k)
-        return auto_agent_id.AllocResult(sub_tag="cc-orchestrator-3", siblings=[], sticky=True)
+        return auto_agent_id.AllocResult(sub_tag="cc-substrate-3", siblings=[], sticky=True)
     monkeypatch.setattr(auto_agent_id, "allocate_sub_tag_and_register", _alloc)
     rc = auto_agent_id.main(["--pwd", "/x", "--repo", "orchestrator", "--dsn", "d",
                              "--tmux-session", "lane-a", "--host", "M"])
@@ -999,7 +1001,8 @@ def test_cli_passes_tmux_session_and_host(monkeypatch):
 def test_cli_without_session_does_not_probe_tmux(monkeypatch):
     seen = {}
     monkeypatch.setattr(auto_agent_id, "load_family_map", lambda dsn: {})
-    monkeypatch.setattr(auto_agent_id, "resolve_base_agent_id", lambda pwd, m: "cc-orchestrator")
+    monkeypatch.setattr(auto_agent_id, "resolve_base_agent_id", lambda pwd, m: "cc-substrate")
+    monkeypatch.setattr(auto_agent_id, "singleton_base_ids", lambda dsn=None: frozenset({"cc-orchestrator"}))
     monkeypatch.setattr(auto_agent_id, "reap_stale_family", lambda base, dsn: None)
     monkeypatch.setattr(auto_agent_id, "scan_overlap_siblings", lambda **k: [])
 
@@ -1009,7 +1012,7 @@ def test_cli_without_session_does_not_probe_tmux(monkeypatch):
 
     def _alloc(**k):
         seen.update(k)
-        return auto_agent_id.AllocResult(sub_tag="cc-orchestrator-1", siblings=[])
+        return auto_agent_id.AllocResult(sub_tag="cc-substrate-1", siblings=[])
     monkeypatch.setattr(auto_agent_id, "allocate_sub_tag_and_register", _alloc)
     assert auto_agent_id.main(["--pwd", "/x", "--repo", "o", "--dsn", "d"]) == 0
     assert seen.get("tmux_session") is None
@@ -1085,3 +1088,64 @@ def test_launcher_resolves_session_and_host_before_allocation():
     assert 'CC_TMUX_SESSION="${_BODY_MODEL_SESSION:-}"' not in src
     # the untargeted display-message fallback must NOT feed the allocator
     assert "_ALLOC_TMUX_SESSION=\"$(tmux display-message" not in src
+
+
+
+# ── pwd-derived SINGLETON base is refused (orch-console #77922, 2026-10-27) ────────────────
+# A manual launch in orchestrator.wt-cleanup derived 'cc-orchestrator' from pwd and minted
+# 'cc-orchestrator-1' -- a cc-substrate worker impersonating the hub.
+def _stub_alloc(monkeypatch, seen):
+    monkeypatch.setattr(auto_agent_id, "singleton_base_ids", lambda dsn=None: frozenset(
+        {"cc-orchestrator", "orch-console", "cai", "cc-fleet-health", "cc-quality"}))
+    monkeypatch.setattr(auto_agent_id, "reap_stale_family", lambda base, dsn: None)
+    monkeypatch.setattr(auto_agent_id, "scan_overlap_siblings", lambda **k: [])
+
+    def _alloc(**k):
+        seen.update(k)
+        return auto_agent_id.AllocResult(sub_tag=f"{k['base']}-1", siblings=[])
+    monkeypatch.setattr(auto_agent_id, "allocate_sub_tag_and_register", _alloc)
+
+
+def test_pwd_derived_singleton_base_is_refused_and_never_allocates(monkeypatch, capsys):
+    seen = {}
+    _stub_alloc(monkeypatch, seen)
+    monkeypatch.setattr(auto_agent_id, "load_family_map",
+                        lambda dsn: {"orchestrator": "cc-orchestrator"})
+    rc = auto_agent_id.main(["--pwd", "/Users/x/wingmen/projects/orchestrator.wt-cleanup",
+                             "--repo", "orchestrator", "--dsn", "d"])
+    assert rc == 1
+    assert seen == {}, "a refused launch must not allocate or register anything"
+    err = capsys.readouterr().err
+    assert "PwdSingletonRefused" in err and "CC_BASE_OVERRIDE" in err and "lanes.sh up" in err
+
+
+def test_lanes_sh_override_into_a_singleton_family_still_allocates(monkeypatch):
+    # lanes.sh pins CC_BASE_OVERRIDE=<fleet_lanes.base_agent_id>; the 'quality' lane's base is
+    # cc-quality (a singleton). An EXPLICIT override must keep working.
+    seen = {}
+    _stub_alloc(monkeypatch, seen)
+    monkeypatch.setattr(auto_agent_id, "load_cc_families", lambda dsn: {"cc-quality", "cc-substrate"})
+    monkeypatch.setattr(auto_agent_id, "load_family_map",
+                        lambda dsn: pytest.fail("override must skip pwd resolution"))
+    rc = auto_agent_id.main(["--pwd", "/Users/x/wingmen/projects/orchestrator.wt-anything",
+                             "--repo", "orchestrator", "--dsn", "d", "--base-override", "cc-quality"])
+    assert rc == 0 and seen["base"] == "cc-quality"
+
+
+def test_lanes_sh_override_for_a_worker_lane_in_an_orchestrator_worktree_allocates(monkeypatch):
+    # The exact lane that went wrong, launched the sanctioned way: lanes.sh up substrate-cleanup.
+    seen = {}
+    _stub_alloc(monkeypatch, seen)
+    monkeypatch.setattr(auto_agent_id, "load_cc_families", lambda dsn: {"cc-substrate"})
+    rc = auto_agent_id.main(["--pwd", "/Users/x/wingmen/projects/orchestrator.wt-cleanup",
+                             "--repo", "orchestrator", "--dsn", "d", "--base-override", "cc-substrate"])
+    assert rc == 0 and seen["base"] == "cc-substrate"
+
+
+def test_pwd_derived_non_singleton_still_allocates(monkeypatch):
+    seen = {}
+    _stub_alloc(monkeypatch, seen)
+    monkeypatch.setattr(auto_agent_id, "load_family_map", lambda dsn: {"ihsanos": "cc-ihsanos"})
+    rc = auto_agent_id.main(["--pwd", "/Users/x/wingmen/projects/ihsanos.wt-fix",
+                             "--repo", "ihsanos", "--dsn", "d"])
+    assert rc == 0 and seen["base"] == "cc-ihsanos"

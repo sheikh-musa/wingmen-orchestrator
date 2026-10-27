@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from scripts.lib.singleton_bases import singleton_base_ids
+
 
 # Advisory-lock registry (see docs/lock-namespace.md).
 # Identity/scheduling range: 1000–1099. Reserve new keys there.
@@ -148,6 +150,10 @@ def resolve_base_agent_id(pwd: str, family_map: dict[str, str]) -> str:
 
 # ── CC_BASE_OVERRIDE guardrail (CAI-RESP-258) ─────────────────────────────────
 _AUTHORITY_IDS = frozenset({"cai", "musa", "substrate", "broadcast"})
+
+
+class PwdSingletonRefused(ValueError):
+    """A pwd-derived base resolved to a singleton body (scripts.lib.singleton_bases)."""
 
 
 class OverrideRefused(ValueError):
@@ -752,6 +758,18 @@ def main(argv: list[str] | None = None) -> int:
             family_map = load_family_map(args.dsn)
             base = resolve_base_agent_id(args.pwd, family_map)
             override_used = False
+            if base in singleton_base_ids(args.dsn):  # registry, via the launcher's own DSN
+                # orch-console #77922: a manual launch in orchestrator.wt-cleanup derived
+                # 'cc-orchestrator' from pwd and minted 'cc-orchestrator-1' -- a worker
+                # impersonating the hub. A pwd guess may never mint a singleton instance; an
+                # explicit CC_BASE_OVERRIDE (what lanes.sh passes) is still honored above.
+                raise PwdSingletonRefused(
+                    f"pwd {args.pwd!r} resolves to SINGLETON base {base!r}; launching here would "
+                    f"mint '{base}-N' and impersonate that body. Launch via "
+                    f"'scripts/lanes.sh up <lane>', or set CC_BASE_OVERRIDE=<your cc-* family>.")
+    except PwdSingletonRefused as e:
+        sys.stderr.write(f"PwdSingletonRefused: {e}\n")
+        return 1
     except OverrideRefused as e:
         sys.stderr.write(f"OverrideRefused: {e}\n")
         return 1
