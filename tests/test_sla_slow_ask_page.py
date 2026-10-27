@@ -192,3 +192,30 @@ def test_console_held_timed_reminder_is_exempt_like_ask_5430():
 
 def test_ask_delegated_to_console_itself_is_exempt():
     assert w.slow_ask_targets([row(id=12, lane="orch-console")], now=NOW) == []
+
+
+# ── console #78612: a DEFERRED ask is parked by Musa, not dropped ────────────
+def test_deferred_ask_is_never_a_target_like_ask_5469():
+    r = row(id=5469, age_min=60)
+    r["deferred_at"] = "2026-10-27T18:57Z"   # Musa parked it (op#34961), then it paged
+    assert w.slow_ask_targets([r], now=NOW) == []
+
+
+def test_undeferred_ask_still_pages():
+    r = row(id=13, age_min=60)
+    r["deferred_at"] = None
+    assert ids(w.slow_ask_targets([r], now=NOW)) == [13]
+
+
+class FetchCur(FakeCur):
+    description = ()
+
+    def fetchall(self):
+        return []
+
+
+def test_candidate_query_excludes_deferred_asks():
+    conn = FakeConn()
+    conn.cursor = lambda: FetchCur(conn)
+    w._fetch_slow_ask_candidates(conn)
+    assert "oa.deferred_at IS NULL" in conn.sql[0]
