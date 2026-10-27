@@ -991,13 +991,14 @@
   // bus id; the operator types the ask and sends — the send is the deliberate act.
   function retaskLane(e) {
     var target = e.baseId || e.agentId;
-    var sel = $("assignAgent"), form = $("assignForm"), tog = $("assignToggle");
+    var sel = $("assignAgent"), form = $("assignForm"), det = $("assignSec");
     if (!sel || !form) { toast("ask composer not on this page", true); return; }
+    if (det) det.open = true;
     var has = false;
     Array.prototype.forEach.call(sel.options, function (o) { if (o.value === target) has = true; });
     if (!has) sel.insertAdjacentHTML("beforeend", '<option value="' + esc(target) + '">' + esc(target) + '</option>');
     sel.value = target;
-    form.classList.add("open"); if (tog) tog.classList.add("on");
+    form.classList.add("open");
     closeSheet();
     var inp = $("assignAsk");
     if (inp) { inp.placeholder = "Retask " + target + ": what should it do now?"; inp.focus(); }
@@ -1313,72 +1314,6 @@
     el.innerHTML = rows.map(bodyRow).join("");
   }
 
-  // ---- YOUR ASKS (fc-v55) — the operator's LIVE ask board -------------------
-  // One card per open operator_asks row. STATUS IS DERIVED LIVE on the bus each
-  // poll (never stored) so it cannot go stale (op#13250). needs_you is pinned red
-  // to the top by the server; review (delegate_done) is NOT auto-done — the
-  // operator swipe-to-confirms it. The card only carries {id, ask, delegated_to,
-  // status, updated_age_s, asked_age_s}; we render the copy per status here.
-  var ASK_TAG = {
-    waiting_on_musa: { cls: "needs", label: "waiting on you" },
-    needs_you:     { cls: "needs", label: "needs you" },
-    delegate_done: { cls: "rev",   label: "review" },
-    in_progress:   { cls: "prog",  label: "in progress" },
-    pending:       { cls: "pend",  label: "pending" },
-    on_nazim:      { cls: "naz",   label: "on me" }
-  };
-  function askMeta(a) {
-    var to = a.delegated_to
-      ? '<span class="ato">→ <b>' + esc(a.delegated_to) + '</b></span>'
-      : '<span class="ato">not yet delegated</span>';
-    var upd = a.updated_age_s, warn = (upd != null && upd >= 3600);
-    var ageCls = warn ? "aage warnage" : "aage";
-    var moved;
-    if (a.status === "waiting_on_musa") moved = "asked " + fmtAge(a.asked_age_s) + " ago";
-    else if (a.status === "needs_you") moved = "bounced back " + fmtAge(upd) + " ago";
-    else if (a.status === "delegate_done") moved = "replied " + fmtAge(upd) + " ago";
-    else if (a.status === "pending") moved = "sent " + fmtAge(upd) + " ago · unopened";
-    else if (a.status === "on_nazim") moved = "asked " + fmtAge(a.asked_age_s) + " ago";
-    else moved = "updated " + fmtAge(upd) + " ago";
-    var parts = [to, '<span class="' + ageCls + '">' + esc(moved) + '</span>'];
-    // Show when it was originally asked too — except where that IS moved
-    // (on_nazim + fc-v86 waiting_on_musa, whose moved line is the asked-age).
-    if (a.status !== "on_nazim" && a.status !== "waiting_on_musa" && a.asked_age_s != null)
-      parts.push('<span>asked ' + esc(fmtAge(a.asked_age_s)) + ' ago</span>');
-    return '<div class="ameta">' + parts.join('<span class="adot">·</span>') + '</div>';
-  }
-  function askCard(a) {
-    var t = ASK_TAG[a.status] || ASK_TAG.pending;
-    var needs = a.status === "needs_you";
-    var review = a.status === "delegate_done";
-    var cls = "ask" + (needs ? " needs" : "") + (review ? " confirmable" : "");
-    var rev = review
-      ? '<div class="arev" data-confirm="' + a.id + '">✓ delegate reported done — swipe or tap to confirm it landed</div>'
-      : "";
-    return '<div class="' + cls + '" data-ask="' + a.id + '">' +
-      '<span class="atag ' + t.cls + '">' + t.label + '</span>' +
-      '<div class="abody"><div class="atxt">' + esc(a.ask) + '</div>' +
-        rev + askMeta(a) +
-      '</div></div>';
-  }
-  function renderAsks(rows) {
-    var el = $("asks");
-    if (!el) return;
-    var cnt = $("asksCount"), fresh = $("asksFresh");
-    // fc-v86 (bus #78269, op#34848): home de-noise — the server now sends ONLY
-    // the waiting-on-you rows (status waiting_on_musa; lane-owned / in-progress
-    // / review live at /asks, the full board). The card copy says so.
-    if (!rows || !rows.length) {
-      el.innerHTML = '<div class="empty">Nothing waits on you — the full board lives at <a href="/asks">Asks</a>.</div>';
-      if (cnt) cnt.textContent = "none waiting";
-      if (fresh) fresh.style.display = "none";
-      return;
-    }
-    if (cnt) cnt.textContent = rows.length + " waiting on you";
-    el.innerHTML = rows.map(askCard).join("");
-    if (fresh) fresh.style.display = "flex";
-  }
-
   // fc-v86: the persistent top bar's Asks badge — mirrors pulse.asks_waiting
   // (server-derived, same source as the home card), styled as attention only
   // when something actually waits. Missing pulse = honest dash, never 0-lie.
@@ -1389,29 +1324,6 @@
     if (n == null) { el.textContent = "—"; el.className = "tbcnt"; return; }
     el.textContent = String(n);
     el.className = "tbcnt" + (n > 0 ? " has-waits" : "");
-  }
-
-  // swipe/tap-to-confirm — the operator's authoritative "done" on a review card.
-  // A delegate stamping responded_at only shows REVIEW; this close (confirm) is the
-  // only thing that clears the ask (POST /api/ask-close). Best-effort optimistic
-  // fade; the next poll is the source of truth.
-  var askBusy = {};
-  function confirmAsk(id, action) {
-    if (!id || askBusy[id]) return;
-    action = action || "confirm";
-    askBusy[id] = true;
-    var card = document.querySelector('.ask[data-ask="' + id + '"]');
-    if (card) card.classList.add("confirming");
-    fetch("/api/ask-close", {
-      method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
-      body: JSON.stringify({ id: Number(id), action: action })
-    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j || {} }; }, function () { return { ok: r.ok, j: {} }; }); })
-      .then(function (res) {
-        if (res.ok && res.j.ok) { toast(action === "drop" ? "✓ dismissed" : "✓ confirmed done"); load(); }
-        else { if (card) card.classList.remove("confirming"); toast("✗ " + (res.j.error || "close failed"), true); }
-      })
-      .catch(function () { if (card) card.classList.remove("confirming"); toast("✗ network dropped — confirm may not have run", true); })
-      .finally(function () { askBusy[id] = false; });
   }
 
   // ---- assign affordance -----------------------------------------------------
@@ -1545,7 +1457,6 @@
     renderCoordinators(d.coordinators || []);
     buildEntries(lanes, d.coordinators || []);
     renderLanes(lanes);
-    renderAsks(d.your_asks || []);
     renderDrainBoard(d.drain_board || []);
     buildAssignTargets(lanes, d.coordinators || []);
     updateDock();
@@ -1814,40 +1725,9 @@
       var cell = e.target.closest ? e.target.closest("#bloatCell.tapx") : null;
       if (cell) toggleBloat();
     });
-    // fc-v52: drain-board assign affordance.
-    var at = $("assignToggle");
-    if (at) at.addEventListener("click", function () {
-      var f = $("assignForm");
-      var open = f.classList.toggle("open");
-      at.classList.toggle("on", open);
-      if (open && $("assignAsk")) $("assignAsk").focus();
-    });
+    // fc-v86 (op#34852): the assign composer lives in a collapsed <details>
+    // ("Delegate an ask") — no toggle button anymore, the summary opens it.
     var asend = $("assignSend"); if (asend) asend.addEventListener("click", sendAssign);
-    // fc-v55: swipe/tap-to-confirm on a "Your asks" review card (delegated once).
-    var asks = $("asks");
-    if (asks) {
-      // Tap the review CTA → confirm.
-      asks.addEventListener("click", function (e) {
-        var cta = e.target.closest ? e.target.closest(".arev[data-confirm]") : null;
-        if (cta) confirmAsk(cta.getAttribute("data-confirm"), "confirm");
-      });
-      // Horizontal swipe on a confirmable card → confirm (right) / dismiss (left).
-      var sx = null, sy = null, scard = null;
-      asks.addEventListener("touchstart", function (e) {
-        var c = e.target.closest ? e.target.closest(".ask.confirmable") : null;
-        if (!c) { scard = null; return; }
-        scard = c; sx = e.touches[0].clientX; sy = e.touches[0].clientY;
-      }, { passive: true });
-      asks.addEventListener("touchend", function (e) {
-        if (!scard || sx == null) return;
-        var t = e.changedTouches[0], dx = t.clientX - sx, dy = t.clientY - sy;
-        if (Math.abs(dx) > 64 && Math.abs(dx) > Math.abs(dy) * 1.6) {
-          var id = scard.getAttribute("data-ask");
-          confirmAsk(id, dx > 0 ? "confirm" : "drop");
-        }
-        scard = null; sx = sy = null;
-      }, { passive: true });
-    }
     var aask = $("assignAsk");
     if (aask) aask.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); sendAssign(); } });
     var bp = $("bulkPreview"); if (bp) bp.addEventListener("click", bulkPreviewRun);
@@ -1949,7 +1829,7 @@
       mdlChip: mdlChip, shortModel: shortModel, routineSummary: routineSummary, collapsedHtml: collapsedHtml,
       tileHtml: tileHtml, coordChip: coordChip, armedHeaders: armedHeaders, ARMED_KEY_LS: ARMED_KEY_LS,
       confirmTyped: confirmTyped, CONFIRM_COPY: CONFIRM_COPY, resetBodyFor: resetBodyFor,
-      renderAsks: renderAsks, renderTopbar: renderTopbar,
+      renderTopbar: renderTopbar,
       govCardHtml: govCardHtml, govStripCopy: govStripCopy, govStripHtml: govStripHtml, GOV_MONEY_ACK: GOV_MONEY_ACK };
   }
 

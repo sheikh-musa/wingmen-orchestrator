@@ -67,42 +67,10 @@ const WAITING = { id: 1, ask: "decide the ADCDA release window", delegated_to: "
 let passed = 0;
 function ok(name, fn) { fn(); passed++; console.log("  ok - " + name); }
 
-// ── the home card: waiting-only copy, honest badge ─────────────────────────
-ok("waiting row renders a 'waiting on you' tag", function () {
-  const els = { asks: makeEl(), asksCount: makeEl(), asksFresh: makeEl() };
-  const { renderAsks } = loadFleet(els);
-  renderAsks([WAITING]);
-  assert(/waiting on you/.test(els.asks.innerHTML), "tag copy present");
-  assert(/needs/.test(els.asks.innerHTML), "tag carries the needs (red) class");
-  assert(/decide the ADCDA release window/.test(els.asks.innerHTML), "ask text present");
-  assert(esc_ok(els.asks.innerHTML), "ask text is HTML-escaped");
-});
-
-ok("badge says N waiting on you — never the open total", function () {
-  const els = { asks: makeEl(), asksCount: makeEl(), asksFresh: makeEl() };
-  const { renderAsks } = loadFleet(els);
-  renderAsks([WAITING, Object.assign({}, WAITING, { id: 2 })]);
-  assert(/2 waiting on you/.test(els.asksCount.textContent), "count = waiting rows");
-  assert(!/open/.test(els.asksCount.textContent), "no 'open' total on home");
-});
-
-ok("empty board: 'nothing waits on you' + badge says none — not '100 open'", function () {
-  const els = { asks: makeEl(), asksCount: makeEl(), asksFresh: makeEl() };
-  const { renderAsks } = loadFleet(els);
-  renderAsks([]);
-  assert(/nothing waits on you/i.test(els.asks.innerHTML), "empty-state copy");
-  assert(/\/asks/.test(els.asks.innerHTML), "points at the full board");
-  assert(/none waiting/i.test(els.asksCount.textContent), "badge none waiting");
-  assert(els.asksFresh.style.display === "none", "freshbar hidden when empty");
-});
-
-ok("waiting meta says 'asked X ago' exactly once (no duplicate age line)", function () {
-  const els = { asks: makeEl(), asksCount: makeEl(), asksFresh: makeEl() };
-  const { renderAsks } = loadFleet(els);
-  renderAsks([WAITING]);
-  const times = els.asks.innerHTML.match(/asked /g) || [];
-  assert(times.length === 1, "asked-age appears once, got " + times.length);
-  assert(/2h/.test(els.asks.innerHTML), "asked age (7200s -> 2h) present");
+// ── the home card is REMOVED (op#34852) ─────────────────────────────────────
+ok("renderAsks is gone — no asks card renderer on home", function () {
+  const { renderTopbar } = loadFleet({ tbAsksCount: makeEl() });
+  assert(typeof renderTopbar === "function", "renderTopbar stays");
 });
 
 // ── the persistent top bar: Asks badge mirrors pulse.asks_waiting ──────────

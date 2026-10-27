@@ -700,26 +700,32 @@
     </details>
   </section>
 
-  <!-- YOUR ASKS (fc-v55): the operator's live ask board. Status derived on the
-       bus each poll — never a stored snapshot. Assign here to delegate a new ask. -->
+  <!-- DELEGATE (fc-v86, op#34852): home's "Your asks" CARD is REMOVED — /asks
+       (top-bar Asks button) is the ONE asks view. What survives here is the
+       INPUT the card section used to host, collapsed by default: the "+ ask"
+       composer + the Retask rail (a lane action) both POST through it. No ask
+       LIST ever renders on home again; the top-bar Asks badge carries the
+       waiting-on-you count. -->
   <section>
-    <div class="sec-h"><h2>Your asks</h2><span id="asksCount" class="count"></span>
-      <button id="assignToggle" class="asbtn">+ ask</button></div>
-    <div id="assignForm" class="assign">
-      <select id="assignAgent" class="assel"><option value="">Delegate to…</option></select>
-      <input id="assignAsk" class="asinput" type="text" placeholder="What should they do?" autocomplete="off" />
-      <div class="asrow">
-        <select id="assignPri" class="assel aspri">
-          <option value="P2">P2</option><option value="P1">P1</option><option value="P0">P0</option>
-        </select>
-        <button id="assignSend" class="assend">Delegate →</button>
+    <details class="chatter" id="assignSec">
+      <summary>
+        <span>Delegate an ask</span>
+        <span class="csub">(collapsed · also powers Retask)</span>
+        <span class="chev">▸</span>
+      </summary>
+      <div class="cinner">
+        <div id="assignForm" class="assign">
+          <select id="assignAgent" class="assel"><option value="">Delegate to…</option></select>
+          <input id="assignAsk" class="asinput" type="text" placeholder="What should they do?" autocomplete="off" />
+          <div class="asrow">
+            <select id="assignPri" class="assel aspri">
+              <option value="P2">P2</option><option value="P1">P1</option><option value="P0">P0</option>
+            </select>
+            <button id="assignSend" class="assend">Delegate →</button>
+          </div>
+        </div>
       </div>
-    </div>
-    <div id="asks"><div class="empty">Loading…</div></div>
-    <div class="freshbar" id="asksFresh" style="display:none">
-      <span class="g"></span>
-      <span>status derived live from the bus on every refresh · never cached · pull to refresh</span>
-    </div>
+    </details>
   </section>
 
   <!-- Fleet chatter: the old DRAIN BOARD, demoted to a collapsed SRE glance. -->

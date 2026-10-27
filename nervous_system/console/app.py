@@ -1815,13 +1815,13 @@ def _fleet_payload():
     # ("N needs your call") + the "N open · N needs you · N to review" subline.
     asks_needs = sum(1 for a in your_asks if a.get("status") == "needs_you")
     asks_review = sum(1 for a in your_asks if a.get("status") == "delegate_done")
-    # fc-v86 (bus #78269, op#34848): home de-noise. The home "Your asks" card
-    # shows ONLY what waits on Musa (waiting_on_musa = the waiting_on_operator
-    # rows, the one structural FACT recorded at ask-open time) — lane-owned,
-    # in-progress and review asks leave home (nothing dropped: the full board
-    # stays at /asks). Counts above stay computed over the FULL board so their
-    # meaning is unchanged; the payload rows are filtered AFTER, and the pulse
-    # carries the honest waiting count the top-bar Asks badge renders.
+    # fc-v86 (bus #78269, op#34848): home de-noise. The home "Your asks" CARD
+    # is now REMOVED entirely (op#34852 — /asks via the top-bar Asks button is
+    # the ONE asks view), so /api/fleet no longer ships your_asks rows at all
+    # (nobody renders them; dropping the key is pure mobile-payload budget).
+    # What stays is pulse.asks_waiting — the honest waiting-on-you count the
+    # top-bar Asks badge renders, same derivation /api/asks-waiting serves to
+    # lanes.html so both badges always agree. The full board is /api/asks-board.
     asks_waiting_rows = [a for a in your_asks if a.get("status") == "waiting_on_musa"]
 
     return {
@@ -1834,11 +1834,8 @@ def _fleet_payload():
                   "asks_review": asks_review,
                   # fc-v86: the waiting-on-YOU count — the only asks number home shows.
                   "asks_waiting": len(asks_waiting_rows)},
-        # fc-v55: the operator's LIVE "Your asks" board (status derived in SQL,
-        # never stored). Primary operator surface; the drain board is demoted to
-        # a collapsed "Fleet chatter (SRE view)" below it.
-        # fc-v86: home carries ONLY the waiting-on-you rows (see above).
-        "your_asks": _jsonable(asks_waiting_rows),
+        # fc-v86 (op#34852): no "your_asks" rows on /api/fleet — the home card is
+        # gone; /api/asks-board serves the ONE asks view at /asks.
         "needs_you": _jsonable(needs),
         "backlog": _jsonable(backlog),
         "coordinators": _jsonable(coordinators),

@@ -1700,7 +1700,7 @@ def test_dedupe_distinct_lanes_untouched():
 # i.e. waiting_on_operator rows); lane-owned/in-progress/review asks move off
 # home — the full board stays at /asks. The pulse gains the honest waiting
 # count the top-bar Asks badge renders.
-def test_api_fleet_your_asks_waiting_only(server, monkeypatch):
+def test_api_fleet_no_asks_rows_waiting_count(server, monkeypatch):
     from nervous_system.console import db as _db
     # stub the rest of the /api/fleet aggregate empty (endpoint-level test —
     # only the asks side carries signal here; others guard-fallback anyway)
@@ -1725,9 +1725,9 @@ def test_api_fleet_your_asks_waiting_only(server, monkeypatch):
     r = httpx.get(server + "/api/fleet", headers=H(), timeout=10)
     assert r.status_code == 200
     body = r.json()
-    # home card rows: waiting_on_musa ONLY — nothing else leaks onto home
-    assert [a["id"] for a in body["your_asks"]] == [1]
-    assert all(a["status"] == "waiting_on_musa" for a in body["your_asks"])
+    # fc-v86 op#34852: the home card is GONE — /api/fleet ships NO asks rows at
+    # all (the board lives at /api/asks-board; home shows only the badge count).
+    assert "your_asks" not in body
     # the top-bar badge count = the waiting rows, not the noisy open total
     assert body["pulse"]["asks_waiting"] == 1
     # historical pulse keys keep their meaning (computed over the FULL board)
