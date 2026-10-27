@@ -61,7 +61,115 @@ Ingest dedupe + offset-after-commit ordering; `operator_log` body-scoped id-exac
 
 # 1. PreToolUse / PostToolUse hook and guard gaps (auditor A)
 
-_(auditor did not return before the deadline; see bus summary)_
+## A — Claude Code hook/guard gaps (read-only audit, 2026-10-28)
+
+Scope: `.claude/settings.json` (tracked), `.claude/settings.local.json` (gitignored), `~/.claude/settings.json`, `scripts/hooks/*.py`. Method: source read plus ~300 synthetic payloads run through each guard locally (driver `scratchpad/probe_hooks.py`; raw per-case ALLOW/BLOCK results in `scratchpad/probe_out.txt` — consult that file for exact strings; this report summarises by category). Hook semantics confirmed against code.claude.com/docs/en/hooks: exit 2 blocks; exit 0 allows; any other exit, crash, missing interpreter, or timeout is a non-blocking error and the tool call proceeds unless the entry sets `"onFailure": "block"` (CC >= 2.1.295). Already tracked, not re-reported: `cat` of env-shaped files (hc#562).
+
+Session note: this audit ran as a lane (`CC_BASE_AGENT_ID=cc-substrate`, `ORCH_BODY_ROLE` unset). Two of my own probe commands were refused by the live guards, so both tiers fire and inherit the discriminator in this session.
+
+---
+
+#### [H-1] Fail-open structure: non-2 exits, crashes, missing interpreter; 9 of 14 worktrees have no `.venv`
+Impact: high  Effort: S
+Evidence:
+- `.claude/settings.json:28-56` — all four project hooks use `"$CLAUDE_PROJECT_DIR"/.venv/bin/python3`; no `onFailure`.
+- Worktrees without `.venv`: wt-asksboard, wt-bariq-tg, wt-busstamp, wt-glm-accept-leak, wt-glm-proj, wt-glm-std, wt-memlint, wt-slowask-deferred (`.gitignore:1` ignores `.venv/`).
+- `tests/test_settings_json_hook_paths_44518.py:38-44` requires `$CLAUDE_PROJECT_DIR` in every hook command — the lint locks in the shape that fails open in a venv-less worktree.
+- No outer try/except around `main()`: `secrets_transcript_guard.py:1253-1305`, `console_irsyad_guard.py:156-183`, `lane_prod_key_guard.py:192-241`, `consult_governance_floor_guard.py:141-191`, `client_media_read_guard.py:202-243`. Only `glm_image_read_guard.py:187-208` has the `_run()` wrapper ("exits with a code OTHER than 0 or 2 is a NON-blocking error ... must fail CLOSED").
+Repro: missing interpreter in wt-memlint -> `exit=127`. Payload `tool_input:"notadict"` -> secrets/console/lane/consult guards exit 1 with Traceback; glm exits 2. `tool_input.command=123` -> secrets and lane guards exit 1.
+Consequence: in a venv-less worktree `console_irsyad_guard` and `consult_governance_floor_guard` (no user-level copy) are entirely unenforced; `lane_prod_key_guard`/`glm_image_read_guard` survive only through their user-level duplicates (H-9).
+Fix sketch: add `"onFailure": "block"` to every policy hook; wrap each `main()` in a fail-closed `_run()` like glm's; use `python3` fallback when the venv is absent (hooks are stdlib-only); relax the 44518 test accordingly.
+
+#### [H-2] secrets_transcript_guard Rule A is a verb allow-list; ~68% of read/dump probes pass
+Impact: high  Effort: M
+Evidence:
+- `secrets_transcript_guard.py:185-194` leading-command regexes (`cat|head|tail|less|more`, `sed` only without `-n`, `awk`, `grep`, a fixed binary-dump set, `python` only when the literal `print` and `open('<literal>')` both appear `:346-357`).
+- `:171-183` `SECRET_FILE_RE` is case-sensitive and token-anchored; `:200-201` statement/pipeline split has no brace, glob, quote-splitting, `$(...)`, or process-substitution handling (acknowledged "known limitation" `:197-199`).
+- `:902-914` env-dump set is a fixed list of spellings; `:1138-1142` Rule B requires the `$SENSITIVE_VAR` and the print verb in the same segment (indirection through another variable escapes).
+Repro: 160/234 Bash probes ALLOWED (see probe_out.txt, section 1). Categories that pass: `sed -n`; other interpreters/one-liners (node, perl, ruby, php, jq, sqlite3, python via pathlib/heredoc/`sys.stdout.write`); plain text utilities not in the list; absolute-path/`sudo`/`nice`/`time`/`command`/`exec`/`eval`/`bash -c` prefixes; shell expansion (glob, brace, quote splitting, `$(find ...)`, `find -exec`, `xargs`, `<(...)`, variable holding the filename); copy/symlink then read; case variants (`.ENV` — the live checkout's `.ENV` resolves on this APFS volume); `declare -p`/`typeset -p`/`export`/`declare -x`; `tmux show-env`/`showenv` aliases; printing `os.environ`/`process.env`/`ENV` in full; `curl -d "$VAR"` exfil.
+Fix sketch: invert the model — once a segment contains a secret-path token (after case-folding, brace/glob normalisation and variable-assignment tracking) block regardless of leading verb, except `source`/`.`; treat any interpreter one-liner that references a secret path or `environ`/`process.env`/`ENV` as a dump; case-insensitive file regex; and keep the longer-term fix of removing secrets from the console's readable FS (lanes already get `env -i` allow-listing, `launch_dangerous_cc.sh:1096-1112`).
+
+#### [H-3] Grep/Glob tools: matched but effectively unguarded; content mode reads secret files/dirs whole
+Impact: high  Effort: S
+Evidence: `secrets_transcript_guard.py:1231-1232` `_command_text` returns `json.dumps(tool_input)` for Grep, then Rule A tokenises the JSON — a trailing `}` defeats the `$`-anchored file regex, and the leading token is never `grep`. `lane_prod_key_guard.py:208-241` handles only Read/Bash; its settings matcher is `Bash|Read` (`.claude/settings.json:38`, `~/.claude/settings.json`).
+Repro: Grep `pattern="." path=<live>/.env output_mode=content` -> ALLOW; Grep `private_key` under `~/.wingmen/keys` as a lane -> ALLOW (both guards); Glob of `~/.wingmen/keys/*` -> ALLOW; Edit on the cosem SA key as a lane -> ALLOW (lane guard not matched on Edit).
+Fix sketch: for Grep/Glob run `_is_secret_path` on `path`/`glob` and deny `output_mode=content` under secret dirs; add `Grep|Glob|Edit|Write|NotebookEdit` to `lane_prod_key_guard`'s matcher with the same path checks.
+
+#### [H-4] Discriminator is read from hook env and fails open when absent; two guards ignore the existing fallback
+Impact: high  Effort: S
+Evidence:
+- `lane_prod_key_guard.py:87-89` `is_worker_lane()` = `CC_BASE_AGENT_ID` present; `:193-195` returns 0 otherwise.
+- `scripts/lib/agent_identity.py:87-120` and `launch_dangerous_cc.sh:271-287` document (bus #68342) that a hook subprocess "does not reliably inherit CC_BASE_AGENT_ID" and provide a per-worktree marker fallback — used by `client_media_read_guard.py:81-88` for the allow-path only, NOT by `lane_prod_key_guard`, and not for the deny decision anywhere.
+- `console_irsyad_guard.py:42-43`, `consult_governance_floor_guard.py:76-83`, `client_media_read_guard.py:77-78` key on exact `ORCH_BODY_ROLE == "console"`; `.env:110` sets it; it is unset in worktree sessions (this session) and the launcher scrubs it for lanes (`launch_dangerous_cc.sh:195`).
+Repro: lane guard with `CC_BASE_AGENT_ID` unset -> ALLOW on a direct prod-key read; with `AGENT_ID` only -> ALLOW. Console guard with `ORCH_BODY_ROLE` unset / `Console` / `console ` -> ALLOW (no-op).
+Spoofing: a model cannot alter the hook's inherited env from a Bash command (`env -u X cmd` only affects the child) — correct by design, verified by reading `main()` ordering. The exposure is absence, not spoofing.
+Fix sketch: `lane_prod_key_guard` and `client_media_read_guard` resolve identity via `resolve_base_agent_id_for_hook(payload["cwd"])`; prod-key guard should default-deny when identity is unknown; console guards should positively identify the console (marker/lease row) rather than an env string.
+
+#### [H-5] Guard code and settings are writable by the guarded agent; project-level `disableAllHooks` is unguarded
+Impact: high  Effort: S
+Evidence: `ls -l` shows `~/.claude/settings.json` and `~/wingmen/orchestrator/scripts/hooks/secrets_transcript_guard.py` are `-rw-r--r-- sheikhmusa` — same OS user every lane runs as, with `--dangerously-skip-permissions` (`launch_dangerous_cc.sh:1108,1112`). Docs: a project-level `disableAllHooks` setting overrides the user-level value; `.claude/settings.local.json` is gitignored (`.gitignore:11`) so a lane writing one in its worktree leaves no tracked trace. No PreToolUse rule covers Write/Edit/Bash targeting `.claude/settings*.json`, `scripts/hooks/`, or `~/.claude/settings.json` (secrets guard path check `secrets_transcript_guard.py:251-263` only covers secret paths).
+Repro: not executed (would be a write). Shape verified: Write to `.claude/settings.local.json` with `disableAllHooks` is matched by the secrets guard but passes `_is_secret_path`.
+Fix sketch: a small PreToolUse rule denying lanes any write to hook sources/settings paths; SessionStart integrity check (sha256 of `scripts/hooks/*` + both settings files vs a pinned manifest, fail loud); root-own or `chflags uchg` the live hook files.
+
+#### [H-6] console_irsyad_guard: literal, case-sensitive substrings; real `.env` names for the ihsanos store are not in the list
+Impact: med  Effort: S
+Evidence: `console_irsyad_guard.py:27-39` BLOCKED list (`goumlyne...|GOUMLYNE_`, `ceayj...|IHSANOS_PROD_DATABASE_URL`, `write_dsn\.env|WRITE_DSN_ALLOWED`, `sheikh-musa/ihsanos\b`, `wingmen/projects/ihsanos`, `--body-file`); `:175` `re.search` without IGNORECASE. Names present in `.env` (names only): `IHSANOS_PROD_RO_DATABASE_URL`, `IHSANOS_SUPABASE_SERVICE_KEY`, `IHSANOS_SUPABASE_URL`.
+Repro (ORCH_BODY_ROLE=console): `psql "$IHSANOS_PROD_RO_DATABASE_URL"` -> ALLOW; curl with `$IHSANOS_SUPABASE_SERVICE_KEY` against `$IHSANOS_SUPABASE_URL` -> ALLOW; upper/mixed-case project ref in a hostname (DNS is case-insensitive) -> ALLOW; ref split across a shell variable -> ALLOW; `cd ~/wingmen/projects && cat ihsanos/...`, glob `ihsa*`, doubled slash, mixed-case GitHub owner/repo -> ALLOW; `$WRITE_DSN` -> ALLOW (only `WRITE_DSN_ALLOWED`/`write_dsn.env` listed). The `--body-file` exfil block (`:33-38`) is sidestepped by `--body "$(...)"` or `--body "$VAR"`: the allow-exception rejects `$(` (`:117`) but the command then falls through to BLOCKED, which has no match -> ALLOW; the secrets guard also allows it (its token regex needs `^`/`/` directly before `.env`).
+Fix sketch: `re.IGNORECASE`; add name families `IHSANOS_\w*`, `WRITE_DSN\w*`; match `projects/ihsanos` after path normalisation; for `bus_send`/`tg_send`/`nazim_send` argv deny any `$`, backtick or `$(` in the body/subject values.
+
+#### [H-7] lane_prod_key_guard: contiguous-path regex; Part-A isolation can be undone from the command line
+Impact: med  Effort: S
+Evidence: `lane_prod_key_guard.py:65` `_PROD_KEY_RE = \.wingmen/keys/[^\s'"]*cosem` (dir and basename must be adjacent in one token); `:70-74` ADC regex likewise; `:82-84` only `GOOGLE_APPLICATION_CREDENTIALS=`, `CLOUDSDK_CONFIG=`, `--key-file`; `scripts/lib/lane_gcloud_isolation.sh:88` relies on `CLOUDSDK_CONFIG`/GAC staying set.
+Repro (lane): `cd` into the keys dir then read; directory in a variable; `*`/`*.json`/`cos*-sa.json` globs; `find -exec`; `cd ~/.config/gcloud; cat <adc file>`; `~/.config/gcloud/*.json` -> all ALLOW. `unset CLOUDSDK_CONFIG; gcloud ...`, `env -u CLOUDSDK_CONFIG ...`, `env -i ... gcloud`, `gcloud --configuration=default` -> ALLOW (restores the per-user prod config). `gcloud auth login --cred-file=`, `gcloud config set auth/credential_file_override`, `export $GAC=...` -> ALLOW. `~/.config/configstore/firebase-tools.json` EXISTS on this host and is not covered.
+Fix sketch: for a lane, deny any token containing `.wingmen/keys`, `.config/gcloud`, or `configstore/firebase-tools` regardless of basename; deny `unset|env -u|env -i` touching `CLOUDSDK_CONFIG`/GAC and `--configuration`; the durable fix remains OS-level separation (bus #48469).
+
+#### [H-8] glm_image_read_guard and client_media_read_guard: copy-out and non-listed dumpers bypass; staging "proof" is forgeable
+Impact: med  Effort: S
+Evidence: `glm_image_read_guard.py:60-63` extension list (no .avif/.jfif/.ico/.docx/.xlsx/.pptx; .svg acknowledged), `:70-76` dumper regex anchored at segment start (fails on `/bin/cat`, `sudo`, `bash -c`, `cat<file`, loop/`find`/`xargs` forms), interpreters/OCR/convert tools absent. `client_media_read_guard.py:213-214` Read only — Bash dump of a `logs/tg_media` file is not seen; `:172` realpath of a COPY no longer contains `tg_media`; `:179-199` "staged CLEAN" = any `reports/client-file-staging/*/<stem>.md` without the literal `(structure only` — that directory is `drwxr-xr-x sheikhmusa`, and `_operator_attested_exports.log` is `-rw-r--r-- sheikhmusa`, i.e. writable by the lane the guard restrains.
+Repro: routed lane — copy image to a `.txt` then `cat`, python/node/openssl base64, tesseract/pdftotext/magick, variable-held path, `for`/`find`/`xargs` -> ALLOW. Lane — `cat ... | base64` on a tg_media file -> ALLOW; `cp` out of tg_media then Read the copy -> ALLOW.
+Fix sketch: block Bash segments whose tokens realpath into `logs/tg_media/`; store CLEAN/attest proof where lanes cannot write (root-owned dir or substrate row with the file sha256); extend image extensions and strip launcher prefixes before the dumper match.
+
+#### [H-9] Duplicate registration: lane_prod_key_guard and glm_image_read_guard run twice per call with different code; ~8 interpreter spawns per Read
+Impact: med  Effort: S
+Evidence: project `.claude/settings.json:37-56` (`$CLAUDE_PROJECT_DIR` form) and `~/.claude/settings.json` (absolute live-checkout form) register both guards; docs dedupe only an identical handler, and these command strings differ, so both run. `secrets_transcript_guard` is also in project `.claude/settings.local.json` (identical string to the user-level entry; likely deduped, but host-local and untracked). Measured median startup (ms): secrets 123, scanner 102, console 87, lane 75, glm 85, client_media 99, consult 327. A lane Read triggers up to 8 spawns, roughly 0.7-0.9 s per tool call.
+Divergence: the user-level copy executes the live checkout's branch; the project copy executes the worktree's branch — a lane on an older branch gets a different rule set, and `scripts/arm_glm_image_read_guard.sh` validated only the user-level copy. Deny-wins so disagreement is safe, but cost and drift are real.
+Fix sketch: one tier per hook (user-level for fleet-wide guards, with python fallback per H-1), remove project duplicates; or one `scripts/hooks/dispatch.py` that reads stdin once and runs all guards in-process.
+
+#### [H-10] secrets_output_scanner is alert-plus-disk-redaction only; cannot block, does not redact what the model sees; fail-open
+Impact: med  Effort: S
+Evidence: `secrets_output_scanner.py:533-537` returns 0 on unparsable input ("fail-open, the tool call already completed"); no outer wrapper for other exceptions (exit 1 = non-blocking anyway). `:204-325` edits the on-disk JSONL/persisted file after the content was already transmitted (`:8-11`, `:505`). Docs: PostToolUse exit 2 only shows stderr; `hookSpecificOutput.updatedToolOutput` CAN replace the output before Claude sees it — not used. `:115` 64 KiB scan cap. `:520-523` `subprocess.run(... timeout=20)` plus `:626-628` 3 retries inside a 20 s hook timeout (`~/.claude/settings.json`) — a slow `bus_send` can get the hook killed before the stderr note. `:127,:162-164` fixture marker `(?:test|fake|example)-?` on the matched text suppresses the PAGE for any real credential whose characters contain `test` (redaction still runs). `:486-488` executes `bus_send.py` from `ORCH_ROOT` (live checkout).
+Fix sketch: emit `updatedToolOutput` with the redacted text (shape-matched per tool); wrap `main()`; lower the subprocess timeout to ~8 s; restrict the fixture marker to a token boundary.
+
+#### [H-11] ddl_detect.py is a library, not a hook — not orphaned, but mis-located
+Impact: low  Effort: S
+Evidence: not registered in any settings file; imported by `secrets_transcript_guard.py:153` for Rule G (`:742-768`); vendored again at `scripts/lib/exec_broker/ddl_detect.py` with pin tests `tests/exec_broker/test_ddl_detect_vendor_pin.py:14-15`, `tests/test_secrets_transcript_guard.py:1220-1236`; CLI mode (`ddl_detect.py:212-226`) has no caller in this repo.
+Fix sketch: move to `scripts/lib/` and import from there; keep the pin tests.
+
+#### [H-12] Matcher gaps: MCP tools, WebFetch/WebSearch never reach any PreToolUse guard
+Impact: med  Effort: S
+Evidence: project matchers `.claude/settings.json:28,37,46,53` and user-level matchers are explicit tool-name lists; none includes `mcp__.*`, `WebFetch`, `WebSearch`. `~/.claude/settings.local.json` pre-allows `mcp__claude_ai_Supabase__execute_sql` and `apply_migration`. Only the PostToolUse scanner uses `*`.
+Repro: the console guard script itself would block an MCP `execute_sql` payload naming the goumlyne ref (haystack is `json.dumps(tool_input)`), but the matcher never invokes it for `mcp__` names, so it never runs.
+Agent tool: covered by `console_irsyad_guard` (prompt text) only; docs confirm settings hooks also run inside subagents with `agent_id`/`agent_type`, so a subagent's own Bash/Read calls are still gated (same env). Remote-isolation subagents: docs silent — treat as uncovered.
+Fix sketch: add `mcp__.*|WebFetch|WebSearch` to the console guard and secrets guard matchers; secrets guard should Rule-E-scan `json.dumps(tool_input)` for any unknown tool.
+
+#### [H-13] consult_governance_floor_guard: consultation marker is a world-forgeable temp file; console-only so a no-op in worktree sessions
+Impact: low  Effort: S
+Evidence: `consult_governance_floor_guard.py:86-93` marker `$TMPDIR/gov_floor_consulted_<session_id>`; `:176-177` any existing marker passes everything; `:145-147` returns 0 when `ORCH_BODY_ROLE != console`. Startup 327 ms (slowest hook).
+Fix sketch: fine as a nudge; do not describe it as a gate. Key the marker under a dir only the hook writes, or record the consult in the substrate.
+
+#### [H-14] Other credential surfaces on this host outside every pattern
+Impact: med  Effort: S
+Evidence (presence only, no contents read): `~/.claude.json`, `~/.npmrc`, `~/.config/gh/hosts.yml`, `~/.config/configstore/firebase-tools.json`, `~/.wingmen/secrets/` (dir exists; `secrets_transcript_guard.py:226-232,248` cover only `private|keys`), 61 `~/Library/LaunchAgents/dev.wingmen.*.plist` files carrying `EnvironmentVariables`. Probes reading these, `launchctl print|getenv`, `security find-generic-password -w`, and `gh|vercel|supabase|gcloud|firebase|aws` secret-fetch CLIs -> ALLOW (Rule D covers some gcloud/firebase forms for lanes only, `:813-889`; the scanner's `SECRET_READING_COMMAND_RE` `secrets_output_scanner.py:70-71` is post-hoc).
+Fix sketch: add `.wingmen/secrets`, `LaunchAgents/dev.wingmen`, `configstore/firebase-tools`, `config/gh/hosts`, `.claude.json`, `.npmrc` to the path rules; add `launchctl print|getenv`, `security ... -w`, `tmux show-env|showenv` to Rule B; treat vendor secret-fetch CLIs as dumps requiring a hash sink.
+
+#### [H-15] No test asserts the user-level registration matches intent; drift between tiers is undetectable
+Impact: low  Effort: S
+Evidence: `tests/test_settings_json_hook_paths_44518.py` lints only the tracked project file; `scripts/arm_glm_image_read_guard.sh` hand-edits `~/.claude/settings.json`; `launch_dangerous_cc.sh` also touches settings. Nothing verifies on the host that the user-level hook set equals the documented fleet-wide set (which is how `console_irsyad_guard` ended up project-only while the doctrine calls it enforcement).
+Fix sketch: a `fleet_health` step that diffs `~/.claude/settings.json` hooks against a tracked manifest and pages on drift.
+
+---
+Ranking (impact/effort): H-1, H-4, H-5, H-3 (high/S) > H-2 (high/M) > H-6, H-7, H-8, H-9, H-10, H-12, H-14 (med/S) > H-11, H-13, H-15 (low/S).
+Artifacts: `scratchpad/probe_hooks.py`, `scratchpad/probe2.py` (drivers), `scratchpad/probe_out.txt` (full per-case results).
 
 ---
 
@@ -290,7 +398,7 @@ Also `launchctl print-disabled` still carries `dev.wingmen.tg-bridge` and `dev.w
 
 ### 6. gzb (VPS hub) findings
 
-Reach: `~/.ssh/config` `Host gzb` → 100.77.251.8 (tailnet), user `gazzai`, key `~/.ssh/gzb_fleet`. `ssh gzb hostname` → `gzbai`. Repo refs: `ssh gzb` (3), `GZB_SSH=` in scripts; runbook mentions `ssh wingmen-core -> sudo gzb-vpn.sh up -> sudo -u wingmen ssh gzb` (older path).
+Reach: `~/.ssh/config` `Host gzb` → <tailnet-ip> (tailnet), user `gazzai`, key `~/.ssh/gzb_fleet`. `ssh gzb hostname` → `gzbai`. Repo refs: `ssh gzb` (3), `GZB_SSH=` in scripts; runbook mentions `ssh wingmen-core -> sudo gzb-vpn.sh up -> sudo -u wingmen ssh gzb` (older path).
 
 System units (`/etc/systemd/system`, all ExecStart/WorkingDirectory paths **exist**, 0 failed wingmen units, 1 err-level journal line in 24h):
 - active/running: `wingmen-orch-hub` (→ `/home/gazzai/orch_supervisor.sh`, untracked, restarts=1) · `wingmen-irsyad-coord` (→ `coord_supervisor.sh`, untracked) · `wingmen-irsyad-tabung-jumaat` (→ `tabung_supervisor.sh`, untracked) · `wingmen-ingest` · `wingmen-tg-out` · `wingmen-agent-wake-subscriber` (restarts=1) · `wingmen-wake-backstop-sweep` (restarts=2) · `wingmen-body-activity-oracle-vps` · `coordinator-pane-publisher` · `hub-ctx-publish` · `irsyad-exec-broker` (`/opt/irsyad-exec-broker/`, the /opt copy) · 2× GitHub Actions runners.
@@ -627,6 +735,61 @@ Confirmed by this audit (grep across `*.py *.sh *.plist *.json *.md` + `~/Librar
 | tmux binary resolution | `ingest.py:726,738`, `agent_wake.py:282`, `nazim_bus_notify.py:39`, bare `"tmux"` in `fleet_health.py:98`, `lane_watchdog.py:118,216`, `priority_sla_watchdog.py:418,421,500` — 4 strategies → 1 `fleet_tmux_bin()` |
 | bus notify daemons | `nervous_system/cai_bus_notify.py`, `finance_bus_notify.py`, `fleet_health_bus_notify.py`, `nazim_bus_notify.py` — near-identical loops with the same high-water-mark bug (P-15) → 1 parameterised daemon |
 | host identity | `scripts/lib/fleet_host_id.py` (canonical) vs `socket.gethostname()` in `nervous_system/ingest.py:1552` (poll-health row host) |
+
+---
+
+# 4b. Dead modules (mechanical, 312 modules) and duplicated helpers (auditor D sub-check)
+
+## D2 — dead modules (mechanical, 312 modules) and duplicated helpers (sub-check delegated by auditor D)
+
+Method: 312 non-`__init__` `.py` files under `nervous_system/` and `scripts/` (incl. `lib/`, `hooks/`, `fire_drills/`, `console/`). For each, whole-word basename search across every code/config file (`.py .sh .plist .json .yml`, `.claude/`, `.github/`, `launchd/`, `ops/`, `deploy/`) plus `~/Library/LaunchAgents/*.plist`. `reports/`, `docs/`, `legacy/` and `*.md` do NOT count as callers. Counts are live refs / test refs. 174 modules have ≥2 live refs and are not listed. `legacy/wingmen_orch.py` imports ~40 nervous_system modules but has no live launcher (its plist targets a file that no longer exists and is unloaded), so refs from `legacy/` are not live. Paths relative to the repo root.
+
+### A1. Referenced by nothing (0 live / 0 test) — 26
+nervous_system: `cai_review_request.py` (legacy + a migration string only), `feature_health_signal.py`, `qwen_lane.py` (reports only; no plist/sh), `transcribe.py`, `wingmen_dream.py`.
+scripts: `ab_qwen_opus.py`, `apply_fleet_lane_autoscale_log.py` (one-shot applier), `backfill_ask_delivered_20261027.py`, `backfill_option_b_historical_bugs.py`, `cc_cost_snapshot.py`, `cc_session_costs_backfill.py`, `coord_golive.py` (reports only), `extend_boot_briefing_arm.py` (name only in schema.sql/migration provenance), `gen_data_store_registry.py` (docs say run by hand), `harvest_sft_dataset.py`, `hub_ctx_publish.py`, `irsyad_residency_purge.py` (one-shot; migration/doc mention), `lane_drill_seed.py`, `lib/irsyad_purge_executed_20260703.py`, `lib/vault_get_proof_cli.py`, `mark_shadowed_tg_media_rows.py`, `render_office.py`, `render_refresh.py`, `run_phase0_drills.py`, `token_usage.py`, `weekly_substrate_audit_gate.py`.
+
+### A2. Referenced only by tests — 28
+nervous_system: `blocking_tasks.py`, `front_door.py`, `paused_jobs_retry_policy.py`, `pipeline_clock.py`, `qa_bridge.py`, `revenue_pipeline.py` (a migration mentions it), `wake_self_drive.py`, `long_caller_watchdog.py` (0/4).
+scripts: `audit_mac_mini.py`, `check_send_paths_report_failure.py` (a lint with no CI hook), `gated_inbound_digest.py`, `instance_id_dup_detector.py`, `lib/a3_rls_load_bearing.py`, `lib/durable_inbox_reconciler.py`, `lib/pgtest_reaper.py` (conftest helper — keep), `lib/pii_safe_file_inspector.py`, `measure_supabase_branch_coldstart.py`, `memory_recall.py` (operator CLI — keep), `migration_rls_grant_lint.py` (keep), `onboard_client_channel.py` (manual CLI — keep), `provider_policy_backfill_check.py`, `reclassify_client_asks.py`, `record_session_cost.py`, `scratch_toolpath_replay.py`, `seed_lane_claude_md.py` (CLAUDE.md names it — keep), `sweep_persisted_output_secrets.py`, `verify_governance_hygiene_batch.py`, `watch_fleet.py`, `opus_reprobe_storefront.py` (its one "live" ref is `.gitignore`).
+
+### A3. Dead through their only referrer — ~25
+| module | only referrer |
+|---|---|
+| `nervous_system/conversation_cleanup.py`, `memory_sync.py`, `morning_brief.py`, `session_compress.py`, `weekly_digest.py`, `bug_escalation.py` | `feature_health_signal.py` (A1) |
+| `nervous_system/ux_analysis.py` | `weekly_digest.py` (dead via above) |
+| `nervous_system/strategic_decisions_poll.py` | `cai_review_request.py` (A1) |
+| `nervous_system/ecosystem_auditor.py` | `wingmen_dream.py` (A1) |
+| `nervous_system/paused_job_escalation.py`, `long_running_claude_callers.py` | `paused_jobs_retry_policy.py` (A2) |
+| `nervous_system/content_shape_signals.py` | `long_caller_watchdog.py` (A2) |
+| `nervous_system/bug_reports_poll.py`, `synthetic_filter.py`, `queue_stall_detector.py` | closed group referencing each other; outside it only legacy |
+| `scripts/fire_drills/drill_{broken_migration,cli_timeout,concurrent_conflict,missing_tool,sigkill}.py` | `run_phase0_drills.py` (A1) |
+| `nervous_system/schema_gate.py` | `drill_broken_migration.py` + legacy |
+| `scripts/scope_tg_media_collisions.py` | `mark_shadowed_tg_media_rows.py` (A1) |
+| `scripts/qwen_capability_testgen.py` | `harvest_sft_dataset.py` (A1) |
+| `scripts/lib/vault_export_dek_cli.py`, `lib/vault_wrap_for_host_cli.py` | only each other; probably manual DR CLIs — keep |
+
+### A4. Single referrer that may be only a comment (check before deleting)
+`council_relay.py` ← `orch_self_audit.py` · `council_executor.py` ← `scripts/spec_schema.json` · `council_agent.py` ← `ai_provider.py` · `deploy_verifier.py`, `orch_self_audit.py` ← `alert_format.py` · `autonomous_loop_detector.py` ← `cc_session_costs_auto_writer.py` · `swallowed_except_harness.py` ← `error_tracker.py` · `operator_notify.py` ← `schema_gate.py` (itself dead) · `check_console_version_cadence.py` ← `console/static/sw.js` · `scratch_shape_replay.py` ← `hooks/secrets_output_scanner.py` · `apply_fleet_health_lease.py`, `apply_orch_lease.py` ← the lib lease files. Every `council_*` module and `orch_self_audit` are imported by legacy.
+
+Single-referrer modules confirmed LIVE (plist / shell runner / `.claude/settings.json` / CI): adcda_fn_error_bus_watch, backlog_done_checker, gazzabyte_board_autopublish, irsyad_confirm_executor, irsyad_daily_issue_digest, op11911_syed_trigger, precompact_digest, register_quality, render_console_playwright, repo_hygiene_sweep, adcda_port_watch, address_variant_miss_watchdog, ci_queue_watchdog, idle_with_work_watchdog, irsyad_shadow_watch, pooler_authfail_tripwire, sentry_new_error_watch, fleet_health_bus_notify, quality_gate_evidence, check_additive_migration, ci_bootstrap_schema, console_deploy_gate_evidence, the lib guards started from launch_dangerous_cc.sh / safe_merge.sh / self_recycle.sh / reset_auditor.sh, irsyad_latency_report, irsyad_media_mirror.
+
+**Total: ~26 unreferenced + ~28 test-only + ~25 dead-through-referrer ≈ 80 dead candidates of 312.**
+
+### B. Duplicated helpers (counts; `tests/`, `.venv/` excluded)
+
+**(a) DSN resolution — 66 separate `_dsn`-style functions.** Shared owner exists: `scripts/lib/substrate_dsn.py:63 dsn_from_env_file()` (file-first, last-wins) — used by 12 files (`instance_id_dup_detector.py:226`, `idle_with_work_watchdog.py:41`, `lib/agent_status_stamp.py:111`, the four `*_bus_notify.py`, `a3_isolation_check.py`, `exec_broker_daemon.py`, `lib/reset_audit_row.py`, `console/glm_usage.py`). **~29 files still read the environment FIRST** (the stale-password pooler-hammer bug op#24342 that `substrate_dsn` exists to prevent): `hub_bus_currency_monitor.py:122`, `gzb_hub_heartbeat.py:51`, `sre_liveness_watchdog.py:90`, `monthly_burn_snapshot.py:62`, `lib/fleet_health_lease.py:70`, `lib/orch_lease.py:79`, `irsyad_shadow_watch.py:56`, `irsyad_media_mirror.py:127`, `hub_self_recovery_staleness_watchdog.py:62`, `asks_daily_digest.py:77`, `context_health_watchdog.py:286`, `nervous_system/ingest.py:94`, `bug_report_channel_poll.py:64`, `lane_wedge_watchdog.py:328`, `media_reaper.py:92`, `body_activity_oracle.py:202`, `commitment_sweeper.py:84`, `responder_runner.py:49`, `front_desk_runner.py:123`, `tg_out.py:69`, `hub_self_recovery.py:91`, plus 8 one-offs. **~30 more** carry their own `load_dotenv`/`.env` parse inside `_dsn` (`priority_sla_watchdog.py:270`, `queue_age_watchdog.py:83`, `irsyad_autoscaler.py:309`, `irsyad_worker_reaper.py:66`, `irsyad_spin_worker.py:69`, `console/db.py:53 resolve_dsn`, `singleton_liveness.py:180`, …). 170 non-test files reference `DATABASE_URL`/`SUPABASE_DB_URL` directly. Collapse ≈60 of 66 into `substrate_dsn`; silo/goumlyne/RO variants stay as parameters.
+
+**(b) psycopg connect — 280 call sites / 161 files; 18 wrapper functions** (`priority_sla_watchdog.py:276`, `preview_devserver_reaper.py:293`, `queue_age_watchdog.py:89`, `reconcile_responded_at.py:272`, `irsyad_shadow_watch.py:91`, `lib/reset_audit_row.py:20`, `onboard_client_channel.py:111`, `cubeasht_monitor.py:573`, `backup_console_memory.py:50`, `context_health_watchdog.py:957`, `lane_wedge_watchdog.py:332`, `singleton_liveness.py:220`, `vault.py:266`, `protected_agents.py:98`, `hub_self_recovery.py:95`, `console/db.py:545`, 2 legacy). Heaviest: `wake_backstop_sweep.py` 16, `operator_log.py` 8, `bus_send.py` 6, `agent_wake.py` 6. One `connect(dsn=None, *, autocommit, connect_timeout)` with stop-on-auth-failure replaces all 18; `console/db.py` and `vault.py` may stay separate.
+
+**(c) `.env` loading — ~95 `load_dotenv()` sites**, each building the path its own way; 4 hard-code `/Users/sheikhmusa/wingmen/orchestrator/.env` (`watch_fleet.py:4`, `cc_session_costs_backfill.py:24`, `watchdog_tripwire_report.py:23`, `legacy/ihsanos_drain/main.py:135`); custom loaders in `cisco_reconcile_watch.py:99`, `substrate_dsn.py:25`, `qwen_lane.py:117`, `adcda_port_watch.py:62`, and four identical `_env(name)` copies in `council_relay.py:30`, `council_agent.py:35`, `ux_analysis.py:27`, `council_executor.py:38`; 13 files open `.env` by hand. Collapse ≈100 sites into one `orch_env.load()`.
+
+**(d) Telegram send** — 4 non-legacy direct-HTTP implementations (`_tg_chunked_send.py:142/176`, `lib/tg_group_send.py:66/218` with its own retry at `:43`, `tg_out.py:221/237`, `ingest.py:1153`, `lane_watch.py:51`) → 2 (chunked-send for operator DMs, tg_out for channels); ~15 subprocess wrappers around `tg_send.sh`/`nazim_send.sh` (`weekly_alert_relay.py:113`, `lane_wedge_watchdog.py:894`, `priority_sla_watchdog.py:724`, `repo_context_watchdog.py:253`, `pooler_breaker_snapshot.py:188`, `context_health_watchdog.py:868/1616`, `programme_stall_guard.py:227`, `sre_liveness_watchdog.py:58`, …) → `operator_notify.notify_operator` (the intended shared wrapper, `operator_notify.py:21`).
+
+**(e) Bus posting — ~65 `INSERT INTO agent_messages` sites in ~45 files outside `bus_send.py`**: 17 named helpers (`_post_bus` ×4, `_bus` ×2, `_notify` ×2, `_bus_insert`, `_emit_bus`, `_alert_console`, `_page_observation`, …), ~22 `_page/_alert/_nudge` variants, ~25 inline inserts (8 in `priority_sla_watchdog.py` alone). Collapse ≈55–60 into one `bus.post(..., cur=None)`.
+
+**(f) now_utc** — no shared helper; 6 local `_now*` helpers; 153 inline `datetime.now(timezone.utc)`/`utcnow()` across 89 files (2 deprecated `utcnow()`: `pooler_authfail_tripwire.py`, `ops/audit-chain-weekly/weekly_audit_chain_check.py`). Low value.
+
+**Overall:** one `scripts/lib/substrate.py` (extending `substrate_dsn`) with `dsn()`, `connect()`, `load_env()`, `bus_post()`, `now_utc()` plus the existing `operator_notify` absorbs ≈60 DSN resolvers, 18 connect wrappers, ≈100 `.env` loads, ≈15 Telegram wrappers, ≈55 bus inserts. The DSN group matters most (29 resolvers still carry the op#24342 bug).
 
 ---
 
