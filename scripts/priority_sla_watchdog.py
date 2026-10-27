@@ -1476,6 +1476,56 @@ def _send_asks_chase(conn, owner: str, row: dict, recipient_resolution=None) -> 
         return False
 
 
+# Zero-send alarm (console #78388 condition 3): client-asks-chase sat at sent=0/33 for 15+h
+# (14,180 SEND FAILED lines) and nothing noticed, because its only report to console fired
+# on a successful send. A chase net with due > 0 and sent == 0 for this many consecutive
+# ARMED scans pages orch-console once; it re-arms when a scan sends or has nothing due.
+ZERO_SEND_ALARM_SCANS = _envint("SLA_ZERO_SEND_ALARM_SCANS", 3)
+
+
+def zero_send_streak(state, net, *, due, sent, threshold=ZERO_SEND_ALARM_SCANS):
+    """PURE-ish (mutates state['zero_send_streak'][net]): returns True exactly when this
+    scan should page. A streak only grows on due > 0 and sent == 0; anything else resets."""
+    rec = state.setdefault("zero_send_streak", {}).get(net) or {"n": 0, "paged": False}
+    if due > 0 and sent == 0:
+        rec = {"n": rec["n"] + 1, "paged": rec["paged"]}
+    else:
+        rec = {"n": 0, "paged": False}
+    fire = rec["n"] >= threshold and not rec["paged"]
+    state["zero_send_streak"][net] = rec
+    return fire
+
+
+def _page_zero_send(net, due, scans, sample, send=None) -> bool:
+    """Impure: one P1 blocker to orch-console. True only on a confirmed send."""
+    if send is None:
+        from scripts.bus_send import send
+    try:
+        send("cc-fleet-health", "orch-console", PAGE_MESSAGE_TYPE,
+             f"[zero-send] {net}: {due} due but 0 sent for {scans} scans in a row",
+             f"TL;DR: the {net} net has had due work and sent nothing for {scans} consecutive "
+             f"scans, so it is failing silently.\n\n- Due now: {due}\n- Sample: {sample}\n"
+             f"- Look at the SKIPPED / SEND FAILED reasons in logs/priority-sla-watchdog.out.log.\n"
+             f"Pages once per streak; re-arms when a scan sends or nothing is due.", "P1",
+             req=True)
+        return True
+    except BaseException as e:  # bus_send refusals raise SystemExit
+        log(f"zero-send alarm page FAILED for {net}: {type(e).__name__}: {e}")
+        if isinstance(e, KeyboardInterrupt):
+            raise
+        return False
+
+
+def zero_send_check(state, net, targets, sent, page=None) -> None:
+    """Track the streak for one ARMED net and page once when it trips. `paged` is set only
+    on a confirmed send, so a failed page retries next scan (dead-man's switch)."""
+    if not zero_send_streak(state, net, due=len(targets or []), sent=sent):
+        return
+    sample = ", ".join(f"#{t.get('id')}->{t.get('delegated_to')}" for t in (targets or [])[:5])
+    ok = (page or _page_zero_send)(net, len(targets), ZERO_SEND_ALARM_SCANS, sample)
+    state["zero_send_streak"][net]["paged"] = bool(ok)
+
+
 def slow_ask_targets(rows, *, now, ack_min=SLOW_ASK_ACK_MIN, horizon_min=SLOW_ASK_HORIZON_MIN):
     """PURE: open operator asks past ack_min with no lane ack, never slow-paged,
     and still younger than horizon_min (the arm-time backlog bound). Rows carry
@@ -1569,6 +1619,15 @@ def _fetch_slow_ask_candidates(conn):
             "WHERE oa.closed_at IS NULL AND oa.triage_state = 'ask' "
             "  AND oa.ask_surface = 'operator' AND oa.source_msg_id IS NOT NULL "
             "  AND oa.slow_paged_at IS NULL "
+            # console #78390: never page console about its OWN ledger. An ask with no
+            # delegated lane (or delegated to console) has no lane to ack it, and one whose
+            # source op is held as an open console-owned commitment is a timed reminder
+            # (op#34877 / held_commitment 727 false-paged as #78386).
+            "  AND oa.delegated_to IS NOT NULL AND oa.delegated_to <> 'orch-console' "
+            "  AND NOT EXISTS (SELECT 1 FROM held_commitments h "
+            "                  WHERE h.owner_agent = 'orch-console' "
+            "                    AND h.status IN ('pending','fired') "
+            "                    AND h.source_ref = 'operator_messages:' || oa.source_msg_id) "
             "  AND oa.created_at > now() - make_interval(mins => %s)",
             (SLOW_ASK_SUBJECT_PREFIX + "%", SLOW_ASK_DELEGATION_WINDOW_MIN, SLOW_ASK_HORIZON_MIN))
         cols = [d[0] for d in cur.description]
@@ -2136,6 +2195,7 @@ def run(dry: bool, injected: list[dict] | None = None,
         # watermark needed — waiting_on_operator defaults false, so every
         # pre-existing row is excluded by construction, not by a watermark guess.
         asks_dry = _gated_dry(dry, "SLA_ASKS_CHASE_ENABLED")
+        asks_targets, asks_sent = [], 0
         try:
             chase_state = state.setdefault("asks_chase", {})
             asks_targets = asks_chase_targets(
@@ -2146,6 +2206,7 @@ def run(dry: bool, injected: list[dict] | None = None,
                     send_chase=lambda owner, t: _send_asks_chase(
                         conn, owner, t, recipient_resolution=recipient_resolution),
                     max_chases=MAX_ASKS_CHASE_PER_RUN)
+                asks_sent = n
                 for t in asks_targets:
                     actions.append(f"{'[DRY] ' if asks_dry else ''}ASKS-CHASE ask#{t['id']} "
                                    f"-> owner {t.get('delegated_to')}")
@@ -2154,6 +2215,8 @@ def run(dry: bool, injected: list[dict] | None = None,
                     + ", ".join(f"#{t['id']}->{t.get('delegated_to')}" for t in asks_targets))
         except Exception as e:  # fail LOUD, keep the scan alive
             log(f"asks-chase ERROR: {e!r}")
+        if not asks_dry:
+            zero_send_check(state, "asks-chase", asks_targets, asks_sent)
 
         # op#34803 part B slow-ask page (Musa op#34841): an operator ask with no
         # op#-citing lane subject within SLOW_ASK_ACK_MIN pages orch-console once.
@@ -2182,6 +2245,7 @@ def run(dry: bool, injected: list[dict] | None = None,
         # gate from the operator asks-chase net above — this is a brand-new
         # mechanism, armed only once the backfill's open-set list is reviewed).
         client_asks_dry = _gated_dry(dry, "SLA_CLIENT_ASKS_CHASE_ENABLED")
+        client_asks_targets, client_sent = [], 0
         try:
             client_chase_state = state.setdefault("client_asks_chase", {})
             client_asks_targets = client_chase_targets(
@@ -2193,6 +2257,7 @@ def run(dry: bool, injected: list[dict] | None = None,
                     send_chase=lambda owner, t: _send_client_ask_chase(
                         conn, owner, t, recipient_resolution=recipient_resolution),
                     max_chases=MAX_CLIENT_ASKS_CHASE_PER_RUN)
+                client_sent = n
                 for t in client_asks_targets:
                     actions.append(f"{'[DRY] ' if client_asks_dry else ''}CLIENT-ASKS-CHASE "
                                    f"ask#{t['id']} -> owner {t.get('delegated_to')}")
@@ -2203,6 +2268,8 @@ def run(dry: bool, injected: list[dict] | None = None,
                     send_client_ask_chase_summary(conn, sent_list)
         except Exception as e:  # fail LOUD, keep the scan alive
             log(f"client-asks-chase ERROR: {e!r}")
+        if not client_asks_dry:
+            zero_send_check(state, "client-asks-chase", client_asks_targets, client_sent)
 
         # migration 082 (bus #45557 condition 3): the oldest untriaged
         # 'captured' bucket, aged past CAPTURED_AGE_MIN, gets its owning body
