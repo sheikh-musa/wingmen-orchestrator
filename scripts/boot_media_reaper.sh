@@ -12,5 +12,5 @@ set -euo pipefail
 ORCH_DIR="$HOME/wingmen/orchestrator"
 cd "$ORCH_DIR"
 set -a; . ./.env; set +a
-export MEDIA_REAPER_CHANNELS="nazim-console,cosem-exams,cosem-caai,alderei,finance-console,hk-editor,cosem-tdu,angullia,oeh,mamadah,coffeemedia,brandit-coffeemedia,coffeemedia-hamhuskies-test"
+export MEDIA_REAPER_CHANNELS="nazim-console,cosem-exams,cosem-caai,alderei,finance-console,hk-editor,cosem-tdu,angullia,oeh,mamadah,coffeemedia,coffeemedia-hamhuskies-test"
 exec "$ORCH_DIR/.venv/bin/python3" -m nervous_system.media_reaper --fire
