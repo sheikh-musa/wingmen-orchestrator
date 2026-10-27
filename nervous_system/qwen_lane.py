@@ -44,7 +44,7 @@ PROTOCOL CONTRACT (studied from the live bus, not guessed)
 =====================================================================
 Bus = `agent_messages` on the substrate DB (env DATABASE_URL, psycopg v3).
  - INBOX read:  SELECT ... WHERE to_agent=<my id> AND read_at IS NULL
- - REPLY write: post_agent_message() RPC (migration 117, extended by 120 with the
+ - REPLY write: post_agent_message() RPC (migration 117, extended by 122 with the
                 is_test/posted_by_identity params this reply needs -- backlog#124,
                 bus #74939), called on the SAME cursor/connection as _mark_handled()'s
                 UPDATE so both commit atomically per message (drain_once). Reuses the

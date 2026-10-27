@@ -1,4 +1,4 @@
--- 119_post_agent_message_optional_params.sql
+-- 122_post_agent_message_optional_params.sql
 -- ledger: silo=tscuymavysscrvoberrr
 -- (orchestrator substrate)
 -- assert: dropped public.post_agent_message(text,text,text,text,text,text,boolean,uuid,text)
@@ -11,7 +11,7 @@
 -- is_test=true (the first two) and a fixed posted_by_identity literal (the third) --
 -- through migration 117's 9-param post_agent_message. Console's ruling: EXTEND the
 -- RPC with both as OPTIONAL, DEFAULTED trailing params rather than leave these 3 on
--- a permanent raw-INSERT bypass (a permanent bypass would mean migration 121's revoke
+-- a permanent raw-INSERT bypass (a permanent bypass would mean migration 124's revoke
 -- can never safely apply to them -- defeats the whole migration).
 --
 -- WHY DROP + CREATE, NOT CREATE OR REPLACE: Postgres identifies a function by name
@@ -55,16 +55,22 @@
 -- number collision (same ordinal, two different migrations) even though git
 -- reported the merge as clean (the filenames differed, so no text conflict).
 -- Rebased onto that base and shifted this whole set again: this file 118->119,
--- enforcement 119->120, revoke 120->121. Content is otherwise unchanged from
--- the original: migration 120 (the enforcement migration, formerly 118 then
--- 119)'s `ALTER FUNCTION post_agent_message(text,text,text,text,text,text,
+-- enforcement 119->120, revoke 120->121.
+--
+-- THIRD RENUMBER (orch-console bus #78234, found on GO-gate verify): by the time this
+-- PR rebased again, fable/substrate-safe-fixes had independently taken 119/120/121 for
+-- 3 unrelated migrations (console_status_board_grant, held_commitments_console_ro_policy,
+-- operator_ask_turnaround). Shifted the whole set a third time: this file 119->122,
+-- enforcement 120->123, revoke 121->124. Content is otherwise unchanged from the
+-- original: migration 123 (the enforcement migration, formerly 118, then 119, then
+-- 120)'s `ALTER FUNCTION post_agent_message(text,text,text,text,text,text,
 -- boolean,uuid,text) OWNER TO bus_writer` targets the OLD 9-param signature,
--- which THIS migration drops, and 120's text already targets the new 11-param
+-- which THIS migration drops, and 123's text already targets the new 11-param
 -- signature instead. mark_delivered/ack_message are untouched by this
--- migration; 120's ALTER FUNCTION statements for those two are unaffected. No
+-- migration; 123's ALTER FUNCTION statements for those two are unaffected. No
 -- ownership change happens here: DROP+CREATE naturally leaves the new function
 -- owned by whichever role applies this migration (the same admin/superuser
--- role that applied 117 originally) -- 120 is still what moves ownership to
+-- role that applied 117 originally) -- 123 is still what moves ownership to
 -- bus_writer, just against the new signature.
 --
 -- TDD'd against an isolated local Postgres, never this substrate (tests/test_post_
@@ -107,10 +113,10 @@ END;
 $fn$;
 
 COMMENT ON FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text) IS
-    'Durable acked inbox posting RPC (migration 117), extended (migration 119, '
+    'Durable acked inbox posting RPC (migration 117), extended (migration 122, '
     'backlog#124) with 2 optional trailing params so is_test/posted_by_identity '
     'callers can move off raw INSERT without a lossy behavior change. A 9-arg call '
-    'defaults both to the exact pre-119 behavior.';
+    'defaults both to the exact pre-122 behavior.';
 
 REVOKE EXECUTE ON FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION post_agent_message(text,text,text,text,text,text,boolean,uuid,text,boolean,text) TO service_role;

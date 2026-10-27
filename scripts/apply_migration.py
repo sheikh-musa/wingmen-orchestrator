@@ -332,7 +332,7 @@ def check_required_assertions(body: str, assertions: list[dict]) -> None:
     migration's own explanatory prose about why it does NOT contain a
     REVOKE/DROP FUNCTION (e.g. "this file contains no REVOKE/DROP FUNCTION")
     false-trips this gate on the words alone (PR#490 CI false positive on
-    migration 120's split-rationale comment, formerly numbered 118 then 119)."""
+    migration 123's split-rationale comment, formerly numbered 118, 119, then 120)."""
     if _REQUIRES_ASSERT_RE.search(strip_sql_comments(body)) and not assertions:
         raise Refuse(
             "revoke/drop migration without post-apply assertions — CAI-RESP-1397 #5. "

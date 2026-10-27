@@ -155,7 +155,7 @@ def test_operator_asks_failure_rolls_back_the_bus_row_too(db):
 def test_assign_uses_the_rpc_not_a_raw_insert(db, monkeypatch):
     """Gate-compliance proof (backlog#124): the write must go through
     post_agent_message(), never a raw INSERT INTO agent_messages, so the enforce-in-code
-    gate (and eventually migration 121's revoke) sees this script as compliant."""
+    gate (and eventually migration 124's revoke) sees this script as compliant."""
     calls = []
     real_execute = psycopg.Cursor.execute
 

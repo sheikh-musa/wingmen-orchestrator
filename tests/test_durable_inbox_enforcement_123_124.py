@@ -1,16 +1,18 @@
-"""Tests for migrations 120 and 121 (backlog#124, durable-inbox final step, split per
-orch-console ruling bus #74885; renumbered twice -- 118/119 -> 119/120 after a PR#490
-CI finding, then -> 120/121 after a second collision (orch-console bus #76518: base
-branch had separately merged its own migrations/118_operator_asks_needs_musa.sql) --
-see migrations/119_post_agent_message_optional_params.sql's header): a dedicated
+"""Tests for migrations 123 and 124 (backlog#124, durable-inbox final step, split per
+orch-console ruling bus #74885; renumbered three times -- 118/119 -> 119/120 after a
+PR#490 CI finding, then -> 120/121 after a second collision (orch-console bus #76518:
+base branch had separately merged its own migrations/118_operator_asks_needs_musa.sql),
+then -> 123/124 after a third collision (orch-console bus #78234: base branch had
+independently taken 119/120/121 for 3 unrelated migrations) --
+see migrations/122_post_agent_message_optional_params.sql's header): a dedicated
 bus_writer role owns post_agent_message/mark_delivered/ack_message and holds the
-INSERT-capable grants (migration 120, purely additive), so that revoking direct
-INSERT (+ sequence USAGE) from service_role on agent_messages (migration 121, the
+INSERT-capable grants (migration 123, purely additive), so that revoking direct
+INSERT (+ sequence USAGE) from service_role on agent_messages (migration 124, the
 breaking half, gated on the fleet-wide enforce-in-code check going green) cannot
 self-defeat the RPCs that must survive it (orch-console design review, bus #74858).
 
-`additive_db` exercises 120 alone -- the state the substrate will be in as soon as
-this merges. `enforced_db` exercises 120+121 -- the gated end-state nothing applies
+`additive_db` exercises 123 alone -- the state the substrate will be in as soon as
+this merges. `enforced_db` exercises 123+124 -- the gated end-state nothing applies
 until orch-console releases it.
 
 Real risk this file's last test exists to catch (my own audit finding, bus #74860):
@@ -183,14 +185,14 @@ _WORK_ITEM_SCHEMA = """
 """
 
 
-def _setup_base_and_120(cur):
-    """Schema + role bootstrap, migration 117, then 119 (RPC optional-params
-    extension), then ONLY 120 (the additive half -- filename order is now
-    dependency order, see 119's own header for the renumbering story). Shared
-    by both fixtures below -- enforced_db just applies 121 on top."""
+def _setup_base_and_123(cur):
+    """Schema + role bootstrap, migration 117, then 122 (RPC optional-params
+    extension), then ONLY 123 (the additive half -- filename order is now
+    dependency order, see 122's own header for the renumbering story). Shared
+    by both fixtures below -- enforced_db just applies 124 on top."""
     migration_117 = (MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text()
-    migration_120 = (MIGRATIONS_DIR / "120_durable_inbox_enforce_bus_writer.sql").read_text()
-    migration_119 = (MIGRATIONS_DIR / "119_post_agent_message_optional_params.sql").read_text()
+    migration_123 = (MIGRATIONS_DIR / "123_durable_inbox_enforce_bus_writer.sql").read_text()
+    migration_122 = (MIGRATIONS_DIR / "122_post_agent_message_optional_params.sql").read_text()
 
     cur.execute("DROP SCHEMA public CASCADE")
     cur.execute("CREATE SCHEMA public")
@@ -200,7 +202,7 @@ def _setup_base_and_120(cur):
     # a privilege 117's own tests ever exercised, since those never SET ROLE to
     # anything other than the schema's own creator). Restoring it here so this
     # fixture matches what the real substrate's 'public' schema has always had --
-    # this is a test-fixture-only fix, NOT something migration 120 itself grants,
+    # this is a test-fixture-only fix, NOT something migration 123 itself grants,
     # since the real schema was never dropped/recreated and never lost it.
     cur.execute("GRANT USAGE ON SCHEMA public TO PUBLIC")
     for role in ("anon", "authenticated", "service_role"):
@@ -210,12 +212,12 @@ def _setup_base_and_120(cur):
 
     cur.execute(_AGENT_MESSAGES_SCHEMA)
     cur.execute(migration_117)
-    cur.execute(migration_119)
+    cur.execute(migration_122)
     cur.execute(_WORK_ITEM_SCHEMA)
 
     # Today's real starting grants (Supabase's blanket default-ACL on the live
     # substrate -- simulated explicitly here since this isolated cluster has no
-    # such seed), BEFORE 120 runs -- so 121's later REVOKE has something real to
+    # such seed), BEFORE 123 runs -- so 124's later REVOKE has something real to
     # revoke, and the work_item-mirror test proves bus_writer needs its OWN grant
     # rather than accidentally inheriting service_role's.
     cur.execute("GRANT SELECT, INSERT, UPDATE ON agent_messages TO service_role")
@@ -223,16 +225,16 @@ def _setup_base_and_120(cur):
     cur.execute("GRANT SELECT, INSERT, UPDATE ON work_item TO service_role")
     cur.execute("GRANT INSERT ON work_item_audit TO service_role")
 
-    cur.execute(migration_120)
+    cur.execute(migration_123)
 
 
 @pytest.fixture
 def additive_db(pg_dsn):
-    """120 only -- the state the real substrate will be in once this PR merges,
-    before orch-console releases 121. service_role must still be able to write
+    """123 only -- the state the real substrate will be in once this PR merges,
+    before orch-console releases 124. service_role must still be able to write
     directly; that is the whole point of splitting the revoke out (bus #74885)."""
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
-        _setup_base_and_120(cur)
+        _setup_base_and_123(cur)
 
     conn = psycopg.connect(pg_dsn)
     yield conn
@@ -241,21 +243,21 @@ def additive_db(pg_dsn):
 
 @pytest.fixture
 def enforced_db(pg_dsn):
-    """120 + 121 -- the state after orch-console's release gate (fleet-wide
+    """123 + 124 -- the state after orch-console's release gate (fleet-wide
     enforce-in-code check green) lets the revoke apply."""
-    migration_121 = (MIGRATIONS_DIR / "121_durable_inbox_revoke_direct_insert.sql").read_text()
+    migration_124 = (MIGRATIONS_DIR / "124_durable_inbox_revoke_direct_insert.sql").read_text()
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
-        _setup_base_and_120(cur)
-        cur.execute(migration_121)
+        _setup_base_and_123(cur)
+        cur.execute(migration_124)
 
     conn = psycopg.connect(pg_dsn)
     yield conn
     conn.close()
 
 
-def test_direct_insert_as_service_role_still_works_with_120_alone(additive_db):
+def test_direct_insert_as_service_role_still_works_with_123_alone(additive_db):
     """The proof the split is supposed to buy us (orch-console ruling, bus #74885):
-    120 by itself must NOT break any existing direct writer -- that is what makes it
+    123 by itself must NOT break any existing direct writer -- that is what makes it
     safe to merge and apply ahead of the ~50-script migration."""
     with additive_db.cursor() as cur:
         cur.execute("SET ROLE service_role")
@@ -268,7 +270,7 @@ def test_direct_insert_as_service_role_still_works_with_120_alone(additive_db):
     additive_db.commit()
 
 
-def test_post_agent_message_still_succeeds_with_120_alone(additive_db):
+def test_post_agent_message_still_succeeds_with_123_alone(additive_db):
     with additive_db.cursor() as cur:
         cur.execute("SET ROLE service_role")
         cur.execute(
@@ -280,7 +282,7 @@ def test_post_agent_message_still_succeeds_with_120_alone(additive_db):
     assert row[0] is not None
 
 
-def test_mark_delivered_and_ack_work_with_120_alone(additive_db):
+def test_mark_delivered_and_ack_work_with_123_alone(additive_db):
     with additive_db.cursor() as cur:
         cur.execute("SET ROLE service_role")
         cur.execute(
@@ -298,8 +300,8 @@ def test_mark_delivered_and_ack_work_with_120_alone(additive_db):
     assert acked_at is not None
 
 
-def test_direct_update_for_read_at_still_works_with_120_alone(additive_db):
-    """Regression 120 never had: the fleet-wide mark-read/respond path
+def test_direct_update_for_read_at_still_works_with_123_alone(additive_db):
+    """Regression 123 never had: the fleet-wide mark-read/respond path
     (`UPDATE agent_messages SET read_at=now()...`, mandated by every lane's own
     CLAUDE.md) is a direct UPDATE, deliberately outside this enforcement's scope."""
     with additive_db.cursor() as cur:
@@ -323,14 +325,14 @@ def test_direct_update_for_read_at_still_works_with_120_alone(additive_db):
     assert read_at is not None
 
 
-def test_120_is_idempotent_on_rerun(additive_db):
-    migration_120 = (MIGRATIONS_DIR / "120_durable_inbox_enforce_bus_writer.sql").read_text()
+def test_123_is_idempotent_on_rerun(additive_db):
+    migration_123 = (MIGRATIONS_DIR / "123_durable_inbox_enforce_bus_writer.sql").read_text()
     with additive_db.cursor() as cur:
-        cur.execute(migration_120)  # re-run on an already-applied schema -- must not raise
+        cur.execute(migration_123)  # re-run on an already-applied schema -- must not raise
     additive_db.commit()
 
 
-def test_work_item_mirror_still_fires_via_rpc_with_120_alone(additive_db):
+def test_work_item_mirror_still_fires_via_rpc_with_123_alone(additive_db):
     """The audit finding (bus #74860): without bus_writer's own work_item/work_item_audit
     grants, this silently degrades (trigger swallows the error) instead of failing loud --
     so the only way to catch it is to check the mirror row actually landed."""
@@ -357,7 +359,7 @@ def test_work_item_mirror_still_fires_via_rpc_with_120_alone(additive_db):
 
 
 def test_direct_insert_as_service_role_fails_after_full_enforcement(enforced_db):
-    """121 is the actual breaking change -- this is what it buys, and only this."""
+    """124 is the actual breaking change -- this is what it buys, and only this."""
     with enforced_db.cursor() as cur:
         cur.execute("SET ROLE service_role")
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
@@ -384,10 +386,10 @@ def test_post_agent_message_still_succeeds_after_full_enforcement(enforced_db):
     assert row[0] is not None
 
 
-def test_121_is_idempotent_on_rerun(enforced_db):
-    migration_121 = (MIGRATIONS_DIR / "121_durable_inbox_revoke_direct_insert.sql").read_text()
+def test_124_is_idempotent_on_rerun(enforced_db):
+    migration_124 = (MIGRATIONS_DIR / "124_durable_inbox_revoke_direct_insert.sql").read_text()
     with enforced_db.cursor() as cur:
-        cur.execute(migration_121)  # re-run on an already-revoked schema -- must not raise
+        cur.execute(migration_124)  # re-run on an already-revoked schema -- must not raise
     enforced_db.commit()
 
 

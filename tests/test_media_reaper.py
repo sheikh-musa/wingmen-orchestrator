@@ -70,7 +70,7 @@ def reaper_dsn(pg_dsn, monkeypatch):
                     "('orch-console', 'console', 'active')")
         # _notify() now posts via bus_send.send() -> post_agent_message() (backlog#124).
         cur.execute((MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text())
-        cur.execute((MIGRATIONS_DIR / "119_post_agent_message_optional_params.sql").read_text())
+        cur.execute((MIGRATIONS_DIR / "122_post_agent_message_optional_params.sql").read_text())
     return pg_dsn
 
 

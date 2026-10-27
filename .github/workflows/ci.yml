@@ -97,8 +97,8 @@ jobs:
         # send()). The baseline tracks pre-existing debt only -- same shape
         # and shrink-only contract as tests/ci_known_failing.txt -- so this
         # gates new bypasses TODAY without red-lining every PR over the ~55
-        # scripts not yet migrated. Migration 121 (the revoke, originally
-        # numbered 119, renumbered twice on two separate PR#490 findings)
+        # scripts not yet migrated. Migration 124 (the revoke, originally
+        # numbered 119, renumbered three times on three separate PR#490 findings)
         # does not release until the baseline file is empty.
         run: python scripts/agent_messages_writer_gate.py . --baseline scripts/agent_messages_writer_gate_baseline.txt
 

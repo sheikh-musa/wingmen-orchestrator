@@ -703,17 +703,18 @@ def _page_spotlight(findings):
               "`mdutil -s` and a df delta."]
     print("\n".join(lines), file=sys.stderr, flush=True)
     try:
-        import psycopg2
+        # RPC, not a raw INSERT (backlog#124, bus #74939/#78234) -- a raw INSERT INTO
+        # agent_messages breaks the instant migration 124's revoke ships.
+        try:
+            from scripts import bus_send
+        except ImportError:
+            import bus_send  # type: ignore
         dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
         if dsn:
-            c = psycopg2.connect(dsn)
-            cur = c.cursor()
-            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-            cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-                           VALUES ('cc-fleet-health','orch-console','blocker','P2',%s,%s)""",
-                        ("Spotlight index regrowing on the Mini — needs root mdutil -X",
-                         "\n".join(lines)))
-            c.commit()
+            bus_send.send(
+                from_agent="cc-fleet-health", to="orch-console", mtype="blocker",
+                subject="Spotlight index regrowing on the Mini — needs root mdutil -X",
+                body="\n".join(lines), priority="P2", dsn=dsn)
     except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already stands
         print(f"[disk-autoremediate] WARN spotlight page failed ({e}); banner stands",
               file=sys.stderr)

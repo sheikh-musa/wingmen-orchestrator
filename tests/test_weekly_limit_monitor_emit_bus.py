@@ -20,7 +20,7 @@ MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parent.parent / "migrations"
 @pytest.fixture
 def db(pg_dsn, monkeypatch):
     migration_117 = (MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text()
-    migration_121 = (MIGRATIONS_DIR / "119_post_agent_message_optional_params.sql").read_text()
+    migration_122 = (MIGRATIONS_DIR / "122_post_agent_message_optional_params.sql").read_text()
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP SCHEMA public CASCADE")
         cur.execute("CREATE SCHEMA public")
@@ -47,7 +47,7 @@ def db(pg_dsn, monkeypatch):
             );
         """)
         cur.execute(migration_117)
-        cur.execute(migration_121)
+        cur.execute(migration_122)
 
     monkeypatch.setenv("DATABASE_URL", pg_dsn)
     yield pg_dsn

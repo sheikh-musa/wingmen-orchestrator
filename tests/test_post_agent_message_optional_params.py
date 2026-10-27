@@ -1,8 +1,9 @@
-"""Tests for migration 119 (backlog#124, bus #74939; renumbered twice -- originally
-120, then 118 after a PR#490 CI finding, then 119 after a second PR#490 collision
-(orch-console bus #76518: base branch separately merged its own, unrelated
-migrations/118_operator_asks_needs_musa.sql) -- see
-migrations/119_post_agent_message_optional_params.sql's header): post_agent_message
+"""Tests for migration 122 (backlog#124, bus #74939; renumbered three times -- originally
+120, then 118, then 119 after a second PR#490 collision (orch-console bus #76518: base
+branch separately merged its own, unrelated migrations/118_operator_asks_needs_musa.sql),
+then 122 after a third PR#490 collision (orch-console bus #78234: base branch had
+independently taken 119/120/121) -- see
+migrations/122_post_agent_message_optional_params.sql's header): post_agent_message
 extended with
 2 optional, defaulted trailing params (p_is_test, p_posted_by_identity) so the 3 scripts
 held back from the one-shots migration (lane_drill_seed.py, nervous_system/qwen_lane.py,
@@ -12,7 +13,7 @@ behavior change.
 The real risk this file exists to catch: Postgres identifies a function by name AND
 parameter list, so a naive CREATE OR REPLACE with 2 extra params would create a SECOND
 overload alongside the original 9-param one, making every existing 9-positional-arg
-caller raise "function is not unique". Migration 119 DROPs the old 9-param signature
+caller raise "function is not unique". Migration 122 DROPs the old 9-param signature
 first so only one overload exists -- this suite proves that actually holds.
 """
 import pathlib
@@ -26,7 +27,7 @@ MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parent.parent / "migrations"
 @pytest.fixture
 def db(pg_dsn):
     migration_117 = (MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text()
-    migration_121 = (MIGRATIONS_DIR / "119_post_agent_message_optional_params.sql").read_text()
+    migration_122 = (MIGRATIONS_DIR / "122_post_agent_message_optional_params.sql").read_text()
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP SCHEMA public CASCADE")
         cur.execute("CREATE SCHEMA public")
@@ -52,7 +53,7 @@ def db(pg_dsn):
             )
         """)
         cur.execute(migration_117)
-        cur.execute(migration_121)
+        cur.execute(migration_122)
         # Faithful minimal reproduction of the REAL provenance trigger
         # (migrations/infra/bedrock_substrate_core.sql's populate_agent_messages_
         # provenance) -- the thing p_posted_by_identity's default (NULL) actually
@@ -85,7 +86,7 @@ def _row(db, msg_id):
 
 
 def test_9_arg_positional_call_still_resolves_unambiguously_and_behaves_as_before(db):
-    """The actual proof migration 119's header promises: an existing 9-arg caller
+    """The actual proof migration 122's header promises: an existing 9-arg caller
     (bus_send.py, every already-migrated one-shot) still works, unchanged, with both
     new params defaulted -- no "function is not unique" ambiguity error."""
     with db.cursor() as cur:
@@ -149,10 +150,10 @@ def test_old_9_param_signature_is_gone(db):
         assert cur.fetchone()[0] is None
 
 
-def test_migration_120_is_idempotent_on_rerun(db):
-    migration_121 = (MIGRATIONS_DIR / "119_post_agent_message_optional_params.sql").read_text()
+def test_migration_122_is_idempotent_on_rerun(db):
+    migration_122 = (MIGRATIONS_DIR / "122_post_agent_message_optional_params.sql").read_text()
     with db.cursor() as cur:
-        cur.execute(migration_121)
+        cur.execute(migration_122)
     db.commit()
     # still exactly one overload, still works
     with db.cursor() as cur:
