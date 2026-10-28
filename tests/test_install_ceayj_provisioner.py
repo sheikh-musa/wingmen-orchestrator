@@ -408,9 +408,12 @@ def test_render_store_grants_is_the_exact_bundle_surface():
     sql = inst.render_store_grants()
     # CREATEROLE (bundles create/drop editor roles) + LOGIN mint is separate
     assert "CREATE ROLE fleet_provisioner CREATEROLE NOLOGIN" in sql
-    # safety pins, idempotent on re-run
-    for pin in ("NOSUPERUSER", "NOBYPASSRLS", "NOCREATEDB", "NOREPLICATION"):
-        assert pin in sql
+    # NO ALTER ROLE attribute line: naming SUPERUSER-family attributes is
+    # superuser-only even to set false, and Supabase's admin isn't one
+    # (bus #80261). The guarantee lives in assert_role_not_elevated instead
+    # (pinned on the PG17 harness); CREATE ROLE defaults already carry all
+    # four NOS, so the render must never need to restate them.
+    assert "ALTER ROLE fleet_provisioner" not in sql
     # schema: CREATE for tables/functions; USAGE WITH GRANT OPTION because the
     # forward bundle re-grants USAGE to each editor role it creates
     assert "GRANT USAGE ON SCHEMA public TO fleet_provisioner WITH GRANT OPTION" in sql
@@ -422,6 +425,30 @@ def test_render_store_grants_is_the_exact_bundle_surface():
     # residency pin: NO bare table-wide SELECT on organizations
     assert "GRANT SELECT ON TABLE public.organizations" not in sql
     assert "GRANT SELECT ON public.organizations" not in sql
+
+
+def test_assert_role_not_elevated_refuses_drifted_and_accepts_clean_roles():
+    # fail-closed pg_roles check that replaces the dropped ALTER ROLE line
+    # (bus #80261): catches a drifted PRE-EXISTING fleet_provisioner that a
+    # fresh CREATE would never have created elevated.
+    class _Cur:
+        def __init__(self, row):
+            self._row = row
+
+        def execute(self, *_a, **_k):
+            return self
+
+        def fetchone(self):
+            return self._row
+
+    with pytest.raises(inst.InstallError, match="does not exist"):
+        inst.assert_role_not_elevated(_Cur(None), "fleet_provisioner")
+    with pytest.raises(inst.InstallError, match="elevated attribute"):
+        inst.assert_role_not_elevated(_Cur((True, False, False, False)), "fleet_provisioner")
+    with pytest.raises(inst.InstallError, match="superuser, createdb"):
+        inst.assert_role_not_elevated(_Cur((True, False, True, False)), "fleet_provisioner")
+    # all four clear -> no raise
+    inst.assert_role_not_elevated(_Cur((False, False, False, False)), "fleet_provisioner")
 
 
 def test_render_install_canary_proves_full_surface_and_rolls_back():

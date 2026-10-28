@@ -78,7 +78,12 @@ What the four steps do (each idempotent; re-runs report already-applied):
 3. Creates the DEDICATED `fleet_provisioner` store role — never postgres —
    with EXACTLY the bundle privileges (CREATEROLE; CREATE on public; USAGE
    WITH GRANT OPTION for editor re-grants; INSERT/DELETE/REFERENCES +
-   SELECT(id)-only on organizations), writes its DSN to
+   SELECT(id)-only on organizations). No `ALTER ROLE ... NOSUPERUSER ...`:
+   naming SUPERUSER-family attributes is superuser-only even to set them
+   false and Supabase's admin is not a superuser (bus #80261) — CREATE ROLE
+   defaults carry all four NOS, and a fail-closed pg_roles assert
+   (`assert_role_not_elevated`) refuses a drifted pre-existing role instead.
+   Writes its DSN to
    `.secrets/ceayj_admin_write.dsn` (0600, the plist's
    PROVISIONER_STORE_DSN_FILE), and proves the surface with a transactional
    canary (always rolled back) + negative probes (org-wide SELECT denied,
