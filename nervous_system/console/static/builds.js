@@ -109,7 +109,40 @@
     "</div>";
   }
 
+  // op#35396 (orch-console 80499): a pending (no written summary) row's line
+  // encodes only who owes it + the channel tag — it carries no per-ask
+  // identity, so >3 rows with the SAME line are one undifferentiated fact
+  // ("N asks waiting on this owner"), not N things to read. Collapse those
+  // into one row with a count; 3-or-fewer stay listed (not worth the row).
+  var PENDING_COLLAPSE_THRESHOLD = 3;
+  function groupPending(rows) {
+    var seen = [];     // insertion-ordered pending line -> items[]
+    var index = {};
+    var out = [];
+    (rows || []).forEach(function (r) {
+      if (!r.pending) { out.push(r); return; }
+      if (!index[r.line]) { index[r.line] = { line: r.line, items: [] }; seen.push(r.line); }
+      index[r.line].items.push(r);
+    });
+    seen.forEach(function (line) {
+      var items = index[line].items;
+      if (items.length > PENDING_COLLAPSE_THRESHOLD) {
+        out.push({ collapsed: true, pending: true, line: line, count: items.length });
+      } else {
+        out = out.concat(items);
+      }
+    });
+    return out;
+  }
+
+  function collapsedRow(cls, g) {
+    return '<div class="item drow ' + cls + ' collapsed">' +
+      '<div class="t"><span class="ttl">' + esc(g.line) + "</span>" +
+      '<span class="pill">×' + esc(String(g.count)) + "</span></div></div>";
+  }
+
   function deliveryRow(m) {
+    if (m.collapsed) return collapsedRow("m-row", m);
     return '<div class="item drow m-row">' +
       '<div class="t"><span class="ttl">' + esc(m.line || ("ask #" + m.id)) + "</span>" +
       '<span class="pill">' + esc(fmtHours(m.total_hours)) + "</span></div>" +
@@ -119,6 +152,7 @@
   }
 
   function notMeasuredRow(nm) {
+    if (nm.collapsed) return collapsedRow("nm-row", nm);
     // NO time fields exist on the row (server contract) and none are painted:
     // the honesty copy explains the absence instead of inventing a number.
     return '<div class="item drow nm-row">' +
@@ -146,12 +180,10 @@
       "</span> not yet measured" +
       '<div class="herosub">times come from live-verified ships only — older asks have no clock yet · Dubai time (UTC+4)</div></div>';
     if (measured.length) {
-      html += '<div class="items">' + measured.map(deliveryRow).join("") + "</div>";
+      html += '<div class="items">' + groupPending(measured).map(deliveryRow).join("") + "</div>";
     }
     if (notMeasured.length) {
-      html += notMeasured.length
-        ? '<div class="items">' + notMeasured.map(notMeasuredRow).join("") + "</div>"
-        : "";
+      html += '<div class="items">' + groupPending(notMeasured).map(notMeasuredRow).join("") + "</div>";
     }
     main.innerHTML = html;
   }
@@ -193,6 +225,7 @@
   // export pure helpers for the node unit test (status.js pattern)
   if (typeof module !== "undefined" && module.exports) {
     module.exports = { tokenFromHash: tokenFromHash, esc: esc, fmtAge: fmtAge,
-      fmtHours: fmtHours, fmtDate: fmtDate, fmtDay: fmtDay, paint: paint };
+      fmtHours: fmtHours, fmtDate: fmtDate, fmtDay: fmtDay, paint: paint,
+      groupPending: groupPending };
   }
 })();

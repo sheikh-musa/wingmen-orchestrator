@@ -214,5 +214,89 @@ console.log("tokenFromHash flow: ok");
     "not-measured row says WHY it has no time, not a zero");
   assert.ok(html.indexOf("unauthorized") === -1, "not an error paint");
   console.log("render flow: ok");
+
+  // ---- op#35396: a run of >3 identical pending-summary lines collapses to
+  // ONE row with a count, instead of repeating the same blank-looking line
+  // dozens of times; 3 or fewer stay listed individually. ----
+  var manyPending = [];
+  for (var i = 0; i < 5; i++) {
+    manyPending.push({ id: 6000 + i, pending: true,
+      line: "summary pending from irsyad coordinator (irsyad)",
+      asked_at: "2026-10-28T13:00:00Z", delivered_at: "2026-10-28T14:00:00Z",
+      total_hours: 1.0, surface: "client-channel" });
+  }
+  var fewPending = [
+    { id: 6100, pending: true, line: "summary pending from fleet health (infra)",
+      asked_at: "2026-10-28T13:00:00Z", delivered_at: "2026-10-28T14:00:00Z",
+      total_hours: 1.0, surface: "operator" },
+    { id: 6101, pending: true, line: "summary pending from fleet health (infra)",
+      asked_at: "2026-10-28T13:00:00Z", delivered_at: "2026-10-28T14:00:00Z",
+      total_hours: 1.0, surface: "operator" },
+  ];
+  var groupPayload = {
+    programmes: payload.programmes,
+    delivery_times: {
+      measured: manyPending.concat(fewPending).concat([
+        { id: 6200, pending: false, line: "A real delivered summary",
+          asked_at: "2026-10-28T13:00:00Z", delivered_at: "2026-10-28T14:00:00Z",
+          total_hours: 1.0, surface: "operator" },
+      ]),
+      not_measured: [],
+      coverage: { measured: 8, not_measured: 0 },
+    },
+  };
+  const main2 = makeEl();
+  const api2 = loadPage("builds.js", {
+    els: { main: main2, token: Object.assign(makeEl(), { value: TOK }) },
+    localStorage: { getItem() { return TOK; }, setItem() {}, removeItem() {} },
+    fetch: function () { return new Promise(function () {}); },
+  });
+  assert.ok(api2.groupPending, "builds.js must export groupPending for the node test");
+  api2.paint(groupPayload);
+  const html2 = main2.innerHTML;
+  assert.ok(html2.indexOf("A real delivered summary") !== -1, "a real summary row is never collapsed");
+  assert.ok(html2.indexOf("fleet health (infra)") !== -1,
+    "3-or-fewer identical pending lines stay listed individually");
+  assert.strictEqual((html2.match(/fleet health \(infra\)/g) || []).length, 2,
+    "exactly 2 individual rows for the 2-item fleet-health group, not collapsed");
+  assert.ok(html2.indexOf("irsyad coordinator (irsyad)") !== -1, "the collapsed group's line is still shown");
+  assert.ok(html2.indexOf("×5") !== -1 || html2.indexOf(">5<") !== -1 || /\b5\b/.test(html2),
+    "the collapsed group shows its count (5)");
+  assert.strictEqual((html2.match(/irsyad coordinator \(irsyad\)/g) || []).length, 1,
+    ">3 identical pending lines collapse to exactly ONE row");
+  console.log("pending-summary grouping: ok");
+
+  // groupPending as a pure function, directly
+  const grouped = api2.groupPending(manyPending.concat(fewPending));
+  assert.strictEqual(grouped.length, 3, "5-item group collapses to 1 row + the 2-item group's 2 individual rows");
+  const collapsedRow = grouped.filter(function (r) { return r.collapsed; })[0];
+  assert.ok(collapsedRow, "exactly one collapsed row produced");
+  assert.strictEqual(collapsedRow.count, 5, "collapsed row carries the real count");
+  assert.strictEqual(collapsedRow.line, "summary pending from irsyad coordinator (irsyad)");
+  console.log("groupPending helper: ok");
+
+  // cc-quality #80511 nit 2: pin the exact >3 boundary (a regression flipping
+  // > to >= would collapse a 3-item group and escape both the 2-item and
+  // 5-item cases above).
+  function pendingRow(id, line) {
+    return { id: id, pending: true, line: line,
+      asked_at: "2026-10-28T13:00:00Z", delivered_at: "2026-10-28T14:00:00Z",
+      total_hours: 1.0, surface: "client-channel" };
+  }
+  const exactlyThree = [
+    pendingRow(7000, "summary pending from bariq (other)"),
+    pendingRow(7001, "summary pending from bariq (other)"),
+    pendingRow(7002, "summary pending from bariq (other)"),
+  ];
+  const groupedThree = api2.groupPending(exactlyThree);
+  assert.strictEqual(groupedThree.length, 3, "exactly 3 identical pending rows stay listed individually");
+  assert.ok(!groupedThree.some(function (r) { return r.collapsed; }), "3 is not > 3 -- no collapse");
+  const exactlyFour = exactlyThree.concat([pendingRow(7003, "summary pending from bariq (other)")]);
+  const groupedFour = api2.groupPending(exactlyFour);
+  assert.strictEqual(groupedFour.length, 1, "the 4th identical pending row tips the group into collapsing");
+  assert.strictEqual(groupedFour[0].collapsed, true);
+  assert.strictEqual(groupedFour[0].count, 4, "collapsed count is exactly 4 at the boundary");
+  console.log("collapse boundary (3 vs 4): ok");
+
   console.log("\nall passed");
 })().catch(function (e) { console.error(e.message); process.exit(1); });

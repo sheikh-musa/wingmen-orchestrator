@@ -744,19 +744,75 @@ def fetch_build_status() -> List[dict]:
     return out
 
 
+# Same coarse topic set topic_for() uses (irsyad / adcda-schedule / cosem /
+# infra / other), but matched by SUBSTRING on the owner alone — the pending
+# fallback (below) never has ask text to disambiguate with, and real owner
+# values are inconsistently prefixed ('irsyad-coord' as well as
+# 'cc-irsyad-coord-1'), so a bare prefix match would miss the bare form.
+_PENDING_TOPIC_SUBSTRINGS = (
+    ("irsyad", "irsyad"),
+    ("adcda", "adcda-schedule"),
+    ("cosem", "cosem"),
+)
+_PENDING_INFRA_OWNERS = ("cc-substrate", "cc-fleet-health", "cc-orchestrator", "orch-console")
+
+
+def _pending_summary_owner_label(delegated_to: Optional[str]) -> str:
+    """Human-readable 'who owes it' for a pending (no triage_summary, no
+    operator_summary) ask row. 'cc-irsyad-coord-1' and 'irsyad-coord' both
+    read as 'irsyad coordinator' — strip the 'cc-' prefix and any trailing
+    per-instance '-N' suffix, then spell out a '-coord' ending in full."""
+    if not delegated_to:
+        return "no owner assigned"
+    name = delegated_to
+    if name.startswith("cc-"):
+        name = name[3:]
+    head, _, tail = name.rpartition("-")
+    if head and tail.isdigit():
+        name = head
+    name = name.replace("-", " ").strip()
+    if name.endswith(" coord"):
+        name = name[: -len(" coord")] + " coordinator"
+    return name or "no owner assigned"
+
+
+def _pending_summary_topic_tag(delegated_to: Optional[str]) -> str:
+    """Channel tag paired with the owner label above — same coarse set as
+    topic_for(), substring-matched on the owner only (see module note)."""
+    owner = (delegated_to or "").lower()
+    for needle, topic in _PENDING_TOPIC_SUBSTRINGS:
+        if needle in owner:
+            return topic
+    if owner.startswith(_PENDING_INFRA_OWNERS):
+        return "infra"
+    return "other"
+
+
+def _pending_summary_line(delegated_to: Optional[str]) -> str:
+    """op#35396: the /builds delivery list must never show a bare, un-owned
+    '(awaiting triage)' blank for an ask with no written summary — it must
+    say who owes the summary and the channel it's on, e.g. 'summary pending
+    from irsyad coordinator (irsyad)', so a page full of identical blanks
+    becomes a page of attributable, chaseable lines instead."""
+    return "summary pending from {} ({})".format(
+        _pending_summary_owner_label(delegated_to),
+        _pending_summary_topic_tag(delegated_to),
+    )
+
+
 def fetch_ask_delivery_times(limit: int = 50) -> dict:
     """Per-ask ask->live times for the build-status view (op#34919). HONESTY
     CONTRACT: an ask with no delivered_at stamp is NOT MEASURED — it lands in
     not_measured with no time fields at all, never a zero and never a done
     (coverage is near zero today; fleet-health is automating the stamps).
     Display text NEVER falls back to the raw captured ask — operator_summary,
-    else triage_summary, else the neutral '(awaiting triage)' placeholder
-    (the #61117 never-raw rule; cc-quality #78556 blocker 2 caught this exact
-    COALESCE-to-ask fallback leaking raw client-captured text on /builds)."""
+    else triage_summary, else an owner+channel pending line (op#35396; the
+    #61117 never-raw rule; cc-quality #78556 blocker 2 caught the original
+    COALESCE-to-ask leak). Each row carries `pending` (bool) so the client can
+    group/collapse a run of identical pending lines instead of repeating the
+    same blank dozens of times (orch-console 80499, Musa op#35396)."""
     measured_sql = (
-        "SELECT a.id, "
-        "  COALESCE(a.operator_summary, a.triage_summary, '(awaiting triage)') "
-        "AS line, "
+        "SELECT a.id, a.operator_summary, a.triage_summary, a.delegated_to, "
         "  a.created_at AS asked_at, a.delivered_at, "
         "  round(extract(epoch FROM (a.delivered_at - a.created_at))/3600.0, 1)::float8 AS total_hours, "
         "  a.ask_surface AS surface "
@@ -765,9 +821,7 @@ def fetch_ask_delivery_times(limit: int = 50) -> dict:
         "ORDER BY a.delivered_at DESC LIMIT %s"
     )
     not_measured_sql = (
-        "SELECT a.id, "
-        "  COALESCE(a.operator_summary, a.triage_summary, '(awaiting triage)') "
-        "AS line, "
+        "SELECT a.id, a.operator_summary, a.triage_summary, a.delegated_to, "
         "  a.created_at AS asked_at, "
         "  a.ask_surface AS surface "
         "FROM operator_asks a "
@@ -776,6 +830,13 @@ def fetch_ask_delivery_times(limit: int = 50) -> dict:
     )
     measured = _query(measured_sql, [limit])
     not_measured = _query(not_measured_sql, [limit])
+    for r in measured + not_measured:
+        operator_summary = r.pop("operator_summary")
+        triage_summary = r.pop("triage_summary")
+        delegated_to = r.pop("delegated_to")
+        summary = operator_summary or triage_summary
+        r["pending"] = not summary
+        r["line"] = summary or _pending_summary_line(delegated_to)
     # app.py's _json is plain json.dumps — datetimes must leave here as ISO
     # text or the whole /api/build-status route 500s (the live fc-v87
     # first-ship bug; locked by test_delivery_times_json_serializable).
