@@ -60,6 +60,32 @@ def floor_db(pg_dsn):
             "INSERT INTO governance_floor (sentence, op_ref, predicate_sql) "
             "VALUES ('always false', 'op#2', 'SELECT false')"
         )
+        # Simulates the real orchestrator substrate's migration_ledger row for
+        # 131_governance_floor.sql -- is_orchestrator_substrate() looks for
+        # exactly this (console bus #80664: --record must refuse off the real
+        # store, since a recorded check is only meaningful there).
+        cur.execute(
+            """CREATE TABLE migration_ledger (
+                 id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                 repo text, migration_name text NOT NULL, silo_ref text NOT NULL,
+                 sha256 text, applied_at timestamptz NOT NULL DEFAULT now(),
+                 applied_by text, note text
+               )"""
+        )
+        cur.execute(
+            "INSERT INTO migration_ledger (migration_name, silo_ref) "
+            "VALUES ('131_governance_floor.sql', %s)",
+            (gfr.SUBSTRATE_SILO_REF,),
+        )
+    return pg_dsn
+
+
+@pytest.fixture
+def floor_db_not_substrate(floor_db, pg_dsn):
+    """Same floor rows, but no migration_ledger row for 131 -- a genuine
+    non-substrate (test/harness) DSN, the case --record must refuse."""
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM migration_ledger WHERE migration_name = '131_governance_floor.sql'")
     return pg_dsn
 
 
@@ -143,3 +169,36 @@ def test_all_retired_is_zero_of_zero_not_a_crash(floor_db):
     with psycopg.connect(floor_db, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("UPDATE governance_floor SET retired_at=now(), retired_op_ref='op#99'")
     assert gfr.main(["--dsn", floor_db]) == 0
+
+
+# ── --record must refuse off the real substrate (console bus #80664) ────────
+# PR#608's doc shipped a real PASS that came from a real --record run -- just
+# against the ephemeral test harness, not the live store. A recorded check is
+# only meaningful from the real substrate; --record now refuses otherwise.
+def test_is_orchestrator_substrate_true_when_ledger_row_present(floor_db):
+    assert gfr.is_orchestrator_substrate(floor_db) is True
+
+
+def test_is_orchestrator_substrate_false_without_ledger_row(floor_db_not_substrate):
+    assert gfr.is_orchestrator_substrate(floor_db_not_substrate) is False
+
+
+def test_is_orchestrator_substrate_false_without_ledger_table_at_all(pg_dsn):
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP SCHEMA public CASCADE")
+        cur.execute("CREATE SCHEMA public")
+        cur.execute("GRANT USAGE ON SCHEMA public TO public")
+    assert gfr.is_orchestrator_substrate(pg_dsn) is False
+
+
+def test_record_refuses_on_non_substrate_dsn(floor_db_not_substrate):
+    exit_code = gfr.main(["--dsn", floor_db_not_substrate, "--record"])
+    assert exit_code == 1
+    assert _q(floor_db_not_substrate, "SELECT count(*) FROM governance_floor_audit") == [(0,)]
+
+
+def test_record_still_works_on_a_substrate_shaped_dsn(floor_db):
+    exit_code = gfr.main(["--dsn", floor_db, "--record"])
+    assert exit_code == 2  # one floor failing, same as before
+    rows = _q(floor_db, "SELECT op_ref, event FROM governance_floor_audit ORDER BY op_ref")
+    assert rows == [("op#1", "checked_pass"), ("op#2", "checked_fail")]

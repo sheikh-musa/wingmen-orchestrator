@@ -15,11 +15,36 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 import psycopg
 
 sys.path.insert(0, os.path.dirname(__file__))
+import apply_migration  # noqa: E402 — reuse its parse_ledger_header, one owner for the silo ref
 import bus_send  # noqa: E402 — reuse its dburl() so DSN resolution has one owner
+
+_MIGRATION_131 = Path(__file__).resolve().parent.parent / "migrations" / "131_governance_floor.sql"
+SUBSTRATE_SILO_REF = apply_migration.parse_ledger_header(_MIGRATION_131.read_text())
+
+
+def is_orchestrator_substrate(dsn: str) -> bool:
+    """True iff this DSN's migration_ledger shows 131_governance_floor.sql
+    applied at the silo this migration itself declares (console bus #80664:
+    PR#608's doc shipped a real PASS from a real --record run -- just against
+    the ephemeral test harness, not the live store; a recorded check is only
+    meaningful from the real substrate). A harness DB has no such row -- it
+    never ran apply_migration.py against a real ledger with that silo. Any
+    connection/table error (a bare test schema has no migration_ledger at
+    all) also means "not the substrate", not a crash."""
+    try:
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM migration_ledger WHERE migration_name = %s AND silo_ref = %s",
+                ("131_governance_floor.sql", SUBSTRATE_SILO_REF),
+            )
+            return cur.fetchone() is not None
+    except psycopg.Error:
+        return False
 
 
 def evaluate(dsn: str) -> list[dict]:
@@ -71,6 +96,13 @@ def main(argv=None) -> int:
     results = evaluate(dsn)
 
     if args.record:
+        if not is_orchestrator_substrate(dsn):
+            sys.stderr.write(
+                "refusing --record: this DSN is not the orchestrator substrate (no "
+                f"migration_ledger row for 131_governance_floor.sql at silo {SUBSTRATE_SILO_REF!r}) "
+                "-- a recorded check is only meaningful from the real store.\n"
+            )
+            return 1
         record(dsn, results)
 
     total = len(results)
