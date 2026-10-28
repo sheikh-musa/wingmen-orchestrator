@@ -25,6 +25,7 @@ from . import acl
 from .gate_validation import BrokerValidationError, check_project_ref, require_gate
 from .mgmt_api import UpstreamError
 from .protocol import ErrorCode, MalformedRequest, encode_error, encode_ok, parse_request
+from .read_only import check_read_only_override
 from .vault_log import VaultLogEntry, log_finalized, log_started
 
 logger = logging.getLogger("exec_broker")
@@ -153,10 +154,25 @@ class BrokerServer:
                 db_conn.commit()
 
                 try:
+                    # Order: ref allowlist first, then the RO mode, then the
+                    # gate — so an armed-but-expired override still yields
+                    # BAD_PROJECT_REF for its ref, and RO refusals are only
+                    # reachable for refs that passed the allowlist (pinned by
+                    # test_ref_override_readonly_allowlist_runs_before_ro_pin,
+                    # bus #79103). RO itself is SCOPED to the override's ref
+                    # (bus #79039): baseline refs keep today's behavior while
+                    # the override is armed.
                     check_project_ref(
                         req.project_ref,
                         override_ref=self.ref_override,
                         override_expires_at=self.ref_override_expires_at,
+                        now=now,
+                    )
+                    check_read_only_override(
+                        req.guarded_sql,
+                        project_ref=req.project_ref,
+                        ref_override=self.ref_override,
+                        ref_override_expires_at=self.ref_override_expires_at,
                         now=now,
                     )
                     require_gate(req.guarded_sql, req.gate_id, req.project_ref, cur)

@@ -98,3 +98,13 @@ def test_encode_error_roundtrip():
 
 def test_encode_error_ends_with_newline():
     assert encode_error(ErrorCode.INTERNAL_ERROR, "x").endswith(b"\n")
+
+
+def test_read_only_override_error_code_exists_and_encodes():
+    # Additive seventh §5 code (orch-console GO #78974, assignment bus #79024):
+    # while the bounded ref override is live, a non-plain-read statement is
+    # refused with this code. Response shape unchanged; callers must tolerate
+    # an unknown code string.
+    assert ErrorCode.READ_ONLY_OVERRIDE.value == "READ_ONLY_OVERRIDE"
+    payload = json.loads(encode_error(ErrorCode.READ_ONLY_OVERRIDE, "broker is read-only").decode("utf-8"))
+    assert payload == {"status": "error", "error": {"code": "READ_ONLY_OVERRIDE", "message": "broker is read-only"}}

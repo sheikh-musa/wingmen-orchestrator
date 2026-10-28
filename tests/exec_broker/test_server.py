@@ -16,6 +16,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
 
 from exec_broker.mgmt_api import UpstreamError  # noqa: E402
@@ -407,3 +409,129 @@ def test_uid_override_denies_after_expiry_end_to_end(tmp_path):
         "gate_id": None, "caller": "c", "exec_ledger_id": "e",
     })
     assert resp["error"]["code"] == "ACL_DENIED"
+
+
+# --- SELECT-only override mode (GO #78974, assignment bus #79024) ------------
+
+_GOUMLYNE = "goumlynecruxrlmzlntp"  # == SILO_ALIASES["goumlyne"], already committed
+
+
+@pytest.mark.parametrize("guarded_sql", [
+    "insert into t values (1)",
+    "update t set x = 1",
+    "delete from t",
+    "DO $$ BEGIN UPDATE t SET x = 1; END $$",
+    "SELECT set_config('a', 'b', false)",
+])
+def test_ref_override_readonly_refuses_writes_end_to_end(tmp_path, guarded_sql):
+    # RO promised (bus #78968) is now RO enforced (GO #78974): while the ref
+    # override is armed, the assignment's five write shapes to the OVERRIDE
+    # ref are all refused, the audit row is finalized, and the mgmt API is
+    # never called.
+    seen = []
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db,
+        mgmt_api_fn=lambda sql, ref, tok: seen.append((sql, ref)) or [],
+        ref_override=_GOUMLYNE, ref_override_expires_at=_FUTURE,
+    )
+    resp = _send(sock_path, {"project_ref": _GOUMLYNE, "guarded_sql": guarded_sql,
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp["error"]["code"] == "READ_ONLY_OVERRIDE"
+    row = list(db.vault_rows.values())[0]
+    assert row["status"] == "error" and row["error_code"] == "READ_ONLY_OVERRIDE"
+    assert seen == []  # refusal never reaches the mgmt API (review Minor #3)
+
+
+def test_ref_override_readonly_allows_cte_read_end_to_end(tmp_path):
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [{"n": 1}],
+        ref_override=_GOUMLYNE, ref_override_expires_at=_FUTURE,
+    )
+    resp = _send(sock_path, {
+        "project_ref": _GOUMLYNE,
+        "guarded_sql": "with x as (select id from t) select count(*) from x",
+        "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp == {"status": "ok", "rows": [{"n": 1}]}
+
+
+def test_ref_override_readonly_scoped_to_override_ref_baseline_write_passes(tmp_path):
+    # SCOPE RULING (cc-fleet-health bus #79039, 2026-10-28 — supersedes the
+    # broker-wide reading of GO #78974): while the override is armed, a write
+    # to the ALWAYS-ALLOWED QA ref passes exactly as it does today — RO binds
+    # only requests targeting the override's ref.
+    seen = []
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db,
+        mgmt_api_fn=lambda sql, ref, tok: seen.append((sql, ref)) or [],
+        ref_override=_GOUMLYNE, ref_override_expires_at=_FUTURE,
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky",
+                             "guarded_sql": "insert into t values (1)",
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp == {"status": "ok", "rows": []}
+    assert seen == [("insert into t values (1)", "oovskwogvefnznfowjky")]
+    row = list(db.vault_rows.values())[0]
+    assert row["status"] == "ok"
+
+
+def test_ref_override_readonly_allowlist_runs_before_ro_pin(tmp_path):
+    # PIN (cc-fleet-health bus #79103): the ref allowlist check runs BEFORE
+    # the RO check — a plain SELECT to a non-allowlisted ref under an armed
+    # override gets BAD_PROJECT_REF (the class check never runs), so a future
+    # reorder of the validation chain fails this test loudly. Synthetic
+    # non-allowlisted ref: the property under test is ordering, not any real
+    # store (console_irsyad_guard fired on a real-ref fixture; ledgered).
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db,
+        ref_override=_GOUMLYNE, ref_override_expires_at=_FUTURE,
+    )
+    resp = _send(sock_path, {"project_ref": "fakeplatypusref00001",
+                             "guarded_sql": "select 1",
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp["error"]["code"] == "BAD_PROJECT_REF"
+
+
+def test_expired_ref_override_lifts_readonly_for_qa_write(tmp_path):
+    # Expiry reverts BOTH the ref widening and the RO mode, by construction.
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [],
+        ref_override=_GOUMLYNE, ref_override_expires_at=_PAST,
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky",
+                             "guarded_sql": "insert into t values (1)",
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp == {"status": "ok", "rows": []}   # QA write unaffected once the override expired
+
+
+def test_uid_override_alone_does_not_impose_readonly(tmp_path):
+    # bus #79024 ties RO to the REF override only; a uid-override window
+    # must not silently turn the broker read-only.
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID + 1}), db=db, mgmt_api_fn=lambda *a, **k: [],
+        uid_override=frozenset({TEST_UID}), uid_override_expires_at=_FUTURE,
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky",
+                             "guarded_sql": "insert into t values (1)",
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp == {"status": "ok", "rows": []}
+
+
+def test_no_override_write_behavior_unchanged_end_to_end(tmp_path):
+    # No override armed at all: an INSERT reaches the mgmt API exactly as
+    # before this feature existed (byte-for-byte unchanged behavior).
+    seen = []
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda sql, ref, tok: seen.append((sql, ref)) or [],
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky",
+                             "guarded_sql": "insert into t values (1)",
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp == {"status": "ok", "rows": []}
+    assert seen == [("insert into t values (1)", "oovskwogvefnznfowjky")]

@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
 from exec_broker.gate_validation import (  # noqa: E402
     BrokerValidationError,
     check_project_ref,
+    ref_override_is_live,
     require_gate,
 )
 from exec_broker.protocol import ErrorCode  # noqa: E402
@@ -201,3 +202,21 @@ def test_require_gate_full_match_rejects_mismatched_migration_once_supplied():
             "drop table t", "56485", "goumlynecruxrlmzlntp", cur=FakeCursor(row), migration="999",
         )
     assert exc.value.code == ErrorCode.GATE_INVALID
+
+
+def test_ref_override_is_live_requires_both_halves():
+    # The ONE definition of "the bounded ref override is currently in force"
+    # (shared by check_project_ref and read_only.check_read_only_override):
+    # armed means BOTH halves present AND unexpired.
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    assert ref_override_is_live("goumlynecruxrlmzlntp", future) is True
+    assert ref_override_is_live(None, future) is False
+    assert ref_override_is_live("goumlynecruxrlmzlntp", None) is False
+
+
+def test_ref_override_is_live_expiry_is_strict():
+    ref = "goumlynecruxrlmzlntp"
+    boundary = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    assert ref_override_is_live(ref, boundary, now=boundary - timedelta(seconds=1)) is True
+    assert ref_override_is_live(ref, boundary, now=boundary) is False  # == expiry is expired
+    assert ref_override_is_live(ref, boundary, now=boundary + timedelta(seconds=1)) is False
