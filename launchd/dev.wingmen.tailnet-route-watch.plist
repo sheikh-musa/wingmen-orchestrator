@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.tailnet-route-watch</string>
+  <!-- cc-fleet-health: pages orch-console when the Mini's 100.64/10 -> utun route goes
+       missing (orch-console #79806; it broke silently ~08:36-10:05Z on 2026-10-28).
+       Every 2 min: read-only `route -n get` per tailnet peer; deduped P1 rr page
+       (60 min/key), P3 recovered note, 'could not measure' paged P2, never read as ok. -->
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/run_tailnet_route_watch.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>120</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/tailnet-route-watch.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/tailnet-route-watch.err.log</string>
+</dict>
+</plist>
