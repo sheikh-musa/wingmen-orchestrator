@@ -218,8 +218,34 @@ def operator_ledger_db(pg_dsn, monkeypatch):
                 needs_operator_decision boolean NOT NULL DEFAULT false,
                 operator_summary    text,
                 delivered_at        timestamptz,
-                slow_paged_at       timestamptz
+                slow_paged_at       timestamptz,
+                -- migration 127 (delivery provenance)
+                delivered_source       text
+                    CHECK (delivered_source IS NULL
+                           OR delivered_source IN ('auto-deploy', 'auto-outbound', 'bus-report', 'manual')),
+                delivered_evidence_ref text,
+                delivered_backfilled   boolean NOT NULL DEFAULT false,
+                no_deliverable_reason  text,
+                CHECK (delivered_at IS NULL OR delivered_source IS NOT NULL),
+                CHECK (delivered_source IS NULL OR delivered_source = 'manual'
+                       OR delivered_evidence_ref IS NOT NULL)
             )
+        """)
+        cur.execute("""
+            CREATE FUNCTION operator_asks_delivery_provenance() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+              IF NEW.delivered_at IS NOT NULL AND NEW.delivered_source IS NULL THEN
+                NEW.delivered_source := 'manual';
+              END IF;
+              RETURN NEW;
+            END;
+            $$
+        """)
+        cur.execute("""
+            CREATE TRIGGER operator_asks_delivery_provenance_trg
+              BEFORE INSERT OR UPDATE OF delivered_at, delivered_source ON operator_asks
+              FOR EACH ROW EXECUTE FUNCTION operator_asks_delivery_provenance()
         """)
         cur.execute("""
             CREATE UNIQUE INDEX operator_asks_source_ask_uniq

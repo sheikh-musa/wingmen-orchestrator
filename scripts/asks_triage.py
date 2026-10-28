@@ -20,7 +20,16 @@ Usage:
   (any action) [--delivered] — stamp delivered_at = now() (LIVE verified),
   first stamp wins, rides along with any action (op#34803, orch-console
   #78198: UI asks stay open after live until Musa confirms, so turnaround
-  measures delivered_at, not closed_at).
+  measures delivered_at, not closed_at). REFUSED when the evidence
+  (--evidence, or the row's triage_evidence_ref) cites a bus#/op# row older
+  than 30 min: that's a catch-up close, and now() would be the bookkeeping
+  time, not the live time (orch-console #79947/#79949). Use --delivered-at.
+
+  (any action) [--delivered-at bus#N | op#N | ISO-8601-with-offset] — stamp
+  delivered_at at the moment the work actually went live: the created_at of
+  agent_messages N / operator_messages N, or the given time. Same first-stamp-
+  wins rule; records the ref in delivered_evidence_ref. Validated BEFORE any
+  write, so a bad ref changes nothing.
 
   (any action) [--answers ASK_ID] — the row being triaged IS Musa's answer to
   open ask ASK_ID: confirm+close it, linking the answering operator message
@@ -81,7 +90,9 @@ can surface a clean failure.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -134,6 +145,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "wins. Rides along with any action. UI asks stay open after live until "
                          "Musa confirms, so turnaround measures delivered_at, not closed_at "
                          "(op#34803, orch-console #78198)")
+    ap.add_argument("--delivered-at", default=None, metavar="REF",
+                    help="stamp delivered_at at the LIVE time: bus#N (agent_messages N's created_at), "
+                         "op#N (operator_messages N's created_at) or an ISO-8601 time with an offset. "
+                         "First stamp wins. Use this for any catch-up close (op#34803, #79949)")
     ap.add_argument("--answers", type=int, default=None, metavar="ASK_ID",
                      help="the operator message being triaged IS the answer to open "
                           "ask ASK_ID — confirm+close it (same close as the console "
@@ -145,15 +160,90 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def stamp_delivered(item_id: int, *, dsn: str | None = None) -> int:
-    """Set operator_asks.delivered_at = now() unless it's already set (first stamp wins).
-    Returns rows stamped: 1 on the first call, 0 on any repeat (not an error)."""
+# A bare --delivered stamps now(); that is only the live time if the evidence is fresh.
+BARE_DELIVERED_MAX_EVIDENCE_AGE = dt.timedelta(minutes=30)
+_REF_RE = re.compile(r"\b(bus|op)\s*#\s*(\d+)", re.IGNORECASE)
+_REF_TABLE = {"bus": "agent_messages", "op": "operator_messages"}
+
+
+def parse_evidence_refs(text: str | None) -> list:
+    """Pure: the bus#N / op#N refs in an evidence string, in order, as (kind, id).
+    A bare '#N' is ignored: it could be a bus row, an op message or a PR."""
+    return [(k.lower(), int(n)) for k, n in _REF_RE.findall(text or "")]
+
+
+def _ref_time(cur, kind: str, ref_id: int):
+    cur.execute(f"SELECT created_at FROM {_REF_TABLE[kind]} WHERE id = %s", (ref_id,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def resolve_delivered_at(cur, item_id: int, value: str, *, now=None):
+    """Resolve a --delivered-at value to (timestamp, evidence_ref, source). Raises
+    ValueError on anything unresolvable, naive, in the future, or before the ask."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    refs = parse_evidence_refs(value)
+    if refs and _REF_RE.fullmatch(value.strip()):
+        kind, ref_id = refs[0]
+        ts = _ref_time(cur, kind, ref_id)
+        if ts is None:
+            raise ValueError(f"--delivered-at {value}: no {_REF_TABLE[kind]} row #{ref_id}")
+        ref, source = f"{kind}#{ref_id}", ("bus-report" if kind == "bus" else "manual")
+    else:
+        try:
+            ts = dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError(f"--delivered-at {value!r}: not bus#N, op#N or an ISO-8601 time") from None
+        if ts.tzinfo is None:
+            raise ValueError(f"--delivered-at {value!r}: give an explicit offset (Z or +04:00), "
+                             f"a naive time is ambiguous")
+        ref, source = f"iso:{ts.isoformat()}", "manual"
+    if ts > now + dt.timedelta(minutes=5):
+        raise ValueError(f"--delivered-at {value}: {ts.isoformat()} is in the future")
+    cur.execute("SELECT created_at FROM operator_asks WHERE id = %s", (item_id,))
+    row = cur.fetchone()
+    if row is not None and ts < row[0]:
+        raise ValueError(f"--delivered-at {value}: {ts.isoformat()} is before the ask itself "
+                         f"({row[0].isoformat()})")
+    return ts, ref, source
+
+
+def check_bare_delivered(cur, item_id: int, evidence: str | None, *, now=None) -> None:
+    """Refuse a bare --delivered (stamp = now()) when the newest bus#/op# evidence row,
+    from this call's --evidence or the row's triage_evidence_ref, is older than
+    BARE_DELIVERED_MAX_EVIDENCE_AGE. No resolvable ref = allowed (verified live just now)."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    cur.execute("SELECT triage_evidence_ref FROM operator_asks WHERE id = %s", (item_id,))
+    row = cur.fetchone()
+    refs = parse_evidence_refs(evidence) + parse_evidence_refs(row[0] if row else None)
+    timed = [(t, f"{k}#{n}") for k, n in refs for t in [_ref_time(cur, k, n)] if t is not None]
+    if not timed:
+        return
+    newest, ref = max(timed)
+    if now - newest > BARE_DELIVERED_MAX_EVIDENCE_AGE:
+        age_min = int((now - newest).total_seconds() // 60)
+        raise ValueError(f"--delivered would stamp now(), but the evidence {ref} is {age_min} min old: "
+                         f"that records the bookkeeping time, not the live time. Use "
+                         f"--delivered-at {ref} (or the row/time it actually went live).")
+
+
+def stamp_delivered(item_id: int, *, at=None, evidence_ref: str | None = None,
+                    source: str | None = None, dsn: str | None = None) -> int:
+    """Set operator_asks.delivered_at unless it's already set (first stamp wins): to `at`
+    (with its evidence_ref/source) when given, else now(). Returns rows stamped: 1 on the
+    first call, 0 on any repeat (not an error)."""
     dsn = dsn or _dsn()
     if not dsn:
         raise RuntimeError("no DATABASE_URL/SUPABASE_DB_URL")
     with psycopg.connect(dsn, autocommit=True, connect_timeout=10) as conn, conn.cursor() as cur:
-        cur.execute("UPDATE operator_asks SET delivered_at = now() "
-                    "WHERE id = %s AND delivered_at IS NULL", (item_id,))
+        if at is None:
+            cur.execute("UPDATE operator_asks SET delivered_at = now() "
+                        "WHERE id = %s AND delivered_at IS NULL", (item_id,))
+        else:
+            cur.execute("UPDATE operator_asks SET delivered_at = %s, delivered_source = %s, "
+                        "  delivered_evidence_ref = COALESCE(delivered_evidence_ref, %s) "
+                        "WHERE id = %s AND delivered_at IS NULL",
+                        (at, source, evidence_ref, item_id))
         return cur.rowcount
 
 
@@ -308,8 +398,28 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
             return n
 
 
+def _precheck_delivery(args):
+    """Validate --delivered/--delivered-at BEFORE triage() writes anything (it autocommits,
+    so a refusal after it would leave a half-applied close). Returns (at, ref, source)."""
+    if not (args.delivered or args.delivered_at):
+        return None, None, None
+    dsn = _dsn()
+    if not dsn:
+        raise RuntimeError("no DATABASE_URL/SUPABASE_DB_URL")
+    with psycopg.connect(dsn, autocommit=True, connect_timeout=10) as conn, conn.cursor() as cur:
+        if args.delivered_at:
+            return resolve_delivered_at(cur, args.id, args.delivered_at)
+        check_bare_delivered(cur, args.id, args.evidence)
+        return None, None, None
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    try:
+        d_at, d_ref, d_src = _precheck_delivery(args)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"error: {type(e).__name__}: {e}\n(nothing written)\n")
+        return 2
     try:
         n = triage(args.id, args.action, summary=args.summary,
                    delegated_to=args.delegated_to, evidence=args.evidence,
@@ -319,9 +429,9 @@ def main(argv=None) -> int:
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"error: {type(e).__name__}: {e}\n")
         return 2
-    if args.delivered:
+    if args.delivered or args.delivered_at:
         try:
-            stamped = stamp_delivered(args.id)
+            stamped = stamp_delivered(args.id, at=d_at, evidence_ref=d_ref, source=d_src)
         except Exception as e:  # noqa: BLE001
             sys.stderr.write(f"error: --delivered stamp failed: {type(e).__name__}: {e}\n")
             return 2
