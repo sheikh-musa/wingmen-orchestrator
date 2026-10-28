@@ -153,7 +153,12 @@ def discover_gate(rows: list[dict], sha12: str, *, now: dt.datetime) -> dict:
         if r["from_agent"] in _GATE_AGENTS
         and r["message_type"] == "decision"
         and (now - r["created_at"].astimezone(dt.timezone.utc)).days <= _GATE_MAX_AGE_DAYS
-        and sha12 in (str(r["subject"]) + str(r["body"]))
+        # per-field, NEVER subject+body concatenation: fetch_gate_rows
+        # pre-filters per-field (subject LIKE OR body LIKE), and the re-check
+        # must be the same predicate or the two layers are not provably
+        # equivalent — a sha12 glued from subject-tail + body-head would
+        # pass a concat check the SQL never selected (cc-quality, bus #80353)
+        and (sha12 in str(r["subject"]) or sha12 in str(r["body"]))
     ]
     if not matches:
         raise InstallError(

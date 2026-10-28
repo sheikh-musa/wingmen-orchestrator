@@ -144,6 +144,30 @@ def test_discover_gate_takes_newest_within_age_floor():
     assert inst.discover_gate(rows, sha12, now=NOW)["id"] == 401
 
 
+def test_discover_gate_rejects_a_sha_spanning_the_subject_body_boundary():
+    # cc-quality nit (bus #80353): fetch_gate_rows pre-filters per-field
+    # (subject LIKE OR body LIKE), so the Python re-check must be the same
+    # predicate — a sha12 that exists only as subject-tail + body-head glue
+    # never survives the SQL, and the re-check must not accept it either
+    sha12 = "abcdef123456"
+    rows = [_gate_row(500, subject=f"GO: bundle {sha12[:6]}",
+                      body=f"{sha12[6:]} approved")]
+    with pytest.raises(inst.InstallError, match="no gate"):
+        inst.discover_gate(rows, sha12, now=NOW)
+
+
+def test_discover_gate_accepts_a_sha_named_in_either_field_alone():
+    # the per-field predicate's positive side: subject-only and body-only
+    # rows both gate (the bus posts put the sha in either place)
+    sha12 = "abcdef123456"
+    rows = [
+        _gate_row(600, subject=f"GO sha {sha12}", body="approved"),
+        _gate_row(601, subject="GO", body=f"approved bundle {sha12}"),
+    ]
+    assert inst.discover_gate(rows[:1], sha12, now=NOW)["id"] == 600
+    assert inst.discover_gate(rows[1:], sha12, now=NOW)["id"] == 601
+
+
 def test_step1_argv_rehearses_against_the_draft_when_unnumbered_dry_run():
     # orch-console bus #79788: dry-run on an unnumbered draft said "would
     # number draft -> 128_...sql" but never created that file, then still
