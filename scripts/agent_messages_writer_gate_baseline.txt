@@ -198,7 +198,6 @@
 # PR with a real-lane boot test once migrated, per console's instruction.
 # legacy/wingmen_orch.py is presumed dead (same class as legacy/ihsanos_
 # drain/main.py, pending the same live-fleet confirmation before deletion).
-scripts/launch_dangerous_cc.sh
 
 # STEP 2, delete the dead, 2026-10-28 (Musa op#34845, console's ruling part
 # 4): scripts/fire_fix1a_grant_ping.sh deleted rather than migrated -- a
@@ -366,3 +365,56 @@ scripts/launch_dangerous_cc.sh
 # asks_reconcile_daily.py, etc.), with a dedicated regression test
 # (test_escalate_bug_survives_bus_send_system_exit) added and confirmed RED
 # before the fix, GREEN after.
+#
+# STEP 2, PR-B batch 3 (final), scripts/launch_dangerous_cc.sh, 2026-10-28
+# (Musa op#34845, console's approved plan bus #80152, review conditions bus
+# #80132): the universal lane launcher, last file on this baseline's list --
+# this PR empties it. All 3 raw-insert call sites (2 in the Vercel
+# deploy-poller, 1 in the EXIT trap's session-end report) were post-launch
+# only; none gate or precede the actual claude launch step, confirmed by
+# reading the whole file before touching it. Migrated onto a dedicated
+# helper, scripts/lib/launch_dangerous_cc_bus_post.py, rather than calling
+# bus_send.send() inline, for two reasons specific to this file's blast
+# radius (every lane boots through it, including the 3 gzb-resident
+# supervisors -- coord, tabung, and the irsyad worker -- confirmed by grep
+# over deploy/*.sh):
+#   1. Subject/body previously interpolated straight into a `python -c
+#      "...$subject..."` string, putting them in argv and therefore in any
+#      `ps aux` listing on the box. Fixed by passing every field through
+#      environment variables (LDCC_FROM_BASE/LDCC_TO/LDCC_TYPE/LDCC_SUBJECT/
+#      LDCC_BODY/LDCC_PRIORITY/LDCC_REQ/LDCC_SUB_TAG) instead of argv.
+#   2. This code runs inside every lane's EXIT trap. A hanging or raising
+#      send() must never delay teardown or change the trap's exit status.
+#      The helper enforces a hard ~10s bound via SIGALRM, swallows any
+#      failure (timeout, no DSN, SystemExit, DB down) to stderr, and always
+#      exits 0 -- verified by 2 unit tests that mock bus_send.send to hang
+#      past the bound and to raise SystemExit respectively (both pass: rc=0
+#      in both cases, elapsed stays under the bound for the hang case).
+#
+# Real-lane evidence, per console's approved boot-test plan (bus #80152),
+# run via a fresh cc-reviewer-N spawn (CC_BASE_OVERRIDE=cc-reviewer) against
+# a throwaway scratch repo (git init, one commit, non-main branch, no
+# remote):
+#   (a) normal case: identity allocated as cc-reviewer-1 via the real
+#       allocator, claude ran one-shot (-p) and exited cleanly (17s), the
+#       auto-push attempt failed harmlessly against the no-remote repo, and
+#       the session-end row posted correctly 22s after session start with
+#       the expected from_agent/sub_tag/message_type/priority/
+#       requires_response/is_test contract.
+#   (b) DB-unreachable case: console's literal plan (point DATABASE_URL/
+#       SUPABASE_DB_URL at an unreachable host from script start) turned
+#       out not to exercise the trap at all -- identity allocation hard-
+#       exits (scripts/launch_dangerous_cc.sh, "ERROR: identity allocation
+#       failed") well before the EXIT trap is installed, with no fallback;
+#       this is pre-existing behavior, unrelated to and unchanged by this
+#       migration, and is the known gap that a lane cannot boot while the
+#       substrate is down. Substituted, with console's sign-off: (i) the 2
+#       unit tests above, which call the helper's exact entrypoint the trap
+#       invokes; and (ii) a standalone run of the helper with the same
+#       argv/env-passing shape as the trap, DATABASE_URL pointed at an
+#       unroutable address (connect_timeout=5) -- elapsed 5.29s, exit 0,
+#       failure swallowed and logged to stderr, never raised.
+#
+# Baseline entry for scripts/launch_dangerous_cc.sh removed -- this file's
+# list of pending entries is now empty, which is migration 124's release
+# condition for --require-complete.

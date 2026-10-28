@@ -538,24 +538,16 @@ if deployments:
                 ;;
             ERROR)
                 echo -e "${RED}${BOLD}  ✗ DEPLOY FAILED — build log: ${build_log_url}${RESET}"
-                # Post blocker to agent_messages
-                "$VENV_PY" -c "
-import os, sys
-sys.path.insert(0, '$ORCH_DIR')
-from dotenv import load_dotenv
-load_dotenv('$ORCH_DIR/.env')
-from supabase import create_client
-sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
-sb.table('agent_messages').insert({
-    'from_agent': '$BASE_AGENT_ID',
-    'sub_tag': '$CC_AGENT_ID',
-    'to_agent': 'cai',
-    'message_type': 'blocker',
-    'subject': 'DEPLOY FAILED — ${REPO_NAME} commit ${commit_sha:0:8}',
-    'body': 'Vercel deployment reached ERROR state.\nCommit: ${commit_sha}\nBuild log: ${build_log_url}\nAction required: read build log, fix, push again.',
-    'requires_response': True,
-}).execute()
-" 2>/dev/null || true
+                # Post blocker to agent_messages (bounded, best-effort; fields via env,
+                # never argv -- scripts/lib/launch_dangerous_cc_bus_post.py)
+                LDCC_FROM_BASE="$BASE_AGENT_ID" LDCC_SUB_TAG="$CC_AGENT_ID" LDCC_TO="cai" \
+                LDCC_TYPE="blocker" LDCC_PRIORITY="P1" LDCC_REQ="1" \
+                LDCC_SUBJECT="DEPLOY FAILED — ${REPO_NAME} commit ${commit_sha:0:8}" \
+                LDCC_BODY="Vercel deployment reached ERROR state.
+Commit: ${commit_sha}
+Build log: ${build_log_url}
+Action required: read build log, fix, push again." \
+                "$VENV_PY" "$ORCH_DIR/scripts/lib/launch_dangerous_cc_bus_post.py" 2>/dev/null || true
                 return 1
                 ;;
             BUILDING|INITIALIZING|QUEUED)
@@ -572,23 +564,13 @@ sb.table('agent_messages').insert({
     # Timeout — flag as blocker
     echo -e "${AMBER}${BOLD}  ⚠ DEPLOY TIMEOUT — still not READY after 5 minutes${RESET}"
     echo -e "${AMBER}  Check: https://vercel.com/dashboard${RESET}"
-    "$VENV_PY" -c "
-import os, sys
-sys.path.insert(0, '$ORCH_DIR')
-from dotenv import load_dotenv
-load_dotenv('$ORCH_DIR/.env')
-from supabase import create_client
-sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
-sb.table('agent_messages').insert({
-    'from_agent': '$BASE_AGENT_ID',
-    'sub_tag': '$CC_AGENT_ID',
-    'to_agent': 'cai',
-    'message_type': 'blocker',
-    'subject': 'DEPLOY TIMEOUT — ${REPO_NAME} commit ${commit_sha:0:8}',
-    'body': 'Vercel deployment did not reach READY within 5 minutes.\nCommit: ${commit_sha}\nCheck Vercel dashboard for build status.',
-    'requires_response': True,
-}).execute()
-" 2>/dev/null || true
+    LDCC_FROM_BASE="$BASE_AGENT_ID" LDCC_SUB_TAG="$CC_AGENT_ID" LDCC_TO="cai" \
+    LDCC_TYPE="blocker" LDCC_PRIORITY="P1" LDCC_REQ="1" \
+    LDCC_SUBJECT="DEPLOY TIMEOUT — ${REPO_NAME} commit ${commit_sha:0:8}" \
+    LDCC_BODY="Vercel deployment did not reach READY within 5 minutes.
+Commit: ${commit_sha}
+Check Vercel dashboard for build status." \
+    "$VENV_PY" "$ORCH_DIR/scripts/lib/launch_dangerous_cc_bus_post.py" 2>/dev/null || true
     return 1
 }
 
@@ -721,6 +703,17 @@ except Exception as e:
         subject="[INTERRUPTED] ${subject}"
     fi
 
+    # agent_messages.from_agent uses BASE (FK-enforced). Sub-tag goes via LDCC_SUB_TAG.
+    # Bounded, best-effort; fields via env, never argv.
+    LDCC_FROM_BASE="$BASE_AGENT_ID" LDCC_SUB_TAG="$CC_AGENT_ID" LDCC_TO="cai" \
+    LDCC_TYPE="update" LDCC_PRIORITY="P3" \
+    LDCC_SUBJECT="$subject" \
+    LDCC_BODY="Session ended. Outcome: $outcome. Duration: ${duration_seconds}s. Repo: $REPO_NAME. Exit code: $exit_code." \
+    "$VENV_PY" "$ORCH_DIR/scripts/lib/launch_dangerous_cc_bus_post.py" 2>/dev/null || true
+
+    # Flip BASE family status to idle (legacy agents table, unrelated to
+    # agent_messages -- out of scope for the bus_send migration). Sub-tag
+    # agent_status was flipped to offline in the psycopg block above.
     "$VENV_PY" -c "
 import os, sys
 sys.path.insert(0, '$ORCH_DIR')
@@ -728,18 +721,6 @@ from dotenv import load_dotenv
 load_dotenv('$ORCH_DIR/.env')
 from supabase import create_client
 sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
-# agent_messages.from_agent uses BASE (FK-enforced). Sub-tag goes in sub_tag column.
-sb.table('agent_messages').insert({
-    'from_agent': '$BASE_AGENT_ID',
-    'sub_tag': '$CC_AGENT_ID',
-    'to_agent': 'cai',
-    'message_type': 'update',
-    'subject': '$subject',
-    'body': 'Session ended. Outcome: $outcome. Duration: ${duration_seconds}s. Repo: $REPO_NAME. Exit code: $exit_code.',
-    'requires_response': False,
-}).execute()
-# Flip BASE family status to idle (legacy agents table). Sub-tag agent_status
-# was flipped to offline in the psycopg block above.
 sb.table('agents').update({'status': 'idle', 'current_task': None}).eq('id', '$BASE_AGENT_ID').execute()
 " 2>/dev/null || true
 }
