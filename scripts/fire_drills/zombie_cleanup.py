@@ -4,6 +4,13 @@ logic to prove a SIGKILL mid-CLI leaves no zombies after an orchestrator
 restart. It had no other live caller, so the original lived on in the
 retired legacy/ cluster purely to serve this one drill -- moved here instead
 of deleted so the drill keeps testing real code, not a reimplementation.
+
+Console's review (bus #79116): this marks ALL 'running' jobs failed with no
+age filter, which is correct ONLY at a real orchestrator's own startup (every
+'running' row at that moment really is a zombie from the process that just
+died). Call it ONLY with a mocked or ephemeral client in a fire drill or
+test -- against a live client outside an actual orchestrator restart it
+would fail every currently-running job.
 """
 from __future__ import annotations
 
