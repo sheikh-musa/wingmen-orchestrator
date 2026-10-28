@@ -2,5 +2,8 @@
   "client_key": "bariq",
   "alias": "ihsanos multi-tenant DB",
   "org_uuid": "62617269-7100-4000-8000-000000000001",
+  "org_name": "Bariq Employment Services Pte. Ltd.",
+  "org_uen": "202219347M",
+  "org_slug": "bariq-employment",
   "seed_keys": ["site", "hero", "testimonials"]
 }

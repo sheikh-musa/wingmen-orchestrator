@@ -21,6 +21,9 @@ def _spec_dict(**overrides):
         client_key="acme",
         alias="ihsanos multi-tenant DB",
         org_uuid="61636d65-7100-4000-8000-000000000001",  # hex("acme") prefix
+        org_name="ACME Services Pte. Ltd.",
+        org_uen="202219999Z",
+        org_slug="acme-services",
         seed_keys=["site", "hero"],
     )
     base.update(overrides)
