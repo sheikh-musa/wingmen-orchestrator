@@ -66,13 +66,25 @@ def log_finalized(cur, row_id: int, status: str, error_code: str | None = None) 
     )
 
 
-def gate_already_used(cur, gate_id: str, verb: str) -> bool:
+def gate_already_used(cur, gate_id: str, verb: str, *, exclude_row_id: int | None = None) -> bool:
     """One-artifact-per-gate: True when any row for this gate+verb is
     'started' (in-flight, or crashed mid-apply — operator reconciles) or
-    'ok' (spent). Attempts that ended in 'error' do not spend the gate."""
-    cur.execute(
-        "SELECT 1 FROM provisioner_access_log "
-        "WHERE gate_id = %s AND verb = %s AND status IN ('started', 'ok') LIMIT 1",
-        (gate_id, verb),
-    )
+    'ok' (spent). Attempts that ended in 'error' do not spend the gate.
+
+    exclude_row_id: the caller's OWN just-inserted 'started' row (the server
+    logs started before the spent-check, audit-first) — without the exclusion
+    every call would see itself and refuse itself."""
+    if exclude_row_id is not None:
+        cur.execute(
+            "SELECT 1 FROM provisioner_access_log "
+            "WHERE gate_id = %s AND verb = %s AND status IN ('started', 'ok') "
+            "AND id != %s LIMIT 1",
+            (gate_id, verb, exclude_row_id),
+        )
+    else:
+        cur.execute(
+            "SELECT 1 FROM provisioner_access_log "
+            "WHERE gate_id = %s AND verb = %s AND status IN ('started', 'ok') LIMIT 1",
+            (gate_id, verb),
+        )
     return cur.fetchone() is not None

@@ -94,6 +94,17 @@ def test_gate_already_used_predicate_treats_started_and_ok_as_spent():
     assert "IN ('started', 'ok')" in sql
 
 
+def test_gate_already_used_excludes_this_attempts_own_row():
+    # the server logs started BEFORE the spent-check (audit-first), so the
+    # check must exclude the row it just inserted — by id — or every call
+    # would see its own 'started' row and refuse itself
+    cur = FakeCursor()
+    ledger.gate_already_used(cur, "78463", "provision", exclude_row_id=7)
+    sql, params = cur.calls[0]
+    assert "id != %s" in sql
+    assert params == ("78463", "provision", 7)
+
+
 def test_draft_ddl_covers_every_column_the_ledger_writes():
     draft = _DRAFT.read_text()
     for col in ("verb", "client_key", "silo_ref", "bundle_sha256", "gate_id",
