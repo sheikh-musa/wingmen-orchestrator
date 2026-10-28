@@ -438,6 +438,68 @@ def test_governance_floor_update_with_app_op_ref_succeeds_and_self_audits(gf_db)
     assert rows == [("updated", "cc-paperclip-spike-1", "op#2")]
 
 
+# ── Console follow-up (bus #80595): floors must be retirable ─────────────────
+# Musa lifts/scopes floors (governance-floors.md already has lift/withdrawal
+# entries). DELETE is FK-blocked (a floor row is permanent once audited), so
+# there is no way to stop evaluating a lifted floor without a state column --
+# retired_at/retired_op_ref are that column, and retiring is still an op-gated
+# UPDATE through the same self-audit trigger.
+def test_governance_floor_retire_requires_op_ref(gf_db):
+    _exec(gf_db, "INSERT INTO governance_floor (sentence, op_ref, predicate_sql) "
+                 "VALUES ('test floor', 'op#1', 'SELECT true')")
+    with pytest.raises(psycopg.errors.RaiseException):
+        _exec(gf_db, "UPDATE governance_floor SET retired_at=now(), retired_op_ref='op#2' "
+                     "WHERE sentence='test floor'")
+
+
+def test_governance_floor_retire_without_retired_op_ref_column_raises_check(gf_db):
+    """retired_at set with no retired_op_ref violates the CHECK constraint --
+    this is a separate guard from the app.op_ref session GUC."""
+    _exec(gf_db, "INSERT INTO governance_floor (sentence, op_ref, predicate_sql) "
+                 "VALUES ('test floor', 'op#1', 'SELECT true')")
+    with psycopg.connect(gf_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.op_ref', 'op#2', false)")
+        with pytest.raises(psycopg.errors.CheckViolation):
+            cur.execute("UPDATE governance_floor SET retired_at=now() WHERE sentence='test floor'")
+
+
+def test_governance_floor_retire_logs_retired_event(gf_db):
+    _exec(gf_db, "INSERT INTO governance_floor (sentence, op_ref, predicate_sql) "
+                 "VALUES ('test floor', 'op#1', 'SELECT true')")
+    floor_id = _q(gf_db, "SELECT id FROM governance_floor WHERE sentence='test floor'")[0][0]
+
+    with psycopg.connect(gf_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.actor', 'musa', false)")
+        cur.execute("SELECT set_config('app.op_ref', 'op#2', false)")
+        cur.execute("UPDATE governance_floor SET retired_at=now(), retired_op_ref='op#2' "
+                    "WHERE id=%s", (floor_id,))
+
+    rows = _q(gf_db, "SELECT event, op_ref FROM governance_floor_audit "
+                     "WHERE floor_id=%s ORDER BY at DESC LIMIT 1", (floor_id,))
+    assert rows == [("retired", "op#2")]
+
+
+def test_governance_floor_unretire_logs_unretired_event_and_is_op_gated(gf_db):
+    _exec(gf_db, "INSERT INTO governance_floor (sentence, op_ref, predicate_sql) "
+                 "VALUES ('test floor', 'op#1', 'SELECT true')")
+    floor_id = _q(gf_db, "SELECT id FROM governance_floor WHERE sentence='test floor'")[0][0]
+    with psycopg.connect(gf_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.op_ref', 'op#2', false)")
+        cur.execute("UPDATE governance_floor SET retired_at=now(), retired_op_ref='op#2' "
+                    "WHERE id=%s", (floor_id,))
+
+    with pytest.raises(psycopg.errors.RaiseException):
+        _exec(gf_db, "UPDATE governance_floor SET retired_at=NULL WHERE id=%s", (floor_id,))
+
+    with psycopg.connect(gf_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.op_ref', 'op#3', false)")
+        cur.execute("UPDATE governance_floor SET retired_at=NULL WHERE id=%s", (floor_id,))
+
+    rows = _q(gf_db, "SELECT event, op_ref FROM governance_floor_audit "
+                     "WHERE floor_id=%s ORDER BY at DESC LIMIT 1", (floor_id,))
+    assert rows == [("unretired", "op#3")]
+
+
 def test_governance_floor_insert_self_audits_without_requiring_app_op_ref(gf_db):
     """INSERT uses the row's own (already NOT-NULL-enforced) op_ref column --
     no session GUC required, unlike UPDATE/DELETE."""

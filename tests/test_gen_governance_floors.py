@@ -30,7 +30,8 @@ def floor_db(pg_dsn):
                  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                  sentence text NOT NULL, op_ref text NOT NULL,
                  predicate_sql text NOT NULL, enforced_in_code boolean NOT NULL DEFAULT false,
-                 decision_ref text, created_at timestamptz NOT NULL DEFAULT now()
+                 decision_ref text, retired_at timestamptz, retired_op_ref text,
+                 created_at timestamptz NOT NULL DEFAULT now()
                )"""
         )
         cur.execute(
@@ -50,6 +51,16 @@ def floor_db(pg_dsn):
             "INSERT INTO governance_floor_audit (floor_id, event, actor, op_ref) "
             "VALUES (%s, 'checked_pass', 'governance_floor_reconcile.py', 'op#32730')",
             (floor_id,),
+        )
+    return pg_dsn
+
+
+@pytest.fixture
+def floor_db_with_retired(floor_db, pg_dsn):
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO governance_floor (sentence, op_ref, predicate_sql, retired_at, retired_op_ref) "
+            "VALUES ('A lifted floor.', 'op#1', 'SELECT true', now(), 'op#99')"
         )
     return pg_dsn
 
@@ -111,7 +122,8 @@ def test_no_floor_rows_still_renders_zero_of_zero(pg_dsn, doc_file):
                  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                  sentence text NOT NULL, op_ref text NOT NULL,
                  predicate_sql text NOT NULL, enforced_in_code boolean NOT NULL DEFAULT false,
-                 decision_ref text, created_at timestamptz NOT NULL DEFAULT now()
+                 decision_ref text, retired_at timestamptz, retired_op_ref text,
+                 created_at timestamptz NOT NULL DEFAULT now()
                )"""
         )
         cur.execute(
@@ -124,3 +136,19 @@ def test_no_floor_rows_still_renders_zero_of_zero(pg_dsn, doc_file):
         )
     assert ggf.main(["--dsn", pg_dsn]) == 0
     assert "0 of 0 floors passing" in doc_file.read_text()
+
+
+# ── Retirable floors (console bus #80595) ─────────────────────────────────
+def test_retired_floor_excluded_from_main_table_and_count(floor_db_with_retired, doc_file):
+    ggf.main(["--dsn", floor_db_with_retired])
+    text = doc_file.read_text()
+    assert "1 of 1 floors passing" in text
+    assert "A lifted floor." not in text.split("Retired floors")[0]
+
+
+def test_retired_floor_listed_separately_with_op_ref(floor_db_with_retired, doc_file):
+    ggf.main(["--dsn", floor_db_with_retired])
+    text = doc_file.read_text()
+    assert "Retired floors" in text
+    assert "op#1" in text
+    assert "op#99" in text

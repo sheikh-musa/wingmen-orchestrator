@@ -143,7 +143,11 @@ CREATE TABLE IF NOT EXISTS governance_floor (
     predicate_sql       text        NOT NULL,
     enforced_in_code    boolean     NOT NULL DEFAULT false,
     decision_ref        text,
-    created_at          timestamptz NOT NULL DEFAULT now()
+    retired_at          timestamptz,
+    retired_op_ref      text,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT governance_floor_retired_op_ref_required
+        CHECK (retired_at IS NULL OR retired_op_ref IS NOT NULL)
 );
 
 COMMENT ON TABLE governance_floor IS
@@ -162,6 +166,18 @@ COMMENT ON COLUMN governance_floor.decision_ref IS
     'decisions already have a place of record -- this just lets a rule cite the '
     'decision behind it). Deliberately not an FK: a decision may predate the '
     'floor it later justifies, or live in a different table generation.';
+
+COMMENT ON COLUMN governance_floor.retired_at IS
+    'A lifted/withdrawn floor (console bus #80595: Musa lifts and scopes floors, '
+    'governance-floors.md already has lift/withdrawal entries). Floor rows are '
+    'permanent history (DELETE is FK-blocked) -- retiring is how a floor stops '
+    'being evaluated without erasing it. Set/cleared only via UPDATE, which the '
+    'self-audit trigger below already requires app.op_ref for -- un-retiring is '
+    'equally op-gated.';
+
+COMMENT ON COLUMN governance_floor.retired_op_ref IS
+    'The op# that retired (or un-retired) this floor -- distinct from op_ref, '
+    'which cites the op# that CREATED it.';
 
 CREATE TABLE IF NOT EXISTS governance_floor_audit (
     id          bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -247,8 +263,16 @@ BEGIN
     END IF;
 
     IF TG_OP = 'UPDATE' THEN
-        INSERT INTO governance_floor_audit (floor_id, event, actor, op_ref, note)
-        VALUES (NEW.id, 'updated', COALESCE(v_actor, 'unknown'), v_op_ref, NEW.sentence);
+        IF OLD.retired_at IS NULL AND NEW.retired_at IS NOT NULL THEN
+            INSERT INTO governance_floor_audit (floor_id, event, actor, op_ref, note)
+            VALUES (NEW.id, 'retired', COALESCE(v_actor, 'unknown'), v_op_ref, NEW.sentence);
+        ELSIF OLD.retired_at IS NOT NULL AND NEW.retired_at IS NULL THEN
+            INSERT INTO governance_floor_audit (floor_id, event, actor, op_ref, note)
+            VALUES (NEW.id, 'unretired', COALESCE(v_actor, 'unknown'), v_op_ref, NEW.sentence);
+        ELSE
+            INSERT INTO governance_floor_audit (floor_id, event, actor, op_ref, note)
+            VALUES (NEW.id, 'updated', COALESCE(v_actor, 'unknown'), v_op_ref, NEW.sentence);
+        END IF;
         RETURN NEW;
     ELSE -- DELETE
         INSERT INTO governance_floor_audit (floor_id, event, actor, op_ref, note)

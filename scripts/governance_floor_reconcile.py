@@ -29,7 +29,8 @@ def evaluate(dsn: str) -> list[dict]:
     bad floor row must not hide every other floor's result."""
     results = []
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, op_ref, sentence, predicate_sql FROM governance_floor ORDER BY id")
+        cur.execute("SELECT id, op_ref, sentence, predicate_sql FROM governance_floor "
+                    "WHERE retired_at IS NULL ORDER BY id")
         floors = cur.fetchall()
         for floor_id, op_ref, sentence, predicate_sql in floors:
             try:

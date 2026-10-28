@@ -40,7 +40,8 @@ def floor_db(pg_dsn):
                  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                  sentence text NOT NULL, op_ref text NOT NULL,
                  predicate_sql text NOT NULL, enforced_in_code boolean NOT NULL DEFAULT false,
-                 decision_ref text, created_at timestamptz NOT NULL DEFAULT now()
+                 decision_ref text, retired_at timestamptz, retired_op_ref text,
+                 created_at timestamptz NOT NULL DEFAULT now()
                )"""
         )
         cur.execute(
@@ -116,3 +117,29 @@ def test_json_output(floor_db, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["total"] == 2
     assert out["passing"] == 1
+
+
+# ── Retirable floors (console bus #80595: Musa lifts/scopes floors; with no
+# state column a lifted floor would keep "failing" forever) ──────────────────
+def test_retired_floor_excluded_from_evaluate(floor_db):
+    with psycopg.connect(floor_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("UPDATE governance_floor SET retired_at=now(), retired_op_ref='op#99' "
+                    "WHERE op_ref='op#2'")
+    results = gfr.evaluate(floor_db)
+    assert {r["op_ref"] for r in results} == {"op#1"}
+
+
+def test_retired_floor_gets_no_audit_row_on_record(floor_db):
+    with psycopg.connect(floor_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("UPDATE governance_floor SET retired_at=now(), retired_op_ref='op#99' "
+                    "WHERE op_ref='op#2'")
+    gfr.main(["--dsn", floor_db, "--record"])
+    rows = _q(floor_db, "SELECT op_ref FROM governance_floor_audit WHERE event IN "
+                        "('checked_pass', 'checked_fail')")
+    assert rows == [("op#1",)]
+
+
+def test_all_retired_is_zero_of_zero_not_a_crash(floor_db):
+    with psycopg.connect(floor_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("UPDATE governance_floor SET retired_at=now(), retired_op_ref='op#99'")
+    assert gfr.main(["--dsn", floor_db]) == 0
