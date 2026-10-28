@@ -571,6 +571,125 @@ def run_schema_drift_step():
         return []
 
 
+# 10. LIVE-ENV-FILE SYMLINK WATCH (orch-console #80192). A clone or worktree whose .env is a
+# symlink into the LIVE orchestrator checkout hands any test or script run there the live DSN;
+# the #80158 test-leak investigation turned one up, and three more sat on the Mini the same day.
+# Each sweep scans this host and gzb (over ssh) for .env symlinks under ~/wingmen and the Claude
+# scratch dir that resolve into that host's live checkout from OUTSIDE it, and pages
+# orch-console P2 once per path (a path that goes away and comes back pages again). It never
+# removes a link: that's the owning lane's call. An unreachable host or a failed scan is printed
+# LOUD, never fatal, and keeps that host's previous state; a failed page is retried next sweep.
+ENV_LINK_STATE = _ORCH_DIR / "logs" / "live_env_symlink_watch.json"
+ENV_LINK_HOSTS = ("mini", "gzb")
+ENV_LINK_SCAN_SH = r"""
+LIVE=$(cd "$HOME/wingmen/orchestrator" 2>/dev/null && pwd -P) || LIVE="$HOME/wingmen/orchestrator"
+for r in "$HOME/wingmen" "/tmp/claude-$(id -u)"; do
+  [ -d "$r" ] && (cd "$r" && pwd -P)
+done | sort -u | while IFS= read -r root; do
+  find "$root" -maxdepth 6 \( -name node_modules -o -name .git -o -name .venv -o -name .next \) -prune \
+    -o -name .env -type l -print 2>/dev/null
+done | sort -u | while IFS= read -r l; do
+  t=$(cd "$(dirname "$l")" 2>/dev/null && d=$(readlink "$l") && cd "$(dirname "$d")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$d")") || t=""
+  printf '%s\t%s\t%s\n' "$LIVE" "$l" "$t"
+done
+"""
+
+
+def parse_env_link_scan(text):
+    """(live_root, link, resolved_target) rows from ENV_LINK_SCAN_SH output."""
+    rows = []
+    for line in text.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3:
+            rows.append(tuple(parts))
+    return rows
+
+
+def live_env_links(rows):
+    """PURE: links that resolve into their host's live checkout from outside it, sorted."""
+    out = set()
+    for live, link, target in rows:
+        inside = lambda p: p == live or p.startswith(live.rstrip("/") + "/")
+        if target and inside(target) and not inside(link):
+            out.add(link)
+    return sorted(out)
+
+
+def env_link_plan(host, links, state):
+    """PURE: (paths to page now, new state). state maps host -> paths already paged."""
+    seen = set(state.get(host, []))
+    new = dict(state)
+    new[host] = sorted(links)
+    return [p for p in sorted(links) if p not in seen], new
+
+
+def _scan_env_links(host):
+    cmd = ["sh", "-s"] if host == "mini" else \
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, "sh", "-s"]
+    r = subprocess.run(cmd, input=ENV_LINK_SCAN_SH, capture_output=True, text=True,
+                       timeout=60, check=True)
+    return parse_env_link_scan(r.stdout)
+
+
+def live_env_link_watch(dry=False, scan=None, hosts=ENV_LINK_HOSTS, send=None):
+    """Impure. Returns hosts paged. A failure here is printed loud and never fatal."""
+    import json
+    scan = scan or _scan_env_links
+    try:
+        state = json.loads(ENV_LINK_STATE.read_text()) if ENV_LINK_STATE.exists() else {}
+    except Exception as e:  # noqa: BLE001
+        print(f"LIVE-ENV LINK WATCH could not read state: {type(e).__name__}: {e}")
+        state = {}
+    paged = []
+    for host in hosts:
+        try:
+            links = live_env_links(scan(host))
+        except Exception as e:  # noqa: BLE001 — keep this host's previous state
+            print(f"LIVE-ENV LINK WATCH could not scan {host}: {type(e).__name__}: {e}")
+            continue
+        to_page, new = env_link_plan(host, links, state)
+        if links:
+            print(f"LIVE-ENV LINKS on {host}: " + ", ".join(links))
+        if not to_page:
+            state = new
+            continue
+        if dry:
+            print(f"[dry] LIVE-ENV LINK WATCH would page {host}: " + ", ".join(to_page))
+            continue
+        try:
+            if send is None:
+                from scripts import bus_send
+                send = bus_send.send
+            send("cc-fleet-health", "orch-console", "blocker",
+                 f"live env file symlinked into {len(to_page)} path(s) outside the live checkout on {host}",
+                 f"TL;DR: these .env files on {host} are symlinks into the LIVE orchestrator "
+                 "checkout, so any test or script run from there gets the live DSN (the #80158 "
+                 "leak class).\n\n- " + "\n- ".join(to_page) + "\n\nFix: the owning lane "
+                 "replaces the link with a scoped, non-live env, or removes it. I never delete "
+                 "them. Paged once per path.",
+                 "P2", req=False)
+            state = new
+            paged.append(host)
+        except (Exception, SystemExit) as e:  # noqa: BLE001 — unremembered, retried next sweep
+            print(f"LIVE-ENV LINK WATCH page FAILED for {host}: {type(e).__name__}: {e}")
+    if not dry:
+        try:
+            ENV_LINK_STATE.write_text(json.dumps(state))
+        except Exception as e:  # noqa: BLE001
+            print(f"LIVE-ENV LINK WATCH state write FAILED: {type(e).__name__}: {e}")
+    return paged
+
+
+def run_live_env_link_step():
+    """The sweep's step-10 call: anything live_env_link_watch() fails to contain is printed LOUD
+    and the rest of the sweep keeps running."""
+    try:
+        return live_env_link_watch()
+    except Exception as e:  # noqa: BLE001
+        print(f"LIVE-ENV LINK WATCH FAILED (sweep continues): {type(e).__name__}: {e}")
+        return []
+
+
 def main():
     quiet = "--quiet" in sys.argv
     sessions = live_tmux_sessions()
@@ -714,6 +833,9 @@ def main():
     drift_paged = run_schema_drift_step()
     if drift_paged:
         print("SCHEMA DRIFT WATCH paged orch-console: " + ", ".join(drift_paged))
+    link_paged = run_live_env_link_step()
+    if link_paged:
+        print("LIVE-ENV LINK WATCH paged orch-console: " + ", ".join(link_paged))
 
     if not quiet:
         if marked:
