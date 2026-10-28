@@ -307,8 +307,18 @@ if [ "$_cleared" != 1 ]; then
   # after the row commits; exit 1 if DSN unset OR the write raises — so we never CLAIM an
   # operator escalation that didn't land (the very false-'done' Layer 2 exists to kill).
   _escalated=0
+  # Never post this operator page from a test (orch-console #80174, leaks #78935/#80158).
+  # Fail CLOSED: if the guard can't even load, refuse rather than risk a test paging the operator.
+  _esc_refused=''
+  if ! . "$ORCH_DIR/scripts/lib/reset_escalation_guard.sh" 2>/dev/null; then
+    _esc_refused="guard library missing ($ORCH_DIR/scripts/lib/reset_escalation_guard.sh)"
+    echo "[reset_nazim] REFUSED to post the operator-relay row: $_esc_refused. NOTHING was posted." >&2
+  elif reset_escalation_test_context; then
+    _esc_refused="$RESET_ESC_TEST_REASON"
+    reset_escalation_refuse reset_nazim "$_esc_refused"
+  fi
   _py="$ORCH_DIR/.venv/bin/python3"; [ -x "$_py" ] || _py="$HOME/wingmen/orchestrator/.venv/bin/python3"
-  if [ -x "$_py" ]; then
+  if [ -z "$_esc_refused" ] && [ -x "$_py" ]; then
     # Musa op#34845, bus #78757/#78763 (PR-B step 2): was a raw psycopg INSERT INTO
     # agent_messages; routed through scripts/bus_send.py, same sanctioned path as
     # every other migrated writer. Self-relative via ORCH_DIR (bus #78935/#78954),
@@ -324,6 +334,8 @@ if [ "$_cleared" != 1 ]; then
   fi
   if [ "$_escalated" = 1 ]; then
     echo "[reset_nazim] escalated LOUD failure to orch-console (operator relay). Exiting non-zero." >&2
+  elif [ -n "$_esc_refused" ]; then
+    echo "[reset_nazim] recycle STILL FAILED; the escalation was refused (test context), so nothing reached the operator." >&2
   else
     echo "[reset_nazim] WARNING: could NOT write the operator-relay row (DB unset/unreachable). The recycle STILL FAILED — escalate to the operator MANUALLY." >&2
   fi

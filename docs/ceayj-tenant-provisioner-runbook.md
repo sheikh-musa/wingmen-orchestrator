@@ -87,6 +87,24 @@ What the four steps do (each idempotent; re-runs report already-applied):
    PG17-harness-proven: a full forward+revert bundle lifecycle runs as this
    role under exactly these grants (tests/provisioner/
    test_install_store_role_pg17.py).
+
+   The credentials file is a sourceable shell script; its write-DSN line can
+   sit inside an `if [ "$ALLOW_WRITE_DSN" = "1" ]; then ... fi` block — a
+   tripwire so an interactive `source` of the file doesn't export the write
+   DSN into a whole shell session by accident. The installer does **not**
+   require that flag to be set in its own environment (orch-console bus
+   #79852/#79884 decision — option D, chosen over widening the guard or
+   adding a sentinel-file ceremony step): the flag's purpose is to stop
+   *accidental* shell exposure, and the installer is already a stronger
+   control than that flag — console_irsyad_guard's exception #2 admits only
+   this exact entrypoint/argv, `read_admin_dsn` reads one exact key and
+   never evaluates the file as shell, and the ihsanos-residency ref
+   (TENANT-RESIDENCY-001) is still asserted on the DSN it reads regardless
+   of whether the line was gated. When the matched key is inside a
+   conditional, the installer prints one line naming the required flag(s)
+   and stating the condition is intentionally not enforced here, then
+   proceeds straight to the residency assert — it never silently skips that
+   assert on this path.
 4. `launchctl load` of `launchd/dev.wingmen.ceayj-provisioner.plist` (skip if
    loaded; no credential ever lives in the 0644 plist), then an UNGATED
    socket request must be refused (GATE_INVALID) — the daemon is up AND
