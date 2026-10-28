@@ -269,6 +269,50 @@ def test_ddl_with_fully_valid_shaped_gate_still_refused_end_to_end(tmp_path):
     assert list(db.vault_rows.values())[0]["status"] == "error"
 
 
+def test_ddl_passes_end_to_end_when_wire_migration_matches_the_gate(tmp_path):
+    # Part A (rollout step (c), bus #79024/#79465): once the wire request
+    # carries migration/pr, server.py must thread them into require_gate so
+    # the full independent match (not the unconditional refusal above) is
+    # used, end to end through the real socket.
+    gate_row = {"from_agent": "orch-console", "message_type": "decision",
+                "subject": "apply migration 435 to qa", "body": "", "is_past": True}
+    db = FakeDb(gate_row=gate_row)
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [])
+    resp = _send(sock_path, {
+        "project_ref": "oovskwogvefnznfowjky", "guarded_sql": "drop table t", "reason": "",
+        "gate_id": "56485", "caller": "c", "exec_ledger_id": "e",
+        "migration": "435", "pr": None,
+    })
+    assert resp == {"status": "ok", "rows": []}
+
+
+def test_ddl_still_refused_end_to_end_when_wire_migration_does_not_match_the_gate(tmp_path):
+    gate_row = {"from_agent": "orch-console", "message_type": "decision",
+                "subject": "apply migration 435 to qa", "body": "", "is_past": True}
+    db = FakeDb(gate_row=gate_row)
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [])
+    resp = _send(sock_path, {
+        "project_ref": "oovskwogvefnznfowjky", "guarded_sql": "drop table t", "reason": "",
+        "gate_id": "56485", "caller": "c", "exec_ledger_id": "e",
+        "migration": "999", "pr": None,
+    })
+    assert resp["error"]["code"] == "GATE_INVALID"
+
+
+def test_old_six_key_dml_caller_unaffected_by_migration_pr_amendment_end_to_end(tmp_path):
+    # The deploy-safety property the whole optional-key design rests on
+    # (cc-fleet-health #79465): an old, pre-amendment caller sending exactly
+    # the original 6 keys (no migration/pr at all) must get byte-identical
+    # behaviour on a plain DML call -- no MalformedRequest, ok response.
+    db = FakeDb()
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [{"n": 1}])
+    resp = _send(sock_path, {
+        "project_ref": "oovskwogvefnznfowjky", "guarded_sql": "select count(*) from t", "reason": "",
+        "gate_id": None, "caller": "c", "exec_ledger_id": "e",
+    })
+    assert resp == {"status": "ok", "rows": [{"n": 1}]}
+
+
 def test_dml_still_succeeds_with_no_gate_even_though_ddl_is_refused(tmp_path):
     # DML-only SQL never needs a gate and is unaffected by the DDL refusal
     # above -- confirms the fail-closed fix didn't overreach into DML.

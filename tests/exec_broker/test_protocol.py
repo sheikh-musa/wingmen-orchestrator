@@ -100,6 +100,79 @@ def test_encode_error_ends_with_newline():
     assert encode_error(ErrorCode.INTERNAL_ERROR, "x").endswith(b"\n")
 
 
+def test_parse_request_migration_and_pr_absent_default_to_none():
+    # Part A (rollout step (c), bus #79024/#79465): migration/pr are OPTIONAL
+    # keys -- absent means None, same as an explicit null, and must NOT raise
+    # MalformedRequest. This is the deploy-safety property the whole optional-
+    # key design rests on: an old 6-key caller must keep working unchanged.
+    line = (
+        '{"project_ref":"oovskwogvefnznfowjky","guarded_sql":"select 1",'
+        '"reason":"r","gate_id":null,"caller":"cc-irsyad-2","exec_ledger_id":"abc-123"}'
+    )
+    req = parse_request(line)
+    assert req.migration is None
+    assert req.pr is None
+
+
+def test_parse_request_migration_and_pr_explicit_null():
+    line = (
+        '{"project_ref":"oovskwogvefnznfowjky","guarded_sql":"select 1",'
+        '"reason":"r","gate_id":null,"caller":"cc-irsyad-2","exec_ledger_id":"abc-123",'
+        '"migration":null,"pr":null}'
+    )
+    req = parse_request(line)
+    assert req.migration is None
+    assert req.pr is None
+
+
+def test_parse_request_migration_and_pr_present():
+    line = (
+        '{"project_ref":"goumlynecruxrlmzlntp","guarded_sql":"alter table t add column x int",'
+        '"reason":"r","gate_id":"56485","caller":"cc-irsyad-2","exec_ledger_id":"abc-124",'
+        '"migration":"481","pr":"1072"}'
+    )
+    req = parse_request(line)
+    assert req.migration == "481"
+    assert req.pr == "1072"
+
+
+def test_parse_request_migration_empty_string_raises():
+    # mirrors gate_id's rule: present but "" is neither null nor non-empty
+    line = (
+        '{"project_ref":"x","guarded_sql":"select 1","reason":"r","gate_id":null,'
+        '"caller":"c","exec_ledger_id":"e","migration":""}'
+    )
+    with pytest.raises(MalformedRequest):
+        parse_request(line)
+
+
+def test_parse_request_pr_empty_string_raises():
+    line = (
+        '{"project_ref":"x","guarded_sql":"select 1","reason":"r","gate_id":null,'
+        '"caller":"c","exec_ledger_id":"e","pr":""}'
+    )
+    with pytest.raises(MalformedRequest):
+        parse_request(line)
+
+
+def test_parse_request_migration_non_string_raises():
+    line = (
+        '{"project_ref":"x","guarded_sql":"select 1","reason":"r","gate_id":null,'
+        '"caller":"c","exec_ledger_id":"e","migration":481}'
+    )
+    with pytest.raises(MalformedRequest):
+        parse_request(line)
+
+
+def test_parse_request_pr_non_string_raises():
+    line = (
+        '{"project_ref":"x","guarded_sql":"select 1","reason":"r","gate_id":null,'
+        '"caller":"c","exec_ledger_id":"e","pr":1072}'
+    )
+    with pytest.raises(MalformedRequest):
+        parse_request(line)
+
+
 def test_read_only_override_error_code_exists_and_encodes():
     # Additive seventh §5 code (orch-console GO #78974, assignment bus #79024):
     # while the bounded ref override is live, a non-plain-read statement is
