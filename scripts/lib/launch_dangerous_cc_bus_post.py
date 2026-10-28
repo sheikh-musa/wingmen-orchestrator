@@ -7,6 +7,14 @@ hard ~10s bound (SIGALRM) means a hanging send() can never delay session
 teardown; any failure (timeout, no DSN, DB down, SystemExit) is swallowed
 and logged to stderr. This process always exits 0.
 
+connect_timeout=5 / statement_timeout_ms=8000 (bus #80233/#80236, coord's
+PR#591 review): SIGALRM can't interrupt a libpq call blocked in C, so the
+alarm alone only bounds a connect that fails outright (DNS/refused/
+unroutable) -- a connect that SUCCEEDS and then stalls on the INSERT is
+invisible to it. Both numbers sit inside the alarm's 10s with headroom, so
+the real libpq-level bound fires first in the stall case and the alarm
+stays a pure backstop for anything neither one catches.
+
 Env vars read:
   LDCC_FROM_BASE  (required) -- from_agent base id
   LDCC_TO         (required)
@@ -53,6 +61,7 @@ def main() -> int:
             req=os.environ.get("LDCC_REQ") == "1",
             sub_tag=os.environ.get("LDCC_SUB_TAG") or None,
             is_test=os.environ.get("LAUNCH_DANGEROUS_CC_TEST_MODE") == "1",
+            connect_timeout=5, statement_timeout_ms=8000,
         )
     except (Exception, SystemExit, _PostTimeout) as e:  # noqa: BLE001 -- best-effort,
         # never raise: this must never change the EXIT trap's exit status.

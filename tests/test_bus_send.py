@@ -410,6 +410,114 @@ def test_send_sub_tag_defaults_to_none(monkeypatch):
     assert rpc[1][8] is None
 
 
+def test_send_default_connect_has_no_timeout_kwargs(monkeypatch):
+    # bus #80233 (coord's PR#591 review): SIGALRM can't interrupt a libpq call
+    # blocked in C, so a caller that doesn't ask for a bound must see UNCHANGED
+    # behavior -- no connect_timeout/options kwargs sneaking in by default.
+    import psycopg2
+    calls = []
+
+    def _capture(*a, **k):
+        calls.append((a, k))
+        raise RuntimeError("no live DB in tests")
+
+    monkeypatch.setattr(psycopg2, "connect", _capture)
+    with pytest.raises(RuntimeError, match="no live DB in tests"):
+        bs.send("cc-substrate", "cc-orchestrator", "update", "s",
+                 "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused")
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == ("postgresql://unused",)
+    assert kwargs == {}
+
+
+def test_send_passes_connect_timeout_to_psycopg2_connect_and_sets_statement_timeout_local(monkeypatch):
+    # The actual fast-follow (bus #80233/#80236, revised after coord's live
+    # pooler probe #80453): connect_timeout still goes straight to
+    # psycopg2.connect, but statement_timeout_ms is now a SET LOCAL inside
+    # send()'s own transaction, NOT a connection-string options= GUC --
+    # the Supabase pooler the real bus DSN goes through silently ignores
+    # startup options, so options= never actually bounded anything in prod
+    # even though it worked against a direct ephemeral-PG connection in
+    # testing. SET LOCAL is pooler-safe because it's an explicit statement
+    # inside the transaction the pooler already routed, not a connection
+    # parameter the pooler can swallow.
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
+    bs.send("cc-substrate", "cc-orchestrator", "update", "s",
+             "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
+             connect_timeout=5, statement_timeout_ms=8000)
+    set_local = [e for e in cur.executed if "set local statement_timeout" in e[0].lower()]
+    assert len(set_local) == 1
+    assert "8000" in set_local[0][0]
+    # must be the FIRST statement, so it bounds every later statement in
+    # this same transaction (the thread lookups and the post_agent_message
+    # RPC), not just whatever happens to run after it.
+    assert cur.executed[0] is set_local[0]
+
+
+def test_send_statement_timeout_not_set_when_not_requested(monkeypatch):
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
+    bs.send("cc-substrate", "cc-orchestrator", "update", "s",
+             "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused")
+    assert not any("statement_timeout" in e[0].lower() for e in cur.executed)
+
+
+def test_send_connect_timeout_kwarg_unaffected_by_statement_timeout(monkeypatch):
+    import psycopg2
+    calls = []
+
+    def _capture(*a, **k):
+        calls.append((a, k))
+        raise RuntimeError("no live DB in tests")
+
+    monkeypatch.setattr(psycopg2, "connect", _capture)
+    with pytest.raises(RuntimeError, match="no live DB in tests"):
+        bs.send("cc-substrate", "cc-orchestrator", "update", "s",
+                 "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
+                 connect_timeout=5, statement_timeout_ms=8000)
+    assert calls[0][1] == {"connect_timeout": 5}
+
+
+def test_statement_timeout_set_local_really_cancels_a_slow_query(pg_dsn):
+    # Real psycopg2 against the ephemeral PG fixture (no mocking) -- proves
+    # the exact SET LOCAL statement send() now issues actually bounds a
+    # query that hangs AFTER connect succeeds, inside the same transaction,
+    # the precise gap coord's review found. NOTE (coord's live probe,
+    # #80453): this fixture is a DIRECT Postgres connection and can't
+    # exercise pooler behavior -- it proves the SET LOCAL mechanism itself
+    # works, which is the whole point of moving off options= (a connection
+    # startup parameter the real bus DSN's Supabase pooler was silently
+    # dropping). It does not, and cannot, prove anything about the pooler
+    # here; that was verified directly by coord against the live bus DSN.
+    import psycopg2
+    import psycopg2.errors
+
+    conn = psycopg2.connect(pg_dsn)
+    cur = conn.cursor()
+    cur.execute("SET LOCAL statement_timeout = 100")
+    with pytest.raises(psycopg2.errors.QueryCanceled):
+        cur.execute("SELECT pg_sleep(2)")
+    conn.close()
+
+
+def test_send_connect_timeout_without_statement_timeout(monkeypatch):
+    # The two knobs are independent -- a caller can bound connect without
+    # also bounding statement execution.
+    import psycopg2
+    calls = []
+
+    def _capture(*a, **k):
+        calls.append((a, k))
+        raise RuntimeError("no live DB in tests")
+
+    monkeypatch.setattr(psycopg2, "connect", _capture)
+    with pytest.raises(RuntimeError, match="no live DB in tests"):
+        bs.send("cc-substrate", "cc-orchestrator", "update", "s",
+                 "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
+                 connect_timeout=5)
+    assert calls[0][1] == {"connect_timeout": 5}
+
+
 def test_send_posts_through_the_rpc_not_a_raw_insert(monkeypatch):
     # backlog#124 step 2/4 (bus #74863): the fleet-wide cutover that must land
     # BEFORE migration 124 (the revoke) can safely apply -- send() must
