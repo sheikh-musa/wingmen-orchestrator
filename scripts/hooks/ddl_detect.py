@@ -6,13 +6,56 @@ could disagree on the same SQL is exactly the footgun this file exists to
 prevent: BOTH sides invoke (or vendor, pinned by sha256) this SAME module —
 never re-derive the logic in a second place.
 
-DDL-shaped = a top-level CREATE/ALTER/DROP/TRUNCATE (of any object) or
-GRANT/REVOKE … ON, OR one of those keywords hidden inside a dollar-quoted
+DDL-shaped = a top-level CREATE/ALTER/DROP/TRUNCATE (of any object),
+GRANT/REVOKE … ON, or a top-level bare INTO (SELECT … INTO creates a table —
+excluded when it's part of INSERT INTO or MERGE INTO, both plain DML) — OR a
+CREATE/ALTER/DROP/TRUNCATE/GRANT/REVOKE keyword hidden inside a dollar-quoted
 DO/function body — either written literally (CREATE TABLE … AS inside a DO)
 or as a dynamic-EXECUTE string argument (EXECUTE format('CREATE TABLE %I
 (...)', v)). Conservative by construction: a DDL keyword inside a TOP-LEVEL
 comment or string literal is ignored (so DML-only SQL needs no gate), but one
 inside a dollar-quoted body is not — that is exactly where dynamic DDL hides.
+A bare INTO inside a dollar body means PL/pgSQL variable assignment (SELECT x
+INTO v), not table creation, so the body scan does not apply this rule. This
+is correct, not merely unapplied: PL/pgSQL itself refuses a dynamic `SELECT
+... INTO TABLE` (EXECUTE of SELECT ... INTO is not implemented) and static
+`SELECT ... INTO TABLE n` inside a function/DO body is a variable-assignment
+INTO that errors on the bare TABLE keyword — PG never lets either form
+create a table from inside a body, so no gate is needed there regardless.
+
+LEXER BLIND SPOTS CLOSED HERE (whole-branch review + bus #79239, 2026-10-28):
+this is a best-effort single-pass lexer, not a full PG parser, and had three
+proven blind spots that could swallow real top-level code:
+
+1. No double-quoted-IDENTIFIER state: a bare ', --, /* or $tag$ that
+   textually followed a "-quoted identifier opened a bogus noise region as
+   if it were bare code (e.g. SELECT "x--y"; DROP TABLE t hid the DROP inside
+   what looked like a line comment). Fixed by giving "..." its own state in
+   every lexer below, exactly mirroring '...'  — doubled "" is the escaped-
+   quote-inside-identifier rule, same shape as '' inside a string.
+
+2. $ is a legal PG identifier-continuation character, so col$tag$ is ONE
+   identifier token to PG, but the dollar-open regex matched $tag$ mid-
+   identifier anyway, opening a bogus dollar body. Not a demonstrated miss
+   against is_ddl_shaped itself (anything swallowed this way is still a
+   dollar body and still gets DDL-keyword-rescanned) — fixed anyway for
+   correctness/consistency: $ directly after an identifier character is
+   never treated as an opener.
+
+3. standard_conforming_strings=off (a plain session GUC any caller can flip
+   mid-statement with SET or set_config(), no privilege needed) makes PG
+   treat backslash as an escape character inside ordinary '...' strings too,
+   not just E'...' ones. Which of two readings is correct for a given
+   backslash-before-quote is GENUINELY AMBIGUOUS without knowing the runtime
+   GUC value, and picking either one as a hard default is unsafe in the OTHER
+   mode (verified both directions before settling on this fix — assuming
+   SCS=off by default would instead let a real top-level '\' content char
+   under SCS=on swallow everything after it as "still string"). The only
+   safe resolution is to not resolve it: is_ddl_shaped refuses to analyze any
+   inner_sql containing a backslash ANYWHERE and treats it as DDL-shaped
+   unconditionally, the same posture the orchestrator's exec_broker
+   lexical_hazard pre-screen already takes (PR #570) — false refusal, never
+   a missed write.
 
 Importable API:
     from ddl_detect import is_ddl_shaped
@@ -43,6 +86,29 @@ _DDL_KEYWORD_RE = re.compile(r"(?i)\b(?:CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE)
 # a real tag is exactly what false-refused mig381 — cp#122, 2026-10-01, in exec_prod.py's
 # own history before this module existed.)
 _DOLLAR_OPEN_RE = re.compile(r"\$([A-Za-z_]\w*|)\$")
+
+# A top-level bare INTO (SELECT ... INTO creates a table) vs. INSERT INTO or
+# MERGE INTO (both plain DML — MERGE is PG15+ upsert syntax, not a table-
+# creating statement) — tried in this order so INSERT/MERGE INTO is consumed
+# whole and never separately re-matched as a bare INTO.
+_INTO_RE = re.compile(r"(?i)\b(?:insert|merge)\s+into\b|\binto\b")
+
+
+def _is_identifier_char(ch: str) -> bool:
+    """ASCII alnum, underscore, dollar, or any Unicode letter/digit (PG
+    identifiers may contain non-ASCII letters) — broad on purpose: erring
+    broad only means treating MORE $ signs as identifier-internal, never
+    missing a real dollar-quote opener that follows actual non-identifier
+    code."""
+    return ch.isalnum() or ch in ("_", "$")
+
+
+def _has_bare_into(stripped_sql: str) -> bool:
+    for m in _INTO_RE.finditer(stripped_sql):
+        word = m.group(0).lower()
+        if not (word.startswith("insert") or word.startswith("merge")):
+            return True
+    return False
 
 
 def strip_sql_noise(sql: str) -> str:
@@ -89,6 +155,25 @@ def strip_sql_noise(sql: str) -> str:
                 i += 1
             out.append("''")
             continue
+        if ch == '"':                                     # quoted identifier ("" escapes)
+            i += 1
+            while i < n:
+                if sql[i] == '"':
+                    if i + 1 < n and sql[i + 1] == '"':
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            out.append('""')
+            continue
+        if ch == "$" and i > 0 and _is_identifier_char(sql[i - 1]):
+            # $ immediately after an identifier char is part of THAT
+            # identifier to PG, not a dollar-quote opener — pass through as
+            # ordinary code rather than risk opening a bogus body.
+            out.append(ch)
+            i += 1
+            continue
         m = _DOLLAR_OPEN_RE.match(sql, i)                 # dollar-quoted body
         if m:
             tag = m.group(0)
@@ -130,6 +215,21 @@ def strip_comments_only(sql: str) -> str:
                 else:
                     i += 1
             out.append(" ")
+            continue
+        if sql[i] == '"':                                 # quoted identifier, preserved verbatim
+            out.append(sql[i])
+            i += 1
+            while i < n:
+                out.append(sql[i])
+                if sql[i] == '"':
+                    if i + 1 < n and sql[i + 1] == '"':
+                        i += 1
+                        out.append(sql[i])
+                        i += 1
+                        continue
+                    i += 1
+                    break
+                i += 1
             continue
         out.append(sql[i])
         i += 1
@@ -176,6 +276,20 @@ def extract_dollar_bodies(sql: str) -> list[str]:
                     break
                 i += 1
             continue
+        if ch == '"':
+            i += 1
+            while i < n:
+                if sql[i] == '"':
+                    if i + 1 < n and sql[i + 1] == '"':
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "$" and i > 0 and _is_identifier_char(sql[i - 1]):
+            i += 1
+            continue
         m = _DOLLAR_OPEN_RE.match(sql, i)
         if m:
             tag = m.group(0)
@@ -200,8 +314,17 @@ def is_ddl_shaped(inner_sql: str) -> bool:
     deliberately does NOT strip strings (only comments), because that is
     exactly where dynamic DDL hides. DML-only SQL (SELECT/INSERT/UPDATE/DELETE,
     a DO block with only DML inside, set_config) has no DDL keyword anywhere
-    in either scan and needs no gate."""
-    if _DDL_KEYWORD_RE.search(strip_sql_noise(inner_sql)):
+    in either scan and needs no gate.
+
+    Any backslash ANYWHERE in inner_sql short-circuits to True before any
+    lexing runs at all (see module docstring, blind spot 3) — whether a
+    backslash before a quote closes a string depends on the session's
+    standard_conforming_strings GUC, which this static module cannot know,
+    and guessing either way is unsafe in the other mode."""
+    if "\\" in inner_sql:
+        return True
+    stripped = strip_sql_noise(inner_sql)
+    if _DDL_KEYWORD_RE.search(stripped) or _has_bare_into(stripped):
         return True
     for body in extract_dollar_bodies(inner_sql):
         if _DDL_KEYWORD_RE.search(strip_comments_only(body)):

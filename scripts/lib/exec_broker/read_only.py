@@ -115,6 +115,21 @@ _BODY_TOKEN_RE = _word_regex(_FORBIDDEN_BODY_TOKENS)
 
 _HEAD_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
+# Raw "..."-quoted identifier content (doubled "" is the escaped-quote rule),
+# scanned against the ORIGINAL sql -- not the strip_sql_noise output. The
+# vendored lexer's own dquote state (ihsanos PR #1168 re-vendor, bus #79427)
+# now correctly blanks identifier content for DDL-shape purposes, which would
+# otherwise silently undo this module's documented false-refusal on a quoted
+# column named update/into/for/etc (module docstring, FAIL-CLOSED DOCTRINE):
+# the two modules want different things from the SAME quoted text, so this
+# module keeps its own narrower re-check rather than depending on the
+# upstream lexer's (correct, for its own purpose) blanking.
+_DQUOTE_IDENTIFIER_RE = re.compile(r'"((?:[^"]|"")*)"')
+
+
+def _quoted_identifier_contents(sql: str) -> list:
+    return [m.group(1).replace('""', '"') for m in _DQUOTE_IDENTIFIER_RE.finditer(sql)]
+
 
 def is_plain_read(sql: str) -> bool:
     """True iff sql is a plain read: not lexically hazardous, not DDL-shaped
@@ -142,6 +157,14 @@ def is_plain_read(sql: str) -> bool:
     # data-modifying CTEs, SELECT ... INTO, FOR UPDATE, set_config, nextval...
     if _CODE_TOKEN_RE.search(stripped) or _FUNCTION_TOKEN_RE.search(stripped):
         return False
+
+    # (b2) a quoted identifier whose content is itself a forbidden word (e.g.
+    # a column named "update") -- the vendored lexer's dquote state blanks
+    # this from `stripped` above (correct for DDL purposes), so this module's
+    # own documented false-refusal needs its own, separate re-check.
+    for ident in _quoted_identifier_contents(sql):
+        if _CODE_TOKEN_RE.search(ident) or _FUNCTION_TOKEN_RE.search(ident):
+            return False
 
     # (d) dollar bodies get their own scan (comments stripped, strings kept —
     #     where dynamic SQL hides). Today these only occur in a read-shaped

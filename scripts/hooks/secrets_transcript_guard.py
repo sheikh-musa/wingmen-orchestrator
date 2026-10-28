@@ -139,8 +139,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(__file__))
 from secret_shape_patterns import SECRET_VALUE_PATTERNS, find_hits  # noqa: E402
 # ddl_detect.py: vendored verbatim, sha256-pinned, from sheikh-musa/ihsanos
-# scripts/db/lib/ddl_detect.py (branch feat/q206-exec-prod-gate-contract, commit
-# 4cecf9ef, sha256 a0895e0370751f113fc14dbde3611df53a3360700419ffecf7f3ef3630f9ae25)
+# scripts/db/lib/ddl_detect.py (main, PR #1168 squash 799b16c2, sha256 02a4c047d7ad196dc408f3cce384dcc8da5388d6fb26bcd14f29a726c78c453e)
 # -- the ONE DDL-shape classifier shared with exec_prod.py itself (cc-irsyad-2,
 # bus #56752, q#206), so the hook and exec_prod's own --gate requirement can never
 # disagree on the same SQL. Vendored rather than cross-imported: importing across

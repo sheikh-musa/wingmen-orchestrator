@@ -123,6 +123,19 @@ def test_is_plain_read_refuses_identifier_dollar_as_doctrine_false_refusal():
     assert is_plain_read("SELECT col$1 FROM t") is False
 
 
+def test_is_plain_read_refuses_quoted_update_after_ddl_detect_revendor():
+    # ihsanos PR #1168 re-vendor (bus #79427, 2026-10-28): the vendored
+    # ddl_detect.py gained its own "..." dquote state that BLANKS identifier
+    # content (correct for DDL-shape scanning -- a column literally named
+    # "DROP" isn't DDL). strip_sql_noise now blanks "update" here too, which
+    # would silently flip this module's own documented false-refusal (module
+    # docstring, FAIL-CLOSED DOCTRINE) to True if is_plain_read relied on
+    # strip_sql_noise's output alone -- pin the compensating re-check.
+    assert is_plain_read('SELECT "update" FROM t') is False
+    # and the un-poisoned case must still be unaffected:
+    assert is_plain_read('SELECT "col one", "col two" FROM t') is True
+
+
 # --- check_read_only_override (state check wired in Task 5) ------------------
 
 _FUTURE = datetime.now(timezone.utc) + timedelta(hours=1)
