@@ -484,10 +484,12 @@ def _open_spin_proposal_exists(conn) -> bool:
         return True
 
 
-def emit_spin_proposal(conn, d: Decision) -> Optional[int]:
+def emit_spin_proposal(d: Decision) -> Optional[int]:
     """SUPERVISED-propose: post ONE P1 rr spin proposal to orch-console. NEVER actuates — the
     spin is executed only on Nazim's confirm, as a separate (wet-proved) step. Returns the new
-    bus id, or None on failure."""
+    bus id, or None on failure. INDEPENDENT write (own connection via send(), same as before --
+    write_log_row() already committed its own transaction before this runs): send() through
+    scripts/bus_send.py, never a raw INSERT (Musa op#34845, PR-B step 2)."""
     subject = (f"{PROPOSAL_SUBJECT_PREFIX}: demand={d.demand} pool={d.pool_size}/{MAX_LANES} "
                f"on {d.host} — CONFIRM to spin +1 irsyad worker")
     body = (
@@ -500,14 +502,9 @@ def emit_spin_proposal(conn, d: Decision) -> Optional[int]:
         "is the propose-then-confirm gate you set. Kill path stays idle-proof detect-only this phase."
     )
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-                "requires_response,priority) "
-                "VALUES ('cc-orchestrator','orch-console','question',%s,%s,true,'P1') RETURNING id",
-                (subject, body))
-            new_id = cur.fetchone()[0]
-        conn.commit()
+        from scripts.bus_send import send
+        new_id, _thread = send("cc-orchestrator", "orch-console", "question", subject, body,
+                                "P1", req=True)
         return new_id
     except Exception as e:
         print(f"    SUPERVISED: proposal emit failed ({type(e).__name__}: {e})")
@@ -531,7 +528,7 @@ def run_tick(write: bool = True) -> Decision:
         elif should_emit_proposal(AUTOSCALER_MODE, d.would_spin, d.ambiguous,
                                   _open_spin_proposal_exists(conn)):
             # SUPERVISED-propose arm: detect + propose only (no actuation). Gated + deduped.
-            pid = emit_spin_proposal(conn, d)
+            pid = emit_spin_proposal(d)
             if pid is not None:
                 print(f"    SUPERVISED: spin proposal posted to orch-console (bus #{pid}) — "
                       "awaiting Nazim confirm; NO auto-spin")

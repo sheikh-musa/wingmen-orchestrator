@@ -1,0 +1,24 @@
+{
+  "checks": {
+    "operator_asks_ask_surface_chk": "CHECK ((ask_surface = ANY (ARRAY['operator'::text, 'client-channel'::text])))",
+    "operator_asks_bus_evidence_backfill_only_chk": "CHECK (((delivered_source IS DISTINCT FROM 'bus-report'::text) OR delivered_backfilled))",
+    "operator_asks_committed_date_needs_outbound_chk": "CHECK (((committed_date IS NULL) OR (outbound_msg_id IS NOT NULL)))",
+    "operator_asks_delivered_evidence_chk": "CHECK (((delivered_source IS NULL) OR (delivered_source = 'manual'::text) OR (delivered_evidence_ref IS NOT NULL)))",
+    "operator_asks_delivered_needs_source_chk": "CHECK (((delivered_at IS NULL) OR (delivered_source IS NOT NULL)))",
+    "operator_asks_delivered_source_chk": "CHECK (((delivered_source IS NULL) OR (delivered_source = ANY (ARRAY['auto-deploy'::text, 'auto-outbound'::text, 'bus-report'::text, 'manual'::text]))))",
+    "operator_asks_triage_state_chk": "CHECK ((triage_state = ANY (ARRAY['captured'::text, 'ask'::text, 'not_an_ask'::text, 'done'::text])))"
+  },
+  "table": "operator_asks",
+  "triggers": {
+    "operator_asks_delivery_provenance_trg": {
+      "def": "CREATE TRIGGER operator_asks_delivery_provenance_trg BEFORE INSERT OR UPDATE OF delivered_at, delivered_source ON public.operator_asks FOR EACH ROW EXECUTE FUNCTION operator_asks_delivery_provenance()",
+      "function": "operator_asks_delivery_provenance",
+      "function_def": "CREATE OR REPLACE FUNCTION public.operator_asks_delivery_provenance()\n RETURNS trigger\n LANGUAGE plpgsql\n SET search_path TO 'pg_catalog', 'public'\nAS $function$\nBEGIN\n  IF NEW.delivered_at IS NOT NULL AND NEW.delivered_source IS NULL THEN\n    NEW.delivered_source := 'manual';\n  END IF;\n  RETURN NEW;\nEND;\n$function$\n"
+    },
+    "work_item_mirror_ask_trg": {
+      "def": "CREATE TRIGGER work_item_mirror_ask_trg AFTER INSERT OR UPDATE ON public.operator_asks FOR EACH ROW EXECUTE FUNCTION work_item_mirror_ask_trg()",
+      "function": "work_item_mirror_ask_trg",
+      "function_def": "CREATE OR REPLACE FUNCTION public.work_item_mirror_ask_trg()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\nBEGIN\n    -- The mirror must NEVER be able to block the system of record (orch-console review,\n    -- bus #73195): an exception in here degrades to \"work_item missing/stale for this one\n    -- row, surfaced loudly\", never an aborted operator_asks write. The 2026-10-24\n    -- equivalence proof is the drift backstop that catches anything skipped this way.\n    BEGIN\n        PERFORM work_item_mirror('ask', 'operator_asks', NEW.id,\n            work_item_derive_ask(NEW.id, NEW.ask, NEW.triage_state, NEW.closed_at,\n                                  NEW.delegated_to, NEW.committed_date, NEW.triaged_by),\n            'trigger:operator_asks');\n    EXCEPTION WHEN OTHERS THEN\n        RAISE WARNING 'work_item mirror failed for operator_asks id=%: %', NEW.id, SQLERRM;\n    END;\n    RETURN NEW;\nEND;\n$function$\n"
+    }
+  }
+}

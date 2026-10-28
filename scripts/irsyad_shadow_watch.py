@@ -108,14 +108,12 @@ def log(msg: str) -> None:
 
 
 def bus(subject: str, body: str, priority: str = "P2") -> None:
-    """Tell Nazim. Best-effort: a broken bus must not take the watcher down."""
+    """Tell Nazim. Best-effort: a broken bus must not take the watcher down.
+    INDEPENDENT write (own connection each call, same as before) -- send()
+    through scripts/bus_send.py, never a raw INSERT (Musa op#34845, PR-B step 2)."""
     try:
-        with psycopg.connect(_dsn(), connect_timeout=15) as conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, "
-                "body, priority) VALUES ('substrate','orch-console','update',%s,%s,%s)",
-                (subject, body, priority))
-            conn.commit()
+        from scripts.bus_send import send
+        send("substrate", "orch-console", "update", subject, body, priority)
     except Exception as exc:                      # noqa: BLE001 — never fatal
         log(f"bus write failed: {exc}")
 

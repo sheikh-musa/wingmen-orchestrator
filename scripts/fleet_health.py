@@ -479,6 +479,98 @@ def idle_in_tx_watch(dry=False):
     return warns, paged
 
 
+# 9. SCHEMA DRIFT WATCH (orch-console #80025). The operator_asks test fixture is GENERATED from
+# tests/fixtures/schema/<table>.live.json (PR#584), so tests only stay as strict as prod while
+# that snapshot matches live. Each sweep re-reads the live CHECKs + triggers (read-only, via
+# snapshot_live_checks.read_live) and pages orch-console P2 ONCE per distinct drift; a match
+# clears it, so a later drift pages again. A failed read is printed loud and never fatal; a
+# failed page is not remembered, so the next sweep retries it.
+SCHEMA_DRIFT_TABLES = ("operator_asks",)
+SCHEMA_DRIFT_STATE = _ORCH_DIR / "logs" / "schema_drift_watch.json"
+
+
+def _load_schema_snapshot(table):
+    import json
+    from scripts import snapshot_live_checks
+    return json.loads(snapshot_live_checks.snapshot_path(table).read_text())
+
+
+def schema_drift_plan(table, drift, state):
+    """PURE: (page now?, new state). state maps table -> fingerprint of the drift already paged."""
+    import hashlib
+    new = dict(state)
+    if not drift:
+        new.pop(table, None)
+        return False, new
+    key = hashlib.sha256("\n".join(sorted(drift)).encode()).hexdigest()[:16]
+    new[table] = key
+    return state.get(table) != key, new
+
+
+def schema_drift_watch(dry=False, read_live=None, send=None):
+    """Impure. Returns tables paged. A failure here is printed loud and never fatal."""
+    import json
+    try:
+        from scripts import snapshot_live_checks
+    except Exception as e:  # noqa: BLE001 — never fatal to the sweep (console #80071)
+        print(f"SCHEMA DRIFT WATCH could not import snapshot_live_checks: {type(e).__name__}: {e}")
+        return []
+    read_live = read_live or snapshot_live_checks.read_live
+    try:
+        state = json.loads(SCHEMA_DRIFT_STATE.read_text()) if SCHEMA_DRIFT_STATE.exists() else {}
+    except Exception as e:  # noqa: BLE001
+        print(f"SCHEMA DRIFT WATCH could not read state: {type(e).__name__}: {e}")
+        state = {}
+    paged = []
+    for table in SCHEMA_DRIFT_TABLES:
+        try:
+            drift = snapshot_live_checks.diff(read_live(DSN, table), _load_schema_snapshot(table))
+        except Exception as e:  # noqa: BLE001
+            print(f"SCHEMA DRIFT WATCH could not read live/snapshot for {table}: {type(e).__name__}: {e}")
+            continue
+        page, new = schema_drift_plan(table, drift, state)
+        if drift:
+            print(f"SCHEMA DRIFT: live {table} != its test snapshot: " + "; ".join(drift))
+        if not page:
+            state = new
+            continue
+        if dry:
+            print(f"[dry] SCHEMA DRIFT WATCH would page: {table}")
+            continue
+        try:
+            if send is None:
+                from scripts import bus_send
+                send = bus_send.send
+            send("cc-fleet-health", "orch-console", "blocker",
+                 f"schema drift: live {table} no longer matches its test snapshot",
+                 f"TL;DR: the live {table} CHECKs/triggers changed, but the test fixture is still "
+                 "generated from the old snapshot, so tests now pass against a weaker table "
+                 "than prod.\n\n- " + "\n- ".join(drift) + "\n\nFix: in a worktree run "
+                 f"`scripts/snapshot_live_checks.py --table {table} --write`, make the tests pass, "
+                 "PR it. Paged once per distinct drift; clears when live matches again.",
+                 "P2", req=True)
+            state = new
+            paged.append(table)
+        except (Exception, SystemExit) as e:  # noqa: BLE001 — unremembered, retried next sweep
+            print(f"SCHEMA DRIFT WATCH page FAILED for {table}: {type(e).__name__}: {e}")
+    if not dry:
+        try:
+            SCHEMA_DRIFT_STATE.write_text(json.dumps(state))
+        except Exception as e:  # noqa: BLE001
+            print(f"SCHEMA DRIFT WATCH state write FAILED: {type(e).__name__}: {e}")
+    return paged
+
+
+def run_schema_drift_step():
+    """The sweep's step-9 call: anything schema_drift_watch() fails to contain is printed LOUD
+    and the rest of the sweep keeps running (console #80071)."""
+    try:
+        return schema_drift_watch()
+    except Exception as e:  # noqa: BLE001
+        print(f"SCHEMA DRIFT WATCH FAILED (sweep continues): {type(e).__name__}: {e}")
+        return []
+
+
 def main():
     quiet = "--quiet" in sys.argv
     sessions = live_tmux_sessions()
@@ -619,6 +711,9 @@ def main():
         print("IDLE-IN-TX WARN: " + w)
     if idle_paged:
         print("IDLE-IN-TX WATCH paged orch-console: pids " + ", ".join(map(str, idle_paged)))
+    drift_paged = run_schema_drift_step()
+    if drift_paged:
+        print("SCHEMA DRIFT WATCH paged orch-console: " + ", ".join(drift_paged))
 
     if not quiet:
         if marked:

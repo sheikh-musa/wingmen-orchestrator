@@ -45,6 +45,9 @@ def test_is_hard_excluded_covers_the_standing_never_list():
     assert g.is_hard_excluded("irsyad-worker-1") is True
     assert g.is_hard_excluded("irsyad-coord") is True
     assert g.is_hard_excluded("orch-console") is True
+    # orch-console ruling #79984 (2026-10-28): paperclip-spike's live scope (memory-plan build,
+    # fleet launcher PR-B, irsyad bus_send migration) is operator/irsyad-adjacent -> Claude-only
+    assert g.is_hard_excluded("cc-paperclip-spike") is True
     assert g.is_hard_excluded("cosem-port") is False
     assert g.is_hard_excluded("cosem-adcda") is False
 
@@ -203,12 +206,13 @@ def _tok(s, od):
 
 
 def test_flip_back_refused_by_policy_never_writes_pointer_when_absent(tmp_path):
-    # the cc-paperclip-spike case (#79890): no pointer existed, flip refused -> still none
+    # the #79890 shape (seen on cc-paperclip-spike, since hard-excluded by #79984): an unmapped
+    # lane with no pointer, flip refused by policy -> still no pointer
     run = _rc(0)
-    r = g.flip_back_to_glm("cc-paperclip-spike", tmp_path, apply=True, run=run,
+    r = g.flip_back_to_glm("cc-unmapped-spike", tmp_path, apply=True, run=run,
                            token_resolver=_tok, policy_check=_refused)
     assert r["result"] == "REFUSED"
-    assert not (tmp_path / ".cc-paperclip-spike_model").exists()
+    assert not (tmp_path / ".cc-unmapped-spike_model").exists()
     assert run.calls == []
 
 

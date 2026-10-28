@@ -8,6 +8,7 @@ connection (matches the style of test_operator_log_scope.py).
 """
 import os
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -464,6 +465,41 @@ def test_send_passes_posted_by_identity_through(monkeypatch):
     )
     rpc = next(e for e in cur.executed if "post_agent_message" in e[0].lower())
     assert rpc[1][10] == "cc-fleet-health"
+
+
+# ---- post_on_conn() -- for the one call site whose bus row must ride the
+# caller's own already-open transaction, not an independent connection
+# (irsyad_worker_reaper.py's _reap(): the "REAPED" row must not survive if
+# the fleet_lanes/agent_status state change it describes didn't land).
+# Takes a bare cursor, never a conn -- it structurally cannot call commit();
+# that boundary stays the caller's.
+
+def test_post_on_conn_rejects_invalid_priority():
+    cur = _FakeCursor([])
+    with pytest.raises(ValueError):
+        bs.post_on_conn(cur, "cc-orchestrator", "orch-console", "update", "s",
+                         "x" * bs._MIN_BODY_BYTES, "URGENT")
+
+
+def test_post_on_conn_calls_the_rpc_not_a_raw_insert():
+    cur = _FakeCursor([(555, "th-uuid-xyz")])
+    row_id, thread_id = bs.post_on_conn(
+        cur, "cc-orchestrator", "orch-console", "update", "s",
+        "x" * bs._MIN_BODY_BYTES, "P3",
+    )
+    assert (row_id, thread_id) == (555, "th-uuid-xyz")
+    assert not any("insert into agent_messages" in e[0].lower() for e in cur.executed)
+    rpc = next(e for e in cur.executed if "post_agent_message" in e[0].lower())
+    assert rpc[1][:7] == ("cc-orchestrator", "orch-console", "update", "s",
+                           "x" * bs._MIN_BODY_BYTES, "P3", False)
+
+
+def test_post_on_conn_generates_a_thread_when_none_given():
+    cur = _FakeCursor([(555, "th-uuid-xyz")])
+    bs.post_on_conn(cur, "cc-orchestrator", "orch-console", "update", "s",
+                     "x" * bs._MIN_BODY_BYTES, "P3")
+    rpc = next(e for e in cur.executed if "post_agent_message" in e[0].lower())
+    uuid.UUID(rpc[1][7])  # does not raise -- a real uuid4 string, not None/omitted
 
 
 def test_send_with_link_ask_updates_the_existing_row(monkeypatch):
