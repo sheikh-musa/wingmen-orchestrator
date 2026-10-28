@@ -61,6 +61,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
 import psycopg  # noqa: E402
+from psycopg import sql as psql_sql  # noqa: E402
 from substrate_dsn import dsn_from_env_file  # noqa: E402
 from provisioner import registry as provisioner_registry  # noqa: E402
 
@@ -388,6 +389,18 @@ RETURNING id;
 """
 
 
+def _set_role_password(cur, role: str, pw: str) -> None:
+    """ALTER ROLE ... PASSWORD cannot take a server-side bind parameter:
+    psycopg3 binds server-side and utility statements reject params
+    outright (bus #80224 — the live step-2 apply died on exactly this).
+    Compose the statement CLIENT-side via sql.Literal (safe quoting, never
+    f-string/concat); the composed text carries the password, so it must
+    never reach a log or an exception message — say() and InstallError
+    texts elsewhere carry names/counts/shas only."""
+    cur.execute(psql_sql.SQL("ALTER ROLE {} LOGIN PASSWORD {}").format(
+        psql_sql.Identifier(role), psql_sql.Literal(pw)))
+
+
 def step2_log_role(*, apply: bool) -> None:
     substrate = dsn_from_env_file()
     with psycopg.connect(substrate) as conn, conn.cursor() as cur:
@@ -399,7 +412,7 @@ def step2_log_role(*, apply: bool) -> None:
         return
     pw = secrets.token_urlsafe(24)
     with psycopg.connect(substrate) as conn, conn.cursor() as cur:
-        cur.execute("ALTER ROLE provisioner_log_role LOGIN PASSWORD %s", (pw,))
+        _set_role_password(cur, "provisioner_log_role", pw)
         cur.execute("GRANT SELECT ON public.agent_messages TO provisioner_log_role")
         conn.commit()
     dsn = build_role_dsn(substrate, "provisioner_log_role", pw)
@@ -475,7 +488,7 @@ def step3_store_role(*, apply: bool) -> None:
     pw = secrets.token_urlsafe(24)
     with psycopg.connect(admin) as conn, conn.cursor() as cur:
         cur.execute(render_store_grants())
-        cur.execute("ALTER ROLE fleet_provisioner LOGIN PASSWORD %s", (pw,))
+        _set_role_password(cur, "fleet_provisioner", pw)
         conn.commit()
     dsn = build_role_dsn(admin, "fleet_provisioner", pw)
     write_secret_file(STORE_DSN_FILE, dsn + "\n")

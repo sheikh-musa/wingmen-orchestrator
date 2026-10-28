@@ -93,6 +93,42 @@ def test_store_grants_are_idempotent(store):
         conn.execute(inst.render_store_grants())  # step-3 re-run is a no-op
 
 
+def test_role_password_mint_executes_on_real_postgres_through_psycopg3(store):
+    """bus #80224: psycopg3 binds parameters SERVER-SIDE, and utility
+    statements (ALTER ROLE ...) reject bind params outright -- the step-2/3
+    "ALTER ROLE ... PASSWORD %s" shape raised psycopg SyntaxError on the
+    live apply. The mint must build the statement client-side via
+    sql.Literal instead. Proven against the real PG17 harness, not a mock,
+    for BOTH roles the installer mints, and the old shape is pinned to the
+    exact failure class so this test can never pass vacuously."""
+    import secrets as _secrets
+
+    pw = "TestPw_" + _secrets.token_urlsafe(18)
+    roles = ["provisioner_log_role", "fleet_provisioner"]
+    try:
+        with psycopg.connect(store, autocommit=True) as conn:
+            for role in roles:
+                conn.execute(
+                    f"DO $$ BEGIN CREATE ROLE {role} NOLOGIN; "
+                    f"EXCEPTION WHEN duplicate_object THEN NULL; END $$")
+                # the OLD shape must fail on real postgres through psycopg3
+                with pytest.raises(psycopg.errors.SyntaxError) as excinfo:
+                    conn.execute(f"ALTER ROLE {role} LOGIN PASSWORD %s", (pw,))
+                assert pw not in str(excinfo.value), "password leaked in the error text"
+                # the installer's mint path must succeed and actually set LOGIN
+                inst._set_role_password(conn.cursor(), role, pw)
+                can_login = conn.execute(
+                    "SELECT rolcanlogin FROM pg_roles WHERE rolname = %s",
+                    (role,)).fetchone()[0]
+                assert can_login is True, f"{role} did not get LOGIN via _set_role_password"
+    finally:
+        # fleet_provisioner is owned by the store fixture's teardown (its
+        # unconditional REVOKEs assume it exists) -- only the log role is
+        # this test's exclusive residue
+        with psycopg.connect(store, autocommit=True) as conn:
+            conn.execute("DROP ROLE IF EXISTS provisioner_log_role")
+
+
 def test_grant_set_is_exactly_the_bundles_surface_on_pg17(store):
     spec, bundle = _spec_bundle()
     # the admin side: exactly the installer's grant SQL, then a LOGIN the
