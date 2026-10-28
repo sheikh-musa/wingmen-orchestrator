@@ -100,6 +100,12 @@ _SINGLETON_OWN_POINTER = {"cai": ".cai_default_token", "fleet-health": ".fleet-h
 # The fleet-wide default pointer every worker lane falls back to (tier 4).
 _FLEET_DEFAULT_POINTER = ".lane_default_token"
 
+# Per-SESSION pointer for ONE worker lane (tier 2b, console #80254): pins a single
+# lane ahead of its group pin without moving its siblings, e.g.
+# `.lane_session_token.wingmen-sites`. Same honor rule as the group pin (readable,
+# non-forbidden target, else fall through), and still subject to the Musa freeze.
+_LANE_SESSION_POINTER_PREFIX = ".lane_session_token"
+
 # The per-group pointer file prefix (tier 3). The family is appended:
 # `.group_default_token.irsyad`, `.group_default_token.cosem`, …
 _GROUP_POINTER_PREFIX = ".group_default_token"
@@ -288,7 +294,8 @@ def _apply_musa_freeze(resolved: Optional[str], session: str, orch_dir: str) -> 
 
 def resolve_lane_token_path(session: str, orch_dir: Optional[str] = None) -> Optional[str]:
     """Resolve `session` -> ABSOLUTE PATH of the token key file it is CONFIGURED to
-    boot on, honoring tiers 2 (per-session) → 3 (per-group) → 4 (fleet default), or
+    boot on, honoring tiers 2 (per-session; 2b for a worker lane) → 3 (per-group) →
+    4 (fleet default), or
     None to fall through to the .env default account (tier 5).
 
     Fail-open + forbidden-fp-safe (see module docstring). With NO group pointer
@@ -311,10 +318,16 @@ def resolve_lane_token_path(session: str, orch_dir: Optional[str] = None) -> Opt
         own = _SINGLETON_OWN_POINTER.get(session)
         return _read_pointer_target(orch_dir, own) if own else None
 
-    # Worker lane — Tier 3 (per-GROUP) then Tier 4 (fleet default).
-    fam = family_of(session)
+    # Worker lane — Tier 2b (per-SESSION), Tier 3 (per-GROUP), Tier 4 (fleet default).
     resolved: Optional[str] = None
-    if fam:
+    own_target = _read_pointer_target(orch_dir, "%s.%s" % (_LANE_SESSION_POINTER_PREFIX, session))
+    if own_target:
+        fp = _token_fp_at(own_target)
+        if fp is not None and fp not in _FORBIDDEN_TOKEN_FPS:
+            resolved = own_target
+
+    fam = family_of(session)
+    if resolved is None and fam:
         group_target = _read_pointer_target(orch_dir, "%s.%s" % (_GROUP_POINTER_PREFIX, fam))
         if group_target:
             fp = _token_fp_at(group_target)

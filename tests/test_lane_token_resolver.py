@@ -517,3 +517,57 @@ def test_cli_shim_refuses_with_exit_42_and_no_stdout_when_no_syed(orch, tmp_path
     )
     assert out.returncode == 42
     assert out.stdout.strip() == ""
+
+
+# ── Per-session pointer for a WORKER lane (console #80254) ───────────────────
+
+def test_worker_session_pointer_beats_group_and_fleet(orch):
+    """`.lane_session_token.<session>` pins ONE worker lane, ahead of its group pin,
+    while sibling lanes in the same family keep the group pin."""
+    orch_dir, make_key, ptr = orch
+    fleet = make_key("fleet-oauth-token", "FLEET")
+    grp = make_key("group-oauth-token", "GROUP")
+    own = make_key("own-oauth-token", "OWN")
+    ptr(".lane_default_token", fleet)
+    ptr(".group_default_token.wingmen", grp)
+    ptr(".lane_session_token.wingmen-sites", own)
+    assert R.resolve_lane_token_path("wingmen-sites", orch_dir=orch_dir) == own
+    assert R.resolve_lane_token_path("wingmen-blog", orch_dir=orch_dir) == grp
+
+
+def test_worker_session_pointer_unreadable_or_forbidden_falls_through(orch, monkeypatch):
+    """An unreadable target, or a forbidden fp, is ignored -> group pin (fail-open)."""
+    orch_dir, make_key, ptr = orch
+    grp = make_key("group-oauth-token", "GROUP")
+    ptr(".group_default_token.wingmen", grp)
+    ptr(".lane_session_token.wingmen-sites", os.path.join(orch_dir, "keys", "missing"))
+    assert R.resolve_lane_token_path("wingmen-sites", orch_dir=orch_dir) == grp
+    bad = make_key("bad-oauth-token", "BAD")
+    ptr(".lane_session_token.wingmen-sites", bad)
+    monkeypatch.setattr(R, "_FORBIDDEN_TOKEN_FPS", R._FORBIDDEN_TOKEN_FPS | {_fp("BAD")})
+    assert R.resolve_lane_token_path("wingmen-sites", orch_dir=orch_dir) == grp
+
+
+def test_worker_session_pointer_still_subject_to_musa_freeze(orch, monkeypatch):
+    """The per-session pin is NOT a freeze bypass: an active freeze still swaps a
+    Musa target for Syed."""
+    orch_dir, make_key, ptr = orch
+    musa = make_key("musa-oauth-token", "MUSA")
+    syed = make_key("syed-oauth-token", "SYED")
+    ptr(".lane_session_token.wingmen-sites", musa)
+    ptr(".musa_personal_freeze", "2999-01-01T00:00:00Z")
+    fpmap = os.path.join(orch_dir, "fps.map")
+    with open(fpmap, "w") as f:
+        f.write("musa %s\nsyed %s\n" % (_fp("MUSA"), _fp("SYED")))
+    monkeypatch.setenv("TOKEN_FPS_MAP", fpmap)
+    assert R.resolve_lane_token_path("wingmen-sites", orch_dir=orch_dir) == syed
+
+
+def test_worker_session_pointer_not_consulted_for_singletons(orch):
+    """nazim/cai keep their own pointers; a stray .lane_session_token.<body> is ignored."""
+    orch_dir, make_key, ptr = orch
+    own = make_key("nazim-oauth-token", "N")
+    stray = make_key("stray-oauth-token", "S")
+    ptr(".nazim_default_token", own)
+    ptr(".lane_session_token.nazim", stray)
+    assert R.resolve_lane_token_path("nazim", orch_dir=orch_dir) == own
