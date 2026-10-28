@@ -40,6 +40,22 @@ class MalformedRequest(ValueError):
 # caller, not "no gate needed").
 _REQUIRED_KEYS = ("project_ref", "guarded_sql", "reason", "gate_id", "caller", "exec_ledger_id")
 
+# §2 amendment, rollout step (c) (bus #79024/#79465, orch-console-approved
+# design bus #79077): migration/pr, UNLIKE gate_id, are OPTIONAL keys — the
+# key may be absent from the request entirely, which is treated identically
+# to an explicit null. Deliberately different from gate_id's required-but-
+# nullable shape: gate_id's absence-vs-null distinguishes "malformed caller"
+# from "no gate needed" (a real ambiguity), but migration/pr have no such
+# ambiguity to resolve, and requiring the key would force every un-upgraded
+# (pre-amendment) caller into MalformedRequest on EVERY call, including
+# plain DML, the moment the broker deploys this — before the irsyad-side
+# exec_prod change (routed via cc-irsyad-coord) ships. Optional keys mean the
+# two sides' deploys are never hard-coupled: an old 6-key caller keeps
+# working unchanged (absent -> None -> require_gate's existing unconditional
+# DDL refusal, unaffected), and a new caller gets the real migration/PR
+# match the moment both sides are up.
+_OPTIONAL_KEYS = ("migration", "pr")
+
 
 @dataclass(frozen=True)
 class BrokerRequest:
@@ -49,6 +65,8 @@ class BrokerRequest:
     gate_id: str | None
     caller: str
     exec_ledger_id: str
+    migration: str | None = None
+    pr: str | None = None
 
 
 def parse_request(line: str) -> BrokerRequest:
@@ -73,6 +91,13 @@ def parse_request(line: str) -> BrokerRequest:
     if gate_id is not None and not (isinstance(gate_id, str) and gate_id):
         raise MalformedRequest("gate_id must be null or a non-empty string")
 
+    optional_fields: dict[str, "str | None"] = {}
+    for key in _OPTIONAL_KEYS:
+        value = obj.get(key)
+        if value is not None and not (isinstance(value, str) and value):
+            raise MalformedRequest(f"{key!r} must be absent, null, or a non-empty string")
+        optional_fields[key] = value
+
     string_fields: dict[str, str] = {}
     for key in ("project_ref", "guarded_sql", "caller", "exec_ledger_id"):
         value = obj[key]
@@ -91,6 +116,8 @@ def parse_request(line: str) -> BrokerRequest:
         gate_id=gate_id,
         caller=string_fields["caller"],
         exec_ledger_id=string_fields["exec_ledger_id"],
+        migration=optional_fields["migration"],
+        pr=optional_fields["pr"],
     )
 
 

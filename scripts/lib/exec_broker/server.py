@@ -175,7 +175,10 @@ class BrokerServer:
                         ref_override_expires_at=self.ref_override_expires_at,
                         now=now,
                     )
-                    require_gate(req.guarded_sql, req.gate_id, req.project_ref, cur)
+                    require_gate(
+                        req.guarded_sql, req.gate_id, req.project_ref, cur,
+                        migration=req.migration, pr=req.pr,
+                    )
                 except BrokerValidationError as e:
                     log_finalized(cur, row_id, "error", e.code.value)
                     db_conn.commit()

@@ -34,6 +34,27 @@ never an allow-by-default. require_gate() still accepts optional migration/pr
 kwargs so that once the wire contract is amended at rollout step (c) to carry
 them, re-enabling DDL is a matter of making the final refusal conditional on
 their absence, not a redesign.
+
+GAP CLOSED for DDL-shaped, NON-hazardous SQL (rollout step (c), bus
+#79024/#79465, 2026-10-28): the §2 wire request now carries OPTIONAL
+migration/pr fields (protocol.py), and server.py threads them into
+require_gate(). The unconditional refusal above now applies ONLY when
+migration and pr are both absent (an old, pre-amendment caller) — when
+either is supplied, the full independent digit-boundary match
+(_text_mentions_migration_or_pr, ported verbatim from exec_prod.py's own
+function of the same name) is used instead, exactly as this module's kwargs
+always anticipated.
+
+STILL OPEN, deliberately NOT closed by the above (orch-console ruling, bus
+#79468, pending feasibility question #79471): LEXICALLY HAZARDOUS SQL
+(backslash / dquote-hazard / identifier-$, per is_lexically_hazardous) is
+refused UNCONDITIONALLY in require_gate even when migration/pr are supplied
+and match the gate text — a text-only match is not enough for a class of
+input is_ddl_shaped cannot reliably classify at all. Console approved
+letting it through only behind an ADDITIONAL byte-binding check (the
+executed bytes' sha12 matching a sha12 the gate cites), not yet built — see
+require_gate's `if hazardous:` branch. Do not relax that branch without the
+byte-binding check landing first.
 """
 from __future__ import annotations
 
@@ -216,6 +237,25 @@ def require_gate(
             f"gate {gate_id} does not mention the target silo {project_ref!r}",
         )
 
+    if hazardous:
+        # Part A gap, ruled on by orch-console (bus #79465/#79468,
+        # 2026-10-28): a text-only migration/pr match is NOT enough for
+        # lexically hazardous SQL (backslash / dquote-hazard / identifier-$)
+        # -- console approved letting it through ONLY with an additional
+        # byte-binding check (sha256 of the exact executed bytes matching a
+        # sha12 the gate cites), which is not built yet (open feasibility
+        # question on the citation convention, bus #79471). Until that
+        # lands, hazardous SQL is refused unconditionally here, REGARDLESS
+        # of how well migration/pr match the gate text -- do not fold this
+        # into the migration/pr branch below without the byte-binding check
+        # landing first.
+        raise BrokerValidationError(
+            ErrorCode.GATE_INVALID,
+            f"gate {gate_id} is shape-valid but this statement is lexically "
+            "hazardous, which cannot be authorized by a migration/PR text "
+            "match alone pending the byte-binding check (bus #79468/#79471)",
+        )
+
     if migration or pr:
         # Forward-compat path for rollout step (c), once the wire contract
         # carries migration/pr: do the full independent match instead of the
@@ -237,9 +277,8 @@ def require_gate(
     # landing first.
     raise BrokerValidationError(
         ErrorCode.GATE_INVALID,
-        f"gate {gate_id} is shape-valid but this statement is "
-        f"{'lexically hazardous' if hazardous else 'DDL-shaped'} and cannot "
-        "be independently migration/PR-matched in milestone (a) -- refused, "
+        f"gate {gate_id} is shape-valid but DDL-shaped and cannot be "
+        "independently migration/PR-matched in milestone (a) -- refused, "
         "not allowed by default (bus #70929)",
     )
 

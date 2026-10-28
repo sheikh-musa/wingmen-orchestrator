@@ -274,6 +274,27 @@ def test_require_gate_full_match_still_works_once_migration_pr_supplied():
     )  # no raise
 
 
+def test_require_gate_hazardous_still_refused_even_with_matching_migration_pr():
+    # The gap orch-console ruled on (bus #79465/#79468, 2026-10-28): wiring
+    # migration/pr through must NOT also let LEXICALLY HAZARDOUS SQL pass on
+    # a text-mention match alone -- console approved allowing hazardous SQL
+    # through only WITH an additional byte-binding check (sha256 of the
+    # executed bytes matching a sha12 the gate cites), which does not exist
+    # yet (open feasibility question, bus #79471). Until that lands,
+    # hazardous SQL stays refused regardless of how well migration/pr match
+    # the gate text -- this is the fail-closed INTERIM behavior, pinned so a
+    # future byte-binding PR has to deliberately change this test, not drift
+    # into it by accident.
+    row = {"from_agent": "orch-console", "message_type": "decision",
+           "subject": "apply migration 435 to goumlyne", "body": "", "is_past": True}
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(
+            'SELECT "x--y"; DROP TABLE t', "56485", "goumlynecruxrlmzlntp",
+            cur=FakeCursor(row), migration="435",
+        )
+    assert exc.value.code == ErrorCode.GATE_INVALID
+
+
 def test_require_gate_full_match_rejects_mismatched_migration_once_supplied():
     row = {"from_agent": "orch-console", "message_type": "decision",
            "subject": "apply migration 435 to goumlyne", "body": "", "is_past": True}
