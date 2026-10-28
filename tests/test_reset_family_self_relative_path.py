@@ -13,8 +13,14 @@ test_refuse_if_sandboxed_but_live_* / test_dburl_*_sandboxed* tests) and (2) the
 scripts resolving their own path self-relatively, same as reset_auditor.sh. This
 file covers (2): with ORCH_DIR now self-relative, pointing it at THIS repo (which
 has no .env file -- confirmed by test_dburl_resolves_from_the_passed_string in
-test_bus_send.py) is enough to prove isolation, exactly like reset_auditor.sh's
-own existing test -- no fake-$HOME sandbox needed at all.
+test_bus_send.py) is enough to prove isolation -- no fake-$HOME sandbox needed
+at all.
+
+STEP 2 FOLLOW-UP (bus #78886/#78899/#78953, op#34845 PR-B step 2): a static
+grep-clean check alone doesn't prove the migrated bus_send.py CLI invocation
+actually posts. This file's own 3-script coverage above already proves it for
+reset_cai.sh/reset_fleet_health.sh/reset_nazim.sh; reset_auditor.sh (already
+self-relative, needed no .sh change) gets the matching executed proof below.
 """
 import os
 import pathlib
@@ -145,6 +151,36 @@ def test_escalation_posts_a_real_row_with_orch_dir_pointed_at_a_dotenv_less_repo
     assert row is not None, "no row landed -- bus_send invocation did not post"
     from_agent, to_agent, mtype, prio, req = row[0], row[1], row[2], row[3], row[4]
     assert (from_agent, to_agent, mtype, prio, req) == (expected_from, "orch-console", "blocker", "P1", True)
+
+
+def test_reset_auditor_escalation_posts_a_real_row_with_orch_dir_pointed_at_a_dotenv_less_repo(db):
+    # reset_auditor.sh was already self-relative (ORCH_DIR override + HOME-
+    # fallback PY, same pattern the other 3 scripts were fixed to match) --
+    # no .sh change needed here, just the executed-invocation proof console's
+    # bus #78886/#78899 asked for (a static grep-clean check alone doesn't
+    # prove the migrated bus_send.py CLI call actually posts). Extracted from
+    # the VERIFY-failed branch, skipping the preceding composer-pane retry
+    # loop (which calls composer_parse_pane, not defined in this snippet) --
+    # that loop is irrelevant to proving the escalation call itself, so
+    # _cleared=0 is set directly instead of exercised through the loop.
+    script = REPO / "scripts" / "reset_auditor.sh"
+    snippet = _extract(script, 'if [ "$_cleared" != 1 ]; then', r"\n  exit 8\nfi\n")
+    preamble = (
+        '_cleared=0\n'
+        'PY="$ORCH_DIR/.venv/bin/python3"; [ -x "$PY" ] || PY="$HOME/wingmen/orchestrator/.venv/bin/python3"\n'
+    )
+    env = dict(
+        os.environ, ORCH_DIR=str(REPO), DATABASE_URL=db, WINGMEN_TEST_SANDBOX="1",
+        RESET_BY="cc-fleet-health", BASE="cai",
+    )
+    r = subprocess.run(["bash", "-c", preamble + snippet],
+                        capture_output=True, text=True, timeout=30, env=env)
+    assert r.returncode == 8, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+    assert "escalated LOUD failure" in r.stderr, f"stderr={r.stderr!r}"
+    row = _last_row(db)
+    assert row is not None, "no row landed -- bus_send invocation did not post"
+    from_agent, to_agent, mtype, prio, req = row[0], row[1], row[2], row[3], row[4]
+    assert (from_agent, to_agent, mtype, prio, req) == ("cc-fleet-health", "orch-console", "blocker", "P1", True)
 
 
 @pytest.mark.parametrize("name", ["reset_cai.sh", "reset_fleet_health.sh", "reset_nazim.sh"])
