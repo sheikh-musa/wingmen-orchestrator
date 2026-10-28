@@ -1,5 +1,11 @@
 -- ceayj adopt-bariq-provisioner (orch-console #80291 plan, #80298 approval,
 -- #80366 redesign: NO ownership transfer, NO admin grant on the editor role)
+--
+-- ledger: silo=ceayjeamtmcyzzvqflus
+-- (ihsanos multi-tenant DB — the ADOPTED store: this migration runs on the
+-- store that already holds bariq's live artifacts, unlike 128 which ledgers
+-- on the orchestrator substrate where the provisioner is invoked)
+--
 -- ONE-SHOT for the live ihsanos multi-tenant store shape read read-only on
 -- 2026-10-28 (bus #80296): this migration ASSERTS that exact shape first and
 -- refuses (named error, nothing touched) on any drift, then

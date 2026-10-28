@@ -35,6 +35,16 @@ _ispec.loader.exec_module(inst)
 _ADOPT_DRAFT = (ORCH_DIR / "migrations" /
                 "129_ceayj_adopt_bariq_provisioner.sql").read_text()
 
+
+def test_migration_129_header_silo_matches_the_registry():
+    """apply_migration refuses any file without a `-- ledger: silo=<ref>`
+    header, and checks that ref against --silo AND the resolved DSN before
+    touching anything. The ref is NEVER hand-typed (finding 1, #78463): it
+    must equal the registry's alias->ref for this migration's target store."""
+    from provisioner.registry import store_ref
+    assert f"-- ledger: silo={store_ref('ihsanos multi-tenant DB')}" in _ADOPT_DRAFT, \
+        "migration 129 lost its ledger silo header (or the ref drifted from the registry)"
+
 # the LIVE organizations world (2026-10-28 read): the table, RLS on, the
 # three platform policies — slug-lookup verbatim, the two auth.uid()-shaped
 # ones over inert stubs (empty org_members, NULL auth.uid()) so their DDL

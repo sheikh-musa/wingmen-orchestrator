@@ -173,7 +173,7 @@ users-see-their-orgs SELECT) and NO INSERT/DELETE policy, so the canary's
 org INSERT violates row-level security.
 
 Fix = migration `129_ceayj_adopt_bariq_provisioner.sql` (sha12
-1c958540a297; requires installer step 3 landed first). **#80366
+4583e00059a4; requires installer step 3 landed first). **#80366
 redesign: NO ownership transfer, NO admin grant on the editor role** —
 the earlier draft transferred ownership of the live artifacts to fp (so
 the bundle's REVOKE/GRANT/RLS block would run) and granted fp ADMIN
