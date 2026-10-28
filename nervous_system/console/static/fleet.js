@@ -381,7 +381,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v87';
+  var APP_BUILD = 'fc-v88';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -694,7 +694,13 @@
     var act = (live.running && live.activity) || l.activity || l.current_task || "";
     var picked = multiMode && selected[sess];
     var badge = (l.flagged && l.bucket === "offline") ? '<span class="badge">dark</span>' : "";
-    var pool = poolOf(l), tok = tokChip(l.auth_fp, pool, l.auth_mismatch), mdl = mdlChip(l.model, l.model_src);
+    var pool = poolOf(l),
+      // op#35074 (orch-console #79176): an OFFLINE tile paints no key badge — killed
+      // lanes keep their last key until the 24h prune, and a dead tile reading
+      // "on the irsyad key" misled the operator. Badge-only: data-pool above stays so
+      // the fc-v63 roll-up still counts the key ASSIGNMENT.
+      tok = l.bucket === "offline" ? "" : tokChip(l.auth_fp, pool, l.auth_mismatch),
+      mdl = mdlChip(l.model, l.model_src);
     // key roll-up filter (op#20684): a tile off the tapped pool dims, never hides —
     // the operator still sees the whole fleet, just with that key's lanes lit.
     var off = poolFilter && (poolFilter === "?" ? (pool || !l.auth_fp) : pool !== poolFilter);
