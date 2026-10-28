@@ -29,8 +29,14 @@ def _no_inherited_secrets(monkeypatch):
     this way (bus #64769/#64771). Blank the environ for every test in this
     file so there is nothing real left to leak; tests still monkeypatch.setenv
     whatever they individually need on top of this empty baseline.
+
+    The baseline KEEPS WINGMEN_TEST_SANDBOX=1 (orch-console #80187/#80192): a fully empty
+    environ also wiped conftest's suite-wide sandbox default, so bus_send's live-.env/live-DSN
+    refusals were disarmed for this whole file, and CLI tests that reach a DB helper connected
+    to whatever REPO/.env held (live, in a live-checkout or linked-clone run). A test that
+    needs the flag unset still monkeypatch.delenv()s it itself.
     """
-    monkeypatch.setattr(os, "environ", {})
+    monkeypatch.setattr(os, "environ", {"WINGMEN_TEST_SANDBOX": "1"})
 
 
 # ---- --priority is REQUIRED, no default ------------------------------------
@@ -1448,3 +1454,8 @@ def test_non_singleton_base_still_redirects(monkeypatch):
     monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "x")
     with pytest.raises(SystemExit, match="Did you mean --to cc-irsyad-1"):
         bs.refuse_if_base_has_live_instances("cc-irsyad", False)
+
+
+def test_the_blank_environ_baseline_keeps_the_sandbox_flag():
+    # orch-console #80187: an empty baseline silently disarmed the sandbox refusals
+    assert os.environ.get("WINGMEN_TEST_SANDBOX") == "1"

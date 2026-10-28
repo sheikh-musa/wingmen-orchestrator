@@ -115,54 +115,44 @@ def _extract(script_path: pathlib.Path, start: str, end_re: str) -> str:
     return text[i: i + m.end()]
 
 
-def _last_row(dsn):
+def _count_rows(dsn):
     with psycopg.connect(dsn) as c, c.cursor() as cur:
-        cur.execute(
-            "SELECT from_agent, to_agent, message_type, priority, requires_response, subject "
-            "FROM agent_messages ORDER BY id DESC LIMIT 1"
-        )
-        return cur.fetchone()
+        cur.execute("SELECT count(*) FROM agent_messages")
+        return cur.fetchone()[0]
 
 
-@pytest.mark.parametrize("script_name,sess_env,expected_from", [
-    ("reset_cai", {"SESS": "cai"}, "cc-fleet-health"),
-    ("reset_nazim", {"SESS": "nazim"}, "cc-fleet-health"),
-    ("reset_fleet_health", {}, "orch-console"),
+# orch-console #80174: NO test may post a real escalation row, not even to an ephemeral DB.
+# These used to assert a row LANDED; that same shape, run from a scratch clone with the live
+# env file symlinked in, paged the live bus as "LOUD: reset_cai STUCK" (#78935, #80158). The
+# escalation now refuses in any test context, so the proof is: refused, logged, nothing posted.
+# The real post path's argv is covered without a DB in tests/test_reset_escalation_guard.py.
+@pytest.mark.parametrize("script_name,sess_env", [
+    ("reset_cai", {"SESS": "cai"}),
+    ("reset_nazim", {"SESS": "nazim"}),
+    ("reset_fleet_health", {}),
 ])
-def test_escalation_posts_a_real_row_with_orch_dir_pointed_at_a_dotenv_less_repo(
-    script_name, sess_env, expected_from, db
-):
-    # WINGMEN_TEST_SANDBOX=1 proves the (1) backstop never even fires for a
-    # correctly self-relative script -- the escalation must succeed normally,
-    # not get refused.
+def test_escalation_refuses_in_a_test_context_and_posts_nothing(script_name, sess_env, db, tmp_path):
     script = REPO / "scripts" / f"{script_name}.sh"
     snippet = _extract(script, "_escalated=0", r"\nfi\n")
     env = dict(
         os.environ, ORCH_DIR=str(REPO), DATABASE_URL=db, WINGMEN_TEST_SANDBOX="1",
+        LOGDIR=str(tmp_path),
     )
     env.update(sess_env)
     r = subprocess.run(["bash", "-c", snippet],
                         capture_output=True, text=True, timeout=30, env=env)
-    # exit 8 is this branch's own always-fire exit code, same as reset_auditor.sh's
-    # equivalent test -- the real proof is the DB row, not the exit code.
     assert r.returncode == 8, f"stdout={r.stdout!r} stderr={r.stderr!r}"
-    assert "escalated LOUD failure" in r.stderr, f"stderr={r.stderr!r}"
-    row = _last_row(db)
-    assert row is not None, "no row landed -- bus_send invocation did not post"
-    from_agent, to_agent, mtype, prio, req = row[0], row[1], row[2], row[3], row[4]
-    assert (from_agent, to_agent, mtype, prio, req) == (expected_from, "orch-console", "blocker", "P1", True)
+    assert "REFUSED to post the operator-relay row: WINGMEN_TEST_SANDBOX is set" in r.stderr
+    assert "escalated LOUD failure" not in r.stderr
+    assert "escalate to the operator MANUALLY" not in r.stderr and "escalate MANUALLY" not in r.stderr
+    assert _count_rows(db) == 0, "a test posted an escalation row"
+    assert f"{script_name} escalation REFUSED (test context)" in (tmp_path / "reset_escalation_refused.log").read_text()
 
 
-def test_reset_auditor_escalation_posts_a_real_row_with_orch_dir_pointed_at_a_dotenv_less_repo(db):
-    # reset_auditor.sh was already self-relative (ORCH_DIR override + HOME-
-    # fallback PY, same pattern the other 3 scripts were fixed to match) --
-    # no .sh change needed here, just the executed-invocation proof console's
-    # bus #78886/#78899 asked for (a static grep-clean check alone doesn't
-    # prove the migrated bus_send.py CLI call actually posts). Extracted from
-    # the VERIFY-failed branch, skipping the preceding composer-pane retry
-    # loop (which calls composer_parse_pane, not defined in this snippet) --
-    # that loop is irrelevant to proving the escalation call itself, so
-    # _cleared=0 is set directly instead of exercised through the loop.
+def test_reset_auditor_escalation_refuses_in_a_test_context_and_posts_nothing(db, tmp_path):
+    # Extracted from the VERIFY-failed branch, skipping the preceding composer-pane retry
+    # loop (it calls composer_parse_pane, not defined in this snippet); _cleared=0 is set
+    # directly instead.
     script = REPO / "scripts" / "reset_auditor.sh"
     snippet = _extract(script, 'if [ "$_cleared" != 1 ]; then', r"\n  exit 8\nfi\n")
     preamble = (
@@ -171,16 +161,14 @@ def test_reset_auditor_escalation_posts_a_real_row_with_orch_dir_pointed_at_a_do
     )
     env = dict(
         os.environ, ORCH_DIR=str(REPO), DATABASE_URL=db, WINGMEN_TEST_SANDBOX="1",
-        RESET_BY="cc-fleet-health", BASE="cai",
+        RESET_BY="cc-fleet-health", BASE="cai", LOGDIR=str(tmp_path),
     )
     r = subprocess.run(["bash", "-c", preamble + snippet],
                         capture_output=True, text=True, timeout=30, env=env)
     assert r.returncode == 8, f"stdout={r.stdout!r} stderr={r.stderr!r}"
-    assert "escalated LOUD failure" in r.stderr, f"stderr={r.stderr!r}"
-    row = _last_row(db)
-    assert row is not None, "no row landed -- bus_send invocation did not post"
-    from_agent, to_agent, mtype, prio, req = row[0], row[1], row[2], row[3], row[4]
-    assert (from_agent, to_agent, mtype, prio, req) == ("cc-fleet-health", "orch-console", "blocker", "P1", True)
+    assert "REFUSED to post the operator-relay row" in r.stderr
+    assert "escalated LOUD failure" not in r.stderr
+    assert _count_rows(db) == 0, "a test posted an escalation row"
 
 
 @pytest.mark.parametrize("name", ["reset_cai.sh", "reset_fleet_health.sh", "reset_nazim.sh"])

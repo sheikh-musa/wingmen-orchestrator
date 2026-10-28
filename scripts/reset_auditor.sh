@@ -229,7 +229,19 @@ if [ "$_cleared" != 1 ]; then
   # Musa op#34845, bus #78757/#78763 (PR-B step 2): was a raw psycopg INSERT INTO
   # agent_messages; routed through scripts/bus_send.py, same sanctioned path as
   # every other migrated writer.
-  if "$PY" "$ORCH_DIR/scripts/bus_send.py" --to orch-console --from "$RESET_BY" \
+  # Never post this operator page from a test (orch-console #80174, leaks #78935/#80158).
+  # Fail CLOSED: if the guard can't even load, refuse rather than risk a test paging the operator.
+  _esc_refused=''
+  if ! . "$ORCH_DIR/scripts/lib/reset_escalation_guard.sh" 2>/dev/null; then
+    _esc_refused="guard library missing ($ORCH_DIR/scripts/lib/reset_escalation_guard.sh)"
+    echo "[reset_auditor] REFUSED to post the operator-relay row: $_esc_refused. NOTHING was posted." >&2
+  elif reset_escalation_test_context; then
+    _esc_refused="$RESET_ESC_TEST_REASON"
+    reset_escalation_refuse reset_auditor "$_esc_refused"
+  fi
+  if [ -n "$_esc_refused" ]; then
+    echo "[reset_auditor] recycle FAILED; the escalation was refused (test context), so nothing reached the operator." >&2
+  elif "$PY" "$ORCH_DIR/scripts/bus_send.py" --to orch-console --from "$RESET_BY" \
        --type blocker --priority P1 --req \
        --subject "LOUD: reset_auditor $BASE STUCK — /clear did not take, recycle NOT done" \
        --body "reset_auditor.sh fired on $BASE but the /clear did not execute; NO boot was sent. The body is still on its old context. Re-fire on a clean composer." \
