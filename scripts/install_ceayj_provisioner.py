@@ -441,21 +441,45 @@ def render_store_grants() -> str:
                             (revert), FK REFERENCES on content/history
       SELECT (id)           the revert DELETE's WHERE — and nothing else:
                             fleet_provisioner must not read tenant org data
+    NO ALTER ROLE attribute line: CREATE ROLE's defaults already carry
+    NOSUPERUSER/NOBYPASSRLS/NOCREATEDB/NOREPLICATION, and only a superuser
+    may issue ALTER ROLE NAMING those attributes even to set them false —
+    Supabase's admin is not superuser (bus #80261). The attribute guarantee
+    moved to assert_role_not_elevated, a fail-closed post-creation check.
     The negative probes (org-wide SELECT denied, superuser-grant denied) run
     live at install time; the PG17 harness re-proves the whole set with a
-    real bundle apply/revert AS this role."""
+    real bundle apply/revert AS this role — admin side exercised AS a
+    non-superuser CREATEROLE role mirroring Supabase."""
     return "\n".join([
         "DO $$ BEGIN",
         "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fleet_provisioner') THEN",
         "    CREATE ROLE fleet_provisioner CREATEROLE NOLOGIN;",
         "  END IF;",
         "END $$;",
-        "ALTER ROLE fleet_provisioner NOSUPERUSER NOBYPASSRLS NOCREATEDB NOREPLICATION;",
         "GRANT USAGE ON SCHEMA public TO fleet_provisioner WITH GRANT OPTION;",
         "GRANT CREATE ON SCHEMA public TO fleet_provisioner;",
         "GRANT INSERT, DELETE, REFERENCES ON TABLE public.organizations TO fleet_provisioner;",
         "GRANT SELECT (id) ON TABLE public.organizations TO fleet_provisioner;",
     ])
+
+
+def assert_role_not_elevated(cur, role: str) -> None:
+    """Fail-closed attribute guarantee replacing the dropped
+    `ALTER ROLE ... NOSUPERUSER NOBYPASSRLS NOCREATEDB NOREPLICATION`:
+    issuing that ALTER is superuser-only even to set the attributes FALSE
+    (bus #80261 — Supabase's admin role is not a superuser), so the check is
+    an assertion on pg_roles AFTER creation instead. Catches a drifted
+    pre-existing role (the DO block skips creation when it exists) that
+    silently carries an elevated attribute a fresh CREATE would never set."""
+    row = cur.execute(
+        "SELECT rolsuper, rolbypassrls, rolcreatedb, rolreplication "
+        "FROM pg_roles WHERE rolname = %s", (role,)).fetchone()
+    if row is None:
+        raise InstallError(f"{role} does not exist after the grants render — refusing")
+    attrs = dict(zip(("superuser", "bypassrls", "createdb", "replication"), row))
+    if any(row):
+        on = ", ".join(name for name, val in attrs.items() if val)
+        raise InstallError(f"{role} carries elevated attribute(s): {on} — refusing (fail-closed)")
 
 
 def render_install_canary() -> str:
@@ -488,6 +512,7 @@ def step3_store_role(*, apply: bool) -> None:
     pw = secrets.token_urlsafe(24)
     with psycopg.connect(admin) as conn, conn.cursor() as cur:
         cur.execute(render_store_grants())
+        assert_role_not_elevated(cur, "fleet_provisioner")
         _set_role_password(cur, "fleet_provisioner", pw)
         conn.commit()
     dsn = build_role_dsn(admin, "fleet_provisioner", pw)

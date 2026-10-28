@@ -4,11 +4,12 @@ fleet_provisioner on ephemeral PostgreSQL 17 (ceayj itself runs 17.6).
 
 The installer runs the same render_store_grants() SQL as the admin side and
 then proves the surface with the same transactional canary; this file is the
-CI-grade proof: superuser applies the grants once, then EVERYTHING the
-provisioner will ever do on the store happens AS the dedicated role — full
-forward bundle, full revert bundle — plus the negative pins (no org-wide
-SELECT, no superuser escalation). Skips cleanly when no PG17 binary is
-available (pg_dsn fixture).
+CI-grade proof: the admin side runs as a NON-superuser CREATEROLE role
+(_NonSuperAdmin — Supabase's postgres mirror, bus #80261), then EVERYTHING
+the provisioner will ever do on the store happens AS the dedicated role —
+full forward bundle, full revert bundle — plus the negative pins (no
+org-wide SELECT, no superuser escalation). Skips cleanly when no PG17 binary
+is available (pg_dsn fixture).
 """
 import importlib.util
 import sys
@@ -72,10 +73,31 @@ def store(pg_dsn):
         conn.execute(f"DROP ROLE IF EXISTS {spec.editor_role}")
         conn.execute("DROP ROLE IF EXISTS __fp_install_canary")
         conn.execute("DELETE FROM organizations WHERE id = %s", (spec.org_uuid,))
-        conn.execute("REVOKE ALL ON SCHEMA public FROM fleet_provisioner")
-        conn.execute("REVOKE INSERT, DELETE, REFERENCES ON TABLE public.organizations FROM fleet_provisioner")
-        conn.execute("REVOKE SELECT (id) ON TABLE public.organizations FROM fleet_provisioner")
-        conn.execute("DROP ROLE IF EXISTS fleet_provisioner")
+        # grantor matters: schema-public grants were issued BY __harness_admin
+        # (revoke as that grantor — postgres holds no grant option there),
+        # while table grants are revocable by the table OWNER (postgres).
+        # A mid-render failure (the RED state) also rolls the CREATE ROLE
+        # back, so each role may legitimately not exist here.
+        for role in (spec.editor_role, "fleet_provisioner"):
+            exists = conn.execute(
+                "SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone()
+            if exists:
+                conn.execute(f"REVOKE INSERT, DELETE, REFERENCES ON TABLE public.organizations FROM {role}")
+                conn.execute(f"REVOKE SELECT (id) ON TABLE public.organizations FROM {role}")
+        admin_exists = conn.execute(
+            "SELECT 1 FROM pg_roles WHERE rolname = '__harness_admin'").fetchone()
+        if admin_exists:
+            conn.execute("SET ROLE __harness_admin")
+            try:
+                for role in (spec.editor_role, "fleet_provisioner"):
+                    exists = conn.execute(
+                        "SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone()
+                    if exists:
+                        conn.execute(f"REVOKE ALL ON SCHEMA public FROM {role}")
+            finally:
+                conn.execute("RESET ROLE")
+        for role in (spec.editor_role, "fleet_provisioner"):
+            conn.execute(f"DROP ROLE IF EXISTS {role}")
 
 
 def _spec_bundle():
@@ -87,10 +109,52 @@ def _fp(store):
     return store.replace("user=postgres", "user=fleet_provisioner")
 
 
+class _NonSuperAdmin:
+    """Mirrors Supabase's `postgres` role for the step-3 admin side: NOT a
+    superuser, holds CREATEROLE, and owns (or holds grant options on) the
+    objects it administers. The live apply died at bus #80261 because the
+    harness ran this side as a TRUE superuser — ALTER ROLE naming
+    SUPERUSER-family attributes is superuser-only even to set them false,
+    so that whole statement class passed tests and failed on Supabase.
+    Every admin-side statement in this file runs inside this role."""
+
+    def __init__(self, dsn):
+        self.dsn = dsn
+        self._conn = None
+
+    def __enter__(self):
+        self._conn = psycopg.connect(self.dsn, autocommit=True)
+        c = self._conn.cursor()
+        c.execute('DO $$ BEGIN CREATE ROLE __harness_admin CREATEROLE NOLOGIN; '
+                  'EXCEPTION WHEN duplicate_object THEN NULL; END $$')
+        # ownership + grant options over exactly what the admin side touches:
+        # the organizations table, and CREATE/USAGE (with grant option) on
+        # public so it can re-grant them to fleet_provisioner
+        c.execute("ALTER TABLE public.organizations OWNER TO __harness_admin")
+        c.execute("GRANT USAGE, CREATE ON SCHEMA public TO __harness_admin WITH GRANT OPTION")
+        c.execute("SET ROLE __harness_admin")
+        c.close()
+        return self._conn
+
+    def __exit__(self, *exc):
+        c = self._conn.cursor()
+        c.execute("RESET ROLE")
+        c.execute("ALTER TABLE public.organizations OWNER TO postgres")
+        # __harness_admin itself is deliberately LEFT in place: dropping it
+        # while roles it granted (fleet_provisioner) exist fails on grant
+        # dependencies, and the store teardown drops those only afterwards.
+        # It is NOLOGIN, nothing references it, and re-entry tolerates the
+        # duplicate (session-scoped ephemeral cluster).
+        c.close()
+        self._conn.close()
+        return False
+
+
 def test_store_grants_are_idempotent(store):
-    with psycopg.connect(store, autocommit=True) as conn:
-        conn.execute(inst.render_store_grants())
-        conn.execute(inst.render_store_grants())  # step-3 re-run is a no-op
+    with _NonSuperAdmin(store) as admin:
+        admin.execute(inst.render_store_grants())
+        admin.execute(inst.render_store_grants())  # step-3 re-run is a no-op
+        inst.assert_role_not_elevated(admin.cursor(), "fleet_provisioner")
 
 
 def test_role_password_mint_executes_on_real_postgres_through_psycopg3(store):
@@ -131,12 +195,13 @@ def test_role_password_mint_executes_on_real_postgres_through_psycopg3(store):
 
 def test_grant_set_is_exactly_the_bundles_surface_on_pg17(store):
     spec, bundle = _spec_bundle()
-    # the admin side: exactly the installer's grant SQL, then a LOGIN the
-    # harness can connect as (trust auth — the password mint is an
-    # apply-time secret, not a harness concern)
-    with psycopg.connect(store, autocommit=True) as conn:
-        conn.execute(inst.render_store_grants())
-        conn.execute("ALTER ROLE fleet_provisioner LOGIN")
+    # the admin side runs AS the non-superuser CREATEROLE admin (Supabase
+    # mirror, bus #80261): grants, fail-closed attribute assert, and the
+    # LOGIN mint must all work without any superuser-only statement
+    with _NonSuperAdmin(store) as admin:
+        admin.execute(inst.render_store_grants())
+        inst.assert_role_not_elevated(admin.cursor(), "fleet_provisioner")
+        inst._set_role_password(admin.cursor(), "fleet_provisioner", "HarnessMint_0")
     fp = _fp(store)
 
     # 1. the transactional install canary, AS the role: full surface, no residue
