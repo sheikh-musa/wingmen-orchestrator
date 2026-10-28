@@ -543,6 +543,13 @@ def page_priority(f: dict) -> tuple[str, bool]:
     return "P1", True
 
 
+def page_label(f: dict) -> str:
+    """The priority as --dry-run prints it, derived from page_priority so the dry run can never
+    misreport what the live send would page."""
+    prio, req = page_priority(f)
+    return prio + (" rr" if req else "")
+
+
 def _send_page(f: dict) -> int:
     sys.path.insert(0, str(SCRIPTS_DIR.parent))
     from scripts.bus_send import send  # lazy: psycopg2/DB only on the live paging path
@@ -784,7 +791,7 @@ def run_once(args) -> int:
         for f in findings:
             subj, _ = render_page(f)
             tag = "WOULD PAGE" if f in to_page else "suppressed(cooldown)"
-            print(f"  {tag} [{f['kind']}] -> {TO_AGENT} P1 rr: {subj}")
+            print(f"  {tag} [{f['kind']}] -> {TO_AGENT} {page_label(f)}: {subj}")
         for msg in loud:
             print(f"  LOUD (would exit 4): {msg}")
         print("  (dry-run: nothing inserted, paged, pruned or written)")

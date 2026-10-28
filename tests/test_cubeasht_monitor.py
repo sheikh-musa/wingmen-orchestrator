@@ -466,3 +466,14 @@ def test_ssh_unreachable_runner_online_wording_and_priority():
     assert "asleep" not in subj.lower() and "switch it on" not in low
     assert cm.page_priority(f) == ("P2", False)
     assert cm.page_priority({"kind": "unreachable"}) == ("P1", True)
+
+
+def test_dry_run_label_matches_live_page_priority():
+    # 2026-10-28: --dry-run printed a hardcoded "P1 rr" for every finding while the live send used
+    # page_priority (P2/no-rr for ssh_unreachable_runner_online). The label must derive from the
+    # same function the live send uses, so a dry run never misreports what it would page.
+    assert cm.page_label({"kind": "ssh_unreachable_runner_online"}) == "P2"
+    assert cm.page_label({"kind": "unreachable"}) == "P1 rr"
+    for k in ("ssh_unreachable_runner_online", "unreachable", "ram", "runner_offline"):
+        prio, req = cm.page_priority({"kind": k})
+        assert cm.page_label({"kind": k}) == prio + (" rr" if req else "")
