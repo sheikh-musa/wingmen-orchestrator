@@ -1013,3 +1013,50 @@ def test_exclude_sessions_default_covers_bayanqa_and_encoder(monkeypatch):
             assert name in reloaded.EXCLUDE_SESSIONS, name
     finally:
         importlib.reload(w)
+
+
+# --------------------------------------------------------------------------- #
+# P3 rows never count toward a wedge (console #79756/#79761)
+# --------------------------------------------------------------------------- #
+
+class _RowsCursor:
+    """Fake cursor: first execute() returns the windowed unread rows, the second
+    (last-write age) returns one row."""
+    def __init__(self, rows, last_write=6000.0):
+        self._results = [rows, [(last_write,)]]
+        self._cur = None
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def execute(self, sql, params=None): self._cur = self._results.pop(0)
+    def fetchall(self): return self._cur
+    def fetchone(self): return self._cur[0] if self._cur else None
+
+
+class _RowsConn:
+    def __init__(self, rows): self._c = _RowsCursor(rows)
+    def cursor(self): return self._c
+
+
+def test_p3_requires_response_row_is_not_actionable_wedge_signal():
+    # The 2026-10-28 FP: an "at your next clean seam" P3 ask sent with req=True
+    # read as ACTIONABLE unread -> 6 false wedge pages + mid-task auto-nudges.
+    sig = w.read_bus_signal("cc-bariq-1", _RowsConn([("P3", True, "question", 1800.0)]))
+    assert sig.unread == 0
+    assert sig.actionable == 0
+    assert not sig.piling
+
+
+def test_p3_rows_dropped_but_p2_and_above_still_counted():
+    rows = [("P3", True, "question", 3000.0),
+            ("P1", True, "question", 1500.0),
+            ("P2", False, "update", 1300.0)]
+    sig = w.read_bus_signal("cc-bariq-1", _RowsConn(rows))
+    assert sig.unread == 2
+    assert sig.actionable == 1
+    assert sig.oldest_unread_age == 1500.0  # the P3 row's age no longer sets 'oldest'
+
+
+def test_null_priority_row_still_counts():
+    # Unknown priority defaults to P2 elsewhere in this module; never silently dropped.
+    sig = w.read_bus_signal("cc-bariq-1", _RowsConn([(None, True, "question", 1800.0)]))
+    assert sig.unread == 1 and sig.actionable == 1

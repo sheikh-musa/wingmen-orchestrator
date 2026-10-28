@@ -506,6 +506,11 @@ def read_bus_signal(agent: str, conn, also_match: "str | None" = None) -> BusSig
                 "                    WHERE r.from_agent = %s AND r.created_at > am.created_at)",
                 (agent, UNREAD_MIN_AGE_SEC, UNREAD_MAX_AGE_SEC, agent))
         rows = cur.fetchall()
+        # P3 = "handle at your next clean seam" by definition — a lane correctly deferring
+        # it is healthy, not wedged. Even with requires_response it must never read as
+        # actionable unread (console #79756/#79761: a P3 attestation fan-out with req=True
+        # fired 6 false wedge pages + mid-task auto-nudges). NULL priority still counts.
+        rows = [r for r in rows if r[0] != "P3"]
         unread = len(rows)
         oldest = max((float(r[3]) for r in rows if r[3] is not None), default=0.0)
         actionable = sum(1 for r in rows if r[1])
