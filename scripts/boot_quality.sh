@@ -235,4 +235,7 @@ echo "▶ Launching claude --dangerously-skip-permissions --model $MODEL in $Q_D
 # prompt-suggestion widget (the singleton boots historically skipped ensure_lane_deny).
 "$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_deny.py" --cwd "$Q_DIR" || true
 cd "$Q_DIR"
+# Pin this singleton's tmux window to 200x50 before claude starts (orch-console #79940): an 80x24
+# window lets stale render residue sit on the composer border and lane_nudge refuses every nudge.
+source "$ORCH_DIR/scripts/lib/pin_singleton_window_size.sh"
 claude --dangerously-skip-permissions --model "$MODEL"

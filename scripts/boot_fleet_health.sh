@@ -106,6 +106,10 @@ fi
 #    every body's boot (add A loud-if-unpinned + add B consistency assert live in it).
 source "$ORCH_DIR/scripts/lib/pin_fleet_host_id.sh"
 
+# Pin this singleton's tmux window to 200x50 before claude starts (orch-console #79940): an 80x24
+# window lets stale render residue sit on the composer border and lane_nudge refuses every nudge.
+source "$ORCH_DIR/scripts/lib/pin_singleton_window_size.sh"
+
 _sql() { "$VENV_PY" - "$@" <<'PY'
 import os, sys, psycopg
 dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")

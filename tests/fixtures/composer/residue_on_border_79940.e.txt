@@ -1,0 +1,24 @@
+    would start being skipped. The likely fix is to have the heartbeat also
+    reset the status.
+
+  [1mThings I left alone[0m
+  - coffeemedia-1's 9 overdue messages are old (Oct 3 and 17); the lane itself
+    is healthy and the nightly cleanup handles those.
+  - The feature health signals haven't updated since July 8, but memory says
+    that feature was deliberately switched off.
+
+  [1mComing up[0m
+  - MEMORY.md is 24.5 KB, over its 24.4 KB limit. It was already over before
+    this session, and shrinking it needs a careful line-by-line pass.
+  - Two commitments are due within the hour: op#34803 (Musa's date, 12:00Z
+    today) and the op#34963 open-ask cleanup (12:30Z). I didn't check either
+    during the boot pass, so they're next.
+
+  Going idle until the next wake-up.
+
+[38;5;246m✻[39m [38;5;246mCooked for 7m 36s · done 7:28 PM[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m❯ 
+oting without waiting for an external nudge[38;5;244m─────────────────────────────────────
+[39m  [38;5;211m⏵⏵ bypass permissions on[38;5;246m (shift+tab to cycle)[39m

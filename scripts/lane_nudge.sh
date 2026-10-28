@@ -326,6 +326,31 @@ _redraw_cleared_residue() {   # $1 = session
   [ "$pre" != "$post" ]
 }
 
+# Redraw ONCE and re-evaluate the composer; sets _ln_redraw to the outcome. Only 'empty' or
+# 'reprobe=ghost' may deliver; 'no-change', 'unreadable(..)', or any other re-probe verdict
+# leaves the caller's refuse path exactly as it was. Shared by the revert-fail branch (#49010)
+# and the noborder+unsure branch (#79940) so the two can't drift apart.
+_redraw_and_reevaluate() {   # $1 = session
+  _ln_redraw=''
+  if _redraw_cleared_residue "$1"; then
+    composer_parse_pane tmux "$1"
+    # cc-quality #49035: composer_parse sets CC_EMPTY=1 for BOTH a genuinely blank composer
+    # (CC_PARTIAL=ok) AND a capture with no prompt/border found (a mid-repaint frame right after
+    # the resize-back). The delivery loop starts with C-u, so "could not read" must never count
+    # as "confirmed empty" — and must not be re-probed either (no sentinel into an unreadable pane).
+    if [ "${CC_PARTIAL:-}" != 'ok' ]; then
+      _ln_redraw="unreadable(${CC_PARTIAL:-unset})"
+    elif [ "${CC_EMPTY:-0}" = 1 ]; then
+      _ln_redraw='empty'
+    else
+      _probe_composer tmux "$1"
+      _ln_redraw="reprobe=${CC_PROBE:-unset}"
+    fi
+  else
+    _ln_redraw='no-change'
+  fi
+}
+
 if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [ "${CC_N:-0}" -gt 0 ] 2>/dev/null; then
   # STEP-4 (Nazim promotion, coupled behind the pane_busy collapse b5d82ce). The composer READS
   # as real staged text — but a dim AUTOSUGGESTION ghost parses identically (#23536), and at
@@ -350,25 +375,7 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
       # outcome, or a redraw that changed nothing, falls to the unchanged refuse chain below.
       _ln_race=0; _probe_revertfail_is_repaint_race "$SESSION" && _ln_race=1
       _ln_redraw=''
-      if [ "$_ln_race" = 0 ]; then
-        if _redraw_cleared_residue "$SESSION"; then
-          composer_parse_pane tmux "$SESSION"
-          # cc-quality #49035: composer_parse sets CC_EMPTY=1 for BOTH a genuinely blank composer
-          # (CC_PARTIAL=ok) AND a capture with no prompt/border found (a mid-repaint frame right after
-          # the resize-back). The delivery loop starts with C-u, so "could not read" must never count
-          # as "confirmed empty" — and must not be re-probed either (no sentinel into an unreadable pane).
-          if [ "${CC_PARTIAL:-}" != 'ok' ]; then
-            _ln_redraw="unreadable(${CC_PARTIAL:-unset})"
-          elif [ "${CC_EMPTY:-0}" = 1 ]; then
-            _ln_redraw='empty'
-          else
-            _probe_composer tmux "$SESSION"
-            _ln_redraw="reprobe=${CC_PROBE:-unset}"
-          fi
-        else
-          _ln_redraw='no-change'
-        fi
-      fi
+      [ "$_ln_race" = 0 ] && _redraw_and_reevaluate "$SESSION"
       case "$_ln_redraw" in
         empty|reprobe=ghost)
           _log_probe_capture "PROCEEDED after REVERT-FAIL: resize-redraw cleared render residue (${_ln_redraw}), delivering"
@@ -408,6 +415,32 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
       fi
       [ -n "$_ln_redraw" ] && echo "lane_nudge: (resize-redraw was tried first: ${_ln_redraw})" >&2
       exit 3
+          ;;
+      esac
+      ;;
+    unsure)
+      # #79940 (field case 2026-10-28 11:22-11:54Z, cc-fleet-health, ~30 min deaf): a stale render
+      # fragment ("...oting without waiting for an external nudge", same residue as #49010) was drawn
+      # ON the composer's bottom border of an 80x24 window. The composer was EMPTY, but the border
+      # no longer parsed (CC_PARTIAL=noborder), the fragment read as text, and the probe could only
+      # say unsure -> every nudge REFUSED. Same cure as revert-fail: on a STABLE pane, redraw ONCE
+      # and re-evaluate; only a confirmed-empty composer or a ghost re-probe delivers. Scoped to
+      # noborder (the only capture shape residue produces here); an unsure on a clean border, or
+      # text that survives the redraw, refuses exactly as before.
+      _ln_redraw=''
+      if [ "${CC_RAW_PARTIAL:-}" = 'noborder' ] && ! _probe_revertfail_is_repaint_race "$SESSION"; then
+        _redraw_and_reevaluate "$SESSION"
+      fi
+      case "$_ln_redraw" in
+        empty|reprobe=ghost)
+          _log_probe_capture "PROCEEDED after UNSURE+noborder: resize-redraw cleared render residue (${_ln_redraw}), delivering"
+          echo "lane_nudge: unsure/noborder on '$SESSION' was render residue — a resize-redraw cleared it (${_ln_redraw}); proceeding to deliver." >&2
+          ;;
+        *)
+          _log_probe_capture "REFUSED [probe=unsure: real staged text present${_ln_redraw:+; redraw tried: ${_ln_redraw}}], preserved staged"
+          echo "lane_nudge: REFUSED — '$SESSION' (probe=unsure: real staged text present${_ln_redraw:+; resize-redraw tried first: ${_ln_redraw}}); not clearing the composer." >&2
+          echo "           Preserved verbatim to logs/lane_nudge_preserved_input.log (+ raw capture for diagnosis) — submit/escalate it by hand rather than nudging over it." >&2
+          exit 3
           ;;
       esac
       ;;
