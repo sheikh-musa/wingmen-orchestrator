@@ -223,6 +223,7 @@ def asks_delivery_db(pg_dsn, monkeypatch):
                 triage_summary   text,
                 operator_summary text,
                 ask_surface      text,
+                delegated_to     text,
                 created_at       timestamptz NOT NULL DEFAULT now(),
                 delivered_at     timestamptz,
                 closed_at        timestamptz
@@ -230,15 +231,15 @@ def asks_delivery_db(pg_dsn, monkeypatch):
         """)
         cur.execute("""
             INSERT INTO operator_asks
-              (ask, triage_state, triage_summary, operator_summary, delivered_at)
+              (ask, triage_state, triage_summary, operator_summary, delegated_to, delivered_at)
             VALUES
-              ('RAW-CAPTURED-A please do the thing', 'ask', 'Triage decision line', NULL, now()),
-              ('RAW-CAPTURED-B other thing',        'ask', NULL,                 NULL, now()),
-              ('RAW-CAPTURED-C third thing',        'ask', 'unused triage',      'Plain operator line', now())
+              ('RAW-CAPTURED-A please do the thing', 'ask', 'Triage decision line', NULL, 'cc-cosem-adcda-1', now()),
+              ('RAW-CAPTURED-B other thing',        'ask', NULL,                 NULL, 'irsyad-coord',      now()),
+              ('RAW-CAPTURED-C third thing',        'ask', 'unused triage',      'Plain operator line', 'cc-bariq-1', now())
         """)
         cur.execute("""
-            INSERT INTO operator_asks (ask, triage_state, triage_summary, operator_summary)
-            VALUES ('RAW-CAPTURED-D open thing', 'ask', NULL, NULL)
+            INSERT INTO operator_asks (ask, triage_state, triage_summary, operator_summary, delegated_to)
+            VALUES ('RAW-CAPTURED-D open thing', 'ask', NULL, NULL, NULL)
         """)
     # point the console db layer at the ephemeral store and drain any warm pool
     monkeypatch.setenv("CONSOLE_DB_URL", pg_dsn)
@@ -250,7 +251,8 @@ def asks_delivery_db(pg_dsn, monkeypatch):
 def test_delivery_times_never_render_raw_captured_ask(asks_delivery_db):
     """Display text NEVER falls back to the raw captured ask (#61117 class,
     cc-quality #78556 blocker 2): operator_summary, else triage_summary, else
-    the neutral '(awaiting triage)' placeholder — never the raw capture."""
+    an owner-attributed pending line (op#35396) — never the raw capture, and
+    never a bare, un-owned '(awaiting triage)' blank either."""
     out = db.fetch_ask_delivery_times()
     lines = [r["line"] for r in out["measured"]] + [r["line"] for r in out["not_measured"]]
     assert len(lines) == 4
@@ -259,11 +261,59 @@ def test_delivery_times_never_render_raw_captured_ask(asks_delivery_db):
     )
     by_line = {r["line"]: r for r in out["measured"]}
     assert "Triage decision line" in by_line, "NULL operator_summary falls to triage_summary"
-    assert "(awaiting triage)" in by_line, "both summaries NULL -> neutral placeholder"
     assert "Plain operator line" in by_line, "operator_summary wins when present"
+    pending_line = "summary pending from irsyad coordinator (irsyad)"
+    assert pending_line in by_line, "both summaries NULL -> owner+topic pending line, not a blank"
+    assert by_line[pending_line]["pending"] is True, "pending rows are flagged for client-side grouping"
+    assert by_line["Triage decision line"]["pending"] is False, "a real summary is never flagged pending"
     nm = out["not_measured"][0]
-    assert nm["line"] == "(awaiting triage)", "not-measured rows honor the same rule"
+    assert nm["line"] == "summary pending from no owner assigned (other)", (
+        "no delegated_to -> explicit no-owner line, not a blank placeholder"
+    )
+    assert nm["pending"] is True, "not-measured rows honor the same pending flag"
     assert "total_hours" not in nm, "honesty: not-measured rows carry no time field"
+
+
+def test_delivery_times_pending_label_owner_and_topic(asks_delivery_db):
+    """op#35396: the pending fallback names WHO owes the summary and the
+    channel tag, e.g. 'summary pending from irsyad coordinator (irsyad)' —
+    never the bare '(awaiting triage)' blank. Covers the cc- prefix, the
+    trailing per-instance '-N' suffix, and a bare (no cc- prefix) owner."""
+    out = db.fetch_ask_delivery_times()
+    by_line = {r["line"]: r for r in out["measured"]}
+    assert "summary pending from irsyad coordinator (irsyad)" in by_line, (
+        "bare 'irsyad-coord' owner (no cc- prefix, real production shape) resolves to the irsyad topic"
+    )
+    # RAW-CAPTURED-A has a real triage_summary so it never hits the fallback;
+    # exercise the cc-/instance-suffix stripping directly against the helper.
+    assert db._pending_summary_line("cc-cosem-adcda-1") == (
+        "summary pending from cosem adcda (adcda-schedule)"
+    ), "cc- prefix and trailing -1 instance suffix both strip"
+    assert db._pending_summary_line("cc-fleet-health") == (
+        "summary pending from fleet health (infra)"
+    ), "non-coord owner keeps its plain name"
+    assert db._pending_summary_line(None) == "summary pending from no owner assigned (other)"
+
+
+def test_delivery_times_pending_flag_agrees_with_line_on_empty_string(asks_delivery_db):
+    """cc-quality #80511 nit 1: an EMPTY-STRING (not NULL) summary must not
+    make `pending` disagree with the rendered `line` -- an empty-string
+    operator_summary/triage_summary is exactly as unwritten as NULL, so both
+    must fall to the pending owner line AND be flagged pending (otherwise the
+    row silently escapes the client-side >3 collapse)."""
+    with psycopg.connect(asks_delivery_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO operator_asks (ask, triage_state, triage_summary, "
+            "operator_summary, delegated_to, delivered_at) "
+            "VALUES ('RAW-CAPTURED-E empty-string summary', 'ask', '', '', "
+            "'cc-bariq-1', now())"
+        )
+    out = db.fetch_ask_delivery_times()
+    row = [r for r in out["measured"] if r["id"] not in (1, 2, 3)][0]
+    assert row["pending"] is True, "empty-string summary is unwritten, same as NULL"
+    assert row["line"] == db._pending_summary_line("cc-bariq-1"), (
+        "line and pending must agree -- both must take the fallback together"
+    )
 
 
 def test_delivery_times_json_serializable(asks_delivery_db):
