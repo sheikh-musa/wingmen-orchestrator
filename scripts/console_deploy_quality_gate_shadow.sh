@@ -41,6 +41,12 @@ TIMEOUT_SEC="${QUALITY_GATE_SHADOW_TIMEOUT_SEC:-60}"
 PY="${QUALITY_GATE_SHADOW_PYTHON:-}"
 if [ -z "$PY" ] || [ ! -x "$PY" ]; then
   PY="$ROOT/.venv/bin/python3"
+  # A linked worktree has no .venv of its own; use the main checkout's (via the git
+  # common dir) before PATH python3, which lacks PyYAML (orch-console #80411).
+  if [ ! -x "$PY" ]; then
+    _COMMON="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    [ -n "$_COMMON" ] && PY="$(dirname "$_COMMON")/.venv/bin/python3"
+  fi
   [ -x "$PY" ] || PY="$(command -v python3 || true)"
 fi
 
