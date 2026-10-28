@@ -18,10 +18,15 @@ import importlib.util
 import os
 import pathlib
 import stat
+import sys
 
 import pytest
 
-_MOD_PATH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "install_ceayj_provisioner.py"
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
+from provisioner import registry as inst_registry  # noqa: E402
+
+_MOD_PATH = _REPO_ROOT / "scripts" / "install_ceayj_provisioner.py"
 _spec = importlib.util.spec_from_file_location("install_ceayj_provisioner", _MOD_PATH)
 inst = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(inst)
@@ -139,6 +144,41 @@ def test_discover_gate_takes_newest_within_age_floor():
     assert inst.discover_gate(rows, sha12, now=NOW)["id"] == 401
 
 
+def test_step1_argv_rehearses_against_the_draft_when_unnumbered_dry_run():
+    # orch-console bus #79788: dry-run on an unnumbered draft said "would
+    # number draft -> 128_...sql" but never created that file, then still
+    # passed the (nonexistent) numbered path to apply_migration.py, which
+    # refused rc=3 ("not a path and not a bare numeric prefix") -- the
+    # rehearsal never ran. The numbered TARGET only needs to exist on disk
+    # for a REAL --apply; a --dry-run never writes the ledger (it always
+    # ROLLBACKs), so rehearsing against the draft's own existing path is
+    # exactly as safe and exercises identical bytes (resolve_target_migration
+    # already proved same-sha before this is ever called).
+    target = pathlib.Path("/repo/migrations/128_ceayj_provisioner_access_log.sql")
+    argv = inst._step1_argv(target=target, action="number", apply=False, gate_id=999)
+    assert str(inst.DRAFT) in argv
+    assert str(target) not in argv
+    assert "--dry-run" in argv
+
+
+def test_step1_argv_uses_numbered_target_on_apply():
+    target = pathlib.Path("/repo/migrations/128_ceayj_provisioner_access_log.sql")
+    argv = inst._step1_argv(target=target, action="number", apply=True, gate_id=999)
+    assert str(target) in argv
+    assert str(inst.DRAFT) not in argv
+    assert "--gate" in argv and "999" in argv
+
+
+def test_step1_argv_reuses_numbered_target_on_dry_run_when_already_numbered():
+    # action="reuse" means the numbered copy already exists on disk (prior
+    # run numbered it) -- the existing bug was specific to action="number"
+    # (nothing numbered yet); "reuse" rehearses against the real target.
+    target = pathlib.Path("/repo/migrations/128_ceayj_provisioner_access_log.sql")
+    argv = inst._step1_argv(target=target, action="reuse", apply=False, gate_id=999)
+    assert str(target) in argv
+    assert "--dry-run" in argv
+
+
 def test_discover_gate_age_check_converts_non_utc_aware_timestamps():
     # cc-quality Nit2 (#79345): psycopg returns timestamptz as an AWARE
     # datetime that may carry a non-UTC offset (e.g. a DB/session set to
@@ -183,16 +223,28 @@ def test_build_role_dsn_refuses_unsuffixed_admin_username():
 
 
 # --- credential file handling --------------------------------------------------
+# Every admin-DSN fixture below must be pooler-tenant-suffixed to the REAL
+# ihsanos multi-tenant DB ref (loaded from the registry doc, never a fresh
+# literal here either -- same no-hardcode discipline as registry.py itself)
+# because read_admin_dsn now independently asserts it (orch-console bus
+# #79816 Bug 2 challenge: TENANT-RESIDENCY-001 -- the file holds credentials
+# for MORE than one client store, so a heuristic/wrong-tenant pick must
+# refuse, not silently connect fleet_provisioner into another tenant's silo).
+_IHSANOS_REF = inst_registry.store_ref("ihsanos multi-tenant DB")
+_OTHER_REF = "x" * 20  # a different, equally-shaped, definitely-wrong ref
+
+
 def test_read_admin_dsn_reads_env_file_key(tmp_path):
     f = tmp_path / "write_dsn.env"
-    f.write_text("OTHER=1\nIHSANOS_PROD_DATABASE_URL=" + _dsn("postgres.t", "x") + "\n")
+    f.write_text("OTHER=1\nIHSANOS_PROD_DATABASE_URL="
+                  + _dsn(f"postgres.{_IHSANOS_REF}", "x") + "\n")
     os.chmod(f, 0o600)
-    assert inst.read_admin_dsn(f).endswith(_dsn("postgres.t", "x"))
+    assert inst.read_admin_dsn(f).endswith(_dsn(f"postgres.{_IHSANOS_REF}", "x"))
 
 
 def test_read_admin_dsn_refuses_loose_mode_and_missing_key(tmp_path):
     f = tmp_path / "write_dsn.env"
-    f.write_text("IHSANOS_PROD_DATABASE_URL=" + _dsn("x", "y") + "\n")
+    f.write_text("IHSANOS_PROD_DATABASE_URL=" + _dsn(f"x.{_IHSANOS_REF}", "y") + "\n")
     os.chmod(f, 0o644)
     with pytest.raises(inst.InstallError, match="0600"):
         inst.read_admin_dsn(f)
@@ -202,6 +254,45 @@ def test_read_admin_dsn_refuses_loose_mode_and_missing_key(tmp_path):
     os.chmod(g, 0o600)
     with pytest.raises(inst.InstallError, match="IHSANOS_PROD_DATABASE_URL"):
         inst.read_admin_dsn(g)
+
+
+def test_read_admin_dsn_is_exact_key_only_no_heuristic_pick(tmp_path):
+    # orch-console bus #79816: a heuristic ("the one non-RO postgres DSN in
+    # the file") is NOT acceptable -- the file holds write credentials for
+    # more than one client store, so a heuristic pick can land on another
+    # tenant's silo. The correct DSN sitting under an unexpected key must be
+    # REFUSED, not guessed at -- and the refusal names the key NAMES present
+    # (never a value) so console can supply the right one in one round.
+    f = tmp_path / "write_dsn.env"
+    f.write_text(
+        "SOME_UNEXPECTED_KEY_NAME=" + _dsn(f"postgres.{_IHSANOS_REF}", "x") + "\n"
+        "ANOTHER_KEY=" + _dsn(f"postgres.{_IHSANOS_REF}", "y") + "\n"
+    )
+    os.chmod(f, 0o600)
+    with pytest.raises(inst.InstallError, match="IHSANOS_PROD_DATABASE_URL") as exc:
+        inst.read_admin_dsn(f)
+    assert "SOME_UNEXPECTED_KEY_NAME" in str(exc.value)
+    assert "ANOTHER_KEY" in str(exc.value)
+    # the error names the candidate KEYS only, never a value
+    assert "postgresql://" not in str(exc.value)
+
+
+def test_read_admin_dsn_refuses_a_dsn_targeting_a_different_store_ref(tmp_path):
+    # the exact documented key is present, but its VALUE targets a DIFFERENT
+    # project ref -- the key-name match alone cannot catch a credentials
+    # file that was edited to point the right-named var at the wrong store.
+    f = tmp_path / "write_dsn.env"
+    f.write_text("IHSANOS_PROD_DATABASE_URL=" + _dsn(f"postgres.{_OTHER_REF}", "x") + "\n")
+    os.chmod(f, 0o600)
+    with pytest.raises(inst.InstallError, match=_OTHER_REF):
+        inst.read_admin_dsn(f)
+
+
+def test_read_admin_dsn_accepts_exact_key_with_the_correct_store_ref(tmp_path):
+    f = tmp_path / "write_dsn.env"
+    f.write_text("IHSANOS_PROD_DATABASE_URL=" + _dsn(f"postgres.{_IHSANOS_REF}", "x") + "\n")
+    os.chmod(f, 0o600)
+    assert inst.read_admin_dsn(f).endswith(_dsn(f"postgres.{_IHSANOS_REF}", "x"))
 
 
 def test_write_secret_file_enforces_0700_dir_0600_file(tmp_path):

@@ -62,6 +62,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
 import psycopg  # noqa: E402
 from substrate_dsn import dsn_from_env_file  # noqa: E402
+from provisioner import registry as provisioner_registry  # noqa: E402
 
 DRAFT = REPO_ROOT / "migrations" / "drafts" / "ceayj_provisioner_access_log.sql"
 MIGRATIONS = REPO_ROOT / "migrations"
@@ -171,6 +172,27 @@ def fetch_gate_rows(dsn: str, limit: int = 500) -> list[dict]:
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
+def _step1_argv(*, target: Path, action: str, apply: bool, gate_id: int) -> list[str]:
+    """The numbered TARGET file only needs to exist on disk for a real
+    --apply. A --dry-run never writes the ledger (apply_migration always
+    ROLLBACKs it), so when action=="number" the target hasn't been created
+    yet (dry-run never creates it — see step1_substrate_migration) and
+    rehearsing against it would pass apply_migration a nonexistent path,
+    which refuses rc=3 ("not a path and not a bare numeric prefix") before
+    the rehearsal ever runs (orch-console bus #79788). Rehearse against the
+    DRAFT's own existing path instead — resolve_target_migration has already
+    proved it is byte-identical to what the numbered copy would hold."""
+    rehearsal_path = DRAFT if (action == "number" and not apply) else target
+    argv = [sys.executable, str(REPO_ROOT / "scripts" / "apply_migration.py"),
+            str(rehearsal_path), "--silo", SUBSTRATE_SILO,
+            "--gate-dsn-env", "DATABASE_URL"]
+    if not apply:
+        argv.append("--dry-run")
+    else:
+        argv += ["--gate", str(gate_id)]
+    return argv
+
+
 def step1_substrate_migration(*, apply: bool) -> None:
     substrate = dsn_from_env_file()
     target, action = resolve_target_migration(DRAFT, MIGRATIONS)
@@ -184,13 +206,7 @@ def step1_substrate_migration(*, apply: bool) -> None:
             say(f"step1: numbered draft -> {target.name}")
         else:
             say(f"step1: [dry-run] would number draft -> {target.name}")
-    argv = [sys.executable, str(REPO_ROOT / "scripts" / "apply_migration.py"),
-            str(target), "--silo", SUBSTRATE_SILO,
-            "--gate-dsn-env", "DATABASE_URL"]
-    if not apply:
-        argv.append("--dry-run")
-    else:
-        argv += ["--gate", str(gate["id"])]
+    argv = _step1_argv(target=target, action=action, apply=apply, gate_id=gate["id"])
     env = {**os.environ, "DATABASE_URL": substrate}
     proc = subprocess.run(argv, cwd=REPO_ROOT, env=env, capture_output=True, text=True)
     if proc.returncode != 0:
@@ -208,28 +224,74 @@ def build_role_dsn(admin_dsn: str, role: str, password: str) -> str:
     tenant from the username's suffix, #77507) and the password. Host, port,
     db and scheme stay exactly the admin connection's."""
     parts = urlsplit(admin_dsn)
-    if "@" not in (parts.netloc or "") or "." not in parts.username:
-        raise InstallError(
-            "admin DSN username is not pooler-tenant-suffixed (<user>.<tenant>) — refusing")
-    tenant = parts.username.split(".", 1)[1]
+    tenant = _pooler_tenant_ref(admin_dsn, what="admin DSN")
     userinfo = f"{role}.{tenant}:{quote_plus(password)}"
     return urlunsplit((parts.scheme, f"{userinfo}@{parts.hostname}"
                        + (f":{parts.port}" if parts.port else ""),
                        parts.path, parts.query, parts.fragment))
 
 
+IHSANOS_STORE_ALIAS = "ihsanos multi-tenant DB"
+
+
+def _pooler_tenant_ref(dsn: str, *, what: str = "DSN") -> str:
+    """The project ref a pooler DSN authenticates against: the username's
+    <user>.<tenant> suffix (the pooler derives the tenant from it, #77507)."""
+    parts = urlsplit(dsn)
+    if "@" not in (parts.netloc or "") or not parts.username or "." not in parts.username:
+        raise InstallError(f"{what} username is not pooler-tenant-suffixed (<user>.<tenant>) — refusing")
+    return parts.username.split(".", 1)[1]
+
+
 def read_admin_dsn(path: Path) -> str:
+    """Read the admin/write DSN from the console's private credentials file.
+    EXACT key name only — no heuristic pick (orch-console bus #79816: the
+    file holds write credentials for MORE than one client store, so a
+    "guess the one non-RO postgres DSN" fallback can land fleet_provisioner
+    in another tenant's silo, exactly the TENANT-RESIDENCY-001 breach the
+    guard exists to prevent). On a miss, fails loud and names the KEYS
+    present (never a value) so console can supply the right one in one
+    round. Independently of the key, the DSN's own project ref (pooler
+    username suffix) must equal the ihsanos multi-tenant DB ref from
+    docs/data-store-registry.md — loaded via registry.store_ref (the same
+    never-hardcoded loader the provisioner package already uses), never a
+    fresh literal here. This catches the key-name-right-value-wrong case a
+    key match alone cannot."""
     if not path.is_file():
         raise InstallError(f"{path} not found — the console private credentials file is required for step 3")
     mode = stat.S_IMODE(os.stat(path).st_mode)
     if mode & 0o077:
         raise InstallError(f"{path} mode is {oct(mode)} — must be 0600 (it is a credential)")
+    keys_present: list[str] = []
+    dsn = None
     for line in path.read_text().splitlines():
-        if line.strip().startswith(ADMIN_CRED_KEY + "="):
-            val = line.split("=", 1)[1].strip().strip('"').strip("'")
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        keys_present.append(key)
+        if key == ADMIN_CRED_KEY:
+            val = val.strip().strip('"').strip("'")
             if val:
-                return val
-    raise InstallError(f"{ADMIN_CRED_KEY} not found in {path.name}")
+                dsn = val
+    if dsn is None:
+        raise InstallError(
+            f"{ADMIN_CRED_KEY} not found in {path.name} — keys present: "
+            f"{', '.join(keys_present) or '(none)'}"
+        )
+    try:
+        expected_ref = provisioner_registry.store_ref(IHSANOS_STORE_ALIAS)
+    except provisioner_registry.Refuse as exc:
+        raise InstallError(f"could not resolve the {IHSANOS_STORE_ALIAS!r} store ref: {exc}") from exc
+    actual_ref = _pooler_tenant_ref(dsn, what=f"{ADMIN_CRED_KEY} DSN")
+    if actual_ref != expected_ref:
+        raise InstallError(
+            f"{ADMIN_CRED_KEY} in {path.name} targets project ref {actual_ref!r}, "
+            f"expected the {IHSANOS_STORE_ALIAS!r} ref {expected_ref!r} "
+            f"(docs/data-store-registry.md) — refusing (TENANT-RESIDENCY-001)"
+        )
+    return dsn
 
 
 def write_secret_file(path: Path, text: str) -> Path:
