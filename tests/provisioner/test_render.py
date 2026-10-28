@@ -27,12 +27,74 @@ def test_bundle_header_carries_the_registry_ref():
 
 
 def test_every_policy_is_org_pinned():
-    forward = render_mod.render_bundle(BARIQ).forward_sql
-    policies = re.findall(r"^CREATE POLICY .*?(?=^\s*(?:DROP|CREATE|REVOKE|GRANT|ALTER|INSERT|--)|\Z)",
-                          forward, re.MULTILINE | re.DOTALL)
+    # the structural scan runs on the BARE statements (plan §4.3) — the
+    # forward embeds them inside idempotency guards (#80298 condition 3),
+    # so extract the same list the renderer itself scans
+    bundle = render_mod.render_bundle(BARIQ)
+    ctx = {f: getattr(BARIQ, f) for f in
+           ("org_uuid", "editor_role", "content_table", "history_table")}
+    policies = render_mod._policy_statements(ctx)
     assert len(policies) >= 4  # anon read + editor select/update + history select
     for p in policies:
         assert f"org_id = '{BARIQ.org_uuid}'" in p, f"unpinned policy:\n{p}"
+        # and each statement is actually carried into the guarded forward
+        assert p in bundle.forward_sql, f"policy not embedded in forward:\n{p}"
+
+
+def test_forward_is_exact_shape_guarded_not_bare_ddl():
+    # #80298 condition 3: same-name/different-shape objects must REFUSE, so
+    # no bare CREATE POLICY/CREATE TABLE may remain — everything object-
+    # creating sits inside a guard that pins the expected shape
+    forward = render_mod.render_bundle(BARIQ).forward_sql
+    assert "SHAPE-REFUSED" in forward
+    assert not re.findall(r"(?m)^CREATE (?:POLICY|TABLE) ", forward), \
+        "bare DDL escaped the idempotency guards"
+    # the org INSERT carries the marker the store's fp policies pin
+    assert '"managed_by":"wingmen_provisioner"' in forward
+
+
+def test_revert_is_snapshot_guarded_before_any_drop():
+    # #80298 condition 1: the guard runs FIRST — before the first DROP
+    revert = render_mod.render_bundle(BARIQ).revert_sql
+    assert "REVERT-REFUSED" in revert
+    assert revert.index("REVERT-REFUSED") < revert.index("DROP POLICY IF EXISTS")
+
+
+def test_revert_skips_teardown_for_adopted_objects():
+    # #80366: for every object the adoption record names, the revert SKIPS
+    # teardown with a named notice — the adopted editor stays (LOGIN), the
+    # tables/trigger/fn stay with rows, the org row stays. The check reads
+    # provisioner_adopted_objects defensively (to_regclass): a FRESH world
+    # without the table is simply "no adoptions", never an error.
+    revert = render_mod.render_bundle(BARIQ).revert_sql
+    assert revert.count("REVERT-SKIPPED-ADOPTED") >= 3  # tables group, editor, org row
+    assert "to_regclass('public.provisioner_adopted_objects')" in revert
+    for obj in (BARIQ.content_table, BARIQ.editor_role, "organizations_row"):
+        assert f"AND object_name = '{obj}'" in revert, f"no adoption check for {obj}"
+
+
+def test_forward_privilege_block_is_adoption_guarded():
+    # #80366: REVOKE/GRANT/ENABLE-RLS need table ownership — on ADOPTED
+    # objects (original owner keeps them) the forward must SKIP that block
+    # with a named notice instead of failing; the migration's posture
+    # asserts + privilege sync establish what the block would have done
+    forward = render_mod.render_bundle(BARIQ).forward_sql
+    assert "FORWARD-SKIPPED-ADOPTED" in forward
+    # the privilege statements exist only inside the adoption-guarded DO —
+    # never as bare top-level statements (they would need ownership)
+    assert not re.findall(r"(?m)^REVOKE ALL ON ", forward)
+    assert not re.findall(r"(?m)^ALTER TABLE .+ ENABLE ROW LEVEL SECURITY", forward)
+
+
+def test_migration_ledger_create_is_existence_guarded():
+    # #80291: a pre-existing ledger is store infra — the REVOKE/ENABLE-RLS
+    # statements must run only on the create path (they need an ownership
+    # the bundle must never assume), so exactly one bare CREATE, inside
+    # the EXECUTE, and guarded by to_regclass
+    forward = render_mod.render_bundle(BARIQ).forward_sql
+    assert "IF to_regclass('public.migration_ledger') IS NULL THEN" in forward
+    assert forward.count("CREATE TABLE public.migration_ledger") == 1
+    assert forward.count("REVOKE ALL ON public.migration_ledger FROM anon, authenticated") == 1
 
 
 def test_editor_surface_is_least_privilege():
@@ -40,6 +102,11 @@ def test_editor_surface_is_least_privilege():
     assert f"GRANT USAGE ON SCHEMA public TO {BARIQ.editor_role}" in forward
     assert f"GRANT SELECT, UPDATE ON public.{BARIQ.content_table} TO {BARIQ.editor_role}" in forward
     assert f"GRANT SELECT ON public.{BARIQ.history_table} TO {BARIQ.editor_role}" in forward
+    # the fn REVOKE runs on the fresh path only — inside the adoption-guarded
+    # EXECUTE (#80366), so the statement carries the $sub$ wrapper, not a
+    # bare trailing semicolon
+    assert (f"REVOKE ALL ON FUNCTION {BARIQ.content_table}_audit() "
+            "FROM anon, authenticated, PUBLIC" in forward)
     # INSERT/DELETE stay impossible everywhere for the editor
     editor_inserts = re.findall(r"GRANT[^\n]*INSERT[^\n]*" + BARIQ.editor_role, forward)
     assert not editor_inserts
@@ -91,10 +158,12 @@ def test_audit_function_execute_revoked_from_public_too():
     # cc-quality Minor a (PR#566): function EXECUTE defaults to PUBLIC, and
     # revoking anon/authenticated alone leaves the anon-reachable path open
     # per the standing SECDEF rule — the fn is trigger-only today, but the
-    # lockdown must not depend on reachability
+    # lockdown must not depend on reachability. The statement runs on the
+    # fresh path only — inside the adoption-guarded EXECUTE (#80366), so it
+    # carries the $sub$ wrapper, not a bare trailing semicolon
     out = render_mod.render_bundle(BARIQ)
     assert (f"REVOKE ALL ON FUNCTION {BARIQ.content_table}_audit() "
-            "FROM anon, authenticated, PUBLIC;") in out.forward_sql
+            "FROM anon, authenticated, PUBLIC") in out.forward_sql
 
 
 def test_spec_rejects_hyphenated_client_keys():
