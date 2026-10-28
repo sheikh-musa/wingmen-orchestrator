@@ -1,0 +1,6 @@
+{
+  "client_key": "bariq",
+  "alias": "ihsanos multi-tenant DB",
+  "org_uuid": "62617269-7100-4000-8000-000000000001",
+  "seed_keys": ["site", "hero", "testimonials"]
+}
