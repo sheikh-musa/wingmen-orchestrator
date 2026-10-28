@@ -95,6 +95,12 @@ def _make_source_tables(dsn: str) -> None:
                 cancel_reason   text
             )
         """)
+        # Simulates Supabase's own standing ALTER DEFAULT PRIVILEGES grant
+        # (CAI-1018/1019 doctrine, this migration's own header) -- these
+        # SOURCE tables are untouched by 131's REVOKE, so service_role keeps
+        # the DML live code actually relies on.
+        cur.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON agent_messages, operator_asks, "
+                    "held_commitments TO service_role")
 
 
 def _ensure_role(dsn: str, rolename: str) -> bool:
@@ -323,3 +329,120 @@ def test_requires_response_cleared_after_done_does_not_retcon(gf_db):
     rows = _q(gf_db, "SELECT state FROM work_item WHERE source_table='agent_messages' "
                      "AND source_id=%s", (msg_id,))
     assert rows == [("done",)]
+
+
+# ── Console defect 1 (bus #80555): mirror drift under service_role ────────────────
+# live code (agent_messages_poll.py, build_launch_context.py) UPDATEs agent_messages
+# AS service_role via the Supabase REST path. The REVOKE above removed service_role's
+# direct grants on work_item, so the AFTER UPDATE trigger -- which ran with the
+# CALLER's privileges before this fix -- would hit permission denied, get swallowed
+# by the trigger's own EXCEPTION WHEN OTHERS handler, and silently stop tracking.
+# The fix is SECURITY DEFINER on every work_item_mirror_*/work_item_mark_source_deleted
+# function, so the mirror write runs as the migration owner regardless of caller.
+def test_service_role_update_on_agent_messages_still_moves_the_mirror(gf_db):
+    _exec(gf_db, "INSERT INTO agent_messages (from_agent, subject, requires_response) "
+                 "VALUES ('orch-console', 'ping', true)")
+    msg_id = _q(gf_db, "SELECT id FROM agent_messages")[0][0]
+    assert _q(gf_db, "SELECT state FROM work_item WHERE source_table='agent_messages'") == [("captured",)]
+
+    with psycopg.connect(gf_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SET ROLE service_role")
+        cur.execute("UPDATE agent_messages SET skipped_at=now() WHERE id=%s", (msg_id,))
+        cur.execute("RESET ROLE")
+
+    rows = _q(gf_db, "SELECT state FROM work_item WHERE source_table='agent_messages' "
+                     "AND source_id=%s", (msg_id,))
+    assert rows == [("dropped",)]
+
+
+def test_service_role_delete_on_operator_asks_still_moves_the_mirror(gf_db):
+    _exec(gf_db, "INSERT INTO operator_asks (ask) VALUES ('ping')")
+    ask_id = _q(gf_db, "SELECT id FROM operator_asks")[0][0]
+
+    with psycopg.connect(gf_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SET ROLE service_role")
+        cur.execute("DELETE FROM operator_asks WHERE id=%s", (ask_id,))
+        cur.execute("RESET ROLE")
+
+    rows = _q(gf_db, "SELECT state FROM work_item WHERE source_table='operator_asks' "
+                     "AND source_id=%s", (ask_id,))
+    assert rows == [("dropped",)]
+
+
+def test_mirror_functions_cannot_be_called_directly_by_anon_or_authenticated(gf_db):
+    for role in ("anon", "authenticated"):
+        rows = _q(gf_db, "SELECT has_function_privilege(%s, 'work_item_mirror(text,text,bigint,work_item_derived,text)', 'EXECUTE')", (role,))
+        assert rows == [(False,)], f"{role} can still EXECUTE work_item_mirror directly"
+
+
+# ── Console defect 2 (bus #80555): append-only must bind the owner too ────────────
+# Every agent connects as postgres, the table OWNER -- REVOKE from anon/authenticated/
+# service_role stops none of them, and owner sessions bypass RLS entirely (confirmed:
+# postgres has rolbypassrls=true, live-verified). Only a trigger (which fires for
+# every role unconditionally) can make "append-only" and "op_ref required" true for
+# the owner too.
+def test_owner_cannot_update_work_item_audit_even_as_owner(gf_db):
+    _exec(gf_db, "INSERT INTO operator_asks (ask) VALUES ('ping')")
+    audit_id = _q(gf_db, "SELECT id FROM work_item_audit LIMIT 1")[0][0]
+    with pytest.raises(psycopg.errors.RaiseException):
+        _exec(gf_db, "UPDATE work_item_audit SET note='tampered' WHERE id=%s", (audit_id,))
+
+
+def test_owner_cannot_delete_work_item_audit_even_as_owner(gf_db):
+    _exec(gf_db, "INSERT INTO operator_asks (ask) VALUES ('ping')")
+    audit_id = _q(gf_db, "SELECT id FROM work_item_audit LIMIT 1")[0][0]
+    with pytest.raises(psycopg.errors.RaiseException):
+        _exec(gf_db, "DELETE FROM work_item_audit WHERE id=%s", (audit_id,))
+
+
+def test_owner_cannot_update_governance_floor_audit_even_as_owner(gf_db):
+    _exec(gf_db, "SELECT set_config('app.op_ref', 'op#99', false)")
+    _exec(gf_db, "INSERT INTO governance_floor (sentence, op_ref, predicate_sql) "
+                 "VALUES ('test floor', 'op#99', 'SELECT true')")
+    audit_id = _q(gf_db, "SELECT id FROM governance_floor_audit LIMIT 1")[0][0]
+    with pytest.raises(psycopg.errors.RaiseException):
+        _exec(gf_db, "UPDATE governance_floor_audit SET note='tampered' WHERE id=%s", (audit_id,))
+
+
+def test_governance_floor_update_without_app_op_ref_raises(gf_db):
+    _exec(gf_db, "INSERT INTO governance_floor (sentence, op_ref, predicate_sql) "
+                 "VALUES ('test floor', 'op#1', 'SELECT true')")
+    with pytest.raises(psycopg.errors.RaiseException):
+        _exec(gf_db, "UPDATE governance_floor SET enforced_in_code=true WHERE sentence='test floor'")
+
+
+def test_governance_floor_delete_is_blocked_outright_once_audited(gf_db):
+    """DELETE on governance_floor is doubly guarded: the self-audit trigger's
+    own INSERT (fired on creation) leaves an audit row referencing the floor,
+    and that FK (RESTRICT, the default) blocks the delete before the trigger's
+    own op_ref RAISE would even run -- a floor row is permanent history from
+    the moment it exists, op_ref or not."""
+    _exec(gf_db, "INSERT INTO governance_floor (sentence, op_ref, predicate_sql) "
+                 "VALUES ('test floor', 'op#1', 'SELECT true')")
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        _exec(gf_db, "DELETE FROM governance_floor WHERE sentence='test floor'")
+
+
+def test_governance_floor_update_with_app_op_ref_succeeds_and_self_audits(gf_db):
+    _exec(gf_db, "INSERT INTO governance_floor (sentence, op_ref, predicate_sql) "
+                 "VALUES ('test floor', 'op#1', 'SELECT true')")
+    floor_id = _q(gf_db, "SELECT id FROM governance_floor WHERE sentence='test floor'")[0][0]
+
+    with psycopg.connect(gf_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.actor', 'cc-paperclip-spike-1', false)")
+        cur.execute("SELECT set_config('app.op_ref', 'op#2', false)")
+        cur.execute("UPDATE governance_floor SET enforced_in_code=true WHERE id=%s", (floor_id,))
+
+    rows = _q(gf_db, "SELECT event, actor, op_ref FROM governance_floor_audit "
+                     "WHERE floor_id=%s ORDER BY at DESC LIMIT 1", (floor_id,))
+    assert rows == [("updated", "cc-paperclip-spike-1", "op#2")]
+
+
+def test_governance_floor_insert_self_audits_without_requiring_app_op_ref(gf_db):
+    """INSERT uses the row's own (already NOT-NULL-enforced) op_ref column --
+    no session GUC required, unlike UPDATE/DELETE."""
+    _exec(gf_db, "INSERT INTO governance_floor (sentence, op_ref, predicate_sql) "
+                 "VALUES ('test floor', 'op#1', 'SELECT true')")
+    floor_id = _q(gf_db, "SELECT id FROM governance_floor WHERE sentence='test floor'")[0][0]
+    rows = _q(gf_db, "SELECT event, op_ref FROM governance_floor_audit WHERE floor_id=%s", (floor_id,))
+    assert rows == [("created", "op#1")]

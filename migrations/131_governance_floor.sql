@@ -35,6 +35,49 @@
 --       actually closes this for service_role; RLS below is what restricts
 --       anon/authenticated/console_readonly/bus_writer (all rolbypassrls=false).
 --
+-- CONSOLE REVIEW, bus #80555 -- 2 real defects found in the first version of
+-- this migration, both fixed here:
+--   DEFECT 1 (mirror drift under service_role): live code UPDATEs
+--   agent_messages AS service_role via the Supabase REST path
+--   (agent_messages_poll.py:363,378, build_launch_context.py:192). The REVOKE
+--   above removes service_role's direct grants on work_item, so the AFTER
+--   UPDATE mirror trigger -- which ran with the CALLER's privileges -- would
+--   hit permission denied, get swallowed by the trigger's own EXCEPTION WHEN
+--   OTHERS handler, and silently stop tracking skipped/forwarded rows. Fixed
+--   by making every work_item_mirror_*/work_item_mark_source_deleted function
+--   SECURITY DEFINER (runs as the migration owner regardless of caller), with
+--   search_path pinned (SET search_path = public, pg_temp -- the standard
+--   SECURITY DEFINER hardening against search_path hijacking) and EXECUTE
+--   revoked from PUBLIC/anon/authenticated (so a web-exposed role can't call
+--   these AS an RPC to get the SAME elevated write the REVOKE above was
+--   meant to close -- firing via a normal table trigger needs no EXECUTE
+--   grant at all, only UPDATE/INSERT/DELETE on the SOURCE table, which
+--   service_role still has).
+--   DEFECT 2 (append-only did not bind the owner): every agent connects as
+--   postgres, the table OWNER -- REVOKE from anon/authenticated/service_role
+--   stops none of them, and owner sessions bypass RLS entirely regardless of
+--   FORCE ROW LEVEL SECURITY (postgres has rolbypassrls=true, live-verified).
+--   Only a trigger -- which fires for every role unconditionally, RLS/grants
+--   notwithstanding -- can make "append-only" and "op_ref required" true for
+--   the owner too. Fixed with (a) a BEFORE UPDATE OR DELETE OR TRUNCATE
+--   statement trigger on governance_floor_audit AND work_item_audit that
+--   RAISEs unconditionally, and (b) an AFTER INSERT OR UPDATE OR DELETE
+--   trigger on governance_floor that writes its own audit row (callers no
+--   longer INSERT into governance_floor_audit directly for floor-lifecycle
+--   events), reading actor/op_ref from session GUCs (app.actor, app.op_ref)
+--   and RAISING if app.op_ref is unset on UPDATE/DELETE -- INSERT uses the
+--   row's own already-NOT-NULL op_ref column instead, so creating a floor
+--   still only needs the column, not the GUC.
+--
+-- assert: no_table_privilege anon public.governance_floor UPDATE
+-- assert: no_table_privilege anon public.governance_floor DELETE
+-- assert: no_table_privilege anon public.governance_floor TRUNCATE
+-- assert: no_table_privilege authenticated public.governance_floor UPDATE
+-- assert: no_table_privilege authenticated public.governance_floor DELETE
+-- assert: no_table_privilege authenticated public.governance_floor TRUNCATE
+-- assert: no_table_privilege service_role public.governance_floor UPDATE
+-- assert: no_table_privilege service_role public.governance_floor DELETE
+-- assert: no_table_privilege service_role public.governance_floor TRUNCATE
 -- assert: no_table_privilege anon public.governance_floor_audit UPDATE
 -- assert: no_table_privilege anon public.governance_floor_audit DELETE
 -- assert: no_table_privilege anon public.governance_floor_audit TRUNCATE
@@ -62,6 +105,30 @@
 -- assert: no_table_privilege service_role public.work_item_audit UPDATE
 -- assert: no_table_privilege service_role public.work_item_audit DELETE
 -- assert: no_table_privilege service_role public.work_item_audit TRUNCATE
+-- assert: search_path public.work_item_mirror(text,text,bigint,work_item_derived,text)
+-- assert: no_execute anon public.work_item_mirror(text,text,bigint,work_item_derived,text)
+-- assert: no_execute authenticated public.work_item_mirror(text,text,bigint,work_item_derived,text)
+-- assert: search_path public.work_item_mark_source_deleted(text,bigint,text)
+-- assert: no_execute anon public.work_item_mark_source_deleted(text,bigint,text)
+-- assert: no_execute authenticated public.work_item_mark_source_deleted(text,bigint,text)
+-- assert: search_path public.work_item_mirror_ask_trg()
+-- assert: no_execute anon public.work_item_mirror_ask_trg()
+-- assert: no_execute authenticated public.work_item_mirror_ask_trg()
+-- assert: search_path public.work_item_mirror_bus_trg()
+-- assert: no_execute anon public.work_item_mirror_bus_trg()
+-- assert: no_execute authenticated public.work_item_mirror_bus_trg()
+-- assert: search_path public.work_item_mirror_commitment_trg()
+-- assert: no_execute anon public.work_item_mirror_commitment_trg()
+-- assert: no_execute authenticated public.work_item_mirror_commitment_trg()
+-- assert: search_path public.work_item_mirror_ask_delete_trg()
+-- assert: no_execute anon public.work_item_mirror_ask_delete_trg()
+-- assert: no_execute authenticated public.work_item_mirror_ask_delete_trg()
+-- assert: search_path public.work_item_mirror_bus_delete_trg()
+-- assert: no_execute anon public.work_item_mirror_bus_delete_trg()
+-- assert: no_execute authenticated public.work_item_mirror_bus_delete_trg()
+-- assert: search_path public.work_item_mirror_commitment_delete_trg()
+-- assert: no_execute anon public.work_item_mirror_commitment_delete_trg()
+-- assert: no_execute authenticated public.work_item_mirror_commitment_delete_trg()
 
 BEGIN;
 
@@ -135,6 +202,75 @@ CREATE POLICY governance_floor_audit_console_read ON governance_floor_audit
     FOR SELECT TO console_readonly USING (true);
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- Console defect 2 (bus #80555): append-only must bind the OWNER too, not
+-- just the web-exposed roles the REVOKE above targets -- every agent connects
+-- as postgres (the owner), and owner sessions bypass RLS entirely regardless
+-- of grants. Only a trigger fires unconditionally for every role.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE OR REPLACE FUNCTION reject_audit_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+    RAISE EXCEPTION '% is append-only; % is not permitted, even for the table owner', TG_TABLE_NAME, TG_OP;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION reject_audit_mutation() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS governance_floor_audit_append_only ON governance_floor_audit;
+CREATE TRIGGER governance_floor_audit_append_only
+    BEFORE UPDATE OR DELETE OR TRUNCATE ON governance_floor_audit
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_audit_mutation();
+
+-- governance_floor's own lifecycle changes self-audit -- callers no longer
+-- INSERT into governance_floor_audit directly for create/update/delete; this
+-- trigger does it, reading actor/op_ref from session GUCs and REQUIRING
+-- app.op_ref on UPDATE/DELETE (a change with no op# cited is rejected at the
+-- DB layer, for every role, including the owner). INSERT uses the row's own
+-- already-NOT-NULL op_ref column instead, so creating a floor needs only the
+-- column, not the GUC.
+CREATE OR REPLACE FUNCTION governance_floor_audit_trg() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_actor  text := current_setting('app.actor', true);
+    v_op_ref text := current_setting('app.op_ref', true);
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO governance_floor_audit (floor_id, event, actor, op_ref, note)
+        VALUES (NEW.id, 'created', COALESCE(v_actor, 'unknown'), NEW.op_ref, NEW.sentence);
+        RETURN NEW;
+    END IF;
+
+    IF v_op_ref IS NULL OR v_op_ref = '' THEN
+        RAISE EXCEPTION 'governance_floor % requires app.op_ref to be set first '
+            '(SELECT set_config(''app.op_ref'', ''op#...'', false))', TG_OP;
+    END IF;
+
+    IF TG_OP = 'UPDATE' THEN
+        INSERT INTO governance_floor_audit (floor_id, event, actor, op_ref, note)
+        VALUES (NEW.id, 'updated', COALESCE(v_actor, 'unknown'), v_op_ref, NEW.sentence);
+        RETURN NEW;
+    ELSE -- DELETE
+        INSERT INTO governance_floor_audit (floor_id, event, actor, op_ref, note)
+        VALUES (OLD.id, 'deleted', COALESCE(v_actor, 'unknown'), v_op_ref, OLD.sentence);
+        RETURN OLD;
+    END IF;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION governance_floor_audit_trg() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS governance_floor_self_audit ON governance_floor;
+CREATE TRIGGER governance_floor_self_audit
+    AFTER INSERT OR UPDATE OR DELETE ON governance_floor
+    FOR EACH ROW EXECUTE FUNCTION governance_floor_audit_trg();
+
+DROP TRIGGER IF EXISTS work_item_audit_append_only ON work_item_audit;
+CREATE TRIGGER work_item_audit_append_only
+    BEFORE UPDATE OR DELETE OR TRUNCATE ON work_item_audit
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_audit_mutation();
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- PHASE 1b, gap 3: close the same leak on work_item / work_item_audit
 -- ═══════════════════════════════════════════════════════════════════════════
 
@@ -177,7 +313,7 @@ CREATE POLICY work_item_audit_bus_writer_insert ON work_item_audit
 -- completion can never retcon a done item back to dropped.
 CREATE OR REPLACE FUNCTION work_item_mark_source_deleted(
     p_source_table text, p_source_id bigint, p_actor text
-) RETURNS void LANGUAGE plpgsql AS $$
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
     v_id bigint;
     prior_state text;
@@ -199,7 +335,8 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION work_item_mirror_ask_delete_trg() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION work_item_mirror_ask_delete_trg() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 BEGIN
     BEGIN
         PERFORM work_item_mark_source_deleted('operator_asks', OLD.id, 'trigger:operator_asks:deleted');
@@ -215,7 +352,8 @@ CREATE TRIGGER work_item_mirror_ask_delete_trg
     AFTER DELETE ON operator_asks
     FOR EACH ROW EXECUTE FUNCTION work_item_mirror_ask_delete_trg();
 
-CREATE OR REPLACE FUNCTION work_item_mirror_bus_delete_trg() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION work_item_mirror_bus_delete_trg() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 BEGIN
     BEGIN
         PERFORM work_item_mark_source_deleted('agent_messages', OLD.id, 'trigger:agent_messages:deleted');
@@ -231,7 +369,8 @@ CREATE TRIGGER work_item_mirror_bus_delete_trg
     AFTER DELETE ON agent_messages
     FOR EACH ROW EXECUTE FUNCTION work_item_mirror_bus_delete_trg();
 
-CREATE OR REPLACE FUNCTION work_item_mirror_commitment_delete_trg() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION work_item_mirror_commitment_delete_trg() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 BEGIN
     BEGIN
         PERFORM work_item_mark_source_deleted('held_commitments', OLD.id, 'trigger:held_commitments:deleted');
@@ -296,7 +435,8 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION work_item_mirror_bus_trg() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION work_item_mirror_bus_trg() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 BEGIN
     BEGIN
         PERFORM work_item_mirror('bus', 'agent_messages', NEW.id,
@@ -330,6 +470,35 @@ CREATE TRIGGER work_item_mirror_bus_update_trg
     AFTER UPDATE ON agent_messages
     FOR EACH ROW WHEN (NEW.requires_response OR OLD.requires_response IS TRUE)
     EXECUTE FUNCTION work_item_mirror_bus_trg();
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Console defect 1 (bus #80555), continued: work_item_mirror() itself, and the
+-- two 114-defined trigger functions this migration does not otherwise touch
+-- (ask_trg, commitment_trg), get the same SECURITY DEFINER + search_path pin
+-- via ALTER FUNCTION (no body change, so CREATE OR REPLACE is unnecessary).
+-- EXECUTE revoked from PUBLIC/anon/authenticated on every one of the 8
+-- mirror/delete functions -- firing via a normal table trigger needs no
+-- EXECUTE grant at all (only DML on the SOURCE table, untouched here), so
+-- this closes the direct-RPC path without affecting the trigger path.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER FUNCTION work_item_mirror(text, text, bigint, work_item_derived, text)
+    SECURITY DEFINER SET search_path = public, pg_temp;
+ALTER FUNCTION work_item_mirror_ask_trg()
+    SECURITY DEFINER SET search_path = public, pg_temp;
+ALTER FUNCTION work_item_mirror_commitment_trg()
+    SECURITY DEFINER SET search_path = public, pg_temp;
+
+REVOKE EXECUTE ON FUNCTION work_item_mirror(text, text, bigint, work_item_derived, text)
+    FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION work_item_mark_source_deleted(text, bigint, text)
+    FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION work_item_mirror_ask_trg()          FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION work_item_mirror_bus_trg()          FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION work_item_mirror_commitment_trg()   FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION work_item_mirror_ask_delete_trg()        FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION work_item_mirror_bus_delete_trg()        FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION work_item_mirror_commitment_delete_trg() FROM PUBLIC, anon, authenticated;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Floor row #1: the 72h-ABANDONED check (already proven, 247-row dry-run,
