@@ -17,17 +17,22 @@ is_ddl_shaped itself. Never hand-edit the vendored file and never re-derive
 its context-aware lexing here — a second, divergent lexer is exactly the
 footgun the vendored copy exists to prevent.
 
-LEXICAL HAZARD PRE-SCREEN (whole-branch review Critical #1, 2026-10-28): the
-vendored lexer does not track double-quoted identifiers, so a ', --, /* or
-$tag$ appearing INSIDE a "..." region opens a bogus noise region that
-swallows the real code (and an E'..' backslash escape closes its string
-early), hiding denylisted writes from every scan in this module AND from
-is_ddl_shaped. The durable fix is upstream (ihsanos-irsyad) lexer awareness
-re-vendored under a new pin; until then _lexically_hazardous refuses the
-entire input class BEFORE any vendored call, fail-closed. Refusing the input
-class is doctrine: no legitimate broker statement needs an apostrophe inside
-a quoted identifier or a backslash anywhere, and a caller hitting one
-renames or re-quotes.
+LEXICAL HAZARD PRE-SCREEN (whole-branch review Critical #1, 2026-10-28, plus
+PR #569 review's identifier-$ bypass, 2026-10-28): the vendored lexer does
+not track double-quoted identifiers, so a ', --, /* or $tag$ appearing
+INSIDE a "..." region opens a bogus noise region that swallows the real
+code (and an E'..' backslash escape closes its string early). Separately,
+$ is a legal PG identifier CONTINUATION character, so a$x$ is ONE
+identifier token to PG — but both this module's and the vendored
+dollar-open regex match $x$ mid-identifier, opening a bogus dollar body
+that swallows real code up to the next matching $x$. Either hazard hides
+denylisted writes from every scan in this module AND from is_ddl_shaped.
+The durable fix is upstream (ihsanos-irsyad) lexer awareness re-vendored
+under a new pin; until then _lexically_hazardous refuses the entire input
+class BEFORE any vendored call, fail-closed. Refusing the input class is
+doctrine: no legitimate broker statement needs an apostrophe inside a
+quoted identifier, a $ directly after an identifier character, or a
+backslash anywhere, and a caller hitting one renames or re-quotes.
 
 KNOWN LIMITATION (same doctrine as ddl_detect): this is a best-effort TEXT
 screen, not a semantic analyzer. A read-shaped statement that calls an
@@ -39,11 +44,12 @@ console-gated root action.
 
 FAIL-CLOSED DOCTRINE: false refusals are acceptable; a missed write is not.
 Concretely, a quoted column named "update"/"into"/"for", a dollar-quoted
-string constant containing write words, a quoted identifier containing
-'/--/*/$, and any backslash anywhere are all REFUSED — the same deliberate
-over-refusal stance ddl_detect takes ("a false refusal is fail-safe for a
-screen"). A caller hitting one renames or re-quotes; nothing legitimate is
-silently let through the other way.
+string constant containing write words (incl. into/for), a quoted
+identifier containing '/--/*/$, an identifier followed directly by $
+(e.g. col$1), and any backslash anywhere are all REFUSED — the same
+deliberate over-refusal stance ddl_detect takes ("a false refusal is
+fail-safe for a screen"). A caller hitting one renames or re-quotes;
+nothing legitimate is silently let through the other way.
 """
 from __future__ import annotations
 
@@ -100,8 +106,11 @@ _FORBIDDEN_FUNCTION_TOKENS = frozenset({
 # constant in a read-shaped statement, since DO/CREATE heads are already
 # refused by the head whitelist and is_ddl_shaped — kept as belt-and-braces
 # against exactly where dynamic SQL hides): dynamic EXECUTE + DML writes.
-# DDL keywords inside bodies are already is_ddl_shaped's job.
-_FORBIDDEN_BODY_TOKENS = frozenset({"insert", "update", "delete", "merge", "execute"})
+# into/for included (PR #569 review, belt-and-braces half): a body that gets
+# mis-located by the identifier-$ hazard below would otherwise hide a
+# SELECT...INTO or a locking FOR clause from every other scan. DDL keywords
+# inside bodies are already is_ddl_shaped's job.
+_FORBIDDEN_BODY_TOKENS = frozenset({"insert", "update", "delete", "merge", "execute", "into", "for"})
 
 
 def _word_regex(tokens: frozenset) -> "re.Pattern[str]":
@@ -120,11 +129,24 @@ _HEAD_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 _DOLLAR_OPEN_RE = re.compile(r"\$([A-Za-z_]\w*|)\$")
 
 
+def _is_identifier_char(ch: str) -> bool:
+    """Broad/inclusive on purpose (fail-closed): ASCII alnum, underscore,
+    dollar, or any Unicode letter/digit (str.isalnum() covers those) -- PG
+    identifiers may contain non-ASCII letters, and erring broad only means
+    MORE refusals, never a missed one."""
+    return ch.isalnum() or ch in ("_", "$")
+
+
 def _lexically_hazardous(sql: str) -> bool:
     """True iff sql contains a construct that can blind the vendored lexer:
     a ', --, /* or $tag$ inside a double-quoted identifier (the vendored
     strip_sql_noise treats them as noise openers there and swallows the code
-    that follows). Backslashes are handled separately (any backslash, in any
+    that follows), OR a $ directly following an identifier character (PR
+    #569 review: $ is a legal PG identifier CONTINUATION character, so
+    a$x$ is ONE identifier token to PG -- but both this module's and the
+    vendored dollar-open regex match $x$ mid-identifier and open a bogus
+    dollar body there, swallowing the real code up to the next matching
+    $x$). Backslashes are handled separately (any backslash, in any
     context, is hazardous: E'' escapes close strings early in the vendored
     lexer, and no broker-legitimate statement carries one).
 
@@ -134,8 +156,9 @@ def _lexically_hazardous(sql: str) -> bool:
     Divergences are all in the fail-closed direction:
     - unterminated "..." or $tag$ runs to EOS for us; the code it would hide
       is a PG syntax error upstream, never an executed write;
-    - a bare $ (e.g. a positional $1) is not an opener for us; those are not
-      a broker input class (statements arrive fully rendered).
+    - a bare $ (e.g. a positional $1) that does NOT immediately follow an
+      identifier character is not an opener for us; those are not a broker
+      input class (statements arrive fully rendered).
     """
     i, n = 0, len(sql)
     state = "code"
@@ -165,6 +188,14 @@ def _lexically_hazardous(sql: str) -> bool:
                 state = "dquote"
                 i += 1
             else:
+                if ch == "$" and i > 0 and _is_identifier_char(sql[i - 1]):
+                    # $ immediately after an identifier char: PG folds this
+                    # into the SAME identifier, but naively matching a
+                    # $tag$ pattern here (as both lexers do) can open a
+                    # bogus dollar body mid-statement. Refuse the whole
+                    # input class, fail-closed, rather than try to track
+                    # whether a matching close tag would actually follow.
+                    return True
                 m = _DOLLAR_OPEN_RE.match(sql, i)
                 if m:
                     dollar_tag = m.group(0)

@@ -89,9 +89,38 @@ def test_is_plain_read_accepts(sql):
     "SELECT pg_advisory_lock_shared(1)",
     "SELECT pg_advisory_unlock_shared(1)",
     "SELECT pg_stat_reset_slru()",
+    # --- PR #569 review (cc-fleet-health, 2026-10-28): $ is a legal PG
+    # identifier CONTINUATION character, so a$x$ is ONE identifier token to
+    # PG -- but both the vendored and this module's dollar-open regex match
+    # $x$ mid-identifier and open a bogus dollar body, blanking the real code
+    # between it and the next $x$. Reproduced by the reviewer (classifier
+    # only, nothing executed): is_plain_read of this exact SQL was True.
+    "SELECT 1 AS a$x$ INTO TABLE newtab FROM pg_class WHERE relname<>'z$x$'",
+    "SELECT 1 AS a$x$ FOR UPDATE b$x$ FROM t",                        # same bypass hiding FOR UPDATE
 ])
 def test_is_plain_read_refuses(sql):
     assert is_plain_read(sql) is False
+
+
+def test_is_plain_read_refuses_into_inside_a_dollar_body_belt_and_braces():
+    # PR #569 review, belt-and-braces half: "into"/"for" were not in
+    # _FORBIDDEN_BODY_TOKENS, so a dollar body whose content contains one of
+    # those words -- independent of the identifier-$ root-cause fix (this
+    # $tag$ follows a space, not an identifier char) -- was NOT refused.
+    # A legitimate dollar-quoted string constant containing the word "into"
+    # is now a deliberate false refusal, fail-closed, same doctrine.
+    assert is_plain_read("SELECT $tag$ x INTO t $tag$ FROM t") is False
+
+
+def test_is_plain_read_refuses_identifier_dollar_as_doctrine_false_refusal():
+    # PR #569 review: an identifier containing $ (e.g. a column alias col$1)
+    # is legal PG and not itself a write -- but after the fix, ANY $ directly
+    # following an identifier character is treated as hazardous (the same
+    # mid-identifier ambiguity the bypass above exploits), so this is a
+    # DELIBERATE false refusal, fail-closed, same doctrine as the other
+    # hazard-class false refusals in the accept-corpus comments above. The
+    # reviewer asked this be recorded explicitly, not left implicit.
+    assert is_plain_read("SELECT col$1 FROM t") is False
 
 
 # --- check_read_only_override (state check wired in Task 5) ------------------
