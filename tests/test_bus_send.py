@@ -1346,6 +1346,27 @@ def test_dburl_does_not_refuse_when_live_root_does_not_match(monkeypatch, tmp_pa
     assert bs.dburl("postgres://fallback/db") == "postgres://fallback/db"
 
 
+def test_dburl_refuses_when_sandboxed_and_inherited_dsn_targets_live_substrate(monkeypatch, tmp_path):
+    # bus #78963: the FILE-path check alone misses this -- no .env exists
+    # beside the script (this repo has none), the path-based check therefore
+    # never fires (LIVE_ORCH_ROOT deliberately points somewhere else here),
+    # and dburl() falls through to the inherited database_url. That inherited
+    # value is exactly what launch_dangerous_cc.sh sets -a's into every lane
+    # shell from the LIVE .env, so it must be refused too when it targets the
+    # live substrate -- not just when the FILE on disk does.
+    monkeypatch.setattr(bs, "LIVE_ORCH_ROOT", str(tmp_path / "not-the-real-checkout"))
+    monkeypatch.setenv("WINGMEN_TEST_SANDBOX", "1")
+    dummy_dsn_containing_live_ref = "dummy-inherited-dsn-for-" + bs.LIVE_SUBSTRATE_REF
+    with pytest.raises(SystemExit):
+        bs.dburl(dummy_dsn_containing_live_ref)
+
+
+def test_dburl_does_not_refuse_inherited_dsn_without_live_ref(monkeypatch, tmp_path):
+    monkeypatch.setattr(bs, "LIVE_ORCH_ROOT", str(tmp_path / "not-the-real-checkout"))
+    monkeypatch.setenv("WINGMEN_TEST_SANDBOX", "1")
+    assert bs.dburl("postgres://fallback/db") == "postgres://fallback/db"
+
+
 def test_no_caller_anywhere_passes_the_whole_environ_to_dburl():
     import pathlib
     import re

@@ -89,6 +89,19 @@ _UNDELIVERABLE_EXEMPT = frozenset({"musa"}) | _HUMAN_OPENED
 # reference move right along with it, defeating the whole point of the check.
 LIVE_ORCH_ROOT = "/Users/sheikhmusa/wingmen/orchestrator"
 
+# bus #78963: console's review of the above found it still misses the
+# INHERITED-DSN path -- when no .env FILE exists beside the script (exactly
+# the self-relative/test-repo case the (2) fix moves scripts toward), dburl()
+# falls through to the passed-in `database_url`, i.e. whatever DATABASE_URL
+# the calling shell already had exported. launch_dangerous_cc.sh `set -a`s
+# the live .env into every lane shell, so a test that sets
+# WINGMEN_TEST_SANDBOX=1 but forgets to override DATABASE_URL itself would
+# still silently post to production. This matches on the live Supabase
+# pooler's project ref (present in the DSN's username/host) rather than
+# string-equality with any particular .env line, since the inherited env var
+# and the file's own line are not guaranteed to be formatted identically.
+LIVE_SUBSTRATE_REF = "tscuymavysscrvoberrr"
+
 
 _LIVE_INSTANCE_WINDOW = "30 minutes"  # matches scripts/irsyad_autoscaler.py LIVE_HEARTBEAT_WINDOW
 
@@ -603,6 +616,27 @@ def _refuse_if_sandboxed_but_live(env_path: str) -> None:
         )
 
 
+def _refuse_if_sandboxed_dsn_is_live(dsn: str | None) -> None:
+    """Gap (1) from bus #78963: the FILE-path check above misses the case where
+    NO .env exists beside the script -- dburl() then falls through to the
+    INHERITED `database_url` argument, i.e. whatever DATABASE_URL the calling
+    shell already had exported. launch_dangerous_cc.sh `set -a`s the live .env
+    into every lane shell, so a test that sets WINGMEN_TEST_SANDBOX=1 but
+    forgets to override DATABASE_URL itself would still silently connect to
+    production with no refusal. Match on the live substrate's project ref
+    (present in the DSN's pooler username/host) rather than string-equality
+    with any one .env line, since the inherited value and the file's own line
+    are not guaranteed to be formatted identically."""
+    if os.environ.get("WINGMEN_TEST_SANDBOX") != "1":
+        return
+    if dsn and LIVE_SUBSTRATE_REF in dsn:
+        raise SystemExit(
+            "WINGMEN_TEST_SANDBOX=1 but the resolved DSN targets the LIVE "
+            f"substrate (ref {LIVE_SUBSTRATE_REF}) -- refusing to connect "
+            "rather than silently posting to production (bus #78963)."
+        )
+
+
 def dburl(database_url: str | None) -> str:
     """Resolve the DSN. `database_url` must be the ALREADY-RESOLVED value (e.g.
     `os.environ.get("DATABASE_URL")`) -- NEVER the whole os.environ/env dict.
@@ -632,10 +666,13 @@ def dburl(database_url: str | None) -> str:
             for line in f:
                 line = line.strip()
                 if line.startswith("DATABASE_URL="):
-                    return line.split("=", 1)[1].strip().strip('"')
+                    resolved = line.split("=", 1)[1].strip().strip('"')
+                    _refuse_if_sandboxed_dsn_is_live(resolved)
+                    return resolved
     except FileNotFoundError:
         pass
     if database_url:
+        _refuse_if_sandboxed_dsn_is_live(database_url)
         return database_url
     raise SystemExit("no DATABASE_URL: set it in the environment or .env")
 

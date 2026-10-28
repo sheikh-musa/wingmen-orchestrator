@@ -403,6 +403,12 @@ def set_test_env(monkeypatch):
         # fail-closed, so a test relying on ambient env would be flaky
         # depending on who/what runs it).
         "CC_BASE_AGENT_ID": "cc-test-harness",
+        # bus #78935/#78954/#78963: default every test run into bus_send.py's
+        # sandbox refusal backstop. The original leak was a test that never
+        # knew it needed to opt in -- an opt-in-only flag doesn't cover that
+        # failure mode. A test that genuinely needs the live DB can still
+        # monkeypatch.delenv("WINGMEN_TEST_SANDBOX") itself.
+        "WINGMEN_TEST_SANDBOX": "1",
     }
     for key, value in env_vars.items():
         monkeypatch.setenv(key, value)
