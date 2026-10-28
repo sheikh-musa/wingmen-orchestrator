@@ -157,6 +157,17 @@ def _is_ignored(wt: pathlib.Path, d: pathlib.Path) -> bool:
         return False
 
 
+def _is_tracked(wt: pathlib.Path, d: pathlib.Path) -> bool:
+    """True iff `d` itself is a path git tracks (e.g. a committed symlink, mode 120000).
+    Fail-closed toward 'tracked' on any git error, so an unknown is never removed."""
+    try:
+        r = subprocess.run(["git", "-C", str(wt), "ls-files", "--error-unmatch", "--", str(d)],
+                           capture_output=True, timeout=10)
+        return r.returncode == 0
+    except Exception:
+        return True
+
+
 def _indicator_dirs(wt: pathlib.Path, names=INDICATOR_NAMES):
     """Build-indicator dirs to check for recent activity: each name at the tree root and under
     every apps/* subdir (monorepos build in apps/<x>/). Cheap, bounded — no full-tree walk."""
@@ -228,7 +239,8 @@ def _rmtree(path: pathlib.Path) -> None:
 # ---- sweep --------------------------------------------------------------------
 def reap_one(wt: pathlib.Path, *, dry_run: bool):
     """Clear reclaimable dirs in ONE worktree. Returns a report dict. Fail-loud per dir."""
-    rep = {"worktree": str(wt), "verdict": None, "freed": 0, "cleared": [], "errors": []}
+    rep = {"worktree": str(wt), "verdict": None, "freed": 0, "cleared": [], "errors": [],
+           "spared": []}
     has_git = _has_git(wt)
     in_use = _lsof_cwd_in_use(wt) if has_git else False
     # PER-TREE recent-activity gate (#61165/#61169): only check if cheaper gates haven't spared it
@@ -246,6 +258,12 @@ def reap_one(wt: pathlib.Path, *, dry_run: bool):
         if not is_link and not d.is_dir():
             continue
         if not _is_ignored(wt, d):
+            # A COMMITTED symlink (cosem-adcda ops/node_modules -> ../functions/node_modules,
+            # orch-console #80423) is there by design: spare it silently, never page. A real
+            # tracked DIRECTORY (or an untracked, un-ignored link) is unexpected -> still paged.
+            if is_link and _is_tracked(wt, d):
+                rep["spared"].append(str(d))
+                continue
             rep["errors"].append(f"NOT-IGNORED (spared, would clobber tracked): {d}")
             continue
         # KILL-TIME re-verify: the worktree may have gone live since the top-level scan.
