@@ -147,6 +147,31 @@
 # post_agent_message's body writes to instead. Verified RED against the
 # pre-migration content (the heredoc markers don't exist pre-migration, so
 # extraction itself fails), GREEN after.
+#
+# STEP 2, scripts/disk_space_monitor.sh, 2026-10-28 (Musa op#34845, console's
+# ordering bus #78846/#78857): the EMERGENCY bus_nudge() (the script's only
+# raw-INSERT call site; MANAGED/WARN bands are log-file-only by design, bus
+# #73460) used a raw psycopg2 INSERT INTO agent_messages; migrated onto
+# scripts/bus_send.py's send() (direct import). This heredoc has no preceding
+# `cd` to ORCH_DIR (launchd's cwd isn't guaranteed), so ORCH_DIR is passed in
+# explicitly rather than relying on export. DSN resolution + the import both
+# now go through ORCH_DIR self-relatively (bus #78935/#78954/#78963, same
+# pattern the reset_*.sh family was fixed to match) instead of hardcoding
+# `~/wingmen/orchestrator` -- no fake-$HOME sandbox needed for the executed
+# test (tests/test_disk_space_monitor_bus_send_migration.py), just a scratch
+# ORCH_DIR with its own .env (pointing at an ephemeral PG) and scripts/
+# symlinked in. Verified RED against the pre-migration content (raw INSERT
+# present, no bus_send import, hardcoded ~/wingmen/orchestrator present),
+# GREEN after.
+#
+# GAP NOTED FOR THE RECORD (console's review, bus #78963): this gate -- and
+# the self-relative-path + sandbox-refusal backstop built alongside it --
+# covers scripts/bus_send.py callers only. Other live writers console named
+# as examples (nervous_system/operator_log.py -- inserts into operator_asks/
+# operator_messages, not agent_messages itself, but is the same class of
+# ad-hoc psycopg writer outside this gate's static scan) are NOT covered by
+# any of this series' protections. Not fixed here -- surfaced so the gap
+# stays visible, not silently assumed closed.
 
 scripts/irsyad_autoscaler.py
 scripts/irsyad_confirm_executor.py
@@ -154,7 +179,6 @@ scripts/irsyad_pii_containment_monitor.py
 scripts/irsyad_shadow_watch.py
 scripts/irsyad_spin_worker.py
 scripts/irsyad_worker_reaper.py
-scripts/disk_space_monitor.sh
 scripts/fire_fix1a_grant_ping.sh
 legacy/ihsanos_drain/main.py
 
