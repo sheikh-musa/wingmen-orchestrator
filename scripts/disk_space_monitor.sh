@@ -44,7 +44,7 @@
 # the operator's nazim-console voice. It NEVER touches lanes or the hub pen.
 set -uo pipefail
 
-ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ORCH_DIR="${ORCH_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 WARN_FREE_GB="${DISK_WARN_FREE_GB:-9}"             # local-log-only early signal
 HARD_FREE_GB="${DISK_HARD_FREE_GB:-6}"             # real floor breach, logged (managed band)
 EMERGENCY_FREE_GB="${DISK_EMERGENCY_FREE_GB:-4}"   # genuine near-crash, always pages LOUD
@@ -70,24 +70,28 @@ should_fire() { local f="$1"; [ ! -f "$f" ] || [ -n "$(find "$f" -mmin +60 2>/de
 
 bus_nudge() {  # $1=priority $2=subject $3=body $4=to_agent (default orch-console)
   # MUST use the venv python (has psycopg2); launchd's bare python3 does not.
-  "$ORCH_DIR/.venv/bin/python3" - "$@" <<'PY' 2>>"$LOG"
-import sys, psycopg2
+  ORCH_DIR="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" - "$@" <<'PY' 2>>"$LOG"
+import sys, os
 pri, subj, body = sys.argv[1], sys.argv[2], sys.argv[3]
 to_agent = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else 'orch-console'
-import os
+# Musa op#34845, bus #78757/#78846 (PR-B step 2): was a raw psycopg INSERT INTO
+# agent_messages; routed through scripts/bus_send.py's send(). Self-relative via
+# ORCH_DIR (bus #78935/#78954/#78963), same as the reset_*.sh family -- ORCH_DIR
+# is passed in explicitly above since this heredoc has no preceding `cd` to it
+# (launchd's cwd is not guaranteed) and a bare env var isn't inherited unless
+# exported, which ORCH_DIR itself never is further up this script.
+orch_dir = os.environ['ORCH_DIR']
 url=None
-with open(os.path.expanduser('~/wingmen/orchestrator/.env')) as f:
+with open(os.path.join(orch_dir, '.env')) as f:
     for line in f:
         line=line.strip()
         for k in ('SUPABASE_DB_URL','DATABASE_URL','ORCH_DATABASE_URL'):
             if line.startswith(k+'='):
                 url=line.split('=',1)[1].strip().strip('"').strip("'"); break
         if url: break
-conn=psycopg2.connect(url); cur=conn.cursor()
-cur.execute("SET app.current_agent_id='orch-console'")
-cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-  VALUES ('orch-console',%s,'blocker',%s,%s,%s)""",(to_agent,pri,subj,body))
-conn.commit(); cur.close(); conn.close()
+sys.path.insert(0, orch_dir)
+from scripts.bus_send import send as bus_send
+bus_send('orch-console', to_agent, 'blocker', subj, body, pri, req=False, dsn=url)
 PY
 }
 
