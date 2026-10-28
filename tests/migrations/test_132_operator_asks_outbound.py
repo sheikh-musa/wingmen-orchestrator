@@ -183,13 +183,64 @@ def test_inbound_operator_messages_id_rejected(oa_db):
 
 
 def test_real_outbound_id_accepted(oa_db):
-    outbound_id = _insert_outbound(oa_db)
     ask_id = _insert_ask(oa_db)
+    outbound_id = _insert_outbound(oa_db)
     _exec(oa_db,
           "UPDATE operator_asks SET committed_date = now(), outbound_msg_id = %s WHERE id = %s",
           (outbound_id, ask_id))
     rows = _q(oa_db, "SELECT outbound_msg_id FROM operator_asks WHERE id = %s", (ask_id,))
     assert rows == [(outbound_id,)]
+
+
+# ── console bus #80764 fix 1: the predates check belongs in the TRIGGER
+# itself, not only in asks_triage.py -- the CLI is one writer, the trigger
+# covers all of them. ───────────────────────────────────────────────────────
+def test_outbound_id_sent_before_the_ask_existed_is_rejected_by_the_trigger(oa_db):
+    outbound_id = _insert_outbound(oa_db, created_at="now() - interval '1 day'")
+    ask_id = _insert_ask(oa_db)
+    with pytest.raises(psycopg.errors.RaiseException):
+        _exec(oa_db,
+              "UPDATE operator_asks SET committed_date = now(), outbound_msg_id = %s WHERE id = %s",
+              (outbound_id, ask_id))
+
+
+def test_outbound_id_sent_after_the_ask_was_created_is_accepted(oa_db):
+    ask_id = _insert_ask(oa_db)
+    outbound_id = _insert_outbound(oa_db)
+    _exec(oa_db,
+          "UPDATE operator_asks SET committed_date = now(), outbound_msg_id = %s WHERE id = %s",
+          (outbound_id, ask_id))
+    rows = _q(oa_db, "SELECT outbound_msg_id FROM operator_asks WHERE id = %s", (ask_id,))
+    assert rows == [(outbound_id,)]
+
+
+# ── console bus #80764 fix 2 (the "reopen hole"): the trigger only fired on
+# UPDATE OF outbound_msg_id, committed_date -- an ask reopened (closed_at set
+# back to NULL) while still carrying an old bad link was never checked. ────
+def test_reopening_a_closed_row_with_a_bad_link_raises(oa_db):
+    with psycopg.connect(oa_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO operator_asks (ask, closed_at, committed_date, outbound_msg_id) "
+            "VALUES ('legacy bad link', now(), now(), 80678) RETURNING id"
+        )
+        ask_id = cur.fetchone()[0]
+    with pytest.raises(psycopg.errors.RaiseException):
+        _exec(oa_db, "UPDATE operator_asks SET closed_at = NULL WHERE id = %s", (ask_id,))
+
+
+def test_reopening_a_closed_row_with_a_real_link_succeeds(oa_db):
+    with psycopg.connect(oa_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO operator_asks (ask) VALUES ('legacy good link') RETURNING id")
+        ask_id = cur.fetchone()[0]
+    # Sent AFTER the ask was created -- a real, non-predating link.
+    outbound_id = _insert_outbound(oa_db)
+    _exec(oa_db,
+          "UPDATE operator_asks SET closed_at = now(), committed_date = now(), outbound_msg_id = %s "
+          "WHERE id = %s",
+          (outbound_id, ask_id))
+    _exec(oa_db, "UPDATE operator_asks SET closed_at = NULL WHERE id = %s", (ask_id,))
+    rows = _q(oa_db, "SELECT closed_at FROM operator_asks WHERE id = %s", (ask_id,))
+    assert rows == [(None,)]
 
 
 def test_closed_historical_row_untouched_by_unrelated_update(oa_db):
@@ -212,8 +263,8 @@ def test_closed_historical_row_untouched_by_unrelated_update(oa_db):
 def test_clearing_both_columns_together_is_allowed(oa_db):
     """How fleet-health lifts a bad link (console bus #80736): setting
     committed_date AND outbound_msg_id to NULL together on an open row."""
-    outbound_id = _insert_outbound(oa_db)
     ask_id = _insert_ask(oa_db)
+    outbound_id = _insert_outbound(oa_db)
     _exec(oa_db,
           "UPDATE operator_asks SET committed_date = now(), outbound_msg_id = %s WHERE id = %s",
           (outbound_id, ask_id))
@@ -227,8 +278,8 @@ def test_clearing_both_columns_together_is_allowed(oa_db):
 def test_a_real_outbound_row_from_the_nazim_console_channel_is_accepted(oa_db):
     """Fleet-health stamps Friday dates from console's own real nazim_send
     message (console bus #80736) -- that exact real write path must work."""
-    outbound_id = _insert_outbound(oa_db, text="Confirmed for Fri 6 Nov.", tag="nazim-console")
     ask_id = _insert_ask(oa_db)
+    outbound_id = _insert_outbound(oa_db, text="Confirmed for Fri 6 Nov.", tag="nazim-console")
     _exec(oa_db,
           "UPDATE operator_asks SET committed_date = '2026-11-06T00:00:00Z', outbound_msg_id = %s WHERE id = %s",
           (outbound_id, ask_id))
