@@ -677,7 +677,9 @@ def test_delivered_at_bus_ref_stamps_that_rows_time(operator_ledger_db):
     rc = at.main([str(rid), "done", "--evidence", f"bus#{bus_id}", "--delivered-at", f"bus#{bus_id}"])
     assert rc == 0
     d_at, src, ref, closed = _delivery(operator_ledger_db, rid)
-    assert d_at == bus_ts and src == "bus-report" and ref == f"bus#{bus_id}" and closed is not None
+    # 'manual', never 'bus-report': that source is backfill-only (ruling #78610) and the live
+    # operator_asks_bus_evidence_backfill_only_chk rejects it (caught applying ask 4225, 10-28)
+    assert d_at == bus_ts and src == "manual" and ref == f"bus#{bus_id}" and closed is not None
 
 
 def test_delivered_at_op_ref_stamps_the_operator_message_time(operator_ledger_db):

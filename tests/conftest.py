@@ -228,7 +228,9 @@ def operator_ledger_db(pg_dsn, monkeypatch):
                 no_deliverable_reason  text,
                 CHECK (delivered_at IS NULL OR delivered_source IS NOT NULL),
                 CHECK (delivered_source IS NULL OR delivered_source = 'manual'
-                       OR delivered_evidence_ref IS NOT NULL)
+                       OR delivered_evidence_ref IS NOT NULL),
+                -- bus-report is backfill-only (ruling #78610)
+                CHECK (delivered_source IS DISTINCT FROM 'bus-report' OR delivered_backfilled)
             )
         """)
         cur.execute("""

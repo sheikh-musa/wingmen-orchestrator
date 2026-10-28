@@ -28,8 +28,9 @@ Usage:
   (any action) [--delivered-at bus#N | op#N | ISO-8601-with-offset] — stamp
   delivered_at at the moment the work actually went live: the created_at of
   agent_messages N / operator_messages N, or the given time. Same first-stamp-
-  wins rule; records the ref in delivered_evidence_ref. Validated BEFORE any
-  write, so a bad ref changes nothing.
+  wins rule; records the ref in delivered_evidence_ref (source stays 'manual':
+  'bus-report' is backfill-only, ruling #78610). Validated BEFORE any write, so
+  a bad ref changes nothing.
 
   (any action) [--answers ASK_ID] — the row being triaged IS Musa's answer to
   open ask ASK_ID: confirm+close it, linking the answering operator message
@@ -188,7 +189,9 @@ def resolve_delivered_at(cur, item_id: int, value: str, *, now=None):
         ts = _ref_time(cur, kind, ref_id)
         if ts is None:
             raise ValueError(f"--delivered-at {value}: no {_REF_TABLE[kind]} row #{ref_id}")
-        ref, source = f"{kind}#{ref_id}", ("bus-report" if kind == "bus" else "manual")
+        # always 'manual': bus-report is reserved for the backfill (ruling #78610,
+        # enforced by operator_asks_bus_evidence_backfill_only_chk); the anchor lives in the ref
+        ref, source = f"{kind}#{ref_id}", "manual"
     else:
         try:
             ts = dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
