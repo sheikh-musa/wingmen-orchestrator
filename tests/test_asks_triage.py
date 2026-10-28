@@ -767,3 +767,24 @@ def test_delivered_at_first_stamp_still_wins(operator_ledger_db):
     assert at.main([str(rid), "ask", "--summary", "s", "--delivered-at", f"bus#{b1}"]) == 0
     assert at.main([str(rid), "ask", "--summary", "s", "--delivered-at", f"bus#{b2}"]) == 0
     assert _delivery(operator_ledger_db, rid)[0] == ts1
+
+
+def test_a_refused_stamp_rolls_back_the_whole_triage(operator_ledger_db):
+    # orch-console #79986: triage() used to autocommit BEFORE the separate stamp, so a stamp the
+    # live checks reject left a half-applied close. Now they share one transaction.
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _aged_ask(c)
+    bad = {"at": _dt.datetime.now(_dt.timezone.utc), "ref": "bus#1", "source": "bus-report"}
+    with pytest.raises(psycopg.errors.CheckViolation):
+        at.triage(rid, "done", evidence="bus#1", deliver=bad)    # bus-report is backfill-only
+    d_at, _, _, closed = _delivery(operator_ledger_db, rid)
+    assert d_at is None and closed is None
+
+
+def test_triage_and_stamp_commit_together_and_report_stamped(operator_ledger_db):
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _aged_ask(c)
+        bus_id, bus_ts = _bus_row(c, age_min=50)
+    d = {"at": bus_ts, "ref": f"bus#{bus_id}", "source": "manual"}
+    assert at.triage(rid, "done", evidence=f"bus#{bus_id}", deliver=d) == 1 and d["stamped"] == 1
+    assert _delivery(operator_ledger_db, rid)[:2] == (bus_ts, "manual")

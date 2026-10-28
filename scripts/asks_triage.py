@@ -230,24 +230,28 @@ def check_bare_delivered(cur, item_id: int, evidence: str | None, *, now=None) -
                          f"--delivered-at {ref} (or the row/time it actually went live).")
 
 
+def _stamp_delivered_cur(cur, item_id: int, *, at=None, evidence_ref=None, source=None) -> int:
+    if at is None:
+        cur.execute("UPDATE operator_asks SET delivered_at = now() "
+                    "WHERE id = %s AND delivered_at IS NULL", (item_id,))
+    else:
+        cur.execute("UPDATE operator_asks SET delivered_at = %s, delivered_source = %s, "
+                    "  delivered_evidence_ref = COALESCE(delivered_evidence_ref, %s) "
+                    "WHERE id = %s AND delivered_at IS NULL",
+                    (at, source, evidence_ref, item_id))
+    return cur.rowcount
+
+
 def stamp_delivered(item_id: int, *, at=None, evidence_ref: str | None = None,
                     source: str | None = None, dsn: str | None = None) -> int:
     """Set operator_asks.delivered_at unless it's already set (first stamp wins): to `at`
     (with its evidence_ref/source) when given, else now(). Returns rows stamped: 1 on the
-    first call, 0 on any repeat (not an error)."""
+    first call, 0 on any repeat (not an error). The CLI stamps inside triage() instead."""
     dsn = dsn or _dsn()
     if not dsn:
         raise RuntimeError("no DATABASE_URL/SUPABASE_DB_URL")
     with psycopg.connect(dsn, autocommit=True, connect_timeout=10) as conn, conn.cursor() as cur:
-        if at is None:
-            cur.execute("UPDATE operator_asks SET delivered_at = now() "
-                        "WHERE id = %s AND delivered_at IS NULL", (item_id,))
-        else:
-            cur.execute("UPDATE operator_asks SET delivered_at = %s, delivered_source = %s, "
-                        "  delivered_evidence_ref = COALESCE(delivered_evidence_ref, %s) "
-                        "WHERE id = %s AND delivered_at IS NULL",
-                        (at, source, evidence_ref, item_id))
-        return cur.rowcount
+        return _stamp_delivered_cur(cur, item_id, at=at, evidence_ref=evidence_ref, source=source)
 
 
 def triage(item_id: int, action: str, *, summary: str | None = None,
@@ -255,7 +259,11 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
            committed_date: str | None = None, outbound_msg_id: int | None = None,
            needs_musa: str | None = None, musa_summary: str | None = None,
            answers: int | None = None, dsn: str | None = None,
-           triaged_by: str | None = None) -> int:
+           triaged_by: str | None = None, deliver: dict | None = None) -> int:
+    """Apply one triage action; returns the PRIMARY action's rowcount. `deliver`, when given
+    ({"at": ts-or-None-for-now(), "ref": str, "source": str}), stamps delivered_at in the SAME
+    transaction (first stamp wins) and records deliver["stamped"] = 0|1, so a refused stamp
+    rolls the whole triage back instead of leaving a half-applied close (orch-console #79986)."""
     if action == "ask" and not (summary and summary.strip()):
         raise ValueError("--summary is required for action=ask")
     if answers is not None and answers == item_id:
@@ -266,7 +274,9 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
         raise RuntimeError("no DATABASE_URL/SUPABASE_DB_URL")
     triaged_by = triaged_by or resolve_agent_id(os.environ)
 
-    with psycopg.connect(dsn, autocommit=True, connect_timeout=10) as conn:
+    # One transaction (commit on clean exit, rollback on any exception): the primary action,
+    # the --answers close and the delivered stamp land together or not at all.
+    with psycopg.connect(dsn, connect_timeout=10) as conn:
         with conn.cursor() as cur:
             # --answers pre-check (bus #78269): validate the TARGET ask exists
             # (and whether it is ALREADY closed — the idempotency input for the
@@ -398,6 +408,10 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                     "WHERE id = %s AND closed_at IS NULL",
                     (ans_ref, triaged_by, answers),
                 )
+            if deliver is not None:
+                deliver["stamped"] = _stamp_delivered_cur(cur, item_id, at=deliver.get("at"),
+                                                          evidence_ref=deliver.get("ref"),
+                                                          source=deliver.get("source"))
             return n
 
 
@@ -423,22 +437,19 @@ def main(argv=None) -> int:
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"error: {type(e).__name__}: {e}\n(nothing written)\n")
         return 2
+    deliver = ({"at": d_at, "ref": d_ref, "source": d_src}
+               if (args.delivered or args.delivered_at) else None)
     try:
         n = triage(args.id, args.action, summary=args.summary,
                    delegated_to=args.delegated_to, evidence=args.evidence,
                    committed_date=args.committed_date, outbound_msg_id=args.outbound_msg_id,
                    needs_musa=args.needs_musa, musa_summary=args.musa_summary,
-                   answers=args.answers, triaged_by=args.triaged_by)
+                   answers=args.answers, triaged_by=args.triaged_by, deliver=deliver)
     except Exception as e:  # noqa: BLE001
-        sys.stderr.write(f"error: {type(e).__name__}: {e}\n")
+        sys.stderr.write(f"error: {type(e).__name__}: {e}\n(nothing written: rolled back)\n")
         return 2
-    if args.delivered or args.delivered_at:
-        try:
-            stamped = stamp_delivered(args.id, at=d_at, evidence_ref=d_ref, source=d_src)
-        except Exception as e:  # noqa: BLE001
-            sys.stderr.write(f"error: --delivered stamp failed: {type(e).__name__}: {e}\n")
-            return 2
-        print("delivered_at stamped" if stamped else "delivered_at already set (first stamp kept)")
+    if deliver is not None:
+        print("delivered_at stamped" if deliver.get("stamped") else "delivered_at already set (first stamp kept)")
     if n == 1:
         if args.answers is not None:
             # True on both close paths — just-now confirmed or already closed
