@@ -15,8 +15,8 @@ VENDORED_PATH = REPO_ROOT / "scripts" / "lib" / "exec_broker" / "ddl_detect.py"
 HOOKS_PATH = REPO_ROOT / "scripts" / "hooks" / "ddl_detect.py"
 
 # the exact upstream hash both vendored copies are pinned to (ihsanos-irsyad
-# main scripts/db/lib/ddl_detect.py as of commit eba13a7b / #1051).
-UPSTREAM_PINNED_HASH = "a0895e0370751f113fc14dbde3611df53a3360700419ffecf7f3ef3630f9ae25"
+# main scripts/db/lib/ddl_detect.py as of PR #1168 squash 799b16c2).
+UPSTREAM_PINNED_HASH = "02a4c047d7ad196dc408f3cce384dcc8da5388d6fb26bcd14f29a726c78c453e"
 
 
 def test_hooks_copy_matches_its_own_pinned_hash():

@@ -68,5 +68,40 @@
     "label": "do_block_set_config_only",
     "sql": "DO $$ BEGIN PERFORM set_config('x','y',true); END $$;",
     "expected": false
+  },
+  {
+    "label": "select_into_creates_a_table_is_ddl",
+    "sql": "SELECT 1 INTO newtab FROM pg_class;",
+    "expected": true
+  },
+  {
+    "label": "insert_into_alone_is_still_dml_not_ddl",
+    "sql": "INSERT INTO t (x) VALUES (1);",
+    "expected": false
+  },
+  {
+    "label": "merge_into_alone_is_still_dml_not_ddl",
+    "sql": "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET x = s.x;",
+    "expected": false
+  },
+  {
+    "label": "plpgsql_select_into_variable_inside_do_block_is_not_ddl",
+    "sql": "DO $$\nDECLARE v int;\nBEGIN\n  SELECT 1 INTO v;\nEND\n$$;",
+    "expected": false
+  },
+  {
+    "label": "dquote_identifier_hides_a_comment_marker_is_now_caught",
+    "sql": "SELECT \"x--y\"; DROP TABLE t;",
+    "expected": true
+  },
+  {
+    "label": "standard_conforming_strings_off_backslash_bypass_is_now_caught",
+    "sql": "SET standard_conforming_strings = off; SELECT '\\''; DROP TABLE t; --'",
+    "expected": true
+  },
+  {
+    "label": "any_backslash_forces_a_gate_even_when_harmless",
+    "sql": "SELECT 'a\\b';",
+    "expected": true
   }
 ]
