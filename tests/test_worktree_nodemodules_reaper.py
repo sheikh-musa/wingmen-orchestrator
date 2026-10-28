@@ -285,3 +285,49 @@ def test_page_calls_bus_send_with_correct_kwargs(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["to"] == "orch-console"
     assert calls[0]["from_agent"] == "cc-fleet-health"
+
+
+@pytest.fixture
+def tracked_symlink_worktree(tmp_path):
+    """cosem-adcda shape (orch-console #80423): ops/node_modules is a COMMITTED symlink
+    (git mode 120000) to ../functions/node_modules, by design (PR486)."""
+    wt = tmp_path / "proj.wt-tracked-link"
+    (wt / "functions" / "node_modules").mkdir(parents=True)
+    (wt / "functions" / "node_modules" / "dep.js").write_bytes(b"z" * 1024)
+    (wt / "ops").mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=wt, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=wt, check=True)
+    (wt / ".gitignore").write_text("functions/node_modules/\n")
+    (wt / "ops" / "node_modules").symlink_to("../functions/node_modules")
+    subprocess.run(["git", "add", ".gitignore", "ops/node_modules"], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=wt, check=True)
+    return wt
+
+
+def test_tracked_symlink_spared_silently_80423(tracked_symlink_worktree, idle_project, monkeypatch):
+    wt = tracked_symlink_worktree
+    monkeypatch.setattr(nm, "_lsof_cwd_in_use", lambda p: False)
+    rep = nm.reap_one(wt, dry_run=False)
+    assert (wt / "ops" / "node_modules").is_symlink()        # the tracked link is untouched
+    assert not any("ops/node_modules" in e for e in rep["errors"])   # and NOT paged
+    assert str(wt / "ops" / "node_modules") in rep["spared"]
+    # the real (ignored) dir behind it is still reclaimed as usual
+    assert not (wt / "functions" / "node_modules").exists()
+    status = subprocess.run(["git", "-C", str(wt), "status", "--porcelain"],
+                            capture_output=True, text=True).stdout
+    assert status.strip() == ""
+
+
+def test_untracked_unignored_symlink_still_pages(tmp_path, idle_project, monkeypatch):
+    """Only a TRACKED link is expected; an untracked, un-ignored link is still surfaced."""
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    wt = tmp_path / "proj.wt-odd-link"
+    wt.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
+    (wt / "node_modules").symlink_to(target)
+    monkeypatch.setattr(nm, "_lsof_cwd_in_use", lambda p: False)
+    rep = nm.reap_one(wt, dry_run=False)
+    assert (wt / "node_modules").is_symlink()
+    assert any("NOT-IGNORED" in e for e in rep["errors"])
