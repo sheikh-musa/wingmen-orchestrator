@@ -116,6 +116,60 @@ def test_require_gate_noop_for_dml():
     assert cur.calls == []  # cur never touched for DML
 
 
+# --- (c): reuse the RO-override's lexical hazard pre-screen on the base
+# is_ddl_shaped path (cc-fleet-health bus #79161, after the PR #569
+# identifier-$ review). "One test per construct" — see each test's own
+# comment for whether the construct is a DEMONSTRATED is_ddl_shaped miss on
+# this path (the dquote class is) or a defense-in-depth/consistency refusal
+# (identifier-$ and backslash are NOT demonstrated misses here specifically,
+# because is_ddl_shaped's dollar-body DDL-keyword rescan already defends
+# that class when a real DDL keyword is present inside the swallowed
+# region -- but ambiguous/hazardous input is refused regardless, same
+# fail-closed doctrine as the RO-override screen).
+
+def test_require_gate_refuses_lexically_hazardous_dquote_without_gate():
+    # DEMONSTRATED pre-existing miss (whole-branch review, non-blocking item,
+    # 2026-10-28): the vendored lexer has no double-quoted-identifier state
+    # at all, so a bare "--" after a quote char opens a LINE COMMENT (not a
+    # dollar body -- never re-scanned), permanently hiding "; DROP TABLE t"
+    # from is_ddl_shaped. Confirmed is_ddl_shaped(sql) is False for this
+    # exact string before this fix.
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate('SELECT "x--y"; DROP TABLE t', None, "goumlynecruxrlmzlntp", cur=FakeCursor())
+    assert exc.value.code == ErrorCode.GATE_REQUIRED
+
+
+def test_require_gate_refuses_lexically_hazardous_dquote_even_with_a_valid_gate():
+    # Same milestone-(a) fail-closed doctrine as
+    # test_require_gate_refuses_even_a_fully_valid_shaped_gate: a hazardous
+    # statement with a shape-valid gate is STILL refused (GATE_INVALID), not
+    # silently allowed once a gate_id is attached.
+    row = {"from_agent": "orch-console", "message_type": "decision", "subject": "apply to goumlyne", "body": "", "is_past": True}
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate('SELECT "x--y"; DROP TABLE t', "56485", "goumlynecruxrlmzlntp", cur=FakeCursor(row))
+    assert exc.value.code == ErrorCode.GATE_INVALID
+
+
+def test_require_gate_refuses_lexically_hazardous_identifier_dollar_without_gate():
+    # Defense-in-depth/consistency, NOT a demonstrated is_ddl_shaped miss for
+    # this exact string (no DDL keyword appears anywhere, so is_ddl_shaped
+    # was already False for an unrelated reason -- this test instead proves
+    # the wiring: hazardous input is gated even with nothing DDL-shaped to
+    # find, same "cannot safely classify -> refuse" posture as the RO path.
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate("SELECT col$1 FROM t", None, "goumlynecruxrlmzlntp", cur=FakeCursor())
+    assert exc.value.code == ErrorCode.GATE_REQUIRED
+
+
+def test_require_gate_refuses_lexically_hazardous_backslash_without_gate():
+    # Same posture as the identifier-$ test above, for the backslash/E-string
+    # hazard class: a harmless E-string escape, no DDL keyword anywhere.
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate("SELECT E'\\x41' FROM t", None, "goumlynecruxrlmzlntp", cur=FakeCursor())
+    assert exc.value.code == ErrorCode.GATE_REQUIRED
+
+
+
 def test_require_gate_required_for_ddl_without_gate():
     with pytest.raises(BrokerValidationError) as exc:
         require_gate("alter table t add column x int", None, "goumlynecruxrlmzlntp", cur=FakeCursor())

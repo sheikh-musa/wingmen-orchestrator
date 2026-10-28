@@ -17,22 +17,14 @@ is_ddl_shaped itself. Never hand-edit the vendored file and never re-derive
 its context-aware lexing here — a second, divergent lexer is exactly the
 footgun the vendored copy exists to prevent.
 
-LEXICAL HAZARD PRE-SCREEN (whole-branch review Critical #1, 2026-10-28, plus
-PR #569 review's identifier-$ bypass, 2026-10-28): the vendored lexer does
-not track double-quoted identifiers, so a ', --, /* or $tag$ appearing
-INSIDE a "..." region opens a bogus noise region that swallows the real
-code (and an E'..' backslash escape closes its string early). Separately,
-$ is a legal PG identifier CONTINUATION character, so a$x$ is ONE
-identifier token to PG — but both this module's and the vendored
-dollar-open regex match $x$ mid-identifier, opening a bogus dollar body
-that swallows real code up to the next matching $x$. Either hazard hides
-denylisted writes from every scan in this module AND from is_ddl_shaped.
-The durable fix is upstream (ihsanos-irsyad) lexer awareness re-vendored
-under a new pin; until then _lexically_hazardous refuses the entire input
-class BEFORE any vendored call, fail-closed. Refusing the input class is
-doctrine: no legitimate broker statement needs an apostrophe inside a
-quoted identifier, a $ directly after an identifier character, or a
-backslash anywhere, and a caller hitting one renames or re-quotes.
+LEXICAL HAZARD PRE-SCREEN: this module imports is_lexically_hazardous from
+the shared lexical_hazard module (see that module's docstring for the full
+two-class rationale — double-quoted-identifier noise-opener confusion, plus
+the identifier-$ dollar-open bypass) rather than defining its own copy.
+gate_validation.require_gate reuses the SAME function on the base DDL-gate
+path (rollout step (c), bus #79161) — one shared definition so the two
+pre-screens cannot drift, the same reasoning as ref_override_is_live being
+the one liveness definition shared across the override checks.
 
 KNOWN LIMITATION (same doctrine as ddl_detect): this is a best-effort TEXT
 screen, not a semantic analyzer. A read-shaped statement that calls an
@@ -44,12 +36,11 @@ console-gated root action.
 
 FAIL-CLOSED DOCTRINE: false refusals are acceptable; a missed write is not.
 Concretely, a quoted column named "update"/"into"/"for", a dollar-quoted
-string constant containing write words (incl. into/for), a quoted
-identifier containing '/--/*/$, an identifier followed directly by $
-(e.g. col$1), and any backslash anywhere are all REFUSED — the same
-deliberate over-refusal stance ddl_detect takes ("a false refusal is
-fail-safe for a screen"). A caller hitting one renames or re-quotes;
-nothing legitimate is silently let through the other way.
+string constant containing write words (incl. into/for), and anything
+is_lexically_hazardous flags are all REFUSED — the same deliberate
+over-refusal stance ddl_detect takes ("a false refusal is fail-safe for a
+screen"). A caller hitting one renames or re-quotes; nothing legitimate is
+silently let through the other way.
 """
 from __future__ import annotations
 
@@ -58,6 +49,7 @@ from datetime import datetime
 
 from .ddl_detect import extract_dollar_bodies, is_ddl_shaped, strip_sql_noise
 from .gate_validation import BrokerValidationError, ref_override_is_live
+from .lexical_hazard import is_lexically_hazardous
 from .protocol import ErrorCode
 
 
@@ -123,118 +115,6 @@ _BODY_TOKEN_RE = _word_regex(_FORBIDDEN_BODY_TOKENS)
 
 _HEAD_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
-# Dollar-quote opener: $$ or $tag$ where tag is [A-Za-z_]\w* — the SAME
-# pattern the vendored _DOLLAR_OPEN_RE uses, so the pre-screen tracks exactly
-# the regions the vendored lexer could mis-read.
-_DOLLAR_OPEN_RE = re.compile(r"\$([A-Za-z_]\w*|)\$")
-
-
-def _is_identifier_char(ch: str) -> bool:
-    """Broad/inclusive on purpose (fail-closed): ASCII alnum, underscore,
-    dollar, or any Unicode letter/digit (str.isalnum() covers those) -- PG
-    identifiers may contain non-ASCII letters, and erring broad only means
-    MORE refusals, never a missed one."""
-    return ch.isalnum() or ch in ("_", "$")
-
-
-def _lexically_hazardous(sql: str) -> bool:
-    """True iff sql contains a construct that can blind the vendored lexer:
-    a ', --, /* or $tag$ inside a double-quoted identifier (the vendored
-    strip_sql_noise treats them as noise openers there and swallows the code
-    that follows), OR a $ directly following an identifier character (PR
-    #569 review: $ is a legal PG identifier CONTINUATION character, so
-    a$x$ is ONE identifier token to PG -- but both this module's and the
-    vendored dollar-open regex match $x$ mid-identifier and open a bogus
-    dollar body there, swallowing the real code up to the next matching
-    $x$). Backslashes are handled separately (any backslash, in any
-    context, is hazardous: E'' escapes close strings early in the vendored
-    lexer, and no broker-legitimate statement carries one).
-
-    Single left-to-right pass mirroring the vendored lexer's own region set
-    (code / 'string' / "identifier" / -- comment / nestable /* comment */ /
-    $tag$ body), so a "..." region is located exactly where PG locates it.
-    Divergences are all in the fail-closed direction:
-    - unterminated "..." or $tag$ runs to EOS for us; the code it would hide
-      is a PG syntax error upstream, never an executed write;
-    - a bare $ (e.g. a positional $1) that does NOT immediately follow an
-      identifier character is not an opener for us; those are not a broker
-      input class (statements arrive fully rendered).
-    """
-    i, n = 0, len(sql)
-    state = "code"
-    dollar_tag = ""
-    while i < n:
-        ch = sql[i]
-        two = sql[i:i + 2]
-        if state == "code":
-            if two == "--":
-                state = "line_comment"
-                i += 2
-            elif two == "/*":
-                state = "block_comment"
-                depth, i = 1, i + 2
-                while i < n and depth:
-                    if sql[i:i + 2] == "/*":
-                        depth, i = depth + 1, i + 2
-                    elif sql[i:i + 2] == "*/":
-                        depth, i = depth - 1, i + 2
-                    else:
-                        i += 1
-                continue
-            elif ch == "'":
-                state = "squote"
-                i += 1
-            elif ch == '"':
-                state = "dquote"
-                i += 1
-            else:
-                if ch == "$" and i > 0 and _is_identifier_char(sql[i - 1]):
-                    # $ immediately after an identifier char: PG folds this
-                    # into the SAME identifier, but naively matching a
-                    # $tag$ pattern here (as both lexers do) can open a
-                    # bogus dollar body mid-statement. Refuse the whole
-                    # input class, fail-closed, rather than try to track
-                    # whether a matching close tag would actually follow.
-                    return True
-                m = _DOLLAR_OPEN_RE.match(sql, i)
-                if m:
-                    dollar_tag = m.group(0)
-                    state = "dollar"
-                    i = m.end()
-                else:
-                    i += 1
-        elif state == "squote":
-            if ch == "'":
-                if two == "''":  # doubled quote: escaped, still in-string
-                    i += 2
-                else:
-                    state = "code"
-                    i += 1
-            else:
-                i += 1
-        elif state == "dquote":
-            if ch == '"':
-                if two == '""':  # doubled quote: escaped, still in-identifier
-                    i += 2
-                else:
-                    state = "code"
-                    i += 1
-            elif ch in ("'", "$") or two in ("--", "/*"):
-                return True  # hazard inside a quoted identifier
-            else:
-                i += 1
-        elif state == "line_comment":
-            if ch == "\n":
-                state = "code"
-            i += 1
-        else:  # dollar body — exact-tag close only
-            if sql.startswith(dollar_tag, i):
-                i += len(dollar_tag)
-                state = "code"
-            else:
-                i += 1
-    return False
-
 
 def is_plain_read(sql: str) -> bool:
     """True iff sql is a plain read: not lexically hazardous, not DDL-shaped
@@ -246,7 +126,7 @@ def is_plain_read(sql: str) -> bool:
     # (0) lexical hazard pre-screen (Critical #1): refuse the input class
     #     that can blind the vendored lexer BEFORE any vendored call — the
     #     class defeats is_ddl_shaped below in the same stroke.
-    if "\\" in sql or _lexically_hazardous(sql):
+    if is_lexically_hazardous(sql):
         return False
 
     # (a) DDL of any kind — top-level or inside a dollar body — via the
