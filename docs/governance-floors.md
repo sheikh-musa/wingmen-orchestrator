@@ -166,7 +166,7 @@ that is. See `migrations/131_governance_floor.sql`.
 <!-- GENERATED:governance_floor:START -->
 | Op ref | Floor | Enforced in code | Last check |
 |---|---|---|---|
-| op#32730 | No work_item in owned/in_progress sits untouched past 72 hours unless it carries a future due_at. | yes | not yet checked |
+| op#32730 | No work_item in owned/in_progress sits untouched past 72 hours unless it carries a future due_at. | yes | FAIL |
 
 **0 of 1 floors passing.**
 
