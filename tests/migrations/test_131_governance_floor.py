@@ -247,6 +247,41 @@ def test_requires_response_cleared_drops_the_stale_mirror(gf_db):
     assert rows == [("dropped", "source:agent_messages", "requires_response cleared")]
 
 
+# ── Floor row #1: the 72h-ABANDONED check ships seeded, as real SQL ───────────
+def test_floor_row_1_seeded_and_passes_on_empty_table(gf_db):
+    rows = _q(gf_db, "SELECT op_ref, enforced_in_code FROM governance_floor "
+                     "WHERE sentence LIKE 'No work_item in owned/in_progress%'")
+    assert rows == [("op#32730", True)]
+
+    predicate_sql = _q(gf_db, "SELECT predicate_sql FROM governance_floor "
+                              "WHERE sentence LIKE 'No work_item in owned/in_progress%'")[0][0]
+    assert _q(gf_db, f"SELECT ({predicate_sql})") == [(True,)]
+
+
+def test_floor_row_1_predicate_fails_on_a_real_72h_stale_item(gf_db):
+    _exec(gf_db, "INSERT INTO operator_asks (ask, triage_state, delegated_to) "
+                 "VALUES ('stale ping', 'ask', 'cc-irsyad-coord')")
+    _exec(gf_db, "UPDATE work_item SET updated_at = now() - interval '73 hours' "
+                 "WHERE source_table='operator_asks'")
+
+    predicate_sql = _q(gf_db, "SELECT predicate_sql FROM governance_floor "
+                              "WHERE sentence LIKE 'No work_item in owned/in_progress%'")[0][0]
+    assert _q(gf_db, f"SELECT ({predicate_sql})") == [(False,)]
+
+
+def test_floor_row_1_predicate_passes_when_future_due_at_set(gf_db):
+    """The due_at clause is load-bearing: a row parked against a future due
+    date is waiting, not abandoned."""
+    _exec(gf_db, "INSERT INTO held_commitments (owner_agent, title, due_at) "
+                 "VALUES ('cc-irsyad-coord', 'future thing', now() + interval '10 days')")
+    _exec(gf_db, "UPDATE work_item SET updated_at = now() - interval '73 hours' "
+                 "WHERE source_table='held_commitments'")
+
+    predicate_sql = _q(gf_db, "SELECT predicate_sql FROM governance_floor "
+                              "WHERE sentence LIKE 'No work_item in owned/in_progress%'")[0][0]
+    assert _q(gf_db, f"SELECT ({predicate_sql})") == [(True,)]
+
+
 def test_requires_response_cleared_after_done_does_not_retcon(gf_db):
     _exec(gf_db, "INSERT INTO agent_messages (from_agent, subject, requires_response) "
                  "VALUES ('orch-console', 'need review', true)")

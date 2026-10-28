@@ -331,6 +331,29 @@ CREATE TRIGGER work_item_mirror_bus_update_trg
     FOR EACH ROW WHEN (NEW.requires_response OR OLD.requires_response IS TRUE)
     EXECUTE FUNCTION work_item_mirror_bus_trg();
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Floor row #1: the 72h-ABANDONED check (already proven, 247-row dry-run,
+-- console's ruling bus #78827: stays dry-run, seeds page-state, the 247 go
+-- out as one triage list). Query lifted verbatim from work_item_reconcile.py's
+-- _abandoned() (draft branch fable/substrate2-build-20261027, PR#548), inverted
+-- to a boolean "floor passing" form. The due_at clause is load-bearing: a row
+-- parked against a future due date is waiting, not abandoned.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+INSERT INTO governance_floor (sentence, op_ref, predicate_sql, enforced_in_code)
+SELECT
+    'No work_item in owned/in_progress sits untouched past 72 hours unless it carries a future due_at.',
+    'op#32730',
+    $pred$NOT EXISTS (
+        SELECT 1 FROM work_item
+         WHERE state IN ('owned','in_progress') AND updated_at < now() - interval '72 hours'
+           AND (due_at IS NULL OR due_at <= now())
+    )$pred$,
+    true
+WHERE NOT EXISTS (
+    SELECT 1 FROM governance_floor WHERE op_ref = 'op#32730' AND sentence LIKE 'No work_item in owned/in_progress%'
+);
+
 COMMIT;
 
 -- ===========================================================================
