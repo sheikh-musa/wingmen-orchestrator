@@ -46,8 +46,12 @@ channel; you only pull claimable build work off the queue and execute it.
      topic as an automatic bounce, which excluded nearly the whole backlog.
 
 3. **Build it** per irsyad lane discipline: work on a branch, keep the change scoped to the
-   spec, run the repo's tests, open a PR, and route it to the **console gate** (Nazim
-   reviews irsyad/cosem PRs — do NOT self-merge). Follow TENANT-RESIDENCY-001 and
+   spec, run the repo's tests, open a PR, and hand it to **`cc-irsyad-coord`** — coord
+   reviews, merges, deploys and verifies irsyad code PRs (do NOT self-merge). The
+   console does NOT gate irsyad code PRs (owner-sign is the client; console #80143):
+   ONLY a migration or a data write on goumlyne/ceayj goes to orch-console, as an
+   evidence pack with sha12s that coord sends. Never post a pure code PR to the
+   console as "awaiting console gate". Follow TENANT-RESIDENCY-001 and
    LAYER-VOCAB-001; never write client rows to the wrong silo.
    - **`[supervised]`/money/minors-tagged row: still claimable, BUILD-ONLY.** Write the
      code, open the PR, request review, and hand the evidence pack (diff, test results,
