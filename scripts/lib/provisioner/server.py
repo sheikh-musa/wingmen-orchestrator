@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+from pathlib import Path
 
 from . import peer
 from .gate import require_provision_gate
@@ -34,9 +35,14 @@ from .ledger import AccessLogEntry, gate_already_used, log_finalized, log_starte
 from .protocol import ErrorCode, MalformedRequest, encode_error, encode_ok, parse_request
 from .registry import Refuse
 from .render import render_bundle
+from .snapshot import SnapshotRefused, ensure_verified_snapshot
 from .spec import load_spec, spec_path
 
 logger = logging.getLogger("provisioner")
+
+# verified-snapshot files (#80298 condition 1) land next to the daemon's
+# other secrets: 0700 dir, 0600 files (snapshot.py enforces both).
+_SNAPSHOT_BASE = Path(__file__).resolve().parents[3] / ".secrets"
 
 VERBS = frozenset({"provision", "revert"})
 
@@ -61,12 +67,14 @@ class ProvisionerServer:
         bus_conn_factory,
         store_conn_factory,
         peer_uid_fn=peer.peer_uid,
+        snapshot_base: Path = _SNAPSHOT_BASE,
     ) -> None:
         self.sock_path = sock_path
         self.allowed_uids = allowed_uids
         self.bus_conn_factory = bus_conn_factory
         self.store_conn_factory = store_conn_factory
         self.peer_uid_fn = peer_uid_fn
+        self.snapshot_base = snapshot_base
 
     def serve_forever(self) -> None:
         if os.path.exists(self.sock_path):
@@ -175,6 +183,19 @@ class ProvisionerServer:
                                     f"store server major {major} < {_MIN_SERVER_MAJOR} floor — "
                                     "pre-PG16 CREATEROLE escalation rules, refusing fail-closed")
                                 return
+                            if req.verb == "revert":
+                                # #80298 condition 1: a verified snapshot in
+                                # the SAME txn — the revert SQL's own guard
+                                # then re-checks the marker against live
+                                # counts, so a snapshot that drifts (or a
+                                # hand-typed marker) authorizes nothing.
+                                try:
+                                    ensure_verified_snapshot(scur, spec, self.snapshot_base)
+                                except SnapshotRefused as e:
+                                    self._finalize_and_respond(
+                                        conn, bus, cur, row_id, ErrorCode.UPSTREAM_ERROR,
+                                        f"revert refused — snapshot not verified: {e}")
+                                    return
                             scur.execute(bundle.forward_sql if req.verb == "provision"
                                          else bundle.revert_sql)
                         store.commit()

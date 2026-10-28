@@ -499,7 +499,7 @@ def render_install_canary() -> str:
         "DROP ROLE __fp_install_canary;",
         "INSERT INTO organizations (id, name, uen, type, slug, settings)",
         "  VALUES ('00000000-0000-0000-0000-00000000c0de', 'install canary', '',",
-        "          'business', 'install-canary', '{}')",
+        "          'business', 'install-canary', '{\"managed_by\":\"wingmen_provisioner\"}')",
         "  ON CONFLICT (id) DO NOTHING;",
         "DELETE FROM organizations WHERE id = '00000000-0000-0000-0000-00000000c0de';",
         "DROP TABLE public.__fp_install_canary;",

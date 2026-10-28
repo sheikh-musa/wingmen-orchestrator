@@ -27,12 +27,48 @@ def test_bundle_header_carries_the_registry_ref():
 
 
 def test_every_policy_is_org_pinned():
-    forward = render_mod.render_bundle(BARIQ).forward_sql
-    policies = re.findall(r"^CREATE POLICY .*?(?=^\s*(?:DROP|CREATE|REVOKE|GRANT|ALTER|INSERT|--)|\Z)",
-                          forward, re.MULTILINE | re.DOTALL)
+    # the structural scan runs on the BARE statements (plan §4.3) — the
+    # forward embeds them inside idempotency guards (#80298 condition 3),
+    # so extract the same list the renderer itself scans
+    bundle = render_mod.render_bundle(BARIQ)
+    ctx = {f: getattr(BARIQ, f) for f in
+           ("org_uuid", "editor_role", "content_table", "history_table")}
+    policies = render_mod._policy_statements(ctx)
     assert len(policies) >= 4  # anon read + editor select/update + history select
     for p in policies:
         assert f"org_id = '{BARIQ.org_uuid}'" in p, f"unpinned policy:\n{p}"
+        # and each statement is actually carried into the guarded forward
+        assert p in bundle.forward_sql, f"policy not embedded in forward:\n{p}"
+
+
+def test_forward_is_exact_shape_guarded_not_bare_ddl():
+    # #80298 condition 3: same-name/different-shape objects must REFUSE, so
+    # no bare CREATE POLICY/CREATE TABLE may remain — everything object-
+    # creating sits inside a guard that pins the expected shape
+    forward = render_mod.render_bundle(BARIQ).forward_sql
+    assert "SHAPE-REFUSED" in forward
+    assert not re.findall(r"(?m)^CREATE (?:POLICY|TABLE) ", forward), \
+        "bare DDL escaped the idempotency guards"
+    # the org INSERT carries the marker the store's fp policies pin
+    assert '"managed_by":"wingmen_provisioner"' in forward
+
+
+def test_revert_is_snapshot_guarded_before_any_drop():
+    # #80298 condition 1: the guard runs FIRST — before the first DROP
+    revert = render_mod.render_bundle(BARIQ).revert_sql
+    assert "REVERT-REFUSED" in revert
+    assert revert.index("REVERT-REFUSED") < revert.index("DROP POLICY IF EXISTS")
+
+
+def test_migration_ledger_create_is_existence_guarded():
+    # #80291: a pre-existing ledger is store infra — the REVOKE/ENABLE-RLS
+    # statements must run only on the create path (they need an ownership
+    # the bundle must never assume), so exactly one bare CREATE, inside
+    # the EXECUTE, and guarded by to_regclass
+    forward = render_mod.render_bundle(BARIQ).forward_sql
+    assert "IF to_regclass('public.migration_ledger') IS NULL THEN" in forward
+    assert forward.count("CREATE TABLE public.migration_ledger") == 1
+    assert forward.count("REVOKE ALL ON public.migration_ledger FROM anon, authenticated") == 1
 
 
 def test_editor_surface_is_least_privilege():

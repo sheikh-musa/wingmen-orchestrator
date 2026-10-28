@@ -45,6 +45,7 @@ class FakeCursor:
         self.executed.append(sql)
         if self.exc:
             raise self.exc
+        return self  # psycopg3 Cursor.execute returns the cursor itself
 
     def fetchone(self):
         return self.results.pop(0) if self.results else None
@@ -73,9 +74,11 @@ class FakeBusConn:
 
 
 class FakeStoreConn:
-    def __init__(self, major=170000, apply_exc=None):
-        # store conn uses default tuple rows (only the BUS conn is dict_row)
-        self.cur = FakeCursor([(major,)], exc=apply_exc)
+    def __init__(self, major=170000, apply_exc=None, results=None):
+        # store conn uses default tuple rows (only the BUS conn is dict_row);
+        # results (when given) replaces the default [major] script — the
+        # revert path's snapshot step consumes several fetchones first
+        self.cur = FakeCursor(results if results is not None else [(major,)], exc=apply_exc)
         self.commits = 0
         self.rollbacks = 0
 
@@ -177,11 +180,68 @@ def test_happy_path_revert_applies_the_revert_twin():
     go = _go_row(bundle, subject="GO: revert bariq tenant",
                  body=f"approved revert of bundle bariq {_REF} sha256 {bundle.sha256}")
     bus_results = [{"id": 8}, None, go]
-    srv, bus, store = _server(bus_results)
+    # fetchone script: major, then the snapshot step's existence+count reads
+    # (both tables empty -> snapshot is a verified no-op, guard passes)
+    store = FakeStoreConn(results=[(170000,), (True,), (0,), (True,), (0,)])
+    srv, bus, store = _server(bus_results, store=store)
     resp = _run(srv, _request(verb="revert"))
     assert resp["status"] == "ok" and resp["verb"] == "revert"
     assert any("DROP TABLE" in s for s in store.cur.executed)
     assert not any("CREATE TABLE" in s for s in store.cur.executed)
+
+
+def test_revert_refused_when_the_snapshot_cannot_be_verified():
+    # #80298 condition 1 wiring: SnapshotRefused -> UPSTREAM_ERROR, the
+    # revert SQL NEVER executes, and the store txn rolls back
+    bundle = render_bundle(_spec())
+    go = _go_row(bundle, subject="GO: revert bariq tenant",
+                 body=f"approved revert of bundle bariq {_REF} sha256 {bundle.sha256}")
+    calls = {}
+
+    def refused(cur, spec, base):
+        calls["snapshot"] = True
+        raise server_mod.SnapshotRefused("snapshot re-read mismatch")
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(server_mod, "ensure_verified_snapshot", refused)
+    try:
+        srv, bus, store = _server([{"id": 14}, None, go])
+        resp = _run(srv, _request(verb="revert"))
+    finally:
+        monkey.undo()
+    assert resp["error"]["code"] == "UPSTREAM_ERROR"
+    assert "snapshot not verified" in resp["error"]["message"]
+    assert calls.get("snapshot") is True
+    assert not any("DROP TABLE" in s for s in store.cur.executed), \
+        "revert SQL ran despite an unverified snapshot"
+    # the refusal returns from inside the store with-block, so the context
+    # exits cleanly — what must NEVER happen is a commit of that txn (the
+    # snapshot refused before any write, so an empty txn is all there is)
+    assert store.commits == 0
+
+
+def test_revert_snapshot_precedes_the_revert_sql_in_the_same_txn():
+    # ordering pin: the marker INSERT lands inside the same store txn, ahead
+    # of the revert twin — a snapshot that drifts can never authorize a revert
+    bundle = render_bundle(_spec())
+    go = _go_row(bundle, subject="GO: revert bariq tenant",
+                 body=f"approved revert of bundle bariq {_REF} sha256 {bundle.sha256}")
+    seen = []
+
+    def snap(cur, spec, base):
+        seen.append("snapshot")
+        return {"content_rows": 3, "history_rows": 1, "skipped": False}
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(server_mod, "ensure_verified_snapshot", snap)
+    try:
+        srv, bus, store = _server([{"id": 15}, None, go])
+        resp = _run(srv, _request(verb="revert"))
+    finally:
+        monkey.undo()
+    assert resp["status"] == "ok"
+    assert seen == ["snapshot"]
+    assert store.cur.executed[-1] == bundle.revert_sql  # snapshot first, revert last
 
 
 def test_acl_denial_never_reaches_the_bus_or_store():

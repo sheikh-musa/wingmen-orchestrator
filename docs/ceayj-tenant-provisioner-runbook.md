@@ -163,3 +163,74 @@ What the four steps do (each idempotent; re-runs report already-applied):
   (#77536), and CREATEROLE cannot escalate on 17 (finding 2).
 - server: full ladder incl. audit invariant (no store connection before a
   committed started row), server-major >=16 floor, DSN never echoed.
+
+## Adoption round (bus #80291 plan, #80298 approval, 2026-10-29) — migration 129
+
+The live apply died at the step-3 canary: RLS on `organizations` (all tables
+store-wide carry it) blocks fleet_provisioner — the platform ships exactly 3
+public policies on that table (slug-lookup SELECT, org-admin UPDATE,
+users-see-their-orgs SELECT) and NO INSERT/DELETE policy, so the canary's
+org INSERT violates row-level security.
+
+Fix = migration `129_adopt_bariq_provisioner.sql` (draft sha12 18b1a38986b2;
+requires installer step 3 landed first):
+
+1. **org policies for fp only**: `organizations_fp_insert` (INSERT, WITH
+   CHECK on the `managed_by` marker) + `organizations_fp_delete` (DELETE,
+   USING on the marker). No SELECT policy → no tenant read path widens. An
+   INSERT policy carries no USING; a DELETE whose USING never matches is a
+   silent 0-row no-op — fp can only ever touch rows a bundle created.
+   KNOWN LIMIT (accepted, #80298 A.1): a tenant org_admin can edit its own
+   settings; the marker is not tamper-proof against that tenant.
+2. **adoption**: content/history tables + audit fn become fp-owned (the
+   steady state a fresh create would have produced). ALTER ... OWNER TO
+   needs SET ROLE on the target (PG16+) — the admin grants itself
+   membership for the transfer window and drops it after.
+3. **marker on the org row** (`settings.managed_by`), idempotent.
+4. **`provisioner_revert_snapshots`** marker table (ops metadata ONLY:
+   counts, sha256s, path, timestamp) + fp-only ALL policy + SELECT/INSERT.
+5. **fp gets ADMIN OPTION on bariq_editor** — without it the bundle's
+   revert (DROP ROLE) can never complete post-adoption (PG16+ drops need
+   CREATEROLE + ADMIN on the target; a fresh create would have given fp
+   that admin as the role's creator).
+
+The migration ASSERTS the live shape first (roles, the three org policies,
+the bariq org row id/slug/type, column shapes via pg_attribute — NOT
+information_schema, whose columns view is privilege-visible and would
+wrongly refuse a re-run once the admin no longer owns the tables) and
+refuses named-error on any drift. Idempotent: a re-run over a completed
+adoption is a no-op.
+
+**Bundle render changes** (new bundle sha256
+fb5c4b6b837a94ce63c58b3c938e8fd27255272f4047479090f289ae015a05ee):
+
+- org INSERT carries the marker (canary too).
+- every object-creating statement sits in an EXACT-shape guard: absent →
+  created; present → accepted ONLY at the exact rendered shape; anything
+  else `SHAPE-REFUSED` (#80298 condition 3 — pg_policies deparse equality
+  for policies, whitespace-normalized prosrc for the audit fn, column
+  shape for tables). Deparse ground truth pinned against the live store:
+  `(org_id = '<uuid>'::uuid)`.
+- migration_ledger creation is existence-guarded (pre-existing ledger =
+  store infra; the REVOKE/ENABLE-RLS only run on the create path).
+- **revert refuses without a verified snapshot** (#80298 condition 1):
+  dropping tables that hold rows raises `REVERT-REFUSED` unless a marker
+  row in provisioner_revert_snapshots matches the LIVE counts. The daemon's
+  revert flow takes the snapshot in the SAME store txn right before
+  executing the revert SQL: COPY each table (deterministic order), write
+  0600 files under `.secrets/provisioner_snapshots/` (0700 dir), re-read
+  the bytes, reconcile line count vs SQL count, then insert the marker —
+  anything short refuses and nothing drops. Restoring = re-run forward,
+  then `COPY ... FROM` the snapshot files (psycopg3 surfaces COPY streams
+  WITHOUT the `\.` trailer; COPY FROM takes trailer-less data).
+- snapshot files are tenant data on disk (that is their job); the marker
+  row is ops metadata only (TENANT-RESIDENCY-001).
+
+PG17 harness (test_install_store_role_pg17.py) now mirrors the LIVE world —
+RLS'd organizations with the 3 platform policies, pre-existing
+admin-owned artifacts with real rows — and proves: the pre-fix canary
+denial (RED anchor), forward idempotency over the adopted world,
+SHAPE-REFUSED on a drifted policy, revert refusal without snapshot,
+snapshot-verified revert + byte-identical restore, migration idempotency,
+unmarked-row DELETE is a silent 0-row no-op, and the full grants/canary/
+lifecycle surface as fp.
