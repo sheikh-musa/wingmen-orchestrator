@@ -312,3 +312,149 @@ def test_anthropic_host_base_url_is_not_routed(monkeypatch):
     rc = _run(monkeypatch, env={"ANTHROPIC_BASE_URL": "https://api.anthropic.com"},
               stdin_text=_bash('cat ~/.wingmen/private/write_dsn.env'))
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# Allow-exception #2 (op#35106 / bus #79277): Musa authorised the ceayj
+# tenant-provisioner INSTALL. The work is ONE sanctioned script --
+# scripts/install_ceayj_provisioner.py (runbook Install steps 1-4: gated
+# substrate migration, provisioner_log_role credential mint, dedicated
+# fleet_provisioner store role + 0600 DSN reading the console's private
+# client-silo credentials file ONLY inside the process, launchd load +
+# ungated-refusal self-check). Every DIRECT way of doing that work names the
+# ihsanos multi-tenant store or the private credentials file and is BLOCKED
+# above. The exception allows ONE shape and nothing else: a Bash call that is
+# EXACTLY `.venv/bin/python3 scripts/install_ceayj_provisioner.py` with only
+# --dry-run / --apply / --step N, nothing chained, no substitution, no other
+# args. Fail-closed: anything else falls through to the BLOCKED checks.
+# ---------------------------------------------------------------------------
+
+# Canonical allowed shapes: bare (script defaults to dry-run), each mode flag
+# alone, --step (space and inline= forms), flag combinations, relative and
+# absolute interpreter/script paths.
+_INSTALL_CANON_APPLY = ".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply"
+_INSTALL_CANON_DRY_STEP = ".venv/bin/python3 scripts/install_ceayj_provisioner.py --dry-run --step 2"
+_INSTALL_CANON_BARE = "python3 scripts/install_ceayj_provisioner.py"
+_INSTALL_CANON_STEP_ONLY = ".venv/bin/python3 scripts/install_ceayj_provisioner.py --step 4"
+_INSTALL_CANON_INLINE_STEP = ".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply --step=3"
+_INSTALL_CANON_ABS = (
+    f"{guard._REPO_ROOT}/.venv/bin/python3 "
+    f"{guard._REPO_ROOT}/scripts/install_ceayj_provisioner.py --apply"
+)
+
+
+@pytest.mark.parametrize("cmd", [
+    _INSTALL_CANON_APPLY,
+    _INSTALL_CANON_DRY_STEP,
+    _INSTALL_CANON_BARE,
+    _INSTALL_CANON_STEP_ONLY,
+    _INSTALL_CANON_INLINE_STEP,
+    _INSTALL_CANON_ABS,
+])
+def test_install_invocation_allowed_shapes_pass_helper(cmd):
+    assert guard._is_allowed_install_invocation(
+        {"tool_name": "Bash", "tool_input": {"command": cmd}}) is True
+
+
+@pytest.mark.parametrize("cmd", [
+    _INSTALL_CANON_APPLY,
+    _INSTALL_CANON_DRY_STEP,
+    _INSTALL_CANON_BARE,
+])
+def test_install_invocation_allowed_shapes_pass_main(monkeypatch, cmd):
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
+    assert rc == 0
+
+
+# Everything that is not EXACTLY the sanctioned shape must be rejected by the
+# helper (directly) -- the security property.
+_INSTALL_REJECTED = [
+    # shell chaining / substitution / newline (same classes as the coord exception)
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply; psql ceayjeamtmcyzzvqflus",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply&&whoami",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply|tee x",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply>f",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply\nwhoami",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply --step $(cat ~/.wingmen/private/write_dsn.env)",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply `id`",
+    # any other flag -- the gate id, DSNs, targets etc. are discovered IN the
+    # script from gated bus rows, never passed on the command line
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --gate 79277",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --dsn postgres://x",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply --silo ceayjeamtmcyzzvqflus",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --step 2 --subject x",
+    # --step value discipline: 1-4 only, digits only, exactly one, must exist
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --step 0",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --step 5",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --step x",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --step 12",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --step",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --step 2 --step 3",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --dry-run=1",
+    # mode flags are exclusive and single
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply --dry-run",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply --apply",
+    # no positionals, no other programs, no other script paths
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply now",
+    "python3 scripts/bus_send.py --to cc-irsyad-coord --apply",
+    "python3 /tmp/x/install_ceayj_provisioner.py --apply",
+    "/tmp/python3 scripts/install_ceayj_provisioner.py --apply",
+    ".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply # psql goumlynecruxrlmzlntp",
+]
+
+
+@pytest.mark.parametrize("cmd", _INSTALL_REJECTED)
+def test_install_invocation_rejects_each_bypass_directly(cmd):
+    assert guard._is_allowed_install_invocation(
+        {"tool_name": "Bash", "tool_input": {"command": cmd}}) is False
+
+
+def test_install_invocation_rejects_non_bash_tool():
+    payload = {"tool_name": "Read",
+               "tool_input": {"file_path": "scripts/install_ceayj_provisioner.py"}}
+    assert guard._is_allowed_install_invocation(payload) is False
+
+
+# A non-canonical invocation carrying a silo token -> helper False -> the
+# BLOCKED silo check fires -> rc 2 (fail-closed fallthrough, main()).
+def test_install_bypass_with_silo_token_is_blocked_via_main(monkeypatch):
+    cmd = (".venv/bin/python3 scripts/install_ceayj_provisioner.py "
+           "--apply --gate 42 --dsn postgres://ceayjeamtmcyzzvqflus")
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
+    assert rc == 2
+
+
+def test_install_bypass_chained_psql_is_blocked_via_main(monkeypatch, capsys):
+    cmd = (".venv/bin/python3 scripts/install_ceayj_provisioner.py --apply "
+           "; psql ceayjeamtmcyzzvqflus")
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
+    assert rc == 2
+    assert "ihsanos multi-tenant DB (ceayj)" in capsys.readouterr().err
+
+
+# DRIFT-PROOF (mirrors the bus_send drift tests): the guard's allowed shape
+# must ACTUALLY parse on the REAL scripts/install_ceayj_provisioner.py, so
+# guard and tool cannot drift apart.
+import importlib.util as _ilu  # noqa: E402
+
+_install_spec = importlib.util.spec_from_file_location(
+    "install_ceayj_provisioner",
+    pathlib.Path(__file__).resolve().parents[1] / "scripts" / "install_ceayj_provisioner.py")
+_install = importlib.util.module_from_spec(_install_spec)
+_install_spec.loader.exec_module(_install)
+
+
+def test_canonical_install_shapes_parse_on_real_installer():
+    argv = _shlex.split(_INSTALL_CANON_APPLY)[2:]
+    args = _install.build_parser().parse_args(argv)
+    assert args.apply is True and args.step is None
+    argv = _shlex.split(_INSTALL_CANON_DRY_STEP)[2:]
+    args = _install.build_parser().parse_args(argv)
+    assert args.dry_run is True and args.step == 2
+    argv = _shlex.split(_INSTALL_CANON_INLINE_STEP)[2:]
+    args = _install.build_parser().parse_args(argv)
+    assert args.apply is True and args.step == 3
+    argv = _shlex.split(_INSTALL_CANON_BARE)[2:]
+    args = _install.build_parser().parse_args(argv)
+    # bare invocation: dry-run is the script's DEFAULT (not the flag's presence)
+    assert args.apply is False and args.step is None
