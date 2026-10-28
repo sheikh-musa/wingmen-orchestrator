@@ -108,6 +108,19 @@
 # CC_GHOST+history-match state the stub can't produce) -- a genuine,
 # pre-existing, repo-wide gap, not newly introduced by this migration.
 #
+# STEP 2 FOLLOW-UP, the reset_*.sh family, 2026-10-28 (console's bus
+# #78886/#78899: a static grep-clean check alone doesn't prove the migrated
+# bus_send.py CLI invocation actually posts). The executed-invocation proof
+# for reset_cai.sh/reset_fleet_health.sh/reset_nazim.sh already landed in
+# tests/test_reset_family_self_relative_path.py (bus #78935/#78954/#78963 --
+# built alongside those 3 scripts' self-relative-path fix, same PR). This
+# follow-up closes the remaining gap: reset_auditor.sh (already
+# self-relative, needed no .sh change) gets the same executed proof added to
+# that file. Extracted from the VERIFY-failed branch, skipping the preceding
+# composer-pane retry loop (calls composer_parse_pane, not defined in the
+# extracted snippet, and irrelevant to proving the escalation call itself) --
+# _cleared=0 is set directly instead of exercised through the loop.
+#
 # STEP 2, scripts/switch_lane_token.sh, 2026-10-28 (Musa op#34845, console's
 # ordering bus #78846/#78857): the identity-stamped audit + break-glass alert
 # (cai CAI-RESP-747 conds 2/3), a Python heredoc looping over recipients
