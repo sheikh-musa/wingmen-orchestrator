@@ -187,37 +187,47 @@ def _already_surfaced_recently(conn, agent_id: str, within_hours: int = 24) -> b
 def _surface_stale_rr_to_coord(conn, agent_id: str, session: str, row_ids: list[int]) -> None:
     """Fail-safe: a failed insert must never crash the reaper loop over a nudge-only
     feature (cc-quality #58499 finding 2) -- the reap decision above this call has
-    already run and is unaffected."""
+    already run and is unaffected. post_on_conn() on the PASSED conn, never a raw
+    INSERT (Musa op#34845, PR-B step 2) -- reusing conn (not send(), which would open
+    an unrelated fresh connection) keeps this fail-safe-on-a-bad-passed-conn, matching
+    the existing test contract."""
     try:
+        from scripts.bus_send import post_on_conn
         with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-                "requires_response,priority) VALUES ('cc-orchestrator','cc-irsyad-coord','update',%s,%s,false,'P2')",
-                (f"stale requires_response blocking reap: {agent_id} ({session})",
-                 f"{agent_id} ({session}) is idle + wound-down past grace, but reap is held back "
-                 f"solely by unresponded requires_response row(s) older than 24h: "
-                 f"{', '.join(str(i) for i in row_ids)}. The reap decision does not change with age "
-                 "-- an unacked order still blocks reap -- this is a surface-only nudge so coord can "
-                 "clear or re-ack it. Deduped: at most one of these per worker per 24h."))
+            post_on_conn(
+                cur, "cc-orchestrator", "cc-irsyad-coord", "update",
+                f"stale requires_response blocking reap: {agent_id} ({session})",
+                f"{agent_id} ({session}) is idle + wound-down past grace, but reap is held back "
+                f"solely by unresponded requires_response row(s) older than 24h: "
+                f"{', '.join(str(i) for i in row_ids)}. The reap decision does not change with age "
+                "-- an unacked order still blocks reap -- this is a surface-only nudge so coord can "
+                "clear or re-ack it. Deduped: at most one of these per worker per 24h.",
+                "P2", req=False)
         conn.commit()
     except Exception as exc:
         print(f"  [worker-reaper] WARN: stale-rr surface failed for {agent_id} ({exc})")
 
 
 def _reap(conn, agent_id: str, session: str, dry: bool) -> None:
+    """post_on_conn() on the PASSED conn, never a raw INSERT (Musa op#34845, PR-B
+    step 2) -- the "REAPED" row MUST ride the SAME transaction/commit as the
+    fleet_lanes UPDATE + agent_status DELETE above it (never send(), which would open
+    a second, independent connection): the announcement must not survive if the state
+    change it describes didn't land, and vice versa."""
     if dry:
         print(f"  [dry-run] would reap {agent_id} ({session}): kill-session + fleet_lanes down + clear status")
         return
     subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
+    from scripts.bus_send import post_on_conn
     with conn.cursor() as cur:
         cur.execute("UPDATE fleet_lanes SET desired_state='down', updated_at=now() WHERE lane=%s", (session,))
         cur.execute("DELETE FROM agent_status WHERE tmux_session=%s", (session,))
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-            "requires_response,priority) VALUES ('cc-orchestrator','orch-console','update',%s,%s,false,'P3')",
-            (f"REAPED wound-down worker {agent_id} ({session}) — pool shrinks",
-             f"{agent_id} had wound down (idle + latest post = wind-down); reaped its lingering session "
-             "so the autoscaler pool count shrinks and re-proposes on the next demand (op#20774 fix)."))
+        post_on_conn(
+            cur, "cc-orchestrator", "orch-console", "update",
+            f"REAPED wound-down worker {agent_id} ({session}) — pool shrinks",
+            f"{agent_id} had wound down (idle + latest post = wind-down); reaped its lingering session "
+            "so the autoscaler pool count shrinks and re-proposes on the next demand (op#20774 fix).",
+            "P3", req=False)
     conn.commit()
     print(f"  REAPED {agent_id} ({session}) — pool shrinks")
 

@@ -168,16 +168,17 @@ def _boot(n: int, dry: bool) -> int:
     return subprocess.run(["bash", str(WORKER_SUPERVISOR), str(n)]).returncode
 
 
-def _log_bus(conn, n: int, detail: str) -> None:
+def _log_bus(n: int, detail: str) -> None:
     # P3: a routine spin is NOT an exception — Nazim #40871 wants only exceptions (abort criteria,
     # cap-reached-with-demand-waiting, reaper-refused, confirm-executor alert) to surface as P1.
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
-            "VALUES ('cc-orchestrator','orch-console','update',%s,%s,false,'P3')",
-            (f"SPUN cc-irsyad worker (pool slot {n}) — claiming from coord_dispatch_queue",
-             detail))
-    conn.commit()
+    # INDEPENDENT write (own connection via send()): _register_pool_row() already committed
+    # (releasing the slot-allocation lock) and _boot() already ran before this fires -- there is
+    # no shared transaction left to ride. send() through scripts/bus_send.py, never a raw INSERT
+    # (Musa op#34845, PR-B step 2).
+    from scripts.bus_send import send
+    send("cc-orchestrator", "orch-console", "update",
+         f"SPUN cc-irsyad worker (pool slot {n}) — claiming from coord_dispatch_queue",
+         detail, "P3", req=False)
 
 
 def _already_booted_for(conn, proposal_id: int) -> bool:
@@ -264,7 +265,7 @@ def main(argv=None) -> int:
         if not args.dry_run:
             ref = (f"for proposal #{args.proposal_id}" if args.proposal_id is not None
                    else ("AUTO-spin on demand" if args.auto else "wet-prove"))
-            _log_bus(conn, n, f"Booted irsyad-worker-{n} (identity cc-irsyad-<N>, irsyad key) off {wt} "
+            _log_bus(n, f"Booted irsyad-worker-{n} (identity cc-irsyad-<N>, irsyad key) off {wt} "
                               f"{ref}; worker runs the claim-build-loop "
                               f"vs coord_dispatch_queue and winds down when empty.")
         print(f"[spin] done (slot {n}, rc {rc}).")

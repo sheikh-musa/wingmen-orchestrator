@@ -249,10 +249,15 @@ def operator_ledger_db(pg_dsn, monkeypatch):
 def reaper_db(pg_dsn):
     """Ephemeral Postgres carrying the real agent_messages/coord_dispatch_queue columns
     scripts/irsyad_worker_reaper.py's DB-querying helpers (_has_pending_order,
-    _stale_rr_only_skip, _already_surfaced_recently, _surface_stale_rr_to_coord) need --
-    same reuse-the-session-scoped-cluster idiom as operator_ledger_db, kept separate
-    because the reaper's schema slice doesn't overlap that fixture's (bus #58159 item
-    #339 fast-follow). Schema is dropped and recreated per-test."""
+    _stale_rr_only_skip, _already_surfaced_recently, _surface_stale_rr_to_coord, _reap)
+    need -- same reuse-the-session-scoped-cluster idiom as operator_ledger_db, kept
+    separate because the reaper's schema slice doesn't overlap that fixture's (bus
+    #58159 item #339 fast-follow). Schema is dropped and recreated per-test.
+
+    thread_id/sub_tag/is_test/posted_by_identity + post_agent_message (PR-B step 2,
+    Musa op#34845) are ADDITIVE -- every existing raw-INSERT test fixture setup above
+    omits them and gets the column defaults unchanged; only the new post_agent_message-
+    routed call sites (_reap, _surface_stale_rr_to_coord) touch them."""
     assert_dsn_is_not_production(pg_dsn)
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP SCHEMA public CASCADE")
@@ -268,6 +273,10 @@ def reaper_db(pg_dsn):
                 requires_response boolean NOT NULL DEFAULT false,
                 responded_at      timestamptz,
                 priority          text NOT NULL,
+                sub_tag           text,
+                thread_id         uuid DEFAULT gen_random_uuid() NOT NULL,
+                is_test           boolean DEFAULT false,
+                posted_by_identity text,
                 created_at        timestamptz NOT NULL DEFAULT now()
             )
         """)
@@ -278,6 +287,35 @@ def reaper_db(pg_dsn):
                 claimed_by  text,
                 done_at     timestamptz,
                 created_at  timestamptz NOT NULL DEFAULT now()
+            )
+        """)
+        cur.execute("""CREATE FUNCTION post_agent_message(
+            p_from_agent TEXT, p_to_agent TEXT, p_message_type TEXT, p_subject TEXT,
+            p_body TEXT, p_priority TEXT, p_requires_response BOOLEAN, p_thread_id UUID,
+            p_sub_tag TEXT, p_is_test BOOLEAN DEFAULT FALSE, p_posted_by_identity TEXT DEFAULT NULL
+        ) RETURNS TABLE(id BIGINT, thread_id UUID) LANGUAGE plpgsql AS $fn$
+        BEGIN
+            RETURN QUERY
+            INSERT INTO agent_messages
+                (from_agent, to_agent, message_type, subject, body, priority,
+                 requires_response, thread_id, sub_tag, is_test, posted_by_identity)
+            VALUES
+                (p_from_agent, p_to_agent, p_message_type, p_subject, p_body, p_priority,
+                 p_requires_response, p_thread_id, p_sub_tag, p_is_test, p_posted_by_identity)
+            RETURNING agent_messages.id, agent_messages.thread_id;
+        END;
+        $fn$""")
+        cur.execute("""
+            CREATE TABLE fleet_lanes (
+                lane           text PRIMARY KEY,
+                desired_state  text,
+                updated_at     timestamptz
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE agent_status (
+                agent_id      text PRIMARY KEY,
+                tmux_session  text
             )
         """)
     return pg_dsn

@@ -186,13 +186,6 @@
 # any of this series' protections. Not fixed here -- surfaced so the gap
 # stays visible, not silently assumed closed.
 
-scripts/irsyad_autoscaler.py
-scripts/irsyad_confirm_executor.py
-scripts/irsyad_pii_containment_monitor.py
-scripts/irsyad_shadow_watch.py
-scripts/irsyad_spin_worker.py
-scripts/irsyad_worker_reaper.py
-
 # STEP 1b, 2026-10-27 (Musa op#34845, console's PR#551 GO + follow-up bus
 # #78763): the gate's SQL/-sh-only patterns still couldn't see category 3,
 # a supabase-py `.table('agent_messages').insert(...)`/`.upsert(...)` call,
@@ -270,3 +263,70 @@ nervous_system/deploy_verifier.py
 # (already-deleted-alongside) test file -- confirmed dead by console's own
 # launchctl check on both hosts (no such launchd job, VPS hub off since
 # 09-27), same evidence as before, just re-confirmed after the correction.
+#
+# STEP 2, irsyad_*.py migration, 2026-10-29 (Musa op#34845, bus
+# #78757/#79123/#79125/#79950): migrated the 6 irsyad_*.py scripts' raw
+# INSERT INTO agent_messages call sites off this baseline onto
+# scripts/bus_send.py. Read all 6 in full (not grep snippets) before
+# writing any code, per console's two explicit requirements (bus #79125):
+#
+# (1) Transaction semantics, decided per call site, not blanket:
+#   - irsyad_autoscaler.py (emit_spin_proposal): INDEPENDENT -> send().
+#     write_log_row() already commits its own transaction before the
+#     proposal check even runs; nothing shared left to ride.
+#   - irsyad_confirm_executor.py (_alert): INDEPENDENT -> send(). Fires
+#     only AFTER the actuator subprocess already ran (success or fail) --
+#     a post-hoc notice about something already done.
+#   - irsyad_spin_worker.py (_log_bus): INDEPENDENT -> send().
+#     _register_pool_row() already committed (releasing the
+#     IRSYAD_WORKER_SLOT_ALLOC advisory xact lock) and the worker boot
+#     subprocess already ran before this fires -- nothing left to ride.
+#   - irsyad_worker_reaper.py, TWO call sites, different answers:
+#     - _reap(): MUST ride the caller's transaction -- its row shares one
+#       commit with the fleet_lanes UPDATE + agent_status DELETE it
+#       describes. Added bus_send.post_on_conn() (new helper -- posts
+#       through post_agent_message on a CALLER-OWNED cursor instead of
+#       opening a new connection; never calls commit itself) and called it
+#       on the passed conn, not send(). Proved the coupling with a test
+#       that makes post_on_conn raise mid-transaction and asserts NEITHER
+#       the fleet_lanes nor the agent_status change survives (console's
+#       own "spawned worker X should not survive a rollback" concern,
+#       landing on the reap side, not spin_worker).
+#     - _surface_stale_rr_to_coord(): also post_on_conn() on the passed
+#       conn -- NOT for atomicity (it already had its own decoupled
+#       commit), but because the EXISTING test suite
+#       (tests/test_irsyad_worker_reaper_integration.py) deliberately
+#       proves a bad/closed PASSED conn makes this fail safe. send() would
+#       open an unrelated fresh connection and silently defeat that
+#       contract -- a closed caller conn would no longer matter. Caught
+#       this only by reading that test file before touching the function;
+#       my own first-pass bus reply (bus #79950) had this one as send(),
+#       corrected before any code was written.
+#   Of 6 scripts / 8 write call sites total, exactly 1 genuinely needed
+#   the passed-conn treatment for atomicity (_reap) and 1 more needed it
+#   for an unrelated, pre-existing test contract (_surface_stale_rr_to_coord)
+#   -- the rest are independent.
+#
+# (2) Host/launcher/restart -- NOT all 6 run on gzb (a correction to the
+#   working assumption going in, bus #79950):
+#   - gzb (/home/gazzai), no persistent process, --once/oneshot only --
+#     restart = nothing to bounce, gzb pulling before its next scheduled
+#     fire is sufficient: irsyad_autoscaler.py (deploy/autoscaler_tick.sh
+#     cron AND deploy/wingmen-irsyad-autoscaler.service+.timer both exist
+#     in-repo -- which is actually installed needs coord/console to
+#     confirm, no gzb access from this lane), irsyad_confirm_executor.py
+#     (deploy/irsyad_confirm_executor_tick.sh, cron only),
+#     irsyad_worker_reaper.py (deploy/irsyad_worker_reaper_tick.sh, cron
+#     only). irsyad_spin_worker.py has no scheduler of its own -- invoked
+#     as a subprocess by the two gzb cron/timer scripts above.
+#   - Mini (/Users/sheikhmusa), launchd: irsyad_pii_containment_monitor.py
+#     (ops/launchd/dev.wingmen.irsyad-pii-containment-monitor.plist,
+#     StartInterval=3600, no KeepAlive -> fresh process each hour, no
+#     bounce needed) and irsyad_shadow_watch.py
+#     (ops/launchd/dev.wingmen.irsyad-shadow.plist, KeepAlive+RunAtLoad --
+#     the ONE genuinely always-on daemon of the 6; needs an actual
+#     daemon_restart_gate.py bounce after the Mini pulls, same as the two
+#     bus_send daemons bounced for PR#490, bus #78732/#78741).
+#   daemon_restart_gate.py itself is launchd/macOS-only (launchctl list +
+#   ps -o lstart) -- it has zero applicability to the 4 gzb scripts; there
+#   is no gzb equivalent in this repo.

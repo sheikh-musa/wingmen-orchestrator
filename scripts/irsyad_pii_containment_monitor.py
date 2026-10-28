@@ -24,8 +24,14 @@ cannot read must never read green (dead-man's-switch).
 from __future__ import annotations
 
 import os
+import sys
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 ORG_ID = "73339164-7c1f-40ba-a093-33f1f292dd4c"  # Madrasah Irsyad Zuhri Al-Islamiah (goumlyne)
 _GOUMLYNE_ENV = "GOUMLYNE_RO_DATABASE_URL"  # CAI-1225 RO-move: read-only auditor_ro (was write-DSN); reads goumlyne, writes only a bus page
@@ -383,13 +389,12 @@ def _page(subject: str, body: str, priority: str = "P0", requires_response: bool
     """Write a bus page from cc-fleet-health to orch-console. Substrate (DATABASE_URL).
     Carries only field labels + counts — never a PII value. `requires_response` is True
     for loud P0/P1 pages (breach / dead-man) and False for the low-freq non-P0 daily
-    still-open reminder + the one-shot clear notice (they inform, they don't nag)."""
-    import psycopg2
-    conn = psycopg2.connect(os.environ["DATABASE_URL"]); conn.autocommit = True
-    conn.cursor().execute(
-        """INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, priority, requires_response, posted_by_identity)
-           VALUES ('cc-fleet-health','orch-console','blocker',%s,%s,%s,%s,'cc-fleet-health')""",
-        (subject, body, priority, requires_response))
+    still-open reminder + the one-shot clear notice (they inform, they don't nag).
+    INDEPENDENT write (own connection each call, same as before) -- send() through
+    scripts/bus_send.py, never a raw INSERT (Musa op#34845, PR-B step 2)."""
+    from scripts.bus_send import send
+    send("cc-fleet-health", "orch-console", "blocker", subject, body, priority,
+         req=requires_response, posted_by_identity="cc-fleet-health")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
