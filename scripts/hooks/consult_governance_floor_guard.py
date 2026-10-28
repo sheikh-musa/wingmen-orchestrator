@@ -65,6 +65,20 @@ ASSERTION_PATTERNS = [
     r"console\s+(?:safety[-\s]?)?floor",
     r"go-?live\s+needs",
     r"governance\s+floor",
+    # ── HOLD-as-floor-assertion (2026-10-27 incident, op#34500-34512) ──────────
+    # A HOLD / gate / escalate-for-sign-off asserts a floor just as much as a LIFT.
+    # The console held the irsyad backfill on a Musa 'YES BACKFILL' verified-grant
+    # that the SSOT says does NOT exist (owners Shuq/Wan are sole sign-off, nothing
+    # waits on Musa) — a repeat relapse, run from stale memory without consulting the
+    # record. These catch the hold/await/pending-on-authority shape so the gate forces
+    # the SSOT read BEFORE a hold ships, not only before a lift.
+    r"yes\s+backfill",
+    r"verified[-\s]?authoriz",
+    r"(?:find|require)_verified_authorization",
+    r"money[-\s]?path\s+hold",
+    r"hold(?:ing)?[^.\n]{0,40}\b(?:grant|authoriz|sign-?off|owner-?sign|approval)",
+    r"await(?:ing)?[^.\n]{0,40}\b(?:grant|authoriz|sign-?off|approval)",
+    r"pending[^.\n]{0,30}\b(?:grant|authoriz|sign-?off|approval)",
 ]
 _ASSERTION_RE = re.compile("|".join(ASSERTION_PATTERNS), re.IGNORECASE)
 

@@ -206,3 +206,43 @@ class TestIncidentBenchmark:
         assert "cai is OUT of irsyad" in body
         # and explicitly flags the stale phrase as wrong for irsyad
         assert "cai+Nazim" in body and "STALE / WRONG" in body
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BENCHMARK 2 — replay the 2026-10-27 relapse: HOLDING an irsyad action on a Musa
+# sign-off is a floor-assertion too, and must trip the consult-gate.
+# ══════════════════════════════════════════════════════════════════════════════
+class TestHoldIsAFloorAssertionBenchmark:
+    """The console held the irsyad backfill for hours on a Musa 'YES BACKFILL' verified
+    grant that the SSOT says does not exist (owners Shuq/Wan are sole sign-off). A HOLD
+    asserts a floor; the gate must force the SSOT read before the hold ships."""
+
+    # The shapes the relapse actually took — a held_commitment / bus / operator line.
+    HOLD_SHAPES = [
+        'nazim_send.sh "holding the irsyad backfill pending your YES BACKFILL grant"',
+        'bus_send.py --body "GO withheld — awaiting Musa verified authorization on the backfill"',
+        'python3 -c "find_verified_authorization(chat_id=MUSA, phrases=[\'YES BACKFILL\'])"',
+        'bus_send.py --body "irsyad money-path hold until explicit grant"',
+    ]
+
+    @pytest.mark.parametrize("cmd", HOLD_SHAPES)
+    def test_hold_assertion_without_consult_is_blocked(self, monkeypatch, tmp_path, capsys, cmd):
+        rc = _run(monkeypatch, tmp_path, payload=_send(cmd))
+        assert rc == 2, f"hold-shaped assertion should trip the gate: {cmd!r}"
+        assert "docs/governance-floors.md" in capsys.readouterr().err
+
+    def test_after_consult_hold_language_passes(self, monkeypatch, tmp_path):
+        # Once the SSOT is read, the gate clears — the agent can correctly state the
+        # withdrawn hold ("nothing waits on Musa") without being blocked again.
+        assert _run(monkeypatch, tmp_path, payload=_read_ssot()) == 0
+        rc = _run(
+            monkeypatch, tmp_path,
+            payload=_send('nazim_send.sh "nothing waits on you — hold on your sign-off withdrawn"'),
+        )
+        assert rc == 0
+
+    def test_benign_backfill_mention_without_hold_language_passes(self, monkeypatch, tmp_path):
+        # Don't over-fire: a plain status line about a backfill with no hold/authorization
+        # shape must pass even unconsulted.
+        rc = _run(monkeypatch, tmp_path, payload=_send('bus_send.py --body "backfill report 3 of 7 written and verified"'))
+        assert rc == 0
