@@ -164,7 +164,8 @@ def test_flip_back_to_glm_apply_writes_glm_pointer_and_resolves_default_token(tm
         return R()
 
     r = g.flip_back_to_glm("cosem-port", tmp_path, apply=True, run=fake_run,
-                           token_resolver=lambda s, od: "/fake/syed-oauth-token")
+                           token_resolver=lambda s, od: "/fake/syed-oauth-token",
+                           policy_check=_allowed)
     assert r["result"] == "OK"
     assert ptr.read_text() == "glm-5.3"
     assert calls[0][-2:] == ["cosem-port", "/fake/syed-oauth-token"]
@@ -173,8 +174,100 @@ def test_flip_back_to_glm_apply_writes_glm_pointer_and_resolves_default_token(tm
 def test_flip_back_to_glm_apply_reports_token_resolve_failure(tmp_path):
     def boom(s, od):
         raise RuntimeError("no default token resolved for cosem-port")
-    r = g.flip_back_to_glm("cosem-port", tmp_path, apply=True, token_resolver=boom)
+    r = g.flip_back_to_glm("cosem-port", tmp_path, apply=True, token_resolver=boom,
+                           policy_check=_allowed)
     assert r["result"] == "FAILED" and "no default token resolved" in r["detail"]
+
+
+# ── #79897: the .<session>_model pointer must never be left drifted by a failed flip ──
+def _allowed(session):
+    return None
+
+
+def _refused(session):
+    from scripts.lib import provider_policy as pp
+    raise pp.ProviderNotAllowedError(session, "zai", {"allowed_providers": ["anthropic"]}, client_key=None)
+
+
+def _rc(code, out=""):
+    def run(argv, **kw):
+        run.calls.append(argv)
+        class R: returncode = code; stdout = out; stderr = ""
+        return R()
+    run.calls = []
+    return run
+
+
+def _tok(s, od):
+    return "/fake/syed-oauth-token"
+
+
+def test_flip_back_refused_by_policy_never_writes_pointer_when_absent(tmp_path):
+    # the cc-paperclip-spike case (#79890): no pointer existed, flip refused -> still none
+    run = _rc(0)
+    r = g.flip_back_to_glm("cc-paperclip-spike", tmp_path, apply=True, run=run,
+                           token_resolver=_tok, policy_check=_refused)
+    assert r["result"] == "REFUSED"
+    assert not (tmp_path / ".cc-paperclip-spike_model").exists()
+    assert run.calls == []
+
+
+def test_flip_back_refused_by_policy_leaves_existing_pointer_byte_identical(tmp_path):
+    ptr = tmp_path / ".cosem-port_model"
+    ptr.write_text("claude-sonnet-5\n")
+    run = _rc(0)
+    r = g.flip_back_to_glm("cosem-port", tmp_path, apply=True, run=run,
+                           token_resolver=_tok, policy_check=_refused)
+    assert r["result"] == "REFUSED" and ptr.read_text() == "claude-sonnet-5\n" and run.calls == []
+
+
+def test_flip_back_policy_unreadable_fails_closed_without_touching_pointer(tmp_path):
+    def unreadable(session):
+        raise RuntimeError("provider_policy fetch failed: connection refused")
+    run = _rc(0)
+    r = g.flip_back_to_glm("cosem-port", tmp_path, apply=True, run=run,
+                           token_resolver=_tok, policy_check=unreadable)
+    assert r["result"] == "FAILED" and "policy check failed" in r["detail"]
+    assert not (tmp_path / ".cosem-port_model").exists() and run.calls == []
+
+
+@pytest.mark.parametrize("rc,out", [(1, ""), (4, ""), (5, "HOLD: staged composer text"),
+                                    (7, "ERROR: GLM flip REFUSED by the provider_policy gate")])
+def test_flip_back_switch_fails_before_relaunch_restores_prior_pointer(tmp_path, rc, out):
+    ptr = tmp_path / ".cosem-port_model"
+    ptr.write_text("claude-sonnet-5")
+    r = g.flip_back_to_glm("cosem-port", tmp_path, apply=True, run=_rc(rc, out),
+                           token_resolver=_tok, policy_check=_allowed)
+    assert r["result"] == "FAILED" and ptr.read_text() == "claude-sonnet-5"
+    assert "pointer restored" in r["detail"]
+
+
+def test_flip_back_switch_fails_before_relaunch_removes_pointer_that_did_not_exist(tmp_path):
+    r = g.flip_back_to_glm("cosem-port", tmp_path, apply=True, run=_rc(5),
+                           token_resolver=_tok, policy_check=_allowed)
+    assert r["result"] == "FAILED" and not (tmp_path / ".cosem-port_model").exists()
+
+
+@pytest.mark.parametrize("rc,out", [(7, "ERROR: tmux new-session failed for 'cosem-port'. Lane is DOWN"),
+                                    (8, ""), (10, ""), (11, "")])
+def test_flip_back_switch_fails_after_relaunch_keeps_glm_pointer_and_says_verify(tmp_path, rc, out):
+    # past the kill-session the lane may already be on GLM: restoring would drift the OTHER way
+    ptr = tmp_path / ".cosem-port_model"
+    ptr.write_text("claude-sonnet-5")
+    r = g.flip_back_to_glm("cosem-port", tmp_path, apply=True, run=_rc(rc, out),
+                           token_resolver=_tok, policy_check=_allowed)
+    assert r["result"] == "FAILED" and ptr.read_text() == "glm-5.3"
+    assert "VERIFY" in r["detail"]
+
+
+def test_flip_back_switch_raising_restores_prior_pointer(tmp_path):
+    ptr = tmp_path / ".cosem-port_model"
+    ptr.write_text("claude-sonnet-5")
+    def boom(argv, **kw):
+        raise OSError("exec format error")
+    r = g.flip_back_to_glm("cosem-port", tmp_path, apply=True, run=boom,
+                           token_resolver=_tok, policy_check=_allowed)
+    assert r["result"] == "FAILED" and ptr.read_text() == "claude-sonnet-5"
 
 
 def test_main_peak_dry_run_dispatches_urgent_vs_pause(tmp_path, monkeypatch, capsys):
