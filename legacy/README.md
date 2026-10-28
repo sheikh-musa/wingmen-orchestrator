@@ -13,6 +13,20 @@ for one of these files: it isn't coming back without a deliberate decision
 to revive it, and reviving it means re-pointing its imports back out of
 `legacy.*` first.
 
+**2026-10-28 correction (Musa op#34845, PR-B's writer-inventory delete pass):**
+the "reachable only through `wingmen_orch.py`, nothing here runs" claim above
+was WRONG for one function -- `scripts/fire_drills/drill_sigkill.py` (a live,
+non-legacy file) had a real runtime dependency on `wingmen_orch.py`'s
+`cleanup_zombie_jobs`, missed by the original move's full-repo grep because
+the import was function-local, not at module scope. Fixed by extracting that
+one function to `scripts/fire_drills/zombie_cleanup.py` (a live module) before
+deleting `wingmen_orch.py` outright -- the drill keeps testing real code, and
+`wingmen_orch.py` is now actually GONE from this repo, not merely disabled.
+Two orphaned test files that did an unguarded module-level import of a
+now-deleted target (`tests/legacy/test_graceful_shutdown.py`,
+`tests/legacy/ihsanos_drain/test_main_cycle.py`) were deleted alongside it --
+guarding the imports would only have kept dead tests alive.
+
 **Import path:** everything in here that used to import a sibling by a bare
 top-level name (`from bot_manager import ...`) now imports it as
 `legacy.<name>` (`from legacy.bot_manager import ...`), since moving into a
@@ -22,15 +36,19 @@ see below) are untouched; those still resolve normally.
 
 ## What's here, what retired it, when
 
-- **The Telegram-bot-per-client orchestrator** (`wingmen_orch.py`,
-  `cto_bot.py`, `message_dispatcher.py`, `personality.py`, `group_setup.py`,
+- **The Telegram-bot-per-client orchestrator** (`cto_bot.py`,
+  `message_dispatcher.py`, `personality.py`, `group_setup.py`,
   `bot_manager.py`, `bot_onboarding.py`, `bot_user_resolver.py`,
   `permissions.py`, `agents/`, `handlers/`) — the original architecture
   where the orchestrator itself ran each client's Telegram bot via
   `wingmen_orch.py`'s main loop. Disabled per STATUS.md:7; no launchd job
   (`dev.wingmen.orchestrator` not loaded on either host). Superseded by the
   current bus/lane/ingest architecture documented in the top-level
-  `CLAUDE.md`.
+  `CLAUDE.md`. `wingmen_orch.py` itself was deleted outright 2026-10-28
+  (Musa op#34845, console's ruling) after its one real live dependent
+  (`scripts/fire_drills/drill_sigkill.py`'s `cleanup_zombie_jobs` use,
+  see the correction above) was extracted out -- the sibling modules
+  listed here remain, still reachable only via the now-gone main loop.
 - **Its supporting one-off modules** (`bug_notifier.py`, `bug_pipeline.py`,
   `deploy_manager.py`, `ralph_runner.py`, `webhook_server.py`,
   `heartbeat.py`, `watchdog.py`, `uptime_monitor.py`, `approval_handler.py`,
@@ -46,7 +64,14 @@ see below) are untouched; those still resolve normally.
   backend + Telegram surface"); the orchestrator-side half was never the
   surviving one. Reachable only via `wingmen_orch.py:1615`.
 - **`ihsanos_drain/`** — CADENCE-008A drain worker for the ihsanos repo;
-  superseded by the current per-repo lane architecture.
+  superseded by the current per-repo lane architecture. `main.py` (the
+  package's raw-`agent_messages`-write entry point) deleted 2026-10-28
+  (Musa op#34845, console's ruling, confirmed dead by both the agent_messages
+  writer gate inventory and console's own launchctl check on both hosts --
+  no such launchd job, VPS hub off since 09-27); its siblings (`grant.py`,
+  `runner.py`, `poller.py`, `report.py`, `token_budget.py`, `kill_switch.py`,
+  `granted_work.py`) stay, unchanged, since they weren't in the writer-gate
+  inventory's scope.
 - **`reel_triage/`** — the reel-inbox triage pipeline; retired with its
   Telegram surface. `run_reel_digest.py` (a `reel_triage` consumer, missed
   in the first pass, added on review) lives at `legacy/reel_triage/
@@ -76,3 +101,13 @@ executing retired-code tests. `tests/legacy/reel_triage/conftest.py` and
 `test_no_ig_creds.py` had a `parents[N]` path depth hardcoded to the old
 2-levels-deep location under `tests/`; bumped to 3 for the new
 `tests/legacy/reel_triage/` nesting.
+
+**2026-10-28 correction:** the skip marker alone does NOT keep collection
+clean once the file a test imports from is actually deleted -- a
+module-level `from legacy.X import Y` raises before pytest ever applies the
+`pytestmark`. Two files had exactly that shape
+(`tests/legacy/test_graceful_shutdown.py`,
+`tests/legacy/ihsanos_drain/test_main_cycle.py`); both deleted alongside
+their now-gone targets (`wingmen_orch.py`, `ihsanos_drain/main.py`) rather
+than patched with a guard, since they only ever tested the code being
+removed. `pytest tests/ --collect-only` re-verified clean after.
