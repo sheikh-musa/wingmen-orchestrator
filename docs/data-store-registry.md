@@ -65,6 +65,12 @@ behavior from `log_target`'s value for any channel; check
 | **cosem-tdu app (prod, default)** | `tdu-tools-prod` | TDU — production | asia-southeast1 (Singapore) — **confirmed** (op#22426, 2026-09-26) |
 | **cosem-tdu app (staging)** | `tdu-tools-staging` | TDU — staging | **unverified** — PERMISSION_DENIED checking region (op#22426, 2026-09-26); do not retry or attempt to bypass, escalate instead |
 
+### Other client apps (non-cosem, separate stacks)
+
+| Alias | Firebase project | Tenant | Notes |
+|---|---|---|---|
+| **branditqr** ("brandit" legacy QR-redirect product, predecessor to the coffeemedia.sg rebuild) | `qrcode-e7b0f` | client-owned (CAI-RESP-226, 2026-07 remediation) — own account `[REDACTED:email]`, not a wingmen-governed silo; satisfies TENANT-RESIDENCY-001, no commingling | LIVE at `branditqr.vercel.app` (Vercel team `wingmen-aa9356e1`, project `branditqr`). REAL, non-PII QR-redirect data (`qrcodes` + `url_history` collections). Server access keyless via Workload Identity Federation, SA `firebase-adminsdk-udhyr`. `lib/mongodb.js` exists in-repo but is UNVERIFIED/unused: no `MONGODB_URI`-shaped env var exists in the live Vercel project (checked by name only, 2026-10-28, op#34080/hc#589 follow-up) and no app code path imports it — treat as dead code, not a second store, until contradicted. |
+
 ### cosem-tdu subject data (schema/code review only — CAI-1034, no data files read)
 
 Per op#22426 (project_governance onboarding for `cosem-tdu`). **TDU is a local
