@@ -41,6 +41,7 @@ import re
 from datetime import datetime, timezone
 
 from .ddl_detect import is_ddl_shaped
+from .lexical_hazard import is_lexically_hazardous
 from .protocol import ErrorCode
 
 
@@ -163,18 +164,22 @@ def require_gate(
     migration: str | None = None,
     pr: str | None = None,
 ) -> None:
-    """§4 — no-op for DML-only SQL. For DDL-shaped SQL, re-fetches gate_id
-    from the fleet bus via `cur` (a psycopg cursor opened with
+    """§4 — no-op for DML-only SQL. For DDL-shaped SQL -- OR for SQL
+    is_lexically_hazardous flags as unable to safely classify (rollout step
+    (c), bus #79161: the SAME pre-screen read_only.is_plain_read uses on the
+    RO-override path, reused here so the two never drift) -- re-fetches
+    gate_id from the fleet bus via `cur` (a psycopg cursor opened with
     row_factory=psycopg.rows.dict_row) and re-validates from_agent,
     message_type, is_past, and silo-mention. Raises BrokerValidationError on
     any failure, BEFORE any mgmt-API call."""
-    if not is_ddl_shaped(guarded_sql):
+    hazardous = is_lexically_hazardous(guarded_sql)
+    if not is_ddl_shaped(guarded_sql) and not hazardous:
         return
 
     if not gate_id:
         raise BrokerValidationError(
             ErrorCode.GATE_REQUIRED,
-            "inner SQL is DDL-shaped — a gate_id is required",
+            "inner SQL is DDL-shaped or lexically hazardous -- a gate_id is required",
         )
     if not gate_id.isdigit():
         raise BrokerValidationError(
@@ -232,9 +237,10 @@ def require_gate(
     # landing first.
     raise BrokerValidationError(
         ErrorCode.GATE_INVALID,
-        f"gate {gate_id} is shape-valid but DDL cannot be independently "
-        "migration/PR-matched in milestone (a) -- refused, not allowed by "
-        "default (bus #70929)",
+        f"gate {gate_id} is shape-valid but this statement is "
+        f"{'lexically hazardous' if hazardous else 'DDL-shaped'} and cannot "
+        "be independently migration/PR-matched in milestone (a) -- refused, "
+        "not allowed by default (bus #70929)",
     )
 
 
