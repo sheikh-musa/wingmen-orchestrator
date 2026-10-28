@@ -64,6 +64,9 @@ NOT_MIRRORED_TRIGGERS = {
     # so it can never block an operator_asks write; mirroring it would pull in mig114's whole
     # work_item schema.
     "work_item_mirror_ask_trg": "non-blocking AFTER mirror (EXCEPTION WHEN OTHERS)",
+    # Same shape, AFTER DELETE (mig131): swallows every exception the same way; mirroring it
+    # would also pull in mig114/131's whole work_item schema.
+    "work_item_mirror_ask_delete_trg": "non-blocking AFTER DELETE mirror (EXCEPTION WHEN OTHERS)",
 }
 
 
