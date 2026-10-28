@@ -157,7 +157,11 @@ class BrokerServer:
                     # Order: ref allowlist first, then the RO mode, then the
                     # gate — so an armed-but-expired override still yields
                     # BAD_PROJECT_REF for its ref, and RO refusals are only
-                    # reachable for refs that passed the allowlist.
+                    # reachable for refs that passed the allowlist (pinned by
+                    # test_ref_override_readonly_allowlist_runs_before_ro_pin,
+                    # bus #79103). RO itself is SCOPED to the override's ref
+                    # (bus #79039): baseline refs keep today's behavior while
+                    # the override is armed.
                     check_project_ref(
                         req.project_ref,
                         override_ref=self.ref_override,
@@ -166,6 +170,7 @@ class BrokerServer:
                     )
                     check_read_only_override(
                         req.guarded_sql,
+                        project_ref=req.project_ref,
                         ref_override=self.ref_override,
                         ref_override_expires_at=self.ref_override_expires_at,
                         now=now,

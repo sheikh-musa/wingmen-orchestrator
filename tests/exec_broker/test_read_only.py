@@ -105,21 +105,24 @@ def test_check_read_only_noop_when_not_armed():
     # No override armed: writes are NOT the RO check's business (behavior
     # unchanged is asserted end-to-end in test_server.py).
     check_read_only_override(
-        "insert into t values (1)", ref_override=None, ref_override_expires_at=None
+        "insert into t values (1)", project_ref=_REF,
+        ref_override=None, ref_override_expires_at=None,
     )
 
 
 def test_check_read_only_noop_when_expired():
     # Expiry reverts BOTH the ref widening and the RO mode, by construction.
     check_read_only_override(
-        "insert into t values (1)", ref_override=_REF, ref_override_expires_at=_PAST
+        "insert into t values (1)", project_ref=_REF,
+        ref_override=_REF, ref_override_expires_at=_PAST,
     )
 
 
-def test_check_read_only_raises_for_write_when_live():
+def test_check_read_only_raises_for_write_to_override_ref_when_live():
     with pytest.raises(BrokerValidationError) as exc_info:
         check_read_only_override(
-            "insert into t values (1)", ref_override=_REF, ref_override_expires_at=_FUTURE
+            "insert into t values (1)", project_ref=_REF,
+            ref_override=_REF, ref_override_expires_at=_FUTURE,
         )
     assert exc_info.value.code is ErrorCode.READ_ONLY_OVERRIDE
     assert "read-only" in exc_info.value.message
@@ -127,5 +130,17 @@ def test_check_read_only_raises_for_write_when_live():
 
 def test_check_read_only_passes_plain_read_when_live():
     check_read_only_override(
-        "select count(*) from t", ref_override=_REF, ref_override_expires_at=_FUTURE
+        "select count(*) from t", project_ref=_REF,
+        ref_override=_REF, ref_override_expires_at=_FUTURE,
+    )
+
+
+def test_check_read_only_scoped_baseline_ref_write_passes_when_live():
+    # SCOPE RULING (cc-fleet-health bus #79039, 2026-10-28 — supersedes the
+    # broker-wide reading of GO #78974): RO applies only to requests targeting
+    # the override's ref. A write to a BASELINE (always-allowed) ref behaves
+    # exactly as today even while the override is armed.
+    check_read_only_override(
+        "insert into t values (1)", project_ref="oovskwogvefnznfowjky",  # QA baseline ref
+        ref_override=_REF, ref_override_expires_at=_FUTURE,
     )
