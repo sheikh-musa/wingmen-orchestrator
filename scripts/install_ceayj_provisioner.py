@@ -162,13 +162,20 @@ def discover_gate(rows: list[dict], sha12: str, *, now: dt.datetime) -> dict:
     return max(matches, key=lambda r: r["id"])
 
 
-def fetch_gate_rows(dsn: str, limit: int = 500) -> list[dict]:
+def fetch_gate_rows(dsn: str, sha12: str, limit: int = 500) -> list[dict]:
+    """Bus rows that can gate THIS artifact. The sha12 filters IN SQL
+    (subject/body LIKE) inside the age window — never a newest-N scan: a
+    live gate (#79787) once scrolled out of the newest-500 window and had
+    to be re-issued as #80290 purely because of scan volume. The LIMIT is
+    a belt (an artifact named by >limit rows), not the filter."""
+    pattern = f"%{sha12}%"
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
             """SELECT id, from_agent, message_type, subject, body, created_at
                  FROM agent_messages
                 WHERE created_at > now() - interval '21 days'
-                ORDER BY id DESC LIMIT %s""", (limit,))
+                  AND (subject LIKE %s OR body LIKE %s)
+                ORDER BY id DESC LIMIT %s""", (pattern, pattern, limit))
         cols = ["id", "from_agent", "message_type", "subject", "body", "created_at"]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
@@ -198,7 +205,7 @@ def step1_substrate_migration(*, apply: bool) -> None:
     substrate = dsn_from_env_file()
     target, action = resolve_target_migration(DRAFT, MIGRATIONS)
     sha12 = hashlib.sha256(DRAFT.read_bytes()).hexdigest()[:12]
-    gate = discover_gate(fetch_gate_rows(substrate), sha12, now=dt.datetime.now(dt.timezone.utc))
+    gate = discover_gate(fetch_gate_rows(substrate, sha12), sha12, now=dt.datetime.now(dt.timezone.utc))
     say(f"step1: gate row {gate['id']} from {gate['from_agent']} ({gate['created_at']}Z) "
         f"authorizes sha12 {sha12} — subject: {str(gate['subject'])[:80]!r}")
     if action == "number":
