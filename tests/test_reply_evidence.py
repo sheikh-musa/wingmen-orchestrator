@@ -30,6 +30,7 @@ def db(pg_dsn):
                 thread_id     uuid,
                 subject       text,
                 body          text,
+                sub_tag       text,
                 read_at       timestamptz,
                 responded_at  timestamptz,
                 created_at    timestamptz NOT NULL DEFAULT now()
@@ -59,12 +60,13 @@ def db(pg_dsn):
     return pg_dsn
 
 
-def _msg(dsn, frm, to, *, thread=None, subject="", body="", ago_s=0):
+def _msg(dsn, frm, to, *, thread=None, subject="", body="", ago_s=0, sub_tag=None):
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO agent_messages (from_agent, to_agent, thread_id, subject, body, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, now() - make_interval(secs => %s)) RETURNING id",
-            (frm, to, thread, subject, body, ago_s))
+            "INSERT INTO agent_messages (from_agent, to_agent, thread_id, subject, body, sub_tag, "
+            "created_at) VALUES (%s, %s, %s, %s, %s, %s, now() - make_interval(secs => %s)) "
+            "RETURNING id",
+            (frm, to, thread, subject, body, sub_tag, ago_s))
         mid = cur.fetchone()[0]
         conn.commit()
         return mid
@@ -80,7 +82,8 @@ def _replied(dsn, ids):
 def test_same_thread_reply_from_base_id_counts(db):
     """80345 shape: addressed to the instance, answered as the base, same thread."""
     row = _msg(db, "orch-console", "cc-cosem-adcda-1", thread=T1, ago_s=600)
-    _msg(db, "cc-cosem-adcda", "orch-console", thread=T1, body="ack, on it", ago_s=60)
+    _msg(db, "cc-cosem-adcda", "orch-console", thread=T1, body="ack, on it", ago_s=60,
+         sub_tag="cc-cosem-adcda-1")   # live: 80382 = cc-cosem-adcda / sub_tag cc-cosem-adcda-1
     assert _replied(db, [row]) == {row}
 
 
@@ -119,6 +122,30 @@ def test_sibling_instance_does_not_count(db):
     assert _replied(db, [row]) == set()
 
 
+def test_sibling_as_base_with_sibling_sub_tag_does_not_count(db):
+    """orch-console #80417: adcda-2 sending as the BASE, citing adcda-1's row (a relay) or
+    posting on a shared thread, must not mark adcda-1's row attended."""
+    row = _msg(db, "orch-console", "cc-cosem-adcda-1", thread=T1, ago_s=600)
+    _msg(db, "cc-cosem-adcda", "orch-console", body=f"relaying #{row}", ago_s=90,
+         sub_tag="cc-cosem-adcda-2")
+    _msg(db, "cc-cosem-adcda", "orch-console", thread=T1, ago_s=60, sub_tag="cc-cosem-adcda-2")
+    assert _replied(db, [row]) == set()
+
+
+def test_base_send_without_sub_tag_does_not_count(db):
+    """An unattributable base send (NULL sub_tag) is not evidence for an instance row."""
+    row = _msg(db, "orch-console", "cc-cosem-adcda-1", thread=T1, ago_s=600)
+    _msg(db, "cc-cosem-adcda", "orch-console", thread=T1, ago_s=60)
+    assert _replied(db, [row]) == set()
+
+
+def test_row_addressed_to_base_counts_base_reply_any_sub_tag(db):
+    """A row addressed to the BASE itself is answered by a base send, whichever instance."""
+    row = _msg(db, "orch-console", "cc-cosem-adcda", thread=T1, ago_s=600)
+    _msg(db, "cc-cosem-adcda", "orch-console", thread=T1, ago_s=60, sub_tag="cc-cosem-adcda-2")
+    assert _replied(db, [row]) == {row}
+
+
 def test_other_agent_cite_does_not_count(db):
     """The original sender (or anyone else) citing the row is not the recipient attending."""
     row = _msg(db, "orch-console", "cc-cosem-adcda-3", thread=T1, ago_s=600)
@@ -128,7 +155,7 @@ def test_other_agent_cite_does_not_count(db):
 
 def test_base_without_status_row_falls_back_to_suffix_strip(db):
     row = _msg(db, "orch-console", "cc-mamadah-1", thread=T1, ago_s=600)
-    _msg(db, "cc-mamadah", "orch-console", thread=T1, ago_s=60)
+    _msg(db, "cc-mamadah", "orch-console", thread=T1, ago_s=60, sub_tag="cc-mamadah-1")
     assert _replied(db, [row]) == {row}
 
 
@@ -149,7 +176,7 @@ def test_empty_input_and_lookup_error():
 
 def test_sla_attended_for_base_same_thread_reply(db):
     row = _msg(db, "orch-console", "cc-cosem-adcda-1", thread=T1, ago_s=600)
-    _msg(db, "cc-cosem-adcda", "orch-console", thread=T1, ago_s=60)
+    _msg(db, "cc-cosem-adcda", "orch-console", thread=T1, ago_s=60, sub_tag="cc-cosem-adcda-1")
     with psycopg.connect(db) as conn:
         assert s.attended_for(conn, row, "unread", "cc-cosem-adcda-1") is True
 
@@ -175,7 +202,7 @@ def test_lookup_error_does_not_poison_callers_transaction(pg_dsn):
         conn.execute("DROP SCHEMA public CASCADE")
         conn.execute("CREATE SCHEMA public")
         conn.execute("CREATE TABLE agent_messages (id bigint, to_agent text, thread_id uuid, "
-                     "from_agent text, created_at timestamptz)")
+                     "from_agent text, sub_tag text, created_at timestamptz)")
     with psycopg.connect(pg_dsn) as conn:
         assert R.replied_row_ids(conn, [1]) == set()
         assert conn.execute("SELECT 1").fetchone() == (1,)
