@@ -75,6 +75,18 @@ unless it has --evidence, OR both --committed-date and --outbound-msg-id
 (this call or already on the row). ask_surface='operator' rows are NEVER
 gated — this is a client-channel-only restriction.
 
+Migration 132 (console bus #80707/#80718/#80719) closes a real gap: the
+migration-085 CHECK only proved outbound_msg_id IS NOT NULL, never that it
+named a REAL outbound send — lanes had set it to agent_messages (bus) row
+ids in good faith. A freshly-passed --outbound-msg-id is now validated
+client-side (validate_outbound_msg_id) before any write, mirroring the DB
+trigger that is the real floor: it must be a real operator_messages row with
+direction='outbound' that was sent AFTER this ask was created, else REFUSES
+(raises ValueError). If --committed-date is also given, a date that doesn't
+visibly appear in that message's text (in any common written form) only
+WARNS to stderr — never refuses, since a date can be stated in a form this
+doesn't recognize.
+
 triaged_at/triaged_by are always stamped. triaged_by is resolved fail-closed
 via scripts/lib/agent_identity.resolve_agent_id (CC_BASE_AGENT_ID, then
 AGENT_ID, then ORCH_AGENT_ID only for the console body itself) — REFUSES
@@ -230,6 +242,66 @@ def check_bare_delivered(cur, item_id: int, evidence: str | None, *, now=None) -
                          f"--delivered-at {ref} (or the row/time it actually went live).")
 
 
+def _date_appears_in_text(committed_date: str, text: str) -> bool:
+    """True if `committed_date` appears in `text` in a common written form.
+    Every form is COMPUTED from the date itself via strftime -- never
+    hard-coded (console bus #80719: a hard-coded weekday example was itself
+    wrong, baking the slip into the suite would have been worse)."""
+    try:
+        d = dt.datetime.fromisoformat(committed_date.strip().replace("Z", "+00:00")).date()
+    except ValueError:
+        return True  # can't parse it ourselves -- don't block on our own parse failure
+    forms = (
+        d.strftime("%Y-%m-%d"),                                  # 2026-11-06
+        d.strftime("%m-%d"),                                     # 11-06
+        f"{d.day} {d.strftime('%b')}",                           # 6 Nov
+        f"{d.strftime('%b')} {d.day}",                           # Nov 6
+        f"{d.strftime('%a')} {d.day} {d.strftime('%b')}",        # Fri 6 Nov
+    )
+    return any(form in text for form in forms)
+
+
+def validate_outbound_msg_id(cur, item_id: int, outbound_msg_id: int,
+                              committed_date: str | None = None) -> None:
+    """Client-side mirror of migration 132's DB trigger (console bus #80707),
+    run BEFORE the write so a bad id never even attempts it, plus two more
+    checks console asked for (bus #80718, corrected #80719): the message
+    must postdate the ask, and (WARN, never refuse -- a date can be stated
+    in a form this doesn't recognize) the committed date should visibly
+    appear in it."""
+    cur.execute(
+        "SELECT direction, created_at, text FROM operator_messages WHERE id = %s",
+        (outbound_msg_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise ValueError(
+            f"--outbound-msg-id {outbound_msg_id}: no such operator_messages row -- "
+            "it must be the operator_messages row that told Musa the date"
+        )
+    direction, msg_created_at, msg_text = row
+    if direction != "outbound":
+        raise ValueError(
+            f"--outbound-msg-id {outbound_msg_id}: that operator_messages row is "
+            f"{direction!r}, not outbound -- it must be the operator_messages row "
+            "that told Musa the date"
+        )
+    cur.execute("SELECT created_at FROM operator_asks WHERE id = %s", (item_id,))
+    ask_row = cur.fetchone()
+    if ask_row is not None and msg_created_at < ask_row[0]:
+        raise ValueError(
+            f"--outbound-msg-id {outbound_msg_id}: that message was sent before "
+            f"operator_asks #{item_id} even existed -- it cannot have committed this date"
+        )
+    if committed_date and not _date_appears_in_text(committed_date, msg_text):
+        print(
+            f"warning: --outbound-msg-id {outbound_msg_id}: the committed date "
+            f"({committed_date}) does not appear in that message's text in any "
+            "recognized form -- double check it actually states the date",
+            file=sys.stderr,
+        )
+
+
 def _stamp_delivered_cur(cur, item_id: int, *, at=None, evidence_ref=None, source=None) -> int:
     if at is None:
         cur.execute("UPDATE operator_asks SET delivered_at = now() "
@@ -298,6 +370,13 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                 src = cur.fetchone()
                 ans_ref = (f"answered by operator msg #{src[0]}" if src and src[0] is not None
                            else f"answered at triage of operator_asks #{item_id}")
+
+            # migration 132 (console bus #80707/#80718/#80719): validate a
+            # FRESHLY-PASSED --outbound-msg-id before any write — an id
+            # already on the row was validated when it was first set.
+            if outbound_msg_id is not None:
+                validate_outbound_msg_id(cur, item_id, outbound_msg_id, committed_date)
+
             if action == "done":
                 # Client-channel gate (migration 085, bus #47114 item 3a/3c): a dated
                 # commitment only counts if it was actually SENT — evidence OR
