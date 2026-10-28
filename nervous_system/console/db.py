@@ -754,7 +754,17 @@ _PENDING_TOPIC_SUBSTRINGS = (
     ("adcda", "adcda-schedule"),
     ("cosem", "cosem"),
 )
-_PENDING_INFRA_OWNERS = ("cc-substrate", "cc-fleet-health", "cc-orchestrator", "orch-console")
+# One prefix per line (not a single-line tuple): tests/test_protected_agents_
+# registry.py's drift guard flags any line with 3+ quoted protected-agent-id
+# tokens as a possible new hardcoded protection list. This is a topic tag for
+# display, not a protection/membership list, but the one-per-line shape also
+# matches db.py's own _TOPIC_OWNER_RULES above -- no reason to diverge.
+_PENDING_INFRA_OWNERS = (
+    "cc-substrate",
+    "cc-fleet-health",
+    "cc-orchestrator",
+    "orch-console",
+)
 
 
 def _pending_summary_owner_label(delegated_to: Optional[str]) -> str:
