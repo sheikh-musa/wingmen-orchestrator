@@ -12,14 +12,19 @@ import json
 from dataclasses import dataclass
 from enum import Enum
 
-# §5 error codes — exactly these six, no more (two non-blocking extras were
-# explicitly left out of v1 per bus #56789: no dedicated BAD_REQUEST, no
-# exec_ledger_id replay check).
+# §5 error codes — the six v1 codes were frozen at contract commit 5053826e
+# per bus #56789 (two non-blocking extras were explicitly left out: no
+# dedicated BAD_REQUEST, no exec_ledger_id replay check). READ_ONLY_OVERRIDE
+# is the additive seventh, added by the SELECT-only-override-mode follow-up
+# (orch-console GO #78974, assignment bus #79024): while the bounded ref
+# override is live, a non-plain-read statement is refused with this code.
+# Response shape is unchanged; callers must tolerate an unknown code string.
 class ErrorCode(str, Enum):
     ACL_DENIED = "ACL_DENIED"
     BAD_PROJECT_REF = "BAD_PROJECT_REF"
     GATE_REQUIRED = "GATE_REQUIRED"
     GATE_INVALID = "GATE_INVALID"
+    READ_ONLY_OVERRIDE = "READ_ONLY_OVERRIDE"
     UPSTREAM_ERROR = "UPSTREAM_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
