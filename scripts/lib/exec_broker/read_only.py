@@ -38,6 +38,8 @@ import re
 from datetime import datetime
 
 from .ddl_detect import extract_dollar_bodies, is_ddl_shaped, strip_sql_noise
+from .gate_validation import BrokerValidationError, ref_override_is_live
+from .protocol import ErrorCode
 
 
 # Every top-level statement must START with one of these (after strip_sql_noise
@@ -130,3 +132,33 @@ def is_plain_read(sql: str) -> bool:
         if not m or m.group(0).lower() not in _READ_FIRST_KEYWORDS:
             return False
     return saw_statement
+
+
+def check_read_only_override(
+    guarded_sql: str,
+    *,
+    ref_override: "str | None",
+    ref_override_expires_at: "datetime | None",
+    now: "datetime | None" = None,
+) -> None:
+    """No-op unless the bounded ref override is live. When live, refuse
+    (READ_ONLY_OVERRIDE) any guarded_sql that is not a plain read.
+
+    DESIGN RULING (orch-console GO #78974's wording, design ack bus #79037):
+    while the ref override is live the WHOLE broker is read-only — the check
+    applies to every request, not only ones targeting the override ref — and
+    the uid override alone does NOT trigger RO (assignment bus #79024 names
+    EXEC_BROKER_REF_OVERRIDE_ALIAS only). Liveness comes from
+    gate_validation.ref_override_is_live, the same definition
+    check_project_ref uses, so the ref widening and the RO mode arm, expire
+    and revert together, by construction — no second env var, no second root
+    action to disarm."""
+    if not ref_override_is_live(ref_override, ref_override_expires_at, now=now):
+        return
+    if is_plain_read(guarded_sql):
+        return
+    raise BrokerValidationError(
+        ErrorCode.READ_ONLY_OVERRIDE,
+        "ref override is active -- broker is read-only for this window; "
+        "statement is not a plain read (SELECT/WITH/TABLE/VALUES)",
+    )

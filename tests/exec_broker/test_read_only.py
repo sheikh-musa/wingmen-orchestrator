@@ -15,7 +15,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
 
-from exec_broker.read_only import is_plain_read  # noqa: E402
+from exec_broker.gate_validation import BrokerValidationError  # noqa: E402
+from exec_broker.protocol import ErrorCode  # noqa: E402
+from exec_broker.read_only import check_read_only_override, is_plain_read  # noqa: E402
 
 
 @pytest.mark.parametrize("sql", [
@@ -63,3 +65,40 @@ def test_is_plain_read_accepts(sql):
 ])
 def test_is_plain_read_refuses(sql):
     assert is_plain_read(sql) is False
+
+
+# --- check_read_only_override (state check wired in Task 5) ------------------
+
+_FUTURE = datetime.now(timezone.utc) + timedelta(hours=1)
+_PAST = datetime.now(timezone.utc) - timedelta(seconds=1)
+_REF = "goumlynecruxrlmzlntp"  # == SILO_ALIASES["goumlyne"], already committed
+
+
+def test_check_read_only_noop_when_not_armed():
+    # No override armed: writes are NOT the RO check's business (behavior
+    # unchanged is asserted end-to-end in test_server.py).
+    check_read_only_override(
+        "insert into t values (1)", ref_override=None, ref_override_expires_at=None
+    )
+
+
+def test_check_read_only_noop_when_expired():
+    # Expiry reverts BOTH the ref widening and the RO mode, by construction.
+    check_read_only_override(
+        "insert into t values (1)", ref_override=_REF, ref_override_expires_at=_PAST
+    )
+
+
+def test_check_read_only_raises_for_write_when_live():
+    with pytest.raises(BrokerValidationError) as exc_info:
+        check_read_only_override(
+            "insert into t values (1)", ref_override=_REF, ref_override_expires_at=_FUTURE
+        )
+    assert exc_info.value.code is ErrorCode.READ_ONLY_OVERRIDE
+    assert "read-only" in exc_info.value.message
+
+
+def test_check_read_only_passes_plain_read_when_live():
+    check_read_only_override(
+        "select count(*) from t", ref_override=_REF, ref_override_expires_at=_FUTURE
+    )
