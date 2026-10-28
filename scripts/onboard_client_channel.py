@@ -67,11 +67,13 @@ import os
 import re
 import secrets
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ORCH_DIR = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = ORCH_DIR / "migrations"
 INGEST_SCRIPT = ORCH_DIR / "scripts" / "boot_nazim_ingest.sh"
+OPERATOR_LOG = ORCH_DIR / "nervous_system" / "operator_log.py"
 REGISTRY_DOC = ORCH_DIR / "docs" / "data-store-registry.md"
 SUBSTRATE_SILO = "tscuymavysscrvoberrr"
 LIVE_CHECKOUT = Path.home() / "wingmen" / "orchestrator"
@@ -473,6 +475,36 @@ def render_ingest_diff(channel_key: str) -> tuple[str, str] | None:
     return text, new_line
 
 
+def render_polled_tags_diff(tag: str) -> tuple[str, str] | None:
+    """op#22517 lockstep (console-revamp #78815 fast-follow a): a client
+    channel's Mini pin (INGEST_CHANNELS) and its _CONSOLE_POLLED_CLIENT_TAGS
+    entry move in the SAME render pass -- the drift guard
+    (tests/test_operator_log_scope.py) fails CI on half a pair, which is
+    exactly what the 126_bariq_onboarding render shipped and console-revamp
+    had to fix as 7699f50. This renders the operator_log.py half.
+
+    Returns (old_text, new_text), or None when the tag is already present
+    (idempotent, checked independently of the pin so a render also HEALS a
+    tag-side gap). Refuses when the constant block can't be found: the
+    invariant changed shape and this tool must be taught the new one first."""
+    text = OPERATOR_LOG.read_text()
+    m = re.search(r"_CONSOLE_POLLED_CLIENT_TAGS = frozenset\(\{(.*?)\n\}\)", text, re.DOTALL)
+    if not m:
+        fail("nervous_system/operator_log.py has no _CONSOLE_POLLED_CLIENT_TAGS frozenset "
+             "block -- update this tool, the op#22517 lockstep invariant may have changed")
+    if f'"{tag}"' in m.group(1):
+        return None
+    date = datetime.now().strftime("%Y-%m-%d")
+    block = m.group(0)
+    entry = f'    "{tag}",'
+    new_block = block.replace(
+        "\n})",
+        f"\n{entry}" + " " * max(1, 44 - len(entry))
+        + f"# {date} auto lockstep (onboard render)\n}})",
+    )
+    return text, text.replace(block, new_block)
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     if args.chat_ids is None:            # --chat-id omitted (--invite flow)
@@ -482,8 +514,9 @@ def main(argv=None) -> int:
     if args.host == "mini" and cwd == LIVE_CHECKOUT.resolve():
         fail(
             "running with --host mini from the LIVE checkout (~/wingmen/orchestrator) -- this "
-            "would edit boot_nazim_ingest.sh's working tree directly, which launchd jobs "
-            "execute from every few minutes. Run from a git worktree PR branch instead."
+            "would edit boot_nazim_ingest.sh's and operator_log.py's working tree directly, "
+            "and launchd jobs execute the boot script from it every few minutes. Run from a "
+            "git worktree PR branch instead."
         )
 
     validate_mode_target(args.mode, args.inject_target)
@@ -522,13 +555,32 @@ def main(argv=None) -> int:
         print("#   never in git. Relay to the client out-of-band (CA/Musa), not via agents.")
 
     ingest_diff = None
+    polled_tags_diff = None
     if args.host == "mini":
         ingest_diff = render_ingest_diff(args.channel_key)
         if ingest_diff is None:
             print(f"\n# {args.channel_key} is already pinned in INGEST_CHANNELS -- no boot-script diff needed.")
+        if args.audience == "client":
+            # op#22517 lockstep (console-revamp #78815 fast-follow a): the
+            # boot-script pin and the _CONSOLE_POLLED_CLIENT_TAGS entry move
+            # in the same render pass, so client #2 can't ship the half-pair
+            # the 126 render did. Internal Mini pins are lane-owned tags
+            # (operator_log._LANE_OWNED_TAGS) and deliberately never land
+            # here -- adding one would break the drift-guard equality itself.
+            polled_tags_diff = render_polled_tags_diff(args.tag or args.channel_key)
+            if polled_tags_diff is None:
+                print(f"# {args.tag or args.channel_key} is already in "
+                      "_CONSOLE_POLLED_CLIENT_TAGS -- no operator_log diff needed.")
 
     if args.dry_run:
-        print(f"\n# --dry-run: would write migrations/{name}" + (" and edit scripts/boot_nazim_ingest.sh" if ingest_diff else ""))
+        edits = []
+        if ingest_diff:
+            edits.append("edit scripts/boot_nazim_ingest.sh")
+        if polled_tags_diff:
+            edits.append("edit nervous_system/operator_log.py "
+                         "(_CONSOLE_POLLED_CLIENT_TAGS, op#22517 lockstep)")
+        print(f"\n# --dry-run: would write migrations/{name}"
+              + (f" and {' and '.join(edits)}" if edits else ""))
         return 0
 
     out_path = MIGRATIONS_DIR / name
@@ -546,6 +598,12 @@ def main(argv=None) -> int:
         old_text, new_text = ingest_diff
         INGEST_SCRIPT.write_text(new_text)
         print(f"# Updated {INGEST_SCRIPT.relative_to(ORCH_DIR)}'s INGEST_CHANNELS pin (same PR).")
+
+    if polled_tags_diff:
+        _, new_ol = polled_tags_diff
+        OPERATOR_LOG.write_text(new_ol)
+        print(f"# Updated {OPERATOR_LOG.relative_to(ORCH_DIR)}'s _CONSOLE_POLLED_CLIENT_TAGS "
+              "(op#22517 lockstep -- pin + tag in the same PR, never half a pair).")
 
     print(
         f"\n# Next: post migrations/{name} + sha256 {sha[:12]} to orch-console's gate "

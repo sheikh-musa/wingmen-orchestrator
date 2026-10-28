@@ -64,6 +64,89 @@
 # legacy/ihsanos_drain/main.py is confirmed DEAD on the live fleet (console's
 # own launchctl check, bus #78757: no such launchd job, VPS hub off since
 # 09-27) -- candidate for deletion (ruling part 4), not migration.
+#
+# STEP 2, scripts/lane_nudge.sh, 2026-10-28 (Musa op#34845, console's "Step 2
+# order is fine starting with lane_nudge.sh" bus #78757/#78763/#78776): all 3
+# raw psycopg2-INSERT call sites (_probe_p1_escalate, _probe_revertfail_note,
+# _probe_revertfail_nudge_note) migrated onto scripts/bus_send.py's CLI,
+# preserving dedupe/guard/best-effort (`|| true`) semantics exactly. Deleted
+# from this file in the SAME PR as the migration per the shrink-only contract
+# above.
+#
+# STEP 2, scripts/lane_reply.sh, 2026-10-28 (Musa op#34845, same ruling): the
+# SUPERVISED-phase draft (filed to the channel's agent_reviewer, default
+# orch-console) used a raw psycopg INSERT INTO agent_messages RETURNING id;
+# migrated onto scripts.bus_send's send() (direct Python import, not the CLI
+# subprocess -- this script's write path is already inline Python with an
+# open DB connection, so importing send() is the natural fit, same sanctioned
+# post_agent_message RPC either way). tests/test_lane_reply_redaction.py's
+# ephemeral-PG fixture was extended with a minimal post_agent_message RPC
+# (same 11-param shape as migration 122's) and a thread_id column; a new test
+# (test_supervised_reply_posts_the_draft_through_post_agent_message_rpc)
+# proves the RPC path actually ran (thread_id populated), verified RED
+# against the pre-migration code before the fix, GREEN after.
+#
+# STEP 2, the reset_*.sh family (reset_auditor.sh, reset_cai.sh,
+# reset_fleet_health.sh, reset_nazim.sh), 2026-10-28 (Musa op#34845, console's
+# "continue with the reset_*.sh family" bus #78846/#78857): each script's
+# LAYER-2 dead-man-verify FAIL escalation (its only raw-INSERT call site) used
+# a raw psycopg INSERT INTO agent_messages; migrated onto scripts/bus_send.py's
+# CLI, preserving each script's own quirks exactly -- hardcoded from_agent
+# identity (cc-fleet-health for reset_cai.sh/reset_nazim.sh, the
+# reset_fleet_health.sh self-send to/from orch-console, reset_auditor.sh's
+# $RESET_BY), the interpolated subject/body text, and best-effort (`|| true`
+# equivalent) semantics. Bundled as ONE PR per this file's own prior grouping
+# of the family as a single unit. 3 of these 4 scripts had no test file at
+# all; added tests/test_reset_family_bus_send_migration.py (static
+# source-level discriminator -- no raw INSERT remains, the migrated CLI
+# invocation shape is present -- same technique this gate itself uses to
+# detect a raw writer, inverted to assert the new path), verified RED against
+# the pre-migration content (via `git show HEAD:...`) before the fix, GREEN
+# after. reset_auditor.sh's existing 27-test suite re-run clean (no
+# regression); the LAYER-2 branch itself has never been dynamically testable
+# with the static tests/fixtures/stub_tmux.sh stub (needs a composer_capture
+# CC_GHOST+history-match state the stub can't produce) -- a genuine,
+# pre-existing, repo-wide gap, not newly introduced by this migration.
+#
+# STEP 2, scripts/switch_lane_token.sh, 2026-10-28 (Musa op#34845, console's
+# ordering bus #78846/#78857): the identity-stamped audit + break-glass alert
+# (cai CAI-RESP-747 conds 2/3), a Python heredoc looping over recipients
+# (orch-console always, plus cai on armed/break-glass), used a raw psycopg
+# (v3) INSERT INTO agent_messages per recipient; migrated onto scripts/
+# bus_send.py's send() (direct import -- the heredoc already runs with cwd
+# == ORCH_DIR, set by this script's own earlier `cd`), preserving the exact
+# subject/body/mtype/priority logic and the per-recipient loop. No existing
+# test touched this heredoc at all. Unlike the reset_*.sh family, this block
+# has no tmux/pane dependency, so it IS dynamically testable: added
+# tests/test_switch_lane_token_audit_emit.py, which extracts the real
+# heredoc text between the script's own `<<'PYAUDIT'`/`PYAUDIT` markers and
+# runs it against an ephemeral Postgres. Its RPC discriminator could not be
+# "thread_id IS NOT NULL" here (the column's own DEFAULT gen_random_uuid()
+# means even the old raw INSERT gets a non-NULL thread_id) -- used a
+# dedicated side-table only post_agent_message's body writes to instead,
+# verified RED against the pre-migration content before the fix, GREEN
+# after. Existing switch_lane_token.sh test suites (35 tests) re-run clean.
+#
+# STEP 2, scripts/render_gate/render_gate.sh, 2026-10-28 (Musa op#34845,
+# console's ordering bus #78846/#78857): loud_warn()'s best-effort console
+# alert (the script's only raw-write call site) used a literal `psql -c
+# "...INSERT..."` call; migrated onto scripts/bus_send.py's send() (direct
+# import -- no pre-existing Python context here, unlike the CLI-subprocess
+# form used elsewhere). The CLI has no --posted-by-identity flag, and the
+# original explicitly set it to the literal 'cc-fleet-health' (not the DB
+# trigger's current_user auto-population) -- send() is called directly so
+# that nuance is preserved exactly, same as requires_response=true. No
+# existing test touched this. Unlike disk_space_monitor.sh, this heredoc's
+# DSN comes straight from $DATABASE_URL (no hardcoded live-.env parsing), so
+# it IS dynamically testable: added tests/test_render_gate_loud_warn_bus_
+# send.py, extracting the real heredoc text between its own `<<'PY'`/`PY`
+# markers and running it against an ephemeral Postgres. The usual discriminator
+# columns (thread_id, posted_by_identity) don't distinguish old vs. new here
+# (the old raw INSERT set the same literal posted_by_identity, and thread_id
+# has its own column DEFAULT) -- used a dedicated side-table only
+# post_agent_message's body writes to instead. Verified RED against the
+# pre-migration content (the heredoc markers don't exist pre-migration, so
+# extraction itself fails), GREEN after.
 
 scripts/irsyad_autoscaler.py
 scripts/irsyad_confirm_executor.py
@@ -73,14 +156,6 @@ scripts/irsyad_spin_worker.py
 scripts/irsyad_worker_reaper.py
 scripts/disk_space_monitor.sh
 scripts/fire_fix1a_grant_ping.sh
-scripts/lane_nudge.sh
-scripts/lane_reply.sh
-scripts/render_gate/render_gate.sh
-scripts/reset_auditor.sh
-scripts/reset_cai.sh
-scripts/reset_fleet_health.sh
-scripts/reset_nazim.sh
-scripts/switch_lane_token.sh
 legacy/ihsanos_drain/main.py
 
 # STEP 1b, 2026-10-27 (Musa op#34845, console's PR#551 GO + follow-up bus
