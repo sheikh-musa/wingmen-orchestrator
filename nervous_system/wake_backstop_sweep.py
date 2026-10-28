@@ -462,6 +462,20 @@ def _pane_has_live_poll(agent, max_wait_s: int = 900) -> bool:
         return False
 
 
+def _replied_ids(row_ids) -> set:
+    """Row ids whose recipient has REPLIED (same thread or a #<id> cite, as its instance or
+    base id) -- answered, so not stuck (orch-console #80400). Fail toward PAGING: no DSN or any
+    error -> empty set."""
+    if not _DSN or not row_ids:
+        return set()
+    try:
+        from scripts.lib.reply_evidence import replied_row_ids
+        with psycopg.connect(_DSN) as conn:
+            return replied_row_ids(conn, row_ids)
+    except Exception:  # noqa: BLE001 -- a lookup failure must never swallow a real page
+        return set()
+
+
 def _mark_skipped(row_ids) -> list:
     """Set skipped_at on the given rows via CAS (`WHERE skipped_at IS NULL`) and RETURN the
     ids actually set. skipped_at quiesces the rows (the SQL excludes skipped_at IS NOT NULL)
@@ -646,7 +660,7 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                deliveries=_deliveries_of, cap_deliveries: int = WAKE_SWEEP_CAP_DELIVERIES,
                agent_host_rows=_agent_host_rows, this_host=None,
                pending_rows=None, pending_ids=None, clear_pending=clear_pending,
-               is_offline_stale=_is_offline_stale) -> dict:
+               is_offline_stale=_is_offline_stale, replied=_replied_ids) -> dict:
     """One pass. FRESH (under-cap) rotting rows drive a wake of each eligible recipient (the
     doorbell backstop). A row PAST cap_age_s is a give-up candidate. ONLY backstop-eligible
     recipients (should_backstop_wake — never a human/operator or a P3/test row) are classified;
@@ -940,6 +954,16 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
         new_ids = [i for i in ids if ("stuck", i) not in seen]
         if not new_ids or not _alive(agent):   # already-paged rows, or a dead agent (dead-foreign)
             continue
+        # ANSWERED-NOT-STAMPED (orch-console #80400): the lane replied to the row (same thread
+        # or a #<id> cite) but never stamped read_at -- it is attending, not stuck. Not added to
+        # `seen`, so a row that is genuinely still unanswered next sweep is still judged.
+        answered = replied(new_ids)
+        if answered:
+            escalations.append({"kind": "stuck-replied", "agent": agent,
+                                "ids": sorted(answered), "reason": "recipient replied"})
+            new_ids = [i for i in new_ids if i not in answered]
+            if not new_ids:
+                continue
         if not _local(agent):   # the pane read below is LOCAL — never judge a foreign lane's pane
             continue
         state = pane_state(agent)
