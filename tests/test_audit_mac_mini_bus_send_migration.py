@@ -72,7 +72,7 @@ def db(pg_dsn):
 async def test_post_agent_message_posts_a_real_row_through_post_agent_message_rpc(db, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", db)
     msg_id = await amm.post_agent_message(
-        subject="subj-for-test", body="body-for-test", requires_response=True,
+        subject="subj-for-test", body="body-for-test", requires_response=True, priority="P1",
     )
     with psycopg.connect(db) as c, c.cursor() as cur:
         cur.execute(
@@ -82,7 +82,7 @@ async def test_post_agent_message_posts_a_real_row_through_post_agent_message_rp
         rows = cur.fetchall()
     assert len(rows) == 1, rows
     from_agent, to_agent, mtype, prio, req, subj, body = rows[0]
-    assert (from_agent, to_agent, mtype, req) == ("cc-ihsanos", "cai", "update", True)
+    assert (from_agent, to_agent, mtype, prio, req) == ("cc-ihsanos", "cai", "update", "P1", True)
     assert subj == "subj-for-test"
     assert body == "body-for-test"
     with psycopg.connect(db) as c, c.cursor() as cur:
@@ -93,8 +93,17 @@ async def test_post_agent_message_posts_a_real_row_through_post_agent_message_rp
 @pytest.mark.asyncio
 async def test_post_agent_message_default_requires_response_false(db, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", db)
-    await amm.post_agent_message(subject="s", body="b")
+    await amm.post_agent_message(subject="s", body="b", priority="P2")
     with psycopg.connect(db) as c, c.cursor() as cur:
         cur.execute("SELECT requires_response, priority FROM agent_messages")
         req, prio = cur.fetchone()
     assert req is False
+
+
+def test_post_agent_message_has_no_priority_default():
+    """orch-console review nit (bus #80112): a default priority reintroduces the
+    exact silent-default bus_send.py's required --priority design exists to
+    prevent. priority must be a required positional/keyword arg with no default."""
+    import inspect
+    sig = inspect.signature(amm.post_agent_message)
+    assert sig.parameters["priority"].default is inspect.Parameter.empty

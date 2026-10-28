@@ -373,7 +373,7 @@ def write_report(buckets: dict, timestamp: str) -> Path:
 
 # ── Agent messages posting ────────────────────────────────────────────────────
 
-async def post_agent_message(subject: str, body: str, requires_response: bool = False, priority: str = "P2") -> int:
+async def post_agent_message(subject: str, body: str, priority: str, requires_response: bool = False) -> int:
     """Independent write (this is a manual, interactively-run one-shot CLI tool,
     not a daemon) -- goes through scripts/bus_send.py's send(), never a raw
     INSERT (Musa op#34845, PR-B step 2). Runs the sync send() off the event
@@ -564,6 +564,7 @@ async def phase2(supabase):
 
     await post_agent_message(
         subject=f"TASK-043 Phase 2 complete — {len(killed)} killed, {len(skipped)} skipped",
+        priority="P2",
         body=(
             f"Phase 2 execution complete.\n"
             f"Killed: {len(killed)}\n"
@@ -705,6 +706,7 @@ async def phase3(supabase):
 
     await post_agent_message(
         subject=f"TASK-043 Phase 3 complete — Verdict: {verdict}",
+        priority="P2",
         body=(
             f"Baseline measurement complete.\n\n"
             f"Avg idle: {avg_idle:.1f}% | Avg user: {avg_user:.1f}% | Avg sys: {avg_sys:.1f}%\n"
