@@ -37,6 +37,7 @@ from pathlib import Path
 import httpx
 
 from nervous_system import error_tracker
+from scripts import bus_send  # sanctioned agent_messages writer (backlog#124)
 
 logger = logging.getLogger("wingmen.deploy_verifier")
 
@@ -352,18 +353,17 @@ async def _escalate_bug(
         f"(b) NULL `verification_escalated_at` to retry, or (c) flip `verified_at` manually if eye-checked."
     )
     try:
-        await supabase.table("agent_messages").insert({
-            "from_agent": "cc-orchestrator",
-            "to_agent": "cai",
-            "message_type": "blocker",
-            "subject": f"Deploy verification escalation — bug {str(bug_id)[:8]} ({bug_row.get('repo_name')})",
-            "body": body,
-            "priority": "P1",
-            "requires_response": True,
-            "sub_tag": "cc-orchestrator-2",
-        }).execute()
-    except Exception as e:
-        logger.error(f"_escalate_bug: agent_messages INSERT failed for {bug_id}: {e}")
+        await asyncio.to_thread(
+            bus_send.send,
+            "cc-orchestrator", "cai", "blocker",
+            f"Deploy verification escalation — bug {str(bug_id)[:8]} ({bug_row.get('repo_name')})",
+            body, "P1",
+            req=True, sub_tag="cc-orchestrator-2",
+        )
+    except (Exception, SystemExit) as e:  # noqa: BLE001 -- bus_send.dburl() raises bare
+        # SystemExit (not Exception) on a missing DATABASE_URL; this escalation post is
+        # best-effort and must never crash the sweep tick over it.
+        logger.error(f"_escalate_bug: bus post failed for {bug_id}: {e}")
         error_tracker.track_exception("deploy_verifier.escalate_message", e)
 
     # Step 3: optional Telegram alert (one per bug, dedup'd)

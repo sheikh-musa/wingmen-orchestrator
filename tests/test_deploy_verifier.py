@@ -546,13 +546,16 @@ class _FakeSupabase:
 @pytest.mark.asyncio
 async def test_escalate_bug_tombstones_and_p1_messages():
     """AC: escalation must (1) UPDATE bug_reports with verification_escalated_at +
-    diagnostic, (2) INSERT P1 agent_messages addressed to cai with announce_to_agent."""
+    diagnostic, (2) post a P1 bus message addressed to cai via scripts.bus_send.send
+    (never a raw INSERT INTO agent_messages, Musa op#34845, PR-B step 2)."""
     from nervous_system import deploy_verifier
     sb = _FakeSupabase()
     bug = {"id": "00000000-0000-0000-0000-000000000001",
            "repo_name": "ihsandms", "verification_started_at": "2026-04-28T09:00:00Z",
            "job_id": "job-1"}
-    await deploy_verifier._escalate_bug(sb, bug, "deploy-lag 45 min since pr.mergedAt")
+    with patch("nervous_system.deploy_verifier.bus_send.send") as mock_send:
+        mock_send.return_value = (1, "thread-1")
+        await deploy_verifier._escalate_bug(sb, bug, "deploy-lag 45 min since pr.mergedAt")
 
     # bug_reports UPDATE chain
     br_calls = sb.calls.get("bug_reports", [])
@@ -561,13 +564,37 @@ async def test_escalate_bug_tombstones_and_p1_messages():
     assert "verification_escalated_at" in update_payload
     assert "verification_diagnostic" in update_payload
 
-    # agent_messages INSERT chain
-    am_calls = sb.calls.get("agent_messages", [])
-    assert any(c[0] == "insert" for c in am_calls), f"missing insert on agent_messages: {am_calls}"
-    insert_payload = next(c[1][0] for c in am_calls if c[0] == "insert")
-    assert insert_payload["to_agent"] == "cai"
-    assert insert_payload["priority"] == "P1"
-    assert insert_payload["from_agent"] == "cc-orchestrator"
+    # no raw agent_messages table write happened on the supabase double
+    assert "agent_messages" not in sb.calls
+
+    # bus_send.send carried the right envelope
+    mock_send.assert_called_once()
+    args, kwargs = mock_send.call_args
+    assert args[0] == "cc-orchestrator"
+    assert args[1] == "cai"
+    assert args[2] == "blocker"
+    assert args[5] == "P1"
+    assert kwargs.get("req") is True
+    assert kwargs.get("sub_tag") == "cc-orchestrator-2"
+
+
+@pytest.mark.asyncio
+async def test_escalate_bug_survives_bus_send_system_exit():
+    """bus_send.dburl() raises bare SystemExit (not Exception) on a missing
+    DATABASE_URL -- the escalation post is best-effort and must not crash the
+    sweep tick over it (regression: a plain `except Exception` here would let
+    SystemExit propagate and kill the whole tick)."""
+    from nervous_system import deploy_verifier
+    sb = _FakeSupabase()
+    bug = {"id": "00000000-0000-0000-0000-000000000003",
+           "repo_name": "ihsandms", "verification_started_at": "2026-04-28T09:00:00Z",
+           "job_id": "job-1"}
+    with patch("nervous_system.deploy_verifier.bus_send.send",
+               side_effect=SystemExit("no DATABASE_URL: set it in the environment or .env")):
+        await deploy_verifier._escalate_bug(sb, bug, "deploy-lag 45 min since pr.mergedAt")
+    # tombstone still happened; the SystemExit from the bus post didn't propagate
+    br_calls = sb.calls.get("bug_reports", [])
+    assert any(c[0] == "update" for c in br_calls)
 
 
 @pytest.mark.asyncio
@@ -587,7 +614,7 @@ async def test_escalate_bug_telegram_dedup_skips_when_logged():
 
 @pytest.mark.asyncio
 async def test_escalate_bug_skips_p1_if_tombstone_fails():
-    """If UPDATE tombstone fails, do NOT INSERT P1 — would re-fire next tick.
+    """If UPDATE tombstone fails, do NOT post P1 — would re-fire next tick.
 
     Use a supabase double whose UPDATE chain raises on .execute()."""
     from nervous_system import deploy_verifier
@@ -608,7 +635,9 @@ async def test_escalate_bug_skips_p1_if_tombstone_fails():
 
     sb = _FailingSupabase()
     bug = {"id": "x", "repo_name": "r", "verification_started_at": None, "job_id": None}
-    await deploy_verifier._escalate_bug(sb, bug, "diag")
+    with patch("nervous_system.deploy_verifier.bus_send.send") as mock_send:
+        await deploy_verifier._escalate_bug(sb, bug, "diag")
+        mock_send.assert_not_called()
     assert "agent_messages" not in sb.tables_touched, \
         "P1 must NOT fan out when tombstone failed"
 
