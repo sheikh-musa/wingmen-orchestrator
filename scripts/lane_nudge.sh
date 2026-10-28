@@ -427,6 +427,9 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
       # and re-evaluate; only a confirmed-empty composer or a ghost re-probe delivers. Scoped to
       # noborder (the only capture shape residue produces here); an unsure on a clean border, or
       # text that survives the redraw, refuses exactly as before.
+      # NOTE: the guard keys on CC_RAW_PARTIAL (the ORIGINAL capture, snapshotted before the probe),
+      # NOT CC_PARTIAL: _probe_composer re-parses the pane and OVERWRITES CC_PARTIAL with the
+      # after-revert reading. Switching this to CC_PARTIAL would reintroduce the defect (cc-quality F1).
       _ln_redraw=''
       if [ "${CC_RAW_PARTIAL:-}" = 'noborder' ] && ! _probe_revertfail_is_repaint_race "$SESSION"; then
         _redraw_and_reevaluate "$SESSION"
@@ -445,7 +448,8 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
       esac
       ;;
     *)
-      # real | unsure | busy | locked | '' : preserve + refuse (as before step-4). But these are
+      # real | busy | locked | '' : preserve + refuse (as before step-4; unsure has its own branch
+      # above, #79940, and never reaches here). But these are
       # NOT the same event, and the LABEL must say which (#23970.2/.3): real|unsure = the probe
       # found (or could not rule out) REAL staged text; busy|locked|'' = the probe could NOT run
       # (lane busy / a recycle owns the pane / probe error), so we never disambiguated and preserve

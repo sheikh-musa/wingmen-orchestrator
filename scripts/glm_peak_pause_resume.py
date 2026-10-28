@@ -61,8 +61,10 @@ STATE_FILE = Path.home() / "wingmen" / "fleet-health" / "state" / "glm_peak_paus
 
 # glm-rollout-plan-20261013 line 35, standing doctrine: never move these onto GLM,
 # whatever a pointer file says. Exact lane names, not prefixes, except irsyad* which
-# is a whole family bar.
-HARD_EXCLUDE_LANES = {"cosem-adcda-photos", "cc-fleet-health"}
+# is a whole family bar. cc-paperclip-spike: orch-console ruling #79984 (2026-10-28) — its live
+# scope is operator/irsyad-adjacent, so Claude-only until that scope shrinks back to the
+# isolated spike (this also matches provider_policy, which fails it closed: no #79888 divergence).
+HARD_EXCLUDE_LANES = {"cosem-adcda-photos", "cc-fleet-health", "cc-paperclip-spike"}
 HARD_EXCLUDE_PREFIXES = ("irsyad", "hub", "console", "orch-console")
 
 
