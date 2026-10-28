@@ -243,6 +243,58 @@ def _pooler_tenant_ref(dsn: str, *, what: str = "DSN") -> str:
     return parts.username.split(".", 1)[1]
 
 
+_ASSIGN_LINE_RE = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+_VARREF_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+_LEADING_THEN_RE = re.compile(r"^then\b\s*(.*)$")
+_TRAILING_FI_RE = re.compile(r"^(.*?)\bfi\b\s*$")
+
+
+def _scan_credential_lines(text: str) -> list[tuple[str, str, frozenset]]:
+    """Statically scan shell-script-shaped credential text for [export]
+    KEY=value assignment lines, tracking which ones sit inside an
+    `if [ ... $FLAG ... ]; then ... fi` conditional block -- the file's own
+    allow-flag tripwire (orch-console bus #79852). NEVER evaluates the file
+    as shell (no subprocess, no sourcing): this is a static line/clause
+    scan recognizing the conventional if/then/fi idiom (single- or
+    multi-line). Returns (key, value, required_flags) for every assignment
+    found; required_flags is the union of every $VAR referenced in each
+    still-open if-condition at that point. A condition this scan can't
+    fully interpret (e.g. an equality test, not just `-n`) still contributes
+    its referenced var names to required_flags -- more gates, never fewer,
+    so an exotic comparison this scan doesn't understand still fails closed
+    rather than silently granting access."""
+    gate_stack: list[frozenset] = []
+    out: list[tuple[str, str, frozenset]] = []
+    for raw_line in text.splitlines():
+        for clause in raw_line.split(";"):
+            clause = clause.strip()
+            if not clause or clause.startswith("#"):
+                continue
+            m = _LEADING_THEN_RE.match(clause)
+            if m:
+                clause = m.group(1).strip()
+                if not clause:
+                    continue
+            trailing_fi = False
+            m = _TRAILING_FI_RE.match(clause)
+            if m:
+                trailing_fi = True
+                clause = m.group(1).strip()
+            if clause.startswith("if "):
+                cond = re.sub(r"\bthen\b\s*$", "", clause[3:]).strip()
+                gate_stack.append(frozenset(_VARREF_RE.findall(cond)))
+            elif clause:
+                m2 = _ASSIGN_LINE_RE.match(clause)
+                if m2:
+                    key = m2.group(1)
+                    val = m2.group(2).strip().strip('"').strip("'")
+                    required = frozenset().union(*gate_stack) if gate_stack else frozenset()
+                    out.append((key, val, required))
+            if trailing_fi and gate_stack:
+                gate_stack.pop()
+    return out
+
+
 def read_admin_dsn(path: Path) -> str:
     """Read the admin/write DSN from the console's private credentials file.
     EXACT key name only — no heuristic pick (orch-console bus #79816: the
@@ -251,8 +303,13 @@ def read_admin_dsn(path: Path) -> str:
     in another tenant's silo, exactly the TENANT-RESIDENCY-001 breach the
     guard exists to prevent). On a miss, fails loud and names the KEYS
     present (never a value) so console can supply the right one in one
-    round. Independently of the key, the DSN's own project ref (pooler
-    username suffix) must equal the ihsanos multi-tenant DB ref from
+    round. The file is a sourceable shell script (bus #79852): lines may
+    carry an `export` prefix, and the real export may sit inside an
+    `if [ ... $FLAG ... ]; then ... fi` tripwire block — reading the raw
+    text must not silently bypass that tripwire, so a gated assignment is
+    refused unless every referenced flag is non-empty in THIS process's own
+    environment too. Independently of the key, the DSN's own project ref
+    (pooler username suffix) must equal the ihsanos multi-tenant DB ref from
     docs/data-store-registry.md — loaded via registry.store_ref (the same
     never-hardcoded loader the provisioner package already uses), never a
     fresh literal here. This catches the key-name-right-value-wrong case a
@@ -262,23 +319,21 @@ def read_admin_dsn(path: Path) -> str:
     mode = stat.S_IMODE(os.stat(path).st_mode)
     if mode & 0o077:
         raise InstallError(f"{path} mode is {oct(mode)} — must be 0600 (it is a credential)")
-    keys_present: list[str] = []
-    dsn = None
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        key = key.strip()
-        keys_present.append(key)
-        if key == ADMIN_CRED_KEY:
-            val = val.strip().strip('"').strip("'")
-            if val:
-                dsn = val
-    if dsn is None:
+    assignments = _scan_credential_lines(path.read_text())
+    keys_present = [key for key, _val, _req in assignments]
+    match = next(((val, req) for key, val, req in assignments if key == ADMIN_CRED_KEY and val), None)
+    if match is None:
         raise InstallError(
             f"{ADMIN_CRED_KEY} not found in {path.name} — keys present: "
             f"{', '.join(keys_present) or '(none)'}"
+        )
+    dsn, required_flags = match
+    missing = sorted(f for f in required_flags if not os.environ.get(f))
+    if missing:
+        raise InstallError(
+            f"{ADMIN_CRED_KEY} in {path.name} is gated by an if-block requiring "
+            f"{', '.join(missing)} — set it in this process's own environment "
+            f"(the file's own tripwire; reading past it is refused, not bypassed)"
         )
     try:
         expected_ref = provisioner_registry.store_ref(IHSANOS_STORE_ALIAS)
