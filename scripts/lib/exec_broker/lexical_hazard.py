@@ -4,7 +4,7 @@ vendored ddl_detect lexer's blind spots.
 
 WHY THIS EXISTS: strip_sql_noise/is_ddl_shaped (vendored, sha256-pinned,
 NEVER hand-edited) are good-faith single-pass lexers, not a full PG parser,
-and have two documented blind spots that can swallow real top-level code:
+and have three documented blind spots that can swallow real top-level code:
 
 1. Whole-branch review Critical #1 (2026-10-28): the vendored lexer has NO
    double-quoted-IDENTIFIER state at all -- a bare ', --, /* or $tag$ that
@@ -14,13 +14,10 @@ and have two documented blind spots that can swallow real top-level code:
    begin with. A LINE- or BLOCK-COMMENT swallow is never re-scanned by
    anything downstream (unlike a dollar body, which both is_plain_read's
    body-token scan and is_ddl_shaped's own DDL-keyword rescan DO re-examine)
-   -- so this is the one PROVEN, permanent blind spot: e.g.
+   -- so this is one PROVEN, permanent blind spot: e.g.
    SELECT "x--y"; DROP TABLE t has is_ddl_shaped() == False, because the
    `--` after the quote char opens a line comment hiding "; DROP TABLE t"
-   for good. An E'..' backslash escape similarly closes a plain string
-   early relative to true PG semantics, letting what PG still considers
-   string DATA be treated as CODE by the vendored lexer -- any further
-   noise-opener inside that mis-exposed span cascades into the same hole.
+   for good.
 
 2. PR #569 review's identifier-$ bypass (2026-10-28): $ is a legal PG
    identifier CONTINUATION character, so a$x$ is ONE identifier token to
@@ -36,6 +33,26 @@ and have two documented blind spots that can swallow real top-level code:
    posture as class 1, and because a caller hitting it should re-quote
    rather than have EITHER consumer try to reason about it further.
 
+3. PR #570 review's backslash/standard_conforming_strings bypass
+   (2026-10-28, demonstrated independently before accepting the
+   correction): a backslash is hazardous in EVERY string context, not only
+   an E'..' escape -- DO NOT narrow this rule to E-strings. Under
+   standard_conforming_strings=off (a plain session GUC any caller can
+   flip mid-statement with SET or set_config(), no special privilege), PG
+   itself treats backslash as an escape character in ORDINARY '...'
+   strings too. The vendored lexer never checks this GUC and only
+   recognizes a DOUBLED quote ('') as an in-string escape -- so
+   SET standard_conforming_strings = off; SELECT '\''; DROP TABLE t; --'
+   has is_ddl_shaped() == False: PG reads '\'' as a one-char string that
+   closes immediately after the escaped quote, making "; DROP TABLE t; --'"
+   real code to PG -- but the vendored lexer sees the quotes at that same
+   position as a '' doubled-escape and keeps scanning for the NEXT
+   unescaped quote (the trailing one after --), swallowing the whole
+   "; DROP TABLE t; --" span as still-inside-the-string. This is a PROVEN,
+   permanent blind spot exactly like class 1's, and it is why the
+   backslash check below is unconditional ("\\" in sql), never scoped to
+   an E-prefix.
+
 REUSE, NEVER REIMPLEMENT: both scripts/lib/exec_broker/read_only.py (the
 RO-override plain-read screen) and scripts/lib/exec_broker/gate_validation.py
 (require_gate's base DDL-gate path, rollout step (c), bus #79161) import
@@ -48,10 +65,11 @@ liveness definition shared by check_project_ref and check_read_only_override.
 FAIL-CLOSED DOCTRINE: false refusals are acceptable; a missed write (or
 missed DDL) is not. Concretely, a quoted identifier containing '/--/*/$, an
 identifier followed directly by $ (e.g. col$1), and any backslash anywhere
-are all treated as hazardous -- the same deliberate over-refusal stance
-ddl_detect takes ("a false refusal is fail-safe for a screen"). A caller
-hitting one renames or re-quotes; nothing legitimate is silently let
-through the other way.
+(class 3 above -- never narrowed to E-strings) are all treated as
+hazardous -- the same deliberate over-refusal stance ddl_detect takes
+("a false refusal is fail-safe for a screen"). A caller hitting one
+renames or re-quotes; nothing legitimate is silently let through the
+other way.
 """
 from __future__ import annotations
 
