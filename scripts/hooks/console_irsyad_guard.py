@@ -166,8 +166,10 @@ def _is_allowed_coord_bus_post(payload) -> bool:
 # launchd load + ungated-refusal self-check. Every DIRECT way of doing that
 # work names the ihsanos multi-tenant store or the private credentials file
 # and is rightly BLOCKED above; this exception allows ONE shape and nothing
-# else: a Bash call that is EXACTLY
-# `.venv/bin/python3 scripts/install_ceayj_provisioner.py` with only
+# else: a Bash call that invokes scripts/install_ceayj_provisioner.py (via
+# the sanctioned interpreter tokens in _ALLOWED_PY — the repo venv's
+# python3, bare `python3`, or that venv's absolute path, same allowlist the
+# coord-bus exception uses) with only
 # --dry-run / --apply / --step N — nothing chained, no substitution/redirect,
 # no positional args, no other flags. The script prints key names, shas,
 # counts and PIDs only, so no credential or store data can cross this

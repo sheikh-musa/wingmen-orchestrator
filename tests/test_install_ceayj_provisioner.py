@@ -139,6 +139,28 @@ def test_discover_gate_takes_newest_within_age_floor():
     assert inst.discover_gate(rows, sha12, now=NOW)["id"] == 401
 
 
+def test_discover_gate_age_check_converts_non_utc_aware_timestamps():
+    # cc-quality Nit2 (#79345): psycopg returns timestamptz as an AWARE
+    # datetime that may carry a non-UTC offset (e.g. a DB/session set to
+    # +14:00). The buggy form `.replace(tzinfo=utc)` RELABELS the local
+    # wall-clock numbers as UTC instead of CONVERTING the instant -- for
+    # a positive offset that makes a row look MORE RECENT than it truly
+    # is, which can let a genuinely stale (>14d) gate row slip through
+    # the freshness floor. Construct a row whose TRUE age is 15 days
+    # (correctly stale) but whose +14:00 wall-clock numbers, misread as
+    # UTC, land at 14 days (incorrectly fresh) -- the dangerous direction
+    # for a security floor.
+    sha12 = "abcdef123456"
+    offset = dt.timezone(dt.timedelta(hours=14))
+    true_creation_utc = NOW - dt.timedelta(days=15)  # genuinely stale
+    created_at = true_creation_utc.astimezone(offset)  # same instant, +14:00 numbers
+    # sanity: the naive relabel reads as a DIFFERENT (later) instant
+    assert created_at.replace(tzinfo=dt.timezone.utc) != true_creation_utc
+    rows = [_gate_row(500, body=f"sha {sha12}", when=created_at)]
+    with pytest.raises(inst.InstallError, match="no gate"):
+        inst.discover_gate(rows, sha12, now=NOW)
+
+
 # --- DSN building (pooler tenant suffix, #77507) ------------------------------
 def test_build_role_dsn_derives_tenant_suffix_from_admin_username():
     admin = _dsn("postgres.ceayjeamtmcyzzvqflus", "sekret",

@@ -138,12 +138,19 @@ def resolve_target_migration(draft: Path, migrations_dir: Path) -> tuple[Path, s
 def discover_gate(rows: list[dict], sha12: str, *, now: dt.datetime) -> dict:
     """Newest bus row that can gate this exact artifact: from a gate owner,
     message_type decision, within the age floor, mentioning the artifact's
-    sha12 in subject or body. apply_migration re-validates everything."""
+    sha12 in subject or body. apply_migration re-validates everything.
+
+    created_at is converted to UTC (astimezone), never relabeled
+    (.replace(tzinfo=...)) -- psycopg returns an AWARE timestamptz that may
+    carry a non-UTC offset, and relabeling its wall-clock numbers as UTC
+    would silently shift the age computation by that offset, in the
+    dangerous direction for a positive offset: a genuinely stale row can
+    look fresher than it is (cc-quality Nit2, bus #79345)."""
     matches = [
         r for r in rows
         if r["from_agent"] in _GATE_AGENTS
         and r["message_type"] == "decision"
-        and (now - r["created_at"].replace(tzinfo=dt.timezone.utc)).days <= _GATE_MAX_AGE_DAYS
+        and (now - r["created_at"].astimezone(dt.timezone.utc)).days <= _GATE_MAX_AGE_DAYS
         and sha12 in (str(r["subject"]) + str(r["body"]))
     ]
     if not matches:
