@@ -817,16 +817,27 @@ def send(
     path. `priority` has no default here either — callers must pass it.
 
     `connect_timeout`/`statement_timeout_ms` (bus #80233/#80236, coord's
-    PR#591 review): both default to None, which reproduces the pre-existing
-    connect(dsn) call exactly -- no behavior change for the ~100 existing
-    callers that don't pass them. A caller that runs inside a bounded context
-    (e.g. an EXIT trap's SIGALRM backstop) should pass both: SIGALRM cannot
-    interrupt a libpq call blocked in C, so it only bounds a connect that
-    fails outright (DNS/refused/unroutable) -- a connect that SUCCEEDS and
-    then stalls on a slow query is invisible to it. connect_timeout bounds
-    the former at the libpq level; statement_timeout_ms (passed via the
-    `options` GUC, since libpq has no separate kwarg for it) bounds the
-    latter the same way."""
+    PR#591 review; revised after coord's live pooler probe #80453): both
+    default to None, which reproduces the pre-existing connect(dsn) call
+    exactly -- no behavior change for the ~100 existing callers that don't
+    pass them. A caller that runs inside a bounded context (e.g. an EXIT
+    trap's SIGALRM backstop) should pass both: SIGALRM cannot interrupt a
+    libpq call blocked in C, so it only bounds a connect that fails outright
+    (DNS/refused/unroutable) -- a connect that SUCCEEDS and then stalls on a
+    slow query is invisible to it. connect_timeout bounds the former,
+    straight through to psycopg2.connect.
+
+    statement_timeout_ms bounds the latter via `SET LOCAL statement_timeout`
+    as the FIRST statement of this function's own transaction, NOT a
+    connection-string `options=` GUC: the real bus DSN goes through a
+    Supabase pooler that silently ignores startup options (coord confirmed
+    with a live probe -- connect succeeds, but the session's
+    statement_timeout stayed at the role default instead of what options=
+    asked for). SET LOCAL is pooler-safe because it is an explicit statement
+    sent over the already-pooled connection, not a parameter the pooler can
+    drop at connection-setup time, and it is scoped to exactly this
+    transaction (cleared at this function's own commit(), never leaking into
+    whatever the pool hands the next caller)."""
     if priority not in _VALID_PRIORITIES:
         raise ValueError(f"send(): priority must be one of {_VALID_PRIORITIES}, got {priority!r}")
     refuse_if_undeliverable(to, reply_to=reply_to, allow_undeliverable=allow_undeliverable)
@@ -836,10 +847,10 @@ def send(
     connect_kwargs = {}
     if connect_timeout is not None:
         connect_kwargs["connect_timeout"] = connect_timeout
-    if statement_timeout_ms is not None:
-        connect_kwargs["options"] = f"-c statement_timeout={statement_timeout_ms}"
     conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")), **connect_kwargs)
     cur = conn.cursor()
+    if statement_timeout_ms is not None:
+        cur.execute(f"SET LOCAL statement_timeout = {int(statement_timeout_ms)}")
     cur.execute("SELECT set_config('app.current_agent_id', %s, true)", (from_agent,))
 
     if reply_to and not thread:
