@@ -106,10 +106,12 @@ recent_base_read AS (
 )
 SELECT i.instance_id, i.base_agent_id, i.instance_status, i.tmux_session,
        u.oldest_unread_created_at, u.unread_count,
-       r.last_base_read_at
+       r.last_base_read_at,
+       ri.last_base_read_at AS last_instance_read_at
 FROM instances i
 JOIN unread_instance u ON u.instance_id = i.instance_id
 LEFT JOIN recent_base_read r ON r.base_id = i.base_agent_id
+LEFT JOIN recent_base_read ri ON ri.base_id = i.instance_id
 """
 
 
@@ -131,7 +133,10 @@ def find_address_variant_misses(
     specific instance still exists — a retired instance with old unread
     mail would otherwise be misdiagnosed as "awake but blind" when it is
     simply dead; checked separately from base liveness on purpose, since a
-    base can outlive any one of its past instances)."""
+    base can outlive any one of its past instances), AND the instance has NOT
+    read any instance-addressed row since its oldest unread one landed (#80448:
+    a lane that reads P2 instance mail in minutes but leaves P3 FYIs for later
+    can plainly see its instance address)."""
     misses = []
     for r in rows:
         if r.get("instance_status") == "offline":
@@ -147,6 +152,12 @@ def find_address_variant_misses(
             continue
         base_read_age_min = (now - last_base_read).total_seconds() / 60.0
         if base_read_age_min > base_read_recency_min:
+            continue
+        # INSTANCE-READ VETO (#80448): the lane read mail addressed to its INSTANCE id after
+        # the oldest unread one landed, so it sees that address; the backlog is priority
+        # ordering (P3 FYIs left for later) or a long task, not blindness.
+        last_instance_read = r.get("last_instance_read_at")
+        if last_instance_read is not None and last_instance_read > oldest:
             continue
         misses.append(r)
     return misses

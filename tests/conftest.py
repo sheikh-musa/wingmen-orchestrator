@@ -461,6 +461,25 @@ def _no_live_context_watchdog_seams(monkeypatch, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _sla_watchdog_log_and_state_off_live(monkeypatch, tmp_path_factory):
+    """Point scripts.priority_sla_watchdog's LOG_FILE and STATE_FILE at a per-test tmp dir.
+
+    WHY: both are hard-coded under ~/wingmen/orchestrator/logs (the LIVE checkout), not
+    relative to the module, so a test run from ANY worktree wrote fixture lines
+    ("slow-ask SENT ask#5 ... (msg #99)") into the live watchdog log -- 240 lines from
+    2026-10-27 15:25Z on, read as real by anyone checking the log -- and any test reaching
+    save_state() would rewrite the live watchdog's dedup/cooldown state. A test that needs
+    a specific path monkeypatches it itself (that overrides this for that test only)."""
+    try:
+        from scripts import priority_sla_watchdog as _sla
+    except Exception:  # pragma: no cover -- module absent/unimportable: nothing to guard
+        return
+    d = tmp_path_factory.mktemp("sla_wd", numbered=True)
+    monkeypatch.setattr(_sla, "LOG_FILE", d / "priority_sla_watchdog.log", raising=True)
+    monkeypatch.setattr(_sla, "STATE_FILE", d / "priority_sla_watchdog_state.json", raising=True)
+
+
+@pytest.fixture(autouse=True)
 def set_test_env(monkeypatch):
     env_vars = {
         "ANTHROPIC_API_KEY": "test-key",
