@@ -887,6 +887,31 @@ def send(
     return row_id, str(thread_id)
 
 
+def post_on_conn(
+    cur, from_agent: str, to: str, mtype: str, subject: str, body: str, priority: str,
+    req: bool = False, thread: str | None = None, sub_tag: str | None = None,
+    is_test: bool = False, posted_by_identity: str | None = None,
+) -> tuple[int, str]:
+    """Like send(), but posts through post_agent_message on a CURSOR the caller
+    already has open, instead of opening a new connection -- for the rare call
+    site whose bus row must commit (or roll back) together with other writes in
+    the same transaction (e.g. irsyad_worker_reaper.py's _reap(): the "REAPED"
+    row must not survive if the fleet_lanes/agent_status change it describes
+    didn't land). Takes a bare cursor, never a conn, so it structurally cannot
+    call commit() -- that boundary stays the caller's."""
+    if priority not in _VALID_PRIORITIES:
+        raise ValueError(f"post_on_conn(): priority must be one of {_VALID_PRIORITIES}, got {priority!r}")
+    if not thread:
+        thread = str(uuid.uuid4())
+    cur.execute(
+        "SELECT * FROM post_agent_message(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (from_agent, to, mtype, subject, body, priority, req, thread, sub_tag,
+         is_test, posted_by_identity),
+    )
+    row_id, thread_id = cur.fetchone()
+    return row_id, str(thread_id)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 

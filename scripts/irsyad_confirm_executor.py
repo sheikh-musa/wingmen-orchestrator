@@ -85,13 +85,12 @@ def _already_executed(conn, proposal_id: int, after) -> bool:
         return cur.fetchone() is not None
 
 
-def _alert(conn, subject: str, body: str) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-            "requires_response,priority) VALUES ('cc-orchestrator','orch-console','blocker',%s,%s,true,'P1')",
-            (subject, body))
-    conn.commit()
+def _alert(subject: str, body: str) -> None:
+    """INDEPENDENT write (own connection via send()) -- fires only AFTER the actuator
+    subprocess already ran, so there is nothing left to roll back together with.
+    send() through scripts/bus_send.py, never a raw INSERT (Musa op#34845, PR-B step 2)."""
+    from scripts.bus_send import send
+    send("cc-orchestrator", "orch-console", "blocker", subject, body, "P1", req=True)
 
 
 def run_once(dry: bool, lookback_min: int) -> int:
@@ -119,8 +118,7 @@ def run_once(dry: bool, lookback_min: int) -> int:
                 return 0
             r = subprocess.run([sys.executable, str(SPIN_ACTUATOR), "--proposal-id", str(pid)])
             if r.returncode != 0:
-                _alert(conn,
-                       f"AUTOSCALER confirm-executor: actuator REFUSED proposal {pid} (rc={r.returncode})",
+                _alert(f"AUTOSCALER confirm-executor: actuator REFUSED proposal {pid} (rc={r.returncode})",
                        f"A standing CONFIRM SPIN {pid} (bus #{cid}) did not execute — the actuator "
                        f"returned rc={r.returncode}. Manual attention needed. (This alert is the "
                        "'post loudly why' half of #40639.)")
