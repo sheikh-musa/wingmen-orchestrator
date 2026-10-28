@@ -72,15 +72,20 @@ at the DB level.
 - Audit trail: substrate `provisioner_access_log` (who/what/gate/verdict) +
   store `migration_ledger` (what applied where).
 
-## Open decisions (surfaced in the PR, console rules)
+## Ruled by orch-console (bus #79050, 2026-10-28) — no longer open
 
-1. **mint-editor-dsn autonomy**: today provision_bariq.py mints the editor
-   LOGIN password at apply time. Should the provision verb do the same
-   (returning a path to a 0600 DSN file, never the DSN), or does console
-   prefer minting stays a separate gated verb?
-2. **audit-ledger home**: provisioner_access_log lives on the substrate
-   (vault_log precedent). Alternative: a store-side copy on ceayj for
-   store-local auditability. Not blocking; substrate chosen for v1.
+1. **mint-editor-dsn = its own gated verb** (never a step inside provision):
+   minting a credential is its own security event — its own GO, its own
+   ledger row, independently refusable/revocable. Provision succeeds without
+   minting anything (v1 already conforms: the bundle only creates the
+   NOLOGIN role; the mint verb lands separately).
+2. **audit-ledger home = substrate**, on condition the table holds OPS
+   METADATA ONLY (tenant slug/id, verb, artifact sha, gate id, actor,
+   timestamps, outcome) — no tenant data rows, no credentials or DSNs, ever
+   (TENANT-RESIDENCY-001). Pinned by
+   `test_ledger_columns_are_ops_metadata_only_exact_set`: the INSERT and DDL
+   column sets are asserted EXACT, so a residency-drift column fails CI by
+   name.
 
 ## Verified posture (tests/provisioner/, 59 green + 1 CI-only)
 

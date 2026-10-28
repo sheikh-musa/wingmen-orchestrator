@@ -119,3 +119,29 @@ def test_draft_ddl_covers_every_column_the_ledger_writes():
     assert "assert: no_table_privilege authenticated public.provisioner_access_log DELETE" in draft
     assert "ledger: silo=" in draft  # apply routing header, same as 103
     assert "DROP TABLE" in draft and "DROP ROLE" in draft  # REVERT twin present
+
+
+def test_ledger_columns_are_ops_metadata_only_exact_set():
+    """TENANT-RESIDENCY-001 (orch-console #79050 ruling b): the access log
+    holds OPS METADATA ONLY — tenant id/key, verb, artifact sha, gate id,
+    actor, timestamps, outcome. No tenant data rows, no credentials, no
+    DSNs, ever. Pinned as an EXACT column set on both the INSERT the code
+    writes and the DDL: any future column addition (the drift this guards —
+    a 'dsn', 'password', or content-carrying column) fails here by name."""
+    import re as _re
+    cur = FakeCursor(rows=[{"id": 1}])
+    ledger.log_started(cur, _entry())
+    m = _re.search(r"INSERT INTO provisioner_access_log \(([^)]+)\)", cur.calls[0][0])
+    assert m, "log_started INSERT not found"
+    insert_cols = {c.strip() for c in m.group(1).split(",")}
+    assert insert_cols == {"verb", "client_key", "silo_ref", "bundle_sha256",
+                           "gate_id", "peer_uid", "reason", "status", "ts_start"}, \
+        f"ledger INSERT column set drifted: {sorted(insert_cols)}"
+    draft = _DRAFT.read_text()
+    ddl_cols = set(_re.findall(r"^  (\w+)\s+\w+", draft.split("(", 1)[1].split(");", 1)[0],
+                               _re.MULTILINE))
+    assert ddl_cols == insert_cols | {"id", "error_code", "ts_end", "created_at"}, \
+        f"DDL column set drifted from ops-metadata-only: {sorted(ddl_cols)}"
+    forbidden = ("dsn", "password", "token", "secret", "value", "content", "payload")
+    for col in ddl_cols:
+        assert not any(f in col for f in forbidden), f"column {col!r} smells like residency"
