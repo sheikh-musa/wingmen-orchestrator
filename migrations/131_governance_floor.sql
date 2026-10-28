@@ -129,6 +129,12 @@
 -- assert: search_path public.work_item_mirror_commitment_delete_trg()
 -- assert: no_execute anon public.work_item_mirror_commitment_delete_trg()
 -- assert: no_execute authenticated public.work_item_mirror_commitment_delete_trg()
+-- assert: search_path public.reject_audit_mutation()
+-- assert: no_execute anon public.reject_audit_mutation()
+-- assert: no_execute authenticated public.reject_audit_mutation()
+-- assert: search_path public.governance_floor_audit_trg()
+-- assert: no_execute anon public.governance_floor_audit_trg()
+-- assert: no_execute authenticated public.governance_floor_audit_trg()
 
 BEGIN;
 
