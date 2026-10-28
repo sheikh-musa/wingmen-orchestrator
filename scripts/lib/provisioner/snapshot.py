@@ -24,18 +24,26 @@ import psycopg
 
 from .spec import ClientSpec
 
-# psycopg3's COPY TO surfaces the raw row stream WITHOUT the "\." trailer
-# (an empty table reads as zero bytes), and COPY FROM accepts a
-# trailer-less stream — so the row count is simply the newline count.
-def _count_lines(data: bytes) -> int:
-    lines = data.split(b"\n")
-    if lines and lines[-1] == b"":
-        lines = lines[:-1]
-    return len(lines)
-
-
 class SnapshotRefused(Exception):
     """Fail-closed: the revert cannot proceed without a verified snapshot."""
+
+
+def client_is_adopted(cur: psycopg.Cursor, spec: ClientSpec) -> bool:
+    """True when the adoption record names the client's content table
+    (migration ceayj_adopt_bariq_provisioner, #80366): the bundle then owns
+    NOTHING of the client's live surface, its revert drops nothing, and the
+    snapshot belt is unnecessary — it is also IMPOSSIBLE, because fp holds
+    no read path on the adopted tables (deliberately). Two statements, not
+    one AND: SQL does not short-circuit, and a fresh store has no record
+    table — the EXISTS runs only when the table exists."""
+    if not cur.execute(
+            "SELECT to_regclass('public.provisioner_adopted_objects') IS NOT NULL"
+            ).fetchone()[0]:
+        return False
+    return cur.execute(
+        "SELECT EXISTS (SELECT 1 FROM public.provisioner_adopted_objects "
+        "WHERE client_key = %s AND object_name = %s)",
+        (spec.client_key, spec.content_table)).fetchone()[0]
 
 
 def snapshot_dir(base: Path) -> Path:

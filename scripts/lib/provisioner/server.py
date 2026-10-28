@@ -35,7 +35,7 @@ from .ledger import AccessLogEntry, gate_already_used, log_finalized, log_starte
 from .protocol import ErrorCode, MalformedRequest, encode_error, encode_ok, parse_request
 from .registry import Refuse
 from .render import render_bundle
-from .snapshot import SnapshotRefused, ensure_verified_snapshot
+from .snapshot import SnapshotRefused, client_is_adopted, ensure_verified_snapshot
 from .spec import load_spec, spec_path
 
 logger = logging.getLogger("provisioner")
@@ -189,13 +189,20 @@ class ProvisionerServer:
                                 # then re-checks the marker against live
                                 # counts, so a snapshot that drifts (or a
                                 # hand-typed marker) authorizes nothing.
-                                try:
-                                    ensure_verified_snapshot(scur, spec, self.snapshot_base)
-                                except SnapshotRefused as e:
-                                    self._finalize_and_respond(
-                                        conn, bus, cur, row_id, ErrorCode.UPSTREAM_ERROR,
-                                        f"revert refused — snapshot not verified: {e}")
-                                    return
+                                # ADOPTED clients (#80366) skip the belt:
+                                # their revert drops nothing (the rendered
+                                # revert skips all adopted teardown), and fp
+                                # deliberately holds no read path on the
+                                # adopted tables, so the export could not
+                                # run — the belt arms the destructive path.
+                                if not client_is_adopted(scur, spec):
+                                    try:
+                                        ensure_verified_snapshot(scur, spec, self.snapshot_base)
+                                    except SnapshotRefused as e:
+                                        self._finalize_and_respond(
+                                            conn, bus, cur, row_id, ErrorCode.UPSTREAM_ERROR,
+                                            f"revert refused — snapshot not verified: {e}")
+                                        return
                             scur.execute(bundle.forward_sql if req.verb == "provision"
                                          else bundle.revert_sql)
                         store.commit()

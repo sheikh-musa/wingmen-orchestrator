@@ -60,6 +60,32 @@ def test_revert_is_snapshot_guarded_before_any_drop():
     assert revert.index("REVERT-REFUSED") < revert.index("DROP POLICY IF EXISTS")
 
 
+def test_revert_skips_teardown_for_adopted_objects():
+    # #80366: for every object the adoption record names, the revert SKIPS
+    # teardown with a named notice — the adopted editor stays (LOGIN), the
+    # tables/trigger/fn stay with rows, the org row stays. The check reads
+    # provisioner_adopted_objects defensively (to_regclass): a FRESH world
+    # without the table is simply "no adoptions", never an error.
+    revert = render_mod.render_bundle(BARIQ).revert_sql
+    assert revert.count("REVERT-SKIPPED-ADOPTED") >= 3  # tables group, editor, org row
+    assert "to_regclass('public.provisioner_adopted_objects')" in revert
+    for obj in (BARIQ.content_table, BARIQ.editor_role, "organizations_row"):
+        assert f"AND object_name = '{obj}'" in revert, f"no adoption check for {obj}"
+
+
+def test_forward_privilege_block_is_adoption_guarded():
+    # #80366: REVOKE/GRANT/ENABLE-RLS need table ownership — on ADOPTED
+    # objects (original owner keeps them) the forward must SKIP that block
+    # with a named notice instead of failing; the migration's posture
+    # asserts + privilege sync establish what the block would have done
+    forward = render_mod.render_bundle(BARIQ).forward_sql
+    assert "FORWARD-SKIPPED-ADOPTED" in forward
+    # the privilege statements exist only inside the adoption-guarded DO —
+    # never as bare top-level statements (they would need ownership)
+    assert not re.findall(r"(?m)^REVOKE ALL ON ", forward)
+    assert not re.findall(r"(?m)^ALTER TABLE .+ ENABLE ROW LEVEL SECURITY", forward)
+
+
 def test_migration_ledger_create_is_existence_guarded():
     # #80291: a pre-existing ledger is store infra — the REVOKE/ENABLE-RLS
     # statements must run only on the create path (they need an ownership
@@ -76,6 +102,11 @@ def test_editor_surface_is_least_privilege():
     assert f"GRANT USAGE ON SCHEMA public TO {BARIQ.editor_role}" in forward
     assert f"GRANT SELECT, UPDATE ON public.{BARIQ.content_table} TO {BARIQ.editor_role}" in forward
     assert f"GRANT SELECT ON public.{BARIQ.history_table} TO {BARIQ.editor_role}" in forward
+    # the fn REVOKE runs on the fresh path only — inside the adoption-guarded
+    # EXECUTE (#80366), so the statement carries the $sub$ wrapper, not a
+    # bare trailing semicolon
+    assert (f"REVOKE ALL ON FUNCTION {BARIQ.content_table}_audit() "
+            "FROM anon, authenticated, PUBLIC" in forward)
     # INSERT/DELETE stay impossible everywhere for the editor
     editor_inserts = re.findall(r"GRANT[^\n]*INSERT[^\n]*" + BARIQ.editor_role, forward)
     assert not editor_inserts
@@ -127,10 +158,12 @@ def test_audit_function_execute_revoked_from_public_too():
     # cc-quality Minor a (PR#566): function EXECUTE defaults to PUBLIC, and
     # revoking anon/authenticated alone leaves the anon-reachable path open
     # per the standing SECDEF rule — the fn is trigger-only today, but the
-    # lockdown must not depend on reachability
+    # lockdown must not depend on reachability. The statement runs on the
+    # fresh path only — inside the adoption-guarded EXECUTE (#80366), so it
+    # carries the $sub$ wrapper, not a bare trailing semicolon
     out = render_mod.render_bundle(BARIQ)
     assert (f"REVOKE ALL ON FUNCTION {BARIQ.content_table}_audit() "
-            "FROM anon, authenticated, PUBLIC;") in out.forward_sql
+            "FROM anon, authenticated, PUBLIC") in out.forward_sql
 
 
 def test_spec_rejects_hyphenated_client_keys():

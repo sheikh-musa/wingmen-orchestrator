@@ -180,14 +180,43 @@ def test_happy_path_revert_applies_the_revert_twin():
     go = _go_row(bundle, subject="GO: revert bariq tenant",
                  body=f"approved revert of bundle bariq {_REF} sha256 {bundle.sha256}")
     bus_results = [{"id": 8}, None, go]
-    # fetchone script: major, then the snapshot step's existence+count reads
-    # (both tables empty -> snapshot is a verified no-op, guard passes)
-    store = FakeStoreConn(results=[(170000,), (True,), (0,), (True,), (0,)])
+    # fetchone script: major, adopted-read (not adopted), then the snapshot
+    # step's existence+count reads (both tables empty -> verified no-op)
+    store = FakeStoreConn(results=[(170000,), (False,), (True,), (0,), (True,), (0,)])
     srv, bus, store = _server(bus_results, store=store)
     resp = _run(srv, _request(verb="revert"))
     assert resp["status"] == "ok" and resp["verb"] == "revert"
     assert any("DROP TABLE" in s for s in store.cur.executed)
     assert not any("CREATE TABLE" in s for s in store.cur.executed)
+
+
+def test_adopted_revert_skips_the_snapshot_belt_entirely():
+    # #80366: an adopted client's revert drops nothing, and fp holds no read
+    # path on the adopted tables — the snapshot belt arms the destructive
+    # path only, so the flow reads the adoption record and skips the export
+    bundle = render_bundle(_spec())
+    go = _go_row(bundle, subject="GO: revert bariq tenant",
+                 body=f"approved revert of bundle bariq {_REF} sha256 {bundle.sha256}")
+    calls = []
+
+    def snap(cur, spec, base):
+        calls.append("snapshot")
+        return {"content_rows": 0, "history_rows": 0, "skipped": True}
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(server_mod, "ensure_verified_snapshot", snap)
+    try:
+        # fetchone script: major, then the two-step adopted-read (table
+        # exists, record names the content table) — both fetchones
+        srv, bus, store = _server([{"id": 19}, None, go],
+                                  store=FakeStoreConn(results=[(170000,), (True,), (True,)]))
+        resp = _run(srv, _request(verb="revert"))
+    finally:
+        monkey.undo()
+    assert resp["status"] == "ok"
+    assert calls == [], "snapshot ran for an adopted client (it must not)"
+    assert any("REVERT-SKIPPED-ADOPTED" in s for s in store.cur.executed), \
+        "the adopted revert twin never executed"
 
 
 def test_revert_refused_when_the_snapshot_cannot_be_verified():
@@ -205,7 +234,9 @@ def test_revert_refused_when_the_snapshot_cannot_be_verified():
     monkey = pytest.MonkeyPatch()
     monkey.setattr(server_mod, "ensure_verified_snapshot", refused)
     try:
-        srv, bus, store = _server([{"id": 14}, None, go])
+        # fetchone script: major, adopted-read (not adopted -> snapshot runs)
+        srv, bus, store = _server([{"id": 14}, None, go],
+                                  store=FakeStoreConn(results=[(170000,), (False,)]))
         resp = _run(srv, _request(verb="revert"))
     finally:
         monkey.undo()
@@ -235,7 +266,9 @@ def test_revert_snapshot_precedes_the_revert_sql_in_the_same_txn():
     monkey = pytest.MonkeyPatch()
     monkey.setattr(server_mod, "ensure_verified_snapshot", snap)
     try:
-        srv, bus, store = _server([{"id": 15}, None, go])
+        # fetchone script: major, adopted-read (not adopted)
+        srv, bus, store = _server([{"id": 15}, None, go],
+                                  store=FakeStoreConn(results=[(170000,), (False,)]))
         resp = _run(srv, _request(verb="revert"))
     finally:
         monkey.undo()

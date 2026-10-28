@@ -24,7 +24,7 @@ ORCH_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ORCH_DIR / "scripts" / "lib"))
 
 from provisioner.render import render_bundle  # noqa: E402
-from provisioner.snapshot import ensure_verified_snapshot  # noqa: E402
+from provisioner.snapshot import client_is_adopted, ensure_verified_snapshot  # noqa: E402
 from provisioner.spec import load_spec, spec_path  # noqa: E402
 
 _mod_path = ORCH_DIR / "scripts" / "install_ceayj_provisioner.py"
@@ -83,13 +83,18 @@ ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
 """
 
 # the pre-provisioner bariq artifacts exactly as they exist live: postgres
-# (harness: the admin) owns everything, real content rows included.
+# (harness: the admin) owns everything, real content rows included. The
+# privilege posture mirrors the 2026-10-29 read-only live probe: editor is
+# LOGIN (in live use), anon reads content only, editor SELECT+UPDATE on
+# content / SELECT on history, anon sees nothing of history, both tables
+# RLS-enabled. The fn keeps the PUBLIC-default EXECUTE the live manual era
+# never revoked — the migration's privilege-sync is what removes it.
 _ADOPTED_WORLD = """
 DROP TABLE IF EXISTS bariq_site_content_history;
 DROP TABLE IF EXISTS bariq_site_content;
 DROP FUNCTION IF EXISTS bariq_site_content_audit();
 DROP TABLE IF EXISTS migration_ledger;
-DO $$ BEGIN CREATE ROLE bariq_editor NOLOGIN;
+DO $$ BEGIN CREATE ROLE bariq_editor LOGIN;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 CREATE TABLE bariq_site_content (
   org_id     UUID NOT NULL REFERENCES organizations(id),
@@ -129,6 +134,11 @@ CREATE POLICY bariq_site_content_history_editor_select
   ON bariq_site_content_history FOR SELECT TO bariq_editor USING (org_id = '62617269-7100-4000-8000-000000000001');
 ALTER TABLE bariq_site_content ENABLE ROW LEVEL SECURITY;
 ALTER TABLE bariq_site_content_history ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON bariq_site_content FROM anon, authenticated;
+GRANT SELECT ON bariq_site_content TO anon;
+GRANT SELECT, UPDATE ON bariq_site_content TO bariq_editor;
+REVOKE ALL ON bariq_site_content_history FROM anon, authenticated;
+GRANT SELECT ON bariq_site_content_history TO bariq_editor;
 CREATE TABLE migration_ledger (
   repo           TEXT NOT NULL,
   migration_name TEXT NOT NULL,
@@ -183,10 +193,10 @@ class _NonSuperAdmin:
         c.execute("ALTER TABLE public.organizations OWNER TO __harness_admin")
         if self._own_adopted:
             # the live admin owns the bariq artifacts — ownership it needs
-            # for the adoption migration's OWNER TO transfers — and holds
-            # ADMIN on bariq_editor (it created that role; on live, postgres
-            # created it). The harness builds the adopted world as superuser
-            # postgres, so mirror the creator-admin here.
+            # for the adoption migration's privilege sync (the fn REVOKE) —
+            # mirroring live, where postgres created and owns everything.
+            # NO admin on bariq_editor anymore (#80366): the bundle must
+            # never gain power over the live client role.
             for obj in ("ALTER TABLE public.bariq_site_content OWNER TO __harness_admin",
                         "ALTER TABLE public.bariq_site_content_history OWNER TO __harness_admin",
                         "ALTER TABLE public.migration_ledger OWNER TO __harness_admin",
@@ -194,8 +204,6 @@ class _NonSuperAdmin:
                         "ALTER TABLE public.org_members OWNER TO __harness_admin"):
                 c.execute(f"DO $$ BEGIN {obj}; EXCEPTION WHEN undefined_table THEN NULL; "
                           "WHEN undefined_function THEN NULL; END $$")
-            c.execute("DO $$ BEGIN GRANT bariq_editor TO __harness_admin WITH ADMIN OPTION; "
-                      "EXCEPTION WHEN undefined_object THEN NULL; END $$")
         c.execute("GRANT USAGE, CREATE ON SCHEMA public TO __harness_admin WITH GRANT OPTION")
         c.execute("SET ROLE __harness_admin")
         c.close()
@@ -228,15 +236,16 @@ def store(pg_dsn):
     spec, bundle = _spec_bundle()
     with psycopg.connect(pg_dsn, autocommit=True) as conn:
         for stmt in (bundle.revert_sql,
-                     "DROP TABLE IF EXISTS public.provisioner_revert_snapshots"):
+                     "DROP TABLE IF EXISTS public.provisioner_revert_snapshots",
+                     "DROP TABLE IF EXISTS public.provisioner_adopted_objects"):
             try:
                 conn.execute(stmt)
             except Exception:
                 pass
         conn.execute(f"DROP TABLE IF EXISTS public.{spec.history_table}")
         conn.execute(f"DROP TABLE IF EXISTS public.{spec.content_table}")
-        conn.execute("DROP FUNCTION IF EXISTS public.bariq_site_content_audit()")  # fp owns it post-adoption
-        conn.execute("DROP TABLE IF EXISTS public.migration_ledger")  # bundle-created, owned by fp
+        conn.execute("DROP FUNCTION IF EXISTS public.bariq_site_content_audit()")  # admin-owned post-#80366
+        conn.execute("DROP TABLE IF EXISTS public.migration_ledger")  # store infra
         conn.execute("DROP TABLE IF EXISTS public.__fp_install_canary")
         # grantor-aware role cleanup, every statement defensive (a teardown
         # must never raise): schema-public grants were issued BY their
@@ -323,21 +332,80 @@ def test_forward_over_adopted_world_is_idempotent_not_duplicatetable(store):
         with conn.cursor() as cur:
             cur.execute(_BUNDLE.forward_sql)   # and a second run too
         conn.commit()
+    # fp holds NO read path on the adopted tables (deliberately, #80366) —
+    # the data read runs admin-side
+    with psycopg.connect(store, autocommit=True) as admin:
+        n = admin.execute("SELECT count(*) FROM bariq_site_content").fetchone()[0]
+    assert n == 3, "adopted content rows must survive the forward verbatim"
+
+
+def test_adoption_never_transfers_ownership_or_privileges(store):
+    """#80366: fp must NOT own the live client artifacts — ownership stays
+    with the original owner through adoption AND forward, and the privilege
+    posture the migration synced is what stands afterwards (the forward
+    skips its REVOKE/GRANT/RLS block for adopted objects)."""
+    fp = _fp_ready(store)
+    with psycopg.connect(fp) as conn:
         with conn.cursor() as cur:
-            n = cur.execute("SELECT count(*) FROM bariq_site_content").fetchone()
-    assert n[0] == 3, "adopted content rows must survive the forward verbatim"
+            cur.execute(_BUNDLE.forward_sql)
+        conn.commit()
+    with psycopg.connect(store, autocommit=True) as admin:
+        for tbl in ("bariq_site_content", "bariq_site_content_history"):
+            owner = admin.execute(
+                "SELECT tableowner FROM pg_tables WHERE schemaname='public' AND tablename=%s",
+                (tbl,)).fetchone()[0]
+            assert owner == "__harness_admin", \
+                f"{tbl} ownership left the original owner (now {owner})"
+        fn_owner = admin.execute(
+            "SELECT pg_get_userbyid(proowner) FROM pg_proc p JOIN pg_namespace n "
+            "ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname='bariq_site_content_audit'"
+        ).fetchone()[0]
+        assert fn_owner == "__harness_admin", "audit fn ownership left the original owner"
+        # the posture the forward would establish is already standing —
+        # asserted by the migration; here: the fn sync removed PUBLIC exec
+        assert admin.execute(
+            "SELECT has_function_privilege('anon', 'public.bariq_site_content_audit()', 'EXECUTE')"
+        ).fetchone()[0] is False, "fn privilege sync did not remove anon EXECUTE"
+
+
+def test_adoption_records_original_owners_read_live(store):
+    """#80366: the adoption record is READ live at migration time, never
+    typed — object set exact, owners equal the live catalog values."""
+    _fp_ready(store)
+    with psycopg.connect(store, autocommit=True) as admin:
+        rows = admin.execute(
+            "SELECT object_name, object_kind, original_owner "
+            "FROM public.provisioner_adopted_objects WHERE client_key='bariq' "
+            "ORDER BY object_name").fetchall()
+    recorded = {r[0]: (r[1], r[2]) for r in rows}
+    assert set(recorded) == {"bariq_editor", "bariq_site_content",
+                             "bariq_site_content_history",
+                             "bariq_site_content_audit", "organizations_row"}
+    assert recorded["bariq_editor"] == ("role", None)
+    assert recorded["organizations_row"] == ("org_row", None)
+    with psycopg.connect(store, autocommit=True) as admin:
+        for tbl in ("bariq_site_content", "bariq_site_content_history"):
+            live_owner = admin.execute(
+                "SELECT tableowner FROM pg_tables WHERE schemaname='public' AND tablename=%s",
+                (tbl,)).fetchone()[0]
+            assert recorded[tbl] == ("table", live_owner), \
+                f"{tbl}: recorded owner is not the live catalog owner"
+        live_fn = admin.execute(
+            "SELECT pg_get_userbyid(proowner) FROM pg_proc p JOIN pg_namespace n "
+            "ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname='bariq_site_content_audit'"
+        ).fetchone()[0]
+        assert recorded["bariq_site_content_audit"] == ("function", live_fn)
 
 
 def test_forward_refuses_a_same_name_policy_with_a_different_expression(store):
-    """#80298 condition 3: exact-shape guards — a drifted policy REFUSES."""
-    fp = _fp_ready(store)
-    with psycopg.connect(fp) as conn:  # fp owns the table post-adoption
-        with conn.cursor() as cur:
-            cur.execute("DROP POLICY bariq_site_content_public_read ON bariq_site_content")
-            cur.execute("CREATE POLICY bariq_site_content_public_read "
-                        "ON bariq_site_content FOR SELECT TO anon USING (true)")
-        conn.commit()
-    with psycopg.connect(fp) as conn:
+    """#80298 condition 3: exact-shape guards — a drifted policy REFUSES.
+    The drift is introduced ADMIN-side: fp owns nothing post-#80366."""
+    _fp_ready(store)
+    with psycopg.connect(store, autocommit=True) as admin:
+        admin.execute("DROP POLICY bariq_site_content_public_read ON bariq_site_content")
+        admin.execute("CREATE POLICY bariq_site_content_public_read "
+                      "ON bariq_site_content FOR SELECT TO anon USING (true)")
+    with psycopg.connect(_fp(store)) as conn:
         with pytest.raises(psycopg.errors.RaiseException, match="SHAPE-REFUSED.*public_read"):
             with conn.cursor() as cur:
                 cur.execute(_BUNDLE.forward_sql)
@@ -345,52 +413,110 @@ def test_forward_refuses_a_same_name_policy_with_a_different_expression(store):
 
 
 # ---------------------------------------------------------------------------
-# #80298 condition 1: revert refuses without a verified snapshot
+# #80298 condition 1 + #80366: the two revert worlds
+#   adopted  -> revert SKIPS teardown for adopted objects (rows/owner/role
+#               stay; snapshot is the belt, not the enabler)
+#   fresh    -> full teardown, still gated by the verified-snapshot refusal
 # ---------------------------------------------------------------------------
 
-def test_revert_with_rows_is_refused_without_a_snapshot(store):
+def test_adopted_revert_leaves_the_live_surface_intact(store):
+    """The console-#80366 end state: after adopting a pre-existing
+    bariq_editor and admin-owned tables, a bundle revert leaves the editor
+    in place AND LOGIN, the tables with rows under their original owner,
+    the site read path (policies, trigger, fn) and the org row untouched.
+    The snapshot belt is SKIPPED for adopted clients (fp holds no read path
+    on their tables — the belt arms the destructive path only)."""
     fp = _fp_ready(store)
     with psycopg.connect(fp) as conn:
-        with pytest.raises(psycopg.errors.RaiseException,
-                           match="REVERT-REFUSED.*no verified snapshot"):
+        with conn.cursor() as cur:
+            cur.execute(_BUNDLE.forward_sql)
+            assert client_is_adopted(cur, _SPEC) is True
+        conn.commit()
+        with conn.cursor() as cur:
+            cur.execute(_BUNDLE.revert_sql)
+        conn.commit()
+    with psycopg.connect(store, autocommit=True) as admin:
+        n = admin.execute("SELECT count(*) FROM bariq_site_content").fetchone()[0]
+        editor = admin.execute(
+            "SELECT rolcanlogin FROM pg_roles WHERE rolname='bariq_editor'").fetchone()
+        org = admin.execute(
+            "SELECT 1 FROM organizations WHERE id='62617269-7100-4000-8000-000000000001'"
+        ).fetchone()
+        pols = admin.execute(
+            "SELECT count(*) FROM pg_policies WHERE tablename='bariq_site_content'").fetchone()[0]
+        trg = admin.execute(
+            "SELECT count(*) FROM pg_trigger WHERE tgname='bariq_site_content_audit_trg' "
+            "AND NOT tgisinternal").fetchone()[0]
+        owner = admin.execute(
+            "SELECT tableowner FROM pg_tables WHERE schemaname='public' "
+            "AND tablename='bariq_site_content'").fetchone()[0]
+        fn_gone = admin.execute(
+            "SELECT to_regprocedure('public.bariq_site_content_audit()') IS NULL").fetchone()[0]
+        before_after = admin.execute(
+            "SELECT count(*) FROM bariq_site_content_history").fetchone()[0]
+    assert n == 3, "adopted revert dropped or touched content rows"
+    assert editor == (True,), "adopted revert must leave bariq_editor in place, still LOGIN"
+    assert org is not None, "adopted revert deleted the live org row"
+    assert pols == 3 and trg == 1, "adopted revert tore down the site read path"
+    assert owner == "__harness_admin", "adopted revert changed table ownership"
+    assert fn_gone is False, "adopted revert dropped the audit fn"
+    assert before_after == 1, "adopted revert mutated history"
+
+
+def test_fresh_cycle_revert_refuses_without_snapshot_then_drops_and_restores(store, tmp_path):
+    """Condition 1 on the DESTRUCTIVE path: a fresh (non-adopted) client
+    with rows — revert refuses without a verified snapshot; with one it
+    drops, and the snapshot restores byte-identical."""
+    fp = _fp_ready(store)
+    # de-adopt: clear the adoption record + drop the adopted artifacts so
+    # the next forward is a FRESH create (fp owns what it creates)
+    with psycopg.connect(store, autocommit=True) as admin:
+        admin.execute("DELETE FROM public.provisioner_adopted_objects WHERE client_key='bariq'")
+        admin.execute("DROP TABLE bariq_site_content_history")
+        admin.execute("DROP TABLE bariq_site_content")
+        admin.execute("DROP FUNCTION public.bariq_site_content_audit()")  # trigger died with its table
+        # the adopted editor is admin-created — drop it too (its table grants
+        # died with the tables; nothing else granted yet), so the fresh
+        # forward re-creates it NOLOGIN as fp-owned and the fresh revert can
+        # lawfully drop it again
+        admin.execute("DROP ROLE bariq_editor")
+        admin.execute("DELETE FROM organizations WHERE id='62617269-7100-4000-8000-000000000001'")
+    with psycopg.connect(fp) as conn:
+        with conn.cursor() as cur:
+            cur.execute(_BUNDLE.forward_sql)   # fresh create as fp
+            cur.execute("INSERT INTO bariq_site_content (org_id, key, value, updated_by) VALUES "
+                        "('62617269-7100-4000-8000-000000000001', 'hero', '{\"h\": 1}', 'seed'), "
+                        "('62617269-7100-4000-8000-000000000001', 'site', '{\"s\": 2}', 'seed')")
+        conn.commit()
+        with pytest.raises(psycopg.errors.RaiseException, match="REVERT-REFUSED"):
             with conn.cursor() as cur:
                 cur.execute(_BUNDLE.revert_sql)
         conn.rollback()
-        # nothing was destroyed — the refusal is fail-closed
         with conn.cursor() as cur:
-            assert cur.execute("SELECT count(*) FROM bariq_site_content").fetchone()[0] == 3
-
-
-def test_revert_with_verified_snapshot_proceeds_and_restores_byte_identical(store, tmp_path):
-    fp = _fp_ready(store)
-    with psycopg.connect(fp) as conn:
-        with conn.cursor() as cur:
+            assert cur.execute("SELECT count(*) FROM bariq_site_content").fetchone()[0] == 2
             before = {t: _capture(cur, t, o) for t, o in
                       (("bariq_site_content", "org_id, key"),
                        ("bariq_site_content_history", "id"))}
             info = ensure_verified_snapshot(cur, _SPEC, tmp_path)
-            assert info["content_rows"] == 3 and info["skipped"] is False
-            marker = cur.execute(
-                "SELECT content_rows, history_rows FROM provisioner_revert_snapshots "
-                "WHERE client_key='bariq' ORDER BY taken_at DESC LIMIT 1").fetchone()
-            assert marker == (3, 1)
+            assert info["content_rows"] == 2 and info["skipped"] is False
             cur.execute(_BUNDLE.revert_sql)
         conn.commit()
         with conn.cursor() as cur:
             assert cur.execute(
                 "SELECT to_regclass('public.bariq_site_content')").fetchone()[0] is None
-        # restore from the snapshot files: recreate via the forward's own
-        # DDL, COPY the bytes back, re-capture — byte-identical to `before`.
-        # (history's id is GENERATED ALWAYS, and COPY cannot override a
-        # generated column — the identity is dropped for the restore only;
-        # the restored VALUES are what the comparison is about.)
-        with conn.cursor() as cur:
+            # restore from the snapshot files: re-create via the forward's
+            # own DDL, COPY the bytes back, re-capture — byte-identical.
+            # (history's id is GENERATED ALWAYS and COPY cannot override a
+            # generated column — identity dropped for the restore only.)
             cur.execute(_BUNDLE.forward_sql)
             cur.execute("ALTER TABLE public.bariq_site_content_history "
                         "ALTER COLUMN id DROP IDENTITY IF EXISTS")
             after = {}
             for table in ("bariq_site_content", "bariq_site_content_history"):
-                _restore(cur, tmp_path, table)
+                # empty tables have no snapshot file — they restore as the
+                # empty streams they were captured as
+                if list((tmp_path / "provisioner_snapshots").glob(f"*.{table}.copy")):
+                    _restore(cur, tmp_path, table)
                 after[table] = _capture(cur, table, "org_id, key" if "history" not in table else "id")
         conn.commit()
     assert after == before, "snapshot restore is not byte-identical"
@@ -410,17 +536,45 @@ def _restore(cur, tmp_path, table):
 
 def test_adoption_migration_is_idempotent(store):
     """#80298 condition 2: the draft re-runs clean over a COMPLETED adoption
-    (ownership already fp, marker set, policies present) — no-op, no error —
-    and the adopted surface still works afterwards."""
+    (marker set, policies present, adoption record seeded) — no-op, no
+    error — and the adopted surface still works afterwards."""
     _fp_ready(store)  # first adoption
-    # second run mirrors the LIVE re-run: the admin owns nothing anymore
-    # (fleet_provisioner does), so no superuser re-ownership crutch here
+    # second run mirrors the LIVE re-run: ownership never moved (#80366),
+    # so the admin needs no re-ownership crutch — but the fn privilege
+    # sync must still be issuable (it owns the fn throughout, as live)
     with _NonSuperAdmin(store, own_adopted=False) as admin:
         admin.execute(_ADOPT_DRAFT)  # second run over the adopted state
     with psycopg.connect(_fp(store)) as conn:  # surface intact
         with conn.cursor() as cur:
             cur.execute(inst.render_install_canary())
         conn.rollback()
+
+
+@pytest.mark.parametrize("drop_stmt,refuse_text", [
+    # partial drift on the three platform org policies: ONE gone (renamed
+    # or dropped between the live read and the apply) must refuse
+    ('DROP POLICY "Users can see their orgs" ON public.organizations',
+     "the three live organizations policies"),
+    # partial drift inside the four-bundle-policy assert: one content
+    # policy gone while the history policy stands
+    ("DROP POLICY bariq_site_content_editor_update ON public.bariq_site_content",
+     "the four bundle-named policies"),
+])
+def test_adoption_refuses_partial_policy_drift(store, drop_stmt, refuse_text):
+    """cc-quality #80372 REQUIRED fix (condition-3 gap): the section-0
+    presence asserts must refuse when ONE named policy is missing, not only
+    when ALL are — `NOT EXISTS (... policyname IN (a,b,c))` is true only at
+    ZERO matches, so partial drift sailed through. Each named policy is now
+    counted individually."""
+    import secrets as _secrets
+
+    pw = "FpMint_" + _secrets.token_urlsafe(12)
+    with _NonSuperAdmin(store, own_adopted=True) as admin:
+        admin.execute(inst.render_store_grants())
+        inst._set_role_password(admin.cursor(), "fleet_provisioner", pw)
+        admin.execute(drop_stmt)  # the drift: one policy, not all
+        with pytest.raises(psycopg.Error, match=refuse_text):
+            admin.execute(_ADOPT_DRAFT)
 
 
 # ---------------------------------------------------------------------------
@@ -531,19 +685,17 @@ def test_grant_set_is_exactly_the_bundles_surface_on_pg17(store):
             marked = admin.execute("SELECT settings->>'managed_by' FROM organizations "
                                    "WHERE id = %s", (spec.org_uuid,)).fetchone()
             assert marked == ("wingmen_provisioner",), "adoption marker missing on the org row"
-        # revert of a populated client = snapshot first (condition 1)
-        with pytest.raises(psycopg.errors.RaiseException, match="REVERT-REFUSED"):
-            with conn.cursor() as cur:
-                cur.execute(bundle.revert_sql)
-        conn.rollback()
+        # revert of a populated ADOPTED client (#80366): the snapshot belt
+        # is SKIPPED (adopted — same check the daemon makes) and the revert
+        # leaves the adopted surface intact — teardown SKIP, not drop
         with conn.cursor() as cur:
-            ensure_verified_snapshot(cur, spec, Path("/tmp/harness-snaps"))
+            assert client_is_adopted(cur, spec) is True
             cur.execute(bundle.revert_sql)
         conn.commit()
         with conn.cursor() as cur:
             cur.execute(f"SELECT to_regclass(%s)", (f"public.{spec.content_table}",))
-            assert cur.fetchone()[0] is None
-            cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (spec.editor_role,))
-            assert cur.fetchone() is None
+            assert cur.fetchone()[0] is not None, "adopted revert dropped the client table"
+            cur.execute("SELECT rolcanlogin FROM pg_roles WHERE rolname = %s", (spec.editor_role,))
+            assert cur.fetchone() == (True,), "adopted revert dropped or delogged the editor"
             cur.execute("SELECT 1 FROM organizations WHERE id = %s", (spec.org_uuid,))
-            assert cur.fetchone() is None
+            assert cur.fetchone() is not None, "adopted revert deleted the org row"
