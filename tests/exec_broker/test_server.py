@@ -96,6 +96,31 @@ class FakeDb:
         return self.cursor_obj.vault_rows
 
 
+def _wait_until_accepting(sock_path: str, timeout: float = 2.0) -> None:
+    """Blocks until sock_path is actually accepting connections, not merely
+    present on disk. BrokerServer.serve_forever's bind() creates the path
+    BEFORE listen() is called, so a readiness check based on os.path.exists
+    alone has a real race window: a connect() landing in that window gets
+    ConnectionRefusedError even though the file "exists" (the pre-existing
+    ~1-in-3 test_server.py:136 flake, reported against commit 850a4c4).
+    Proves readiness the only way that's actually true: a real connect
+    succeeds, then is immediately closed without sending anything."""
+    deadline = time.monotonic() + timeout
+    last_err: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.connect(sock_path)
+            finally:
+                probe.close()
+            return
+        except (FileNotFoundError, ConnectionRefusedError) as exc:
+            last_err = exc
+            time.sleep(0.02)
+    raise RuntimeError(f"broker socket never started accepting connections: {last_err}")
+
+
 def _make_server(
     tmp_path, allowed_uids, db=None, mgmt_api_fn=None, peer_uid_val=TEST_UID,
     uid_override=None, uid_override_expires_at=None,
@@ -121,12 +146,7 @@ def _make_server(
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    for _ in range(100):
-        if os.path.exists(sock_path):
-            break
-        time.sleep(0.02)
-    else:
-        raise RuntimeError("broker socket never appeared")
+    _wait_until_accepting(sock_path)
     return server, sock_path, db
 
 
@@ -146,6 +166,36 @@ def _send_raw(sock_path, raw: bytes) -> dict:
         client.sendall(raw)
         data = client.makefile("rb").readline()
     return json.loads(data.decode("utf-8"))
+
+
+def test_wait_until_accepting_blocks_until_listen_is_called():
+    """Pins the fix for the pre-existing ~1-in-3 ConnectionRefusedError flake
+    (test_server.py:136, reported against commit 850a4c4): _make_server's old
+    readiness wait polled os.path.exists(sock_path), but bind() creates that
+    path BEFORE listen() is called -- a connect() landing in that window gets
+    ECONNREFUSED even though the socket "exists". This test recreates the
+    exact race window directly (bind a real AF_UNIX socket, delay listen())
+    and asserts _wait_until_accepting does not return before listen() runs."""
+    sock_dir = tempfile.mkdtemp(prefix="eb-wait-")
+    sock_path = str(Path(sock_dir) / "broker.sock")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(sock_path)  # bound, NOT listening -- os.path.exists is already True here
+    listened = threading.Event()
+
+    def listen_after_delay():
+        time.sleep(0.2)
+        sock.listen(5)
+        listened.set()
+
+    threading.Thread(target=listen_after_delay, daemon=True).start()
+    try:
+        start = time.monotonic()
+        _wait_until_accepting(sock_path, timeout=2.0)
+        elapsed = time.monotonic() - start
+        assert listened.is_set(), "returned before listen() was ever called"
+        assert elapsed >= 0.2, f"returned too early ({elapsed}s) -- didn't actually wait for listen()"
+    finally:
+        sock.close()
 
 
 def test_dml_only_success_end_to_end(tmp_path):
@@ -280,10 +330,7 @@ def test_peer_uid_resolution_failure_maps_to_internal_error(tmp_path):
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    for _ in range(100):
-        if os.path.exists(sock_path):
-            break
-        time.sleep(0.02)
+    _wait_until_accepting(sock_path)
     resp = _send(sock_path, {
         "project_ref": "x", "guarded_sql": "select 1", "reason": "", "gate_id": None,
         "caller": "c", "exec_ledger_id": "e",
