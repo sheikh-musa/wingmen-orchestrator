@@ -58,6 +58,7 @@ sys.path.insert(0, str(ORCH))
 from scripts.lib import fleet_health_lease  # noqa: E402
 from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 from scripts.lib.console_alive import console_alive  # noqa: E402  (audit-20261006 item 4)
+from scripts.lib.reply_evidence import replied_row_ids  # noqa: E402  (orch-console #80400)
 from scripts import bus_send  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -860,17 +861,13 @@ def attended_for(conn, mid: int, violation_type: str, agent: str = "") -> bool:
             if not row:
                 return False
             is_read, is_resp, thread_id, created_at = row
-            # SAME-THREAD REPLY (Nazim #63881): the recipient posted in THIS item's
-            # thread AFTER it -> engaging even if read_at is stamped late. SAME thread
-            # only, so an old-topic reply cannot mask a genuinely-unread P0.
-            same_thread_reply_after = False
-            if agent and thread_id is not None and created_at is not None:
-                cur.execute(
-                    "SELECT 1 FROM agent_messages WHERE from_agent=%s AND thread_id=%s "
-                    "AND created_at > %s LIMIT 1",
-                    (agent, thread_id, created_at),
-                )
-                same_thread_reply_after = cur.fetchone() is not None
+            # REPLY EVIDENCE (Nazim #63881, widened per orch-console #80400): the
+            # recipient -- as its instance OR its base id -- posted AFTER this item in
+            # its OWN thread, or cited #<id> elsewhere -> engaging even if read_at is
+            # never stamped. An uncited new-thread message does NOT count, so an
+            # old-topic reply cannot mask a genuinely-unread P0. Same tiers as the
+            # nightly responded_at sweeper; fails toward paging (empty set on error).
+            same_thread_reply_after = mid in replied_row_ids(conn, [mid])
             ask_attended = False
             if thread_id is not None:
                 try:

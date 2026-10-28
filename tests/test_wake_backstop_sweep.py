@@ -1137,3 +1137,39 @@ def test_unseeded_fresh_process_still_pages_a_new_stuck_row():
                    this_host="Sheikhs-Mini", pane_state=lambda a: "idle",
                    pane_active=lambda a: False, mark=mark, escalate=page, escalated_seen=seen)
     assert len(pages) == 1 and "999" in pages[0][1]
+
+
+# ---- answered-not-stamped (orch-console #80400, 2026-10-28) ----
+
+def test_stuck_page_skips_rows_the_lane_already_replied_to_80400():
+    # #80395 shape: adcda-1 acked the row on the bus (as its base id) without stamping
+    # read_at. A row with reply evidence is attending, not stuck -> no page for it; an
+    # unanswered sibling row to the same agent still pages.
+    marked, pages, mark, page = _cas_collector()
+    stuck = [_row_ts("cc-quality", 301, age_s=2000), _row_ts("cc-quality", 302, age_s=2000)]
+    kw = dict(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+              now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
+              pane_state=lambda a: "idle", pane_active=lambda a: False,
+              mark=mark, escalate=page, escalated_seen=set(),
+              replied=lambda ids: {301})
+    r = wbs.sweep_once(**kw)
+    assert len(pages) == 1 and "302" in pages[0][1] and "301" not in pages[0][1]
+    assert {"kind": "stuck-replied", "agent": "cc-quality", "ids": [301],
+            "reason": "recipient replied"} in r["escalations"]
+
+
+def test_stuck_page_fully_answered_agent_not_paged_80400():
+    marked, pages, mark, page = _cas_collector()
+    stuck = [_row_ts("cc-quality", 401, age_s=2000)]
+    kw = dict(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+              now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
+              pane_state=lambda a: "idle", pane_active=lambda a: False,
+              mark=mark, escalate=page, escalated_seen=set(),
+              replied=lambda ids: set(ids))
+    r = wbs.sweep_once(**kw)
+    assert pages == [] and r["stuck_paged"] == []
+
+
+def test_replied_ids_default_fails_toward_paging_without_dsn(monkeypatch):
+    monkeypatch.setattr(wbs, "_DSN", None)
+    assert wbs._replied_ids([1, 2]) == set()
