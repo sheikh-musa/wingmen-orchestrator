@@ -169,3 +169,30 @@ def test_nudge_lane_false_on_non_zero_exit_never_raises(tmp_path):
     miss = _row("cc-shipforge-1", "cc-shipforge", unread_age_min=30, base_read_age_min=5,
                 tmux_session="shipforge")
     assert _nudge_lane(miss, lane_nudge_bin=fake_bin) is False
+
+
+def test_ignores_lane_that_read_its_instance_mail_since_oldest_unread_80448():
+    """2026-10-28 #80448 false positive: cc-cosem-platform-1 left two P3 FYIs (80016 at
+    12:40Z, 80066 at 13:05Z) unread for ~5h while reading P2 rows addressed to its
+    INSTANCE id within minutes (80179 read 14:36Z, 80311 read 16:10Z). Reading
+    instance-addressed mail after the oldest unread one landed proves the lane SEES its
+    instance address -- the backlog is priority ordering, not blindness."""
+    now = datetime(2026, 10, 28, 17, 57, tzinfo=timezone.utc)
+    row = {
+        "instance_id": "cc-cosem-platform-1",
+        "base_agent_id": "cc-cosem-platform",
+        "instance_status": "working",
+        "oldest_unread_created_at": datetime(2026, 10, 28, 12, 40, 40, tzinfo=timezone.utc),
+        "unread_count": 3,
+        "last_base_read_at": datetime(2026, 10, 28, 17, 47, 27, tzinfo=timezone.utc),
+        "last_instance_read_at": datetime(2026, 10, 28, 16, 10, 31, tzinfo=timezone.utc),
+    }
+    assert find_address_variant_misses([row], now=now) == []
+
+
+def test_instance_read_BEFORE_oldest_unread_does_not_veto():
+    """An instance read that predates the oldest unread row says nothing about the
+    current window -- still a miss (blindness can start mid-session, #51166 shape)."""
+    row = _row("cc-scholar-1", "cc-scholar", unread_age_min=45, base_read_age_min=5)
+    row["last_instance_read_at"] = row["oldest_unread_created_at"] - timedelta(minutes=10)
+    assert len(find_address_variant_misses([row], now=NOW)) == 1
