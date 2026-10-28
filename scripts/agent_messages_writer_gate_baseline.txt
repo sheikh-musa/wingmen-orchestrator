@@ -192,7 +192,6 @@ scripts/irsyad_pii_containment_monitor.py
 scripts/irsyad_shadow_watch.py
 scripts/irsyad_spin_worker.py
 scripts/irsyad_worker_reaper.py
-legacy/ihsanos_drain/main.py
 
 # STEP 1b, 2026-10-27 (Musa op#34845, console's PR#551 GO + follow-up bus
 # #78763): the gate's SQL/-sh-only patterns still couldn't see category 3,
@@ -209,7 +208,6 @@ legacy/ihsanos_drain/main.py
 scripts/audit_mac_mini.py
 scripts/launch_dangerous_cc.sh
 nervous_system/deploy_verifier.py
-legacy/wingmen_orch.py
 
 # STEP 2, delete the dead, 2026-10-28 (Musa op#34845, console's ruling part
 # 4): scripts/fire_fix1a_grant_ping.sh deleted rather than migrated -- a
@@ -233,3 +231,42 @@ legacy/wingmen_orch.py
 # See the follow-up PR that extracts cleanup_zombie_jobs into a live module,
 # repoints drill_sigkill.py, and deletes the 2 orphaned test files alongside
 # their targets.
+#
+# STEP 2, delete the dead, 2026-10-28 take 2 (Musa op#34845, console's
+# ruling part 4, corrected after my first "nothing references them" check
+# turned out to grep only scripts/*.py and nervous_system/*.py -- missed
+# scripts/fire_drills/ and tests/ entirely, bus #79096/#79097): deleted
+# legacy/wingmen_orch.py and legacy/ihsanos_drain/main.py outright.
+#
+# wingmen_orch.py had ONE real live dependent:
+# scripts/fire_drills/drill_sigkill.py's run() did `from legacy.wingmen_orch
+# import cleanup_zombie_jobs` (a function-local import, invisible to a
+# module-level-only grep) -- exercised by tests/fire_drills/
+# test_drills_all.py::test_each_drill_passes_live[SigkillDrill], which is
+# NOT skip-marked (it's part of the Phase-0 gating fire-drill suite).
+# Extracted cleanup_zombie_jobs verbatim into a new live module,
+# scripts/fire_drills/zombie_cleanup.py, with its own test file
+# (tests/fire_drills/test_zombie_cleanup.py, ported from the orphaned
+# TestCleanupZombieJobs cases in tests/legacy/test_wingmen_orch.py) before
+# deleting wingmen_orch.py; re-ran test_each_drill_passes_live[SigkillDrill]
+# live (no mocks at the drill boundary) to confirm it still passes with
+# legacy/wingmen_orch.py gone.
+#
+# Two more test files did an UNGUARDED module-level import of a
+# now-deleted target -- pytest.mark.skip doesn't protect against an import
+# raising before pytest ever applies the marker, confirmed empirically
+# (removing the files and running `pytest tests/ --collect-only` gave 2
+# collection ERRORS and an interrupted run before this fix): deleted
+# tests/legacy/test_graceful_shutdown.py (imported legacy.wingmen_orch) and
+# tests/legacy/ihsanos_drain/test_main_cycle.py (imported
+# legacy.ihsanos_drain.main) alongside their targets, rather than guarding
+# the imports -- they only ever tested code being removed. Full
+# `pytest tests/ --collect-only` (no --continue-on-collection-errors)
+# re-verified clean after: 0 errors. legacy/README.md updated to match
+# (wingmen_orch.py is now actually gone, not merely disabled;
+# ihsanos_drain/main.py's siblings are unaffected and stay).
+#
+# legacy/ihsanos_drain/main.py had no live dependent beyond its own
+# (already-deleted-alongside) test file -- confirmed dead by console's own
+# launchctl check on both hosts (no such launchd job, VPS hub off since
+# 09-27), same evidence as before, just re-confirmed after the correction.

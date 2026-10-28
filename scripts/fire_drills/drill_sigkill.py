@@ -47,7 +47,11 @@ class SigkillDrill(Drill):
         return {"proc": proc, "sb": sb, "zombie_jobs": zombie_jobs}
 
     async def run(self, state: dict[str, Any]) -> dict[str, Any]:
-        from legacy.wingmen_orch import cleanup_zombie_jobs
+        # Musa op#34845, console's ruling: legacy/wingmen_orch.py is being
+        # deleted (dead cluster, bus #78757/#78846) -- cleanup_zombie_jobs was
+        # its only piece this drill actually needed, extracted to a live
+        # module instead of losing real-code coverage.
+        from scripts.fire_drills.zombie_cleanup import cleanup_zombie_jobs
 
         proc = state["proc"]
         # 1. Actually SIGKILL the subprocess.
