@@ -167,6 +167,14 @@ def render_bundle(spec: ClientSpec) -> Bundle:
         f"ALTER TABLE {spec.content_table} ENABLE ROW LEVEL SECURITY;",
         f"ALTER TABLE {spec.history_table} ENABLE ROW LEVEL SECURITY;",
         "",
+        "-- 5a. Editor role FIRST (NOLOGIN placeholder; mint-editor-dsn sets the",
+        "--    LOGIN password later, off-artifact). The org-pinned policies below",
+        "--    name this role — on a fresh store it must exist before they render.",
+        f"DO $$ BEGIN",
+        f"  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{spec.editor_role}') THEN",
+        f"    CREATE ROLE {spec.editor_role} NOLOGIN;",
+        "  END IF;",
+        "END $$;",
         *[
             f"CREATE POLICY {pname.format(**ctx)}\n  {pbody.format(**ctx)};"
             for pname, pbody in _POLICY_TEMPLATES
@@ -174,11 +182,6 @@ def render_bundle(spec: ClientSpec) -> Bundle:
         "",
         "-- 5. Editor role: NOLOGIN placeholder (mint-editor-dsn sets the LOGIN",
         "--    password later, off-artifact — a password never lands in a bundle).",
-        f"DO $$ BEGIN",
-        f"  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{spec.editor_role}') THEN",
-        f"    CREATE ROLE {spec.editor_role} NOLOGIN;",
-        "  END IF;",
-        "END $$;",
         f"GRANT USAGE ON SCHEMA public TO {spec.editor_role};",
         f"GRANT SELECT, UPDATE ON public.{spec.content_table} TO {spec.editor_role};",
         f"GRANT SELECT ON public.{spec.history_table} TO {spec.editor_role};",
@@ -201,6 +204,9 @@ def render_bundle(spec: ClientSpec) -> Bundle:
         f"DROP FUNCTION IF EXISTS public.{spec.content_table}_audit();",
         f"DROP TABLE IF EXISTS public.{spec.history_table};",
         f"DROP TABLE IF EXISTS public.{spec.content_table};",
+        "-- table grants die with their tables above; SCHEMA USAGE outlives",
+        "-- them, and a role holding it cannot be dropped (DependentObjectsStillExist)",
+        f"REVOKE ALL ON SCHEMA public FROM {spec.editor_role};",
         f"DROP ROLE IF EXISTS {spec.editor_role};",
         f"DELETE FROM organizations WHERE id = '{spec.org_uuid}';",
     ]) + "\n"
