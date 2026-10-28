@@ -50,17 +50,48 @@ is spent once any attempt for it reaches `started` that didn't end in
 unique index on `(gate_id, verb) WHERE status='ok'` enforces the success half
 at the DB level.
 
-## Install (orch-console/ops, after gate + merge — never from a build lane)
+## Install (orch-console, after gate + merge — never from a build lane)
 
-1. Apply `migrations/drafts/ceayj_provisioner_access_log.sql` via
-   apply_migration.py (assert headers carry the REVOKE proof).
-2. Mint `provisioner_log_role`'s LOGIN password; grant it SELECT on
+ONE sanctioned entrypoint (op#35106 / bus #79277), run by orch-console under
+console_irsyad_guard's second allow-exception (a fail-closed exception for
+exactly this invocation and nothing else):
+
+```
+.venv/bin/python3 scripts/install_ceayj_provisioner.py            # dry-run (default)
+.venv/bin/python3 scripts/install_ceayj_provisioner.py --apply    # execute
+.venv/bin/python3 scripts/install_ceayj_provisioner.py --apply --step 3
+```
+
+Prerequisite: orch-console posts a bus **decision** row naming the migration
+draft's sha12 — the script discovers the gate row by that sha12 and refuses
+without it. Output is key names, shas, counts and PIDs only.
+
+What the four steps do (each idempotent; re-runs report already-applied):
+
+1. Numbers `migrations/drafts/ceayj_provisioner_access_log.sql` after the
+   current top, discovers the gate row by sha12, applies via
+   apply_migration.py (DSNs via env `DATABASE_URL` only, never on argv).
+2. Mints `provisioner_log_role`'s LOGIN password, grants SELECT on
    agent_messages (SELECT only) and INSERT/UPDATE/SELECT on
-   provisioner_access_log.
-3. Mint the store admin-write DSN into
-   `.secrets/ceayj_admin_write.dsn` (0600).
-4. `launchctl load launchd/dev.wingmen.ceayj-provisioner.plist`
-   (env vars inside; no credential ever lives in the 0644 plist).
+   provisioner_access_log, writes `.secrets/provisioner_log_role.dsn` (0600),
+   and proves the credential with a rolled-back write roundtrip AS the role.
+3. Creates the DEDICATED `fleet_provisioner` store role — never postgres —
+   with EXACTLY the bundle privileges (CREATEROLE; CREATE on public; USAGE
+   WITH GRANT OPTION for editor re-grants; INSERT/DELETE/REFERENCES +
+   SELECT(id)-only on organizations), writes its DSN to
+   `.secrets/ceayj_admin_write.dsn` (0600, the plist's
+   PROVISIONER_STORE_DSN_FILE), and proves the surface with a transactional
+   canary (always rolled back) + negative probes (org-wide SELECT denied,
+   superuser-grant denied). The admin credential is read from the console's
+   private credentials file inside the process only.
+   PG17-harness-proven: a full forward+revert bundle lifecycle runs as this
+   role under exactly these grants (tests/provisioner/
+   test_install_store_role_pg17.py).
+4. `launchctl load` of `launchd/dev.wingmen.ceayj-provisioner.plist` (skip if
+   loaded; no credential ever lives in the 0644 plist), then an UNGATED
+   socket request must be refused (GATE_INVALID) — the daemon is up AND
+   gated. The self-check lands one `status='error'` audit row
+   (`gate_id='0'`).
 
 ## Operations
 

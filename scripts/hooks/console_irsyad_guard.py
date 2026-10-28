@@ -153,6 +153,95 @@ def _is_allowed_coord_bus_post(payload) -> bool:
     return True
 
 
+# --- Narrow, FAIL-CLOSED allow-exception #2 (op#35106 / bus #79277) -----------
+# Musa authorised the ceayj tenant-provisioner INSTALL (op#35106, 2026-10-28
+# 04:06Z): orch-console installs PR#566 via ONE sanctioned script,
+# scripts/install_ceayj_provisioner.py, which performs runbook Install steps
+# 1-4 in order — (1) the substrate access-log migration via
+# apply_migration.py --gate (the gate row is DISCOVERED from the fleet bus by
+# the script, never passed as an argument), (2) the provisioner_log_role
+# credential mint, (3) the dedicated fleet_provisioner store role with
+# exactly the bundle privileges plus its 0600 DSN file (the console's private
+# client-silo credentials file is read ONLY inside the process), and (4) the
+# launchd load + ungated-refusal self-check. Every DIRECT way of doing that
+# work names the ihsanos multi-tenant store or the private credentials file
+# and is rightly BLOCKED above; this exception allows ONE shape and nothing
+# else: a Bash call that invokes scripts/install_ceayj_provisioner.py (via
+# the sanctioned interpreter tokens in _ALLOWED_PY — the repo venv's
+# python3, bare `python3`, or that venv's absolute path, same allowlist the
+# coord-bus exception uses) with only
+# --dry-run / --apply / --step N — nothing chained, no substitution/redirect,
+# no positional args, no other flags. The script prints key names, shas,
+# counts and PIDs only, so no credential or store data can cross this
+# boundary. Anything that does not match returns False and falls through to
+# the BLOCKED checks (fail-closed).
+_ALLOWED_INSTALL_FLAGS = frozenset({"--dry-run", "--apply", "--step"})
+_ALLOWED_INSTALL = frozenset({
+    str(_REPO_ROOT / "scripts" / "install_ceayj_provisioner.py"),
+    "scripts/install_ceayj_provisioner.py",
+})
+
+
+def _is_allowed_install_invocation(payload) -> bool:
+    if payload.get("tool_name") != "Bash":
+        return False
+    cmd = (payload.get("tool_input") or {}).get("command")
+    if not isinstance(cmd, str) or not cmd.strip():
+        return False
+    if "\n" in cmd or "\r" in cmd:
+        return False
+    if "$(" in cmd or "`" in cmd:
+        return False
+    try:
+        lexer = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        toks = list(lexer)
+    except ValueError:
+        return False
+    if len(toks) < 2:
+        return False
+    if any(t and all(c in _OP_CHARS for c in t) for t in toks):
+        return False
+    # EXACT program + script match — NO basename fallback.
+    if toks[0] not in _ALLOWED_PY:
+        return False
+    if toks[1] not in _ALLOWED_INSTALL:
+        return False
+    # Only the three flags, each at most once; --dry-run/--apply mutually
+    # exclusive; --step takes a value 1-4 (inline --step=N or space form); no
+    # positionals; no value-flags other than --step.
+    rest = toks[2:]
+    mode = None
+    step = None
+    i = 0
+    while i < len(rest):
+        t = rest[i]
+        if not t.startswith("--"):
+            return False
+        flag, eq, inline = t.partition("=")
+        if flag not in _ALLOWED_INSTALL_FLAGS:
+            return False
+        if flag in ("--dry-run", "--apply"):
+            if eq or mode is not None:
+                return False  # valueless flags take no inline value; exactly one mode
+            mode = flag
+        else:  # --step
+            if step is not None:
+                return False
+            raw = inline if eq else None
+            if raw is None:
+                if i + 1 >= len(rest):
+                    return False
+                i += 1
+                raw = rest[i]
+            if not re.fullmatch(r"[1-4]", raw):
+                return False
+            step = raw
+        i += 1
+    return True
+
+
 def main() -> int:
     # Gate: fire for the console body (its original scope) OR for ANY provider-routed body
     # (CAI-1225 belt — a non-Anthropic-routed cai/lane must also stay off the client silos even
@@ -167,8 +256,12 @@ def main() -> int:
             "(fail-closed for the console body -- Musa op#21944/#22229, enforce-in-code).\n"
         )
         return 2
-    # The one sanctioned irsyad touch: a bus_send ruling to cc-irsyad-coord (bus #62942).
+    # The one sanctioned irsyad touch: a bus_send ruling to cc-irsyad-coord (bus #62942)
+    # — and the second: the sanctioned ceayj tenant-provisioner install script
+    # (op#35106 / bus #79277).
     if _is_allowed_coord_bus_post(payload):
+        return 0
+    if _is_allowed_install_invocation(payload):
         return 0
     tool_input = payload.get("tool_input") or {}
     haystack = json.dumps(tool_input)
