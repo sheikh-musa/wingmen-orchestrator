@@ -18,10 +18,15 @@ import importlib.util
 import os
 import pathlib
 import stat
+import sys
 
 import pytest
 
-_MOD_PATH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "install_ceayj_provisioner.py"
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
+from provisioner import registry as inst_registry  # noqa: E402
+
+_MOD_PATH = _REPO_ROOT / "scripts" / "install_ceayj_provisioner.py"
 _spec = importlib.util.spec_from_file_location("install_ceayj_provisioner", _MOD_PATH)
 inst = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(inst)
@@ -218,16 +223,28 @@ def test_build_role_dsn_refuses_unsuffixed_admin_username():
 
 
 # --- credential file handling --------------------------------------------------
+# Every admin-DSN fixture below must be pooler-tenant-suffixed to the REAL
+# ihsanos multi-tenant DB ref (loaded from the registry doc, never a fresh
+# literal here either -- same no-hardcode discipline as registry.py itself)
+# because read_admin_dsn now independently asserts it (orch-console bus
+# #79816 Bug 2 challenge: TENANT-RESIDENCY-001 -- the file holds credentials
+# for MORE than one client store, so a heuristic/wrong-tenant pick must
+# refuse, not silently connect fleet_provisioner into another tenant's silo).
+_IHSANOS_REF = inst_registry.store_ref("ihsanos multi-tenant DB")
+_OTHER_REF = "x" * 20  # a different, equally-shaped, definitely-wrong ref
+
+
 def test_read_admin_dsn_reads_env_file_key(tmp_path):
     f = tmp_path / "write_dsn.env"
-    f.write_text("OTHER=1\nIHSANOS_PROD_DATABASE_URL=" + _dsn("postgres.t", "x") + "\n")
+    f.write_text("OTHER=1\nIHSANOS_PROD_DATABASE_URL="
+                  + _dsn(f"postgres.{_IHSANOS_REF}", "x") + "\n")
     os.chmod(f, 0o600)
-    assert inst.read_admin_dsn(f).endswith(_dsn("postgres.t", "x"))
+    assert inst.read_admin_dsn(f).endswith(_dsn(f"postgres.{_IHSANOS_REF}", "x"))
 
 
 def test_read_admin_dsn_refuses_loose_mode_and_missing_key(tmp_path):
     f = tmp_path / "write_dsn.env"
-    f.write_text("IHSANOS_PROD_DATABASE_URL=" + _dsn("x", "y") + "\n")
+    f.write_text("IHSANOS_PROD_DATABASE_URL=" + _dsn(f"x.{_IHSANOS_REF}", "y") + "\n")
     os.chmod(f, 0o644)
     with pytest.raises(inst.InstallError, match="0600"):
         inst.read_admin_dsn(f)
@@ -239,53 +256,43 @@ def test_read_admin_dsn_refuses_loose_mode_and_missing_key(tmp_path):
         inst.read_admin_dsn(g)
 
 
-def test_read_admin_dsn_prefers_the_exact_documented_key_when_present(tmp_path):
+def test_read_admin_dsn_is_exact_key_only_no_heuristic_pick(tmp_path):
+    # orch-console bus #79816: a heuristic ("the one non-RO postgres DSN in
+    # the file") is NOT acceptable -- the file holds write credentials for
+    # more than one client store, so a heuristic pick can land on another
+    # tenant's silo. The correct DSN sitting under an unexpected key must be
+    # REFUSED, not guessed at -- and the refusal names the key NAMES present
+    # (never a value) so console can supply the right one in one round.
     f = tmp_path / "write_dsn.env"
     f.write_text(
-        "IHSANOS_PROD_DATABASE_URL=" + _dsn("postgres.t", "x") + "\n"
-        "SOME_OTHER_WRITE_VAR=" + _dsn("postgres.t", "y") + "\n"
+        "SOME_UNEXPECTED_KEY_NAME=" + _dsn(f"postgres.{_IHSANOS_REF}", "x") + "\n"
+        "ANOTHER_KEY=" + _dsn(f"postgres.{_IHSANOS_REF}", "y") + "\n"
     )
     os.chmod(f, 0o600)
-    assert inst.read_admin_dsn(f).endswith(_dsn("postgres.t", "x"))
-
-
-def test_read_admin_dsn_falls_back_to_the_one_unambiguous_write_shaped_key(tmp_path):
-    # orch-console bus #79788: the real file does not use the documented
-    # ADMIN_CRED_KEY name. The file's one job (per its own filename) is to
-    # hold the write/admin DSN, so when exactly one line's VALUE parses as a
-    # postgres(ql):// DSN and its KEY is not RO-named, use it regardless of
-    # the exact key spelling -- still fails loud (below) when that is not
-    # unambiguous.
-    f = tmp_path / "write_dsn.env"
-    f.write_text(
-        "SOME_UNEXPECTED_KEY_NAME=" + _dsn("postgres.t", "x") + "\n"
-        "NOTES=not a dsn\n"
-    )
-    os.chmod(f, 0o600)
-    assert inst.read_admin_dsn(f).endswith(_dsn("postgres.t", "x"))
-
-
-def test_read_admin_dsn_excludes_ro_named_keys_from_the_fallback(tmp_path):
-    f = tmp_path / "write_dsn.env"
-    f.write_text("IHSANOS_PROD_RO_DATABASE_URL=" + _dsn("postgres.t", "x") + "\n")
-    os.chmod(f, 0o600)
-    with pytest.raises(inst.InstallError, match="IHSANOS_PROD_DATABASE_URL"):
+    with pytest.raises(inst.InstallError, match="IHSANOS_PROD_DATABASE_URL") as exc:
         inst.read_admin_dsn(f)
-
-
-def test_read_admin_dsn_refuses_ambiguous_write_shaped_candidates_by_name_only(tmp_path):
-    f = tmp_path / "write_dsn.env"
-    f.write_text(
-        "KEY_ONE=" + _dsn("postgres.t", "x") + "\n"
-        "KEY_TWO=" + _dsn("postgres.t", "y") + "\n"
-    )
-    os.chmod(f, 0o600)
-    with pytest.raises(inst.InstallError, match="KEY_ONE") as exc:
-        inst.read_admin_dsn(f)
-    assert "KEY_TWO" in str(exc.value)
+    assert "SOME_UNEXPECTED_KEY_NAME" in str(exc.value)
+    assert "ANOTHER_KEY" in str(exc.value)
     # the error names the candidate KEYS only, never a value
     assert "postgresql://" not in str(exc.value)
-    assert "ambiguous" in str(exc.value)
+
+
+def test_read_admin_dsn_refuses_a_dsn_targeting_a_different_store_ref(tmp_path):
+    # the exact documented key is present, but its VALUE targets a DIFFERENT
+    # project ref -- the key-name match alone cannot catch a credentials
+    # file that was edited to point the right-named var at the wrong store.
+    f = tmp_path / "write_dsn.env"
+    f.write_text("IHSANOS_PROD_DATABASE_URL=" + _dsn(f"postgres.{_OTHER_REF}", "x") + "\n")
+    os.chmod(f, 0o600)
+    with pytest.raises(inst.InstallError, match=_OTHER_REF):
+        inst.read_admin_dsn(f)
+
+
+def test_read_admin_dsn_accepts_exact_key_with_the_correct_store_ref(tmp_path):
+    f = tmp_path / "write_dsn.env"
+    f.write_text("IHSANOS_PROD_DATABASE_URL=" + _dsn(f"postgres.{_IHSANOS_REF}", "x") + "\n")
+    os.chmod(f, 0o600)
+    assert inst.read_admin_dsn(f).endswith(_dsn(f"postgres.{_IHSANOS_REF}", "x"))
 
 
 def test_write_secret_file_enforces_0700_dir_0600_file(tmp_path):
