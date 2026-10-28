@@ -265,4 +265,18 @@ ok("CAI-RESP-1434: armedHeaders reads localStorage('fc.armedKey') ONLY and rides
   assert(/armed key required — set it in Lane manager/.test(src), "401 copy");
 });
 
+// op#35074 (orch-console #79176, fleet-health 79177): an OFFLINE tile paints NO key
+// badge — killed lanes keep their last auth_account/auth_fp until the 24h prune, and
+// a dead tile reading "on the irsyad key" made the operator ask. Suppression is
+// badge-only: data-pool STAYS (the fc-v63 roll-up still counts the assignment) and
+// the poolFilter machinery is untouched — only the visible chip goes.
+ok("op#35074: an OFFLINE tile paints NO key badge; a live tile on the same key still does", function () {
+  const dead = tileHtml({ agent_id: "cc-substrate-1", tmux_session: "substrate-1", bucket: "offline", pool: "irsyad", auth_fp: "0123456789ab", model: "claude-opus-4-8", model_src: "proc" });
+  assert(dead.indexOf(">irsyad<") < 0, "offline tile must not paint its last-known key name: " + dead);
+  assert(dead.indexOf('data-pool="irsyad"') >= 0, "roll-up mechanics keep the pool attr (fc-v63 counting intact): " + dead);
+  assert(dead.indexOf(">opus-4-8<") >= 0, "model pill is NOT key data and stays: " + dead);
+  const live = tileHtml({ agent_id: "cc-substrate-9", tmux_session: "substrate-9", bucket: "working", pool: "irsyad", auth_fp: "0123456789ab" });
+  assert(live.indexOf(">irsyad<") >= 0, "the control: a LIVE tile on the same key still paints the chip: " + live);
+});
+
 console.log("fleet_keyroll: " + passed + " passed");
