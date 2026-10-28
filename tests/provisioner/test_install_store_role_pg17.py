@@ -32,8 +32,8 @@ _ispec = importlib.util.spec_from_file_location("install_ceayj_provisioner", _mo
 inst = importlib.util.module_from_spec(_ispec)
 _ispec.loader.exec_module(inst)
 
-_ADOPT_DRAFT = (ORCH_DIR / "migrations" / "drafts" /
-                "ceayj_adopt_bariq_provisioner.sql").read_text()
+_ADOPT_DRAFT = (ORCH_DIR / "migrations" /
+                "129_ceayj_adopt_bariq_provisioner.sql").read_text()
 
 # the LIVE organizations world (2026-10-28 read): the table, RLS on, the
 # three platform policies — slug-lookup verbatim, the two auth.uid()-shaped
