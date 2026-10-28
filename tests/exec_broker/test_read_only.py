@@ -77,6 +77,18 @@ def test_is_plain_read_accepts(sql):
     "SELECT \"it's\" FROM t",                                        # legal apostrophe identifier
     "SELECT 'a\\b' FROM t",                                          # backslash in a plain string
     "SELECT E'\\x41' FROM t",                                        # E-string escape, harmless
+    # --- whole-branch review Important #2 + Minor #6 (2026-10-28): the
+    # direct large-object write primitives and the rest of the advisory-lock /
+    # stat-reset family were missing from the denylist.
+    "SELECT lo_write(lo_open(12345, 131072), 'data')",               # mutates an existing large object
+    "SELECT lo_close(0)",
+    "SELECT pg_advisory_xact_lock(1)",
+    "SELECT pg_advisory_xact_lock_shared(1)",
+    "SELECT pg_try_advisory_lock(1)",
+    "SELECT pg_try_advisory_lock_shared(1)",
+    "SELECT pg_advisory_lock_shared(1)",
+    "SELECT pg_advisory_unlock_shared(1)",
+    "SELECT pg_stat_reset_slru()",
 ])
 def test_is_plain_read_refuses(sql):
     assert is_plain_read(sql) is False

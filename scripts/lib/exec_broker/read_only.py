@@ -77,14 +77,23 @@ _FORBIDDEN_CODE_TOKENS = frozenset({"insert", "update", "delete", "merge", "into
 # Write-capable or state-changing functions callable from inside a SELECT.
 # Conservative, not exhaustive — the head whitelist is the primary control.
 # nextval/setval included: they mutate persistent sequence state.
+# lo_open/lo_write/lo_close included: lo_write(lo_open(...)) mutates an
+# existing large object from a single read-shaped statement. The full
+# advisory-lock family and pg_stat_reset_slru complete their groups
+# (whole-branch review Important #2 / Minor #6).
 _FORBIDDEN_FUNCTION_TOKENS = frozenset({
     "set_config", "pg_terminate_backend", "pg_cancel_backend", "pg_reload_conf",
     "pg_notify", "dblink", "dblink_exec", "dblink_connect", "dblink_disconnect",
-    "lo_import", "lo_export", "lo_create", "lo_put", "lo_truncate", "lo_unlink",
+    "lo_open", "lo_write", "lo_close", "lo_import", "lo_export", "lo_create",
+    "lo_put", "lo_truncate", "lo_unlink",
     "pg_read_file", "pg_read_binary_file", "pg_ls_dir", "pg_stat_file",
     "pg_file_write", "pg_file_rename", "pg_file_unlink", "pg_file_read",
-    "pg_advisory_lock", "pg_advisory_unlock", "pg_advisory_unlock_all",
-    "pg_stat_reset", "pg_stat_reset_shared", "nextval", "setval",
+    "pg_advisory_lock", "pg_advisory_lock_shared", "pg_advisory_xact_lock",
+    "pg_advisory_xact_lock_shared", "pg_try_advisory_lock",
+    "pg_try_advisory_lock_shared", "pg_advisory_unlock",
+    "pg_advisory_unlock_shared", "pg_advisory_unlock_all",
+    "pg_stat_reset", "pg_stat_reset_shared", "pg_stat_reset_slru",
+    "nextval", "setval",
 })
 
 # Inside a dollar-quoted body (reachable today only as a dollar-quoted string
