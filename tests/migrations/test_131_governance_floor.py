@@ -97,14 +97,37 @@ def _make_source_tables(dsn: str) -> None:
         """)
 
 
-def _ensure_role(dsn: str, rolename: str) -> None:
+def _ensure_role(dsn: str, rolename: str) -> bool:
     """Roles are cluster-wide in the shared session-scoped pg_dsn harness, so a
     second test creating the same role must not error (same helper shape as
-    test_ddl_coverage_watchdog.py's _ensure_role)."""
+    test_ddl_coverage_watchdog.py's _ensure_role). Returns True iff THIS call
+    created the role (it didn't already exist) -- the caller must drop any
+    role it created, or it leaks into later tests sharing the same cluster.
+    Found live: test_durable_inbox_enforcement_123.py's live_applier fixture
+    assumes IT creates bus_writer fresh (gaining automatic ADMIN on it); a
+    pre-existing bus_writer left behind by an earlier test makes migration
+    123's own `IF NOT EXISTS` guard skip creation, so live_applier never gets
+    admin on it -- "permission denied to grant role bus_writer" downstream."""
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (rolename,))
-        if not cur.fetchone():
-            cur.execute(f'CREATE ROLE "{rolename}" NOLOGIN')
+        if cur.fetchone():
+            return False
+        cur.execute(f'CREATE ROLE "{rolename}" NOLOGIN')
+        return True
+
+
+def _drop_roles_created(dsn: str, created: list[str]) -> None:
+    """Teardown counterpart to _ensure_role: reset the schema first (so no
+    policy/grant still references the role -- DROP ROLE fails otherwise),
+    then drop only the roles THIS test actually created."""
+    if not created:
+        return
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP SCHEMA public CASCADE")
+        cur.execute("CREATE SCHEMA public")
+        cur.execute("GRANT USAGE ON SCHEMA public TO public")
+        for rolename in created:
+            cur.execute(f'DROP ROLE IF EXISTS "{rolename}"')
 
 
 def _q(dsn, sql, params=None):
@@ -122,28 +145,33 @@ def _exec(dsn, sql, params=None):
 @pytest.fixture
 def gf_db(fresh_db):
     """Roles present, 114 applied (work_item/work_item_audit exist), then 131
-    applied on top -- the real stacking order this ships in."""
+    applied on top -- the real stacking order this ships in. Drops any role
+    this fixture created once the test using it is done (see _drop_roles_created)."""
     dsn = f"{fresh_db} application_name={SILO}"
-    for role in ("anon", "authenticated", "service_role", "bus_writer", "console_readonly"):
-        _ensure_role(dsn, role)
+    created = [r for r in ("anon", "authenticated", "service_role", "bus_writer", "console_readonly")
+               if _ensure_role(dsn, r)]
     _make_source_tables(dsn)
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(MIGRATION_114.read_text())
         cur.execute(MIGRATION_131.read_text())
-    return dsn
+    yield dsn
+    _drop_roles_created(dsn, created)
 
 
 # ── Layer 1: apply_migration.py compatibility (dry-run; no --gate needed) ───────────
 def test_dry_run_via_apply_migration(fresh_db):
     dsn = f"{fresh_db} application_name={SILO}"
-    for role in ("anon", "authenticated", "service_role", "bus_writer", "console_readonly"):
-        _ensure_role(dsn, role)
+    created = [r for r in ("anon", "authenticated", "service_role", "bus_writer", "console_readonly")
+               if _ensure_role(dsn, r)]
     _make_ledger_table(dsn)
     _make_source_tables(dsn)
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(MIGRATION_114.read_text())
-    result = am.apply_migration(dsn, MIGRATION_131, silo=SILO, dry_run=True)
-    assert result["status"] == "dry_run_ok"
+    try:
+        result = am.apply_migration(dsn, MIGRATION_131, silo=SILO, dry_run=True)
+        assert result["status"] == "dry_run_ok"
+    finally:
+        _drop_roles_created(dsn, created)
 
 
 # ── Phase 1a: governance_floor / governance_floor_audit shape ──────────────────────
