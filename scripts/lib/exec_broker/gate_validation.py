@@ -92,6 +92,22 @@ ALLOWED_PROJECT_REFS = {SILO_ALIASES["qa"]}
 # this override existed.
 
 
+def ref_override_is_live(
+    override_ref: "str | None",
+    override_expires_at: "datetime | None",
+    now: "datetime | None" = None,
+) -> bool:
+    """The ONE definition of "the bounded ref override is currently in force":
+    armed (both halves present) AND still unexpired. Shared by
+    check_project_ref (the ref widening) and read_only.check_read_only_override
+    (the read-only mode the override now implies, GO #78974) so the two can
+    never drift — the same wall-clock instant flips both, and expiry reverts
+    both together, by construction."""
+    if override_ref is None or override_expires_at is None:
+        return False
+    return (now if now is not None else datetime.now(timezone.utc)) < override_expires_at
+
+
 def check_project_ref(
     project_ref: str,
     *,
@@ -106,12 +122,9 @@ def check_project_ref(
     comment above ALLOWED_PROJECT_REFS."""
     if project_ref in ALLOWED_PROJECT_REFS:
         return
-    if (
-        override_ref is not None
-        and override_expires_at is not None
-        and project_ref == override_ref
-        and (now if now is not None else datetime.now(timezone.utc)) < override_expires_at
-    ):
+    # Liveness first: a live override_ref is non-None by construction, so the
+    # equality below can never pass for a None project_ref.
+    if ref_override_is_live(override_ref, override_expires_at, now=now) and project_ref == override_ref:
         return
     raise BrokerValidationError(
         ErrorCode.BAD_PROJECT_REF,
