@@ -29,6 +29,12 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from supabase import acreate_client
 
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from scripts import bus_send  # sanctioned agent_messages writer (backlog#124)
+
 # Load .env from orchestrator root so script can be run standalone
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -367,20 +373,16 @@ def write_report(buckets: dict, timestamp: str) -> Path:
 
 # ── Agent messages posting ────────────────────────────────────────────────────
 
-async def post_agent_message(supabase, subject: str, body: str, requires_response: bool = False) -> int:
-    result = (
-        await supabase.table("agent_messages")
-        .insert({
-            "from_agent": "cc-ihsanos",
-            "to_agent": "cai",
-            "message_type": "update",
-            "subject": subject,
-            "body": body,
-            "requires_response": requires_response,
-        })
-        .execute()
+async def post_agent_message(subject: str, body: str, requires_response: bool = False, priority: str = "P2") -> int:
+    """Independent write (this is a manual, interactively-run one-shot CLI tool,
+    not a daemon) -- goes through scripts/bus_send.py's send(), never a raw
+    INSERT (Musa op#34845, PR-B step 2). Runs the sync send() off the event
+    loop via asyncio.to_thread so it doesn't block this async script."""
+    msg_id, _thread = await asyncio.to_thread(
+        bus_send.send,
+        "cc-ihsanos", "cai", "update", subject, body, priority,
+        req=requires_response,
     )
-    msg_id = result.data[0]["id"]
     log.info(f"Posted agent_message id={msg_id}: {subject}")
     return msg_id
 
@@ -459,10 +461,10 @@ async def phase1(supabase):
     )
 
     msg_id = await post_agent_message(
-        supabase,
         subject=f"TASK-043 Phase 1 complete — {len(buckets['safe_kill'])} SAFE_KILL, {len(buckets['review'])} REVIEW",
         body=body,
         requires_response=True,
+        priority="P1",
     )
 
     log.info(f"Halting. Waiting for approval via agent_messages (msg_id={msg_id}) or --execute flag.")
@@ -517,9 +519,9 @@ async def phase2(supabase):
             if len(running_wingmen) < 2:  # sanity: at least orchestrator + one other
                 log.error("wingmen services appear to have flapped — aborting Phase 2.")
                 await post_agent_message(
-                    supabase,
                     subject="TASK-043 Phase 2 ABORTED — wingmen service flap detected",
                     body=f"Aborted after {len(killed)} kills. wingmen launchd check returned fewer than 2 running services. Manual review required.",
+                    priority="P1",
                 )
                 break
         except Exception as e:
@@ -561,7 +563,6 @@ async def phase2(supabase):
             skipped.append(proc)
 
     await post_agent_message(
-        supabase,
         subject=f"TASK-043 Phase 2 complete — {len(killed)} killed, {len(skipped)} skipped",
         body=(
             f"Phase 2 execution complete.\n"
@@ -703,7 +704,6 @@ async def phase3(supabase):
     log.info(f"VERDICT: {verdict} — {verdict_detail}")
 
     await post_agent_message(
-        supabase,
         subject=f"TASK-043 Phase 3 complete — Verdict: {verdict}",
         body=(
             f"Baseline measurement complete.\n\n"

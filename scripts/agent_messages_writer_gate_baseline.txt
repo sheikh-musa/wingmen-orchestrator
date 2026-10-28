@@ -205,9 +205,7 @@ scripts/irsyad_worker_reaper.py
 # PR with a real-lane boot test once migrated, per console's instruction.
 # legacy/wingmen_orch.py is presumed dead (same class as legacy/ihsanos_
 # drain/main.py, pending the same live-fleet confirmation before deletion).
-scripts/audit_mac_mini.py
 scripts/launch_dangerous_cc.sh
-nervous_system/deploy_verifier.py
 
 # STEP 2, delete the dead, 2026-10-28 (Musa op#34845, console's ruling part
 # 4): scripts/fire_fix1a_grant_ping.sh deleted rather than migrated -- a
@@ -270,3 +268,41 @@ nervous_system/deploy_verifier.py
 # (already-deleted-alongside) test file -- confirmed dead by console's own
 # launchctl check on both hosts (no such launchd job, VPS hub off since
 # 09-27), same evidence as before, just re-confirmed after the correction.
+#
+# STEP 2, PR-B batch 2, 2026-10-28 (Musa op#34845, bus #79090/#78757):
+# scripts/audit_mac_mini.py and nervous_system/deploy_verifier.py migrated
+# onto scripts/bus_send.py's send(), both lines removed from this file.
+#
+# audit_mac_mini.py's post_agent_message() -- INDEPENDENT write. This is a
+# manual, interactively-run one-shot CLI tool (`python scripts/
+# audit_mac_mini.py [--execute|--baseline]`), not a daemon; no launchd/cron
+# wiring found anywhere (grep over deploy/, ops/) -- confirmed before
+# migrating, not assumed. All 4 call sites now go through send() via
+# asyncio.to_thread (the surrounding script is async throughout; the sync
+# send() would otherwise block the event loop). The supabase param is
+# dropped from post_agent_message()'s signature since it no longer writes
+# through the supabase client. Priority was never specified at any of the 4
+# original raw-insert call sites (would have silently landed on whatever the
+# table default is, the exact bug bus_send.py's --priority-required design
+# exists to prevent) -- picked P1 for the two that need real attention
+# (Phase 1 approval request, Phase 2 service-flap abort) and P2 for the two
+# that are purely informational (Phase 2/3 completion).
+#
+# nervous_system/deploy_verifier.py's _escalate_bug() -- INDEPENDENT write
+# (its own commit, decoupled from the bug_reports tombstone UPDATE above it
+# in the same function, which already has its own try/except and is
+# unaffected). run_deploy_verifier() processes bug rows sequentially (no
+# asyncio.gather) and has zero callers anywhere in the repo outside its own
+# module and test file, confirmed by grep -- the whole worker is dormant,
+# gated behind ORCHESTRATOR_VERIFY_ENABLED (default false) pending a future
+# "flip when ready". Migrated via asyncio.to_thread same as above. Caught
+# one real regression before it shipped: bus_send.dburl() raises bare
+# SystemExit (not Exception) on a missing DATABASE_URL, which escaped the
+# original `except Exception` wrapper and surfaced as an actual test
+# failure (test_escalate_bug_telegram_dedup_skips_when_logged, which
+# exercises _escalate_bug without mocking the bus post) -- fixed to
+# `except (Exception, SystemExit)`, the same idiom already used throughout
+# scripts/ (bus_send.py itself, fleet_health.py, disk_autoremediate.py,
+# asks_reconcile_daily.py, etc.), with a dedicated regression test
+# (test_escalate_bug_survives_bus_send_system_exit) added and confirmed RED
+# before the fix, GREEN after.
