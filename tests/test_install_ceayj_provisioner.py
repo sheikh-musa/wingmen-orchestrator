@@ -326,11 +326,13 @@ def test_read_admin_dsn_key_listing_ignores_non_assignment_fragments(tmp_path):
     assert '[ "$ALLOW_WRITE_DSN"' not in msg
 
 
-def test_read_admin_dsn_requires_the_files_own_allow_flag_when_gated(tmp_path, monkeypatch):
-    # bus #79852 finding 4: an export inside `if [ -n "$FLAG" ]; then ... fi`
-    # is the file's own tripwire against accidental exposure. Reading the
-    # raw text must not silently bypass it -- refuse unless that SAME flag
-    # is set (non-empty) in the installer's own environment too.
+def test_read_admin_dsn_gated_line_prints_bypass_notice_instead_of_refusing(tmp_path, monkeypatch, capsys):
+    # orch-console bus #79852/#79884 decision (option D): the file's own
+    # if/then/fi allow-flag tripwire guards against ACCIDENTAL shell
+    # exposure. This installer is a stronger control (sanctioned
+    # entrypoint, exact-key-only read, residency asserted), so it must NOT
+    # require that flag in its own environment -- it must say, by name,
+    # that it is intentionally not enforcing it, and still return the DSN.
     f = tmp_path / "write_dsn.env"
     f.write_text(
         'if [ "$ALLOW_WRITE_DSN" = "1" ]; then\n'
@@ -339,13 +341,15 @@ def test_read_admin_dsn_requires_the_files_own_allow_flag_when_gated(tmp_path, m
     )
     os.chmod(f, 0o600)
     monkeypatch.delenv("ALLOW_WRITE_DSN", raising=False)
-    with pytest.raises(inst.InstallError, match="ALLOW_WRITE_DSN"):
-        inst.read_admin_dsn(f)
-    monkeypatch.setenv("ALLOW_WRITE_DSN", "1")
-    assert inst.read_admin_dsn(f).endswith(_dsn(f"postgres.{_IHSANOS_REF}", "x"))
+    dsn = inst.read_admin_dsn(f)
+    assert dsn.endswith(_dsn(f"postgres.{_IHSANOS_REF}", "x"))
+    out = capsys.readouterr().out
+    assert "ALLOW_WRITE_DSN" in out
+    assert "not required" in out
+    assert "x" * 1 not in out.split("ALLOW_WRITE_DSN")[0]  # no password/value leaked
 
 
-def test_read_admin_dsn_allow_flag_gate_handles_single_line_if_then_fi(tmp_path, monkeypatch):
+def test_read_admin_dsn_bypass_notice_handles_single_line_if_then_fi(tmp_path, monkeypatch, capsys):
     f = tmp_path / "write_dsn.env"
     f.write_text(
         'if [ "$ALLOW_WRITE_DSN" = "1" ]; then export IHSANOS_PROD_DATABASE_URL='
@@ -353,10 +357,24 @@ def test_read_admin_dsn_allow_flag_gate_handles_single_line_if_then_fi(tmp_path,
     )
     os.chmod(f, 0o600)
     monkeypatch.delenv("ALLOW_WRITE_DSN", raising=False)
-    with pytest.raises(inst.InstallError, match="ALLOW_WRITE_DSN"):
+    dsn = inst.read_admin_dsn(f)
+    assert dsn.endswith(_dsn(f"postgres.{_IHSANOS_REF}", "x"))
+    assert "ALLOW_WRITE_DSN" in capsys.readouterr().out
+
+
+def test_read_admin_dsn_residency_assert_still_enforced_on_gated_bypass_path(tmp_path, monkeypatch):
+    # the bypass must never short-circuit TENANT-RESIDENCY-001 -- a gated
+    # line targeting the WRONG store still refuses, flag or no flag.
+    f = tmp_path / "write_dsn.env"
+    f.write_text(
+        'if [ "$ALLOW_WRITE_DSN" = "1" ]; then\n'
+        "  export IHSANOS_PROD_DATABASE_URL=" + _dsn(f"postgres.{_OTHER_REF}", "x") + "\n"
+        "fi\n"
+    )
+    os.chmod(f, 0o600)
+    monkeypatch.delenv("ALLOW_WRITE_DSN", raising=False)
+    with pytest.raises(inst.InstallError, match="TENANT-RESIDENCY-001"):
         inst.read_admin_dsn(f)
-    monkeypatch.setenv("ALLOW_WRITE_DSN", "1")
-    assert inst.read_admin_dsn(f).endswith(_dsn(f"postgres.{_IHSANOS_REF}", "x"))
 
 
 def test_read_admin_dsn_ungated_line_needs_no_flag(tmp_path, monkeypatch):
