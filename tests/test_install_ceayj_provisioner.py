@@ -295,6 +295,99 @@ def test_read_admin_dsn_accepts_exact_key_with_the_correct_store_ref(tmp_path):
     assert inst.read_admin_dsn(f).endswith(_dsn(f"postgres.{_IHSANOS_REF}", "x"))
 
 
+def test_read_admin_dsn_strips_an_export_prefix(tmp_path):
+    # orch-console bus #79852: the real file is a sourceable shell script --
+    # its lines read `export KEY=value`, not bare `KEY=value`.
+    f = tmp_path / "write_dsn.env"
+    f.write_text("export IHSANOS_PROD_DATABASE_URL="
+                  + _dsn(f"postgres.{_IHSANOS_REF}", "x") + "\n")
+    os.chmod(f, 0o600)
+    assert inst.read_admin_dsn(f).endswith(_dsn(f"postgres.{_IHSANOS_REF}", "x"))
+
+
+def test_read_admin_dsn_key_listing_ignores_non_assignment_fragments(tmp_path):
+    # bus #79852 finding 2: a plain "contains an =" scan picked up an `if`
+    # line's test expression as a bogus "key name" in the miss diagnostic
+    # (harmless but sloppy) -- an equality-style test ("$VAR" = "1") has an
+    # "=" too, so it isn't skipped by a naive "no = means not a key" check.
+    # Only real [export] KEY=value assignment lines count as a "key present".
+    f = tmp_path / "write_dsn.env"
+    f.write_text(
+        'if [ "$ALLOW_WRITE_DSN" = "1" ]; then\n'
+        "  export SOME_OTHER_KEY=" + _dsn(f"postgres.{_IHSANOS_REF}", "x") + "\n"
+        "fi\n"
+    )
+    os.chmod(f, 0o600)
+    with pytest.raises(inst.InstallError) as exc:
+        inst.read_admin_dsn(f)
+    msg = str(exc.value)
+    assert "SOME_OTHER_KEY" in msg
+    # the if-condition fragment itself must never be listed as a key name
+    assert '[ "$ALLOW_WRITE_DSN"' not in msg
+
+
+def test_read_admin_dsn_gated_line_prints_bypass_notice_instead_of_refusing(tmp_path, monkeypatch, capsys):
+    # orch-console bus #79852/#79884 decision (option D): the file's own
+    # if/then/fi allow-flag tripwire guards against ACCIDENTAL shell
+    # exposure. This installer is a stronger control (sanctioned
+    # entrypoint, exact-key-only read, residency asserted), so it must NOT
+    # require that flag in its own environment -- it must say, by name,
+    # that it is intentionally not enforcing it, and still return the DSN.
+    f = tmp_path / "write_dsn.env"
+    f.write_text(
+        'if [ "$ALLOW_WRITE_DSN" = "1" ]; then\n'
+        "  export IHSANOS_PROD_DATABASE_URL=" + _dsn(f"postgres.{_IHSANOS_REF}", "x") + "\n"
+        "fi\n"
+    )
+    os.chmod(f, 0o600)
+    monkeypatch.delenv("ALLOW_WRITE_DSN", raising=False)
+    dsn = inst.read_admin_dsn(f)
+    assert dsn.endswith(_dsn(f"postgres.{_IHSANOS_REF}", "x"))
+    out = capsys.readouterr().out
+    assert "ALLOW_WRITE_DSN" in out
+    assert "not required" in out
+    assert "x" * 1 not in out.split("ALLOW_WRITE_DSN")[0]  # no password/value leaked
+
+
+def test_read_admin_dsn_bypass_notice_handles_single_line_if_then_fi(tmp_path, monkeypatch, capsys):
+    f = tmp_path / "write_dsn.env"
+    f.write_text(
+        'if [ "$ALLOW_WRITE_DSN" = "1" ]; then export IHSANOS_PROD_DATABASE_URL='
+        + _dsn(f"postgres.{_IHSANOS_REF}", "x") + "; fi\n"
+    )
+    os.chmod(f, 0o600)
+    monkeypatch.delenv("ALLOW_WRITE_DSN", raising=False)
+    dsn = inst.read_admin_dsn(f)
+    assert dsn.endswith(_dsn(f"postgres.{_IHSANOS_REF}", "x"))
+    assert "ALLOW_WRITE_DSN" in capsys.readouterr().out
+
+
+def test_read_admin_dsn_residency_assert_still_enforced_on_gated_bypass_path(tmp_path, monkeypatch):
+    # the bypass must never short-circuit TENANT-RESIDENCY-001 -- a gated
+    # line targeting the WRONG store still refuses, flag or no flag.
+    f = tmp_path / "write_dsn.env"
+    f.write_text(
+        'if [ "$ALLOW_WRITE_DSN" = "1" ]; then\n'
+        "  export IHSANOS_PROD_DATABASE_URL=" + _dsn(f"postgres.{_OTHER_REF}", "x") + "\n"
+        "fi\n"
+    )
+    os.chmod(f, 0o600)
+    monkeypatch.delenv("ALLOW_WRITE_DSN", raising=False)
+    with pytest.raises(inst.InstallError, match="TENANT-RESIDENCY-001"):
+        inst.read_admin_dsn(f)
+
+
+def test_read_admin_dsn_ungated_line_needs_no_flag(tmp_path, monkeypatch):
+    # most keys in the file are plain, unconditional lines -- the gate
+    # requirement must only apply to assignments actually inside an if/fi.
+    f = tmp_path / "write_dsn.env"
+    f.write_text("export IHSANOS_PROD_DATABASE_URL="
+                  + _dsn(f"postgres.{_IHSANOS_REF}", "x") + "\n")
+    os.chmod(f, 0o600)
+    monkeypatch.delenv("ALLOW_WRITE_DSN", raising=False)
+    assert inst.read_admin_dsn(f).endswith(_dsn(f"postgres.{_IHSANOS_REF}", "x"))
+
+
 def test_write_secret_file_enforces_0700_dir_0600_file(tmp_path):
     out = inst.write_secret_file(tmp_path / ".secrets" / "role.dsn", _dsn("r", "pw"))
     mode_f = stat.S_IMODE(out.stat().st_mode)

@@ -243,6 +243,63 @@ def _pooler_tenant_ref(dsn: str, *, what: str = "DSN") -> str:
     return parts.username.split(".", 1)[1]
 
 
+_ASSIGN_LINE_RE = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+_VARREF_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+_LEADING_THEN_RE = re.compile(r"^then\b\s*(.*)$")
+_TRAILING_FI_RE = re.compile(r"^(.*?)\bfi\b\s*$")
+
+
+def _scan_credential_lines(text: str) -> list[tuple[str, str, frozenset]]:
+    """Statically scan shell-script-shaped credential text for [export]
+    KEY=value assignment lines, tracking which ones sit inside an
+    `if [ ... $FLAG ... ]; then ... fi` conditional block -- the file's own
+    allow-flag tripwire (orch-console bus #79852). NEVER evaluates the file
+    as shell (no subprocess, no sourcing): this is a static line/clause
+    scan recognizing the conventional if/then/fi idiom (single- or
+    multi-line). Returns (key, value, required_flags) for every assignment
+    found; required_flags is the union of every $VAR referenced in each
+    still-open if-condition at that point. An unmodeled CONDITION (e.g. an
+    equality test, not just `-n`, or `&&`) still contributes its referenced
+    var names to required_flags -- more gates, never fewer, so an exotic
+    comparison fails closed. This does NOT extend to unmodeled BRANCH
+    STRUCTURE: only a bare `if ... ; then ... fi` is tracked, so an
+    assignment inside an `elif`/`else`/`case` branch is scored against the
+    outer if's condition (or as ungated, for a bare `case`), not its own --
+    cc-quality PR#581 review, finding F1. Fine for the real file (a flat
+    if/then/fi, confirmed), but this scanner must not be trusted against a
+    credentials file with that richer shape without first modeling it."""
+    gate_stack: list[frozenset] = []
+    out: list[tuple[str, str, frozenset]] = []
+    for raw_line in text.splitlines():
+        for clause in raw_line.split(";"):
+            clause = clause.strip()
+            if not clause or clause.startswith("#"):
+                continue
+            m = _LEADING_THEN_RE.match(clause)
+            if m:
+                clause = m.group(1).strip()
+                if not clause:
+                    continue
+            trailing_fi = False
+            m = _TRAILING_FI_RE.match(clause)
+            if m:
+                trailing_fi = True
+                clause = m.group(1).strip()
+            if clause.startswith("if "):
+                cond = re.sub(r"\bthen\b\s*$", "", clause[3:]).strip()
+                gate_stack.append(frozenset(_VARREF_RE.findall(cond)))
+            elif clause:
+                m2 = _ASSIGN_LINE_RE.match(clause)
+                if m2:
+                    key = m2.group(1)
+                    val = m2.group(2).strip().strip('"').strip("'")
+                    required = frozenset().union(*gate_stack) if gate_stack else frozenset()
+                    out.append((key, val, required))
+            if trailing_fi and gate_stack:
+                gate_stack.pop()
+    return out
+
+
 def read_admin_dsn(path: Path) -> str:
     """Read the admin/write DSN from the console's private credentials file.
     EXACT key name only — no heuristic pick (orch-console bus #79816: the
@@ -251,8 +308,20 @@ def read_admin_dsn(path: Path) -> str:
     in another tenant's silo, exactly the TENANT-RESIDENCY-001 breach the
     guard exists to prevent). On a miss, fails loud and names the KEYS
     present (never a value) so console can supply the right one in one
-    round. Independently of the key, the DSN's own project ref (pooler
-    username suffix) must equal the ihsanos multi-tenant DB ref from
+    round. The file is a sourceable shell script (bus #79852): lines may
+    carry an `export` prefix, and the real export may sit inside an
+    `if [ ... $FLAG ... ]; then ... fi` tripwire block the file's author
+    added against ACCIDENTAL exposure from an interactive `source`. This
+    installer does not require that flag (bus #79852/#79884 decision,
+    option D): it is already a stronger control than the flag — the
+    guard's exception #2 admits only this exact entrypoint/argv, the key
+    read here is exact-match only, and the DSN's residency is still
+    asserted below regardless of whether the line was gated. When the
+    matched assignment IS gated, this prints one line naming the required
+    flag(s) and stating the condition is intentionally not enforced, so
+    the bypass is visible, never silent. Independently of the key, the
+    DSN's own project ref
+    (pooler username suffix) must equal the ihsanos multi-tenant DB ref from
     docs/data-store-registry.md — loaded via registry.store_ref (the same
     never-hardcoded loader the provisioner package already uses), never a
     fresh literal here. This catches the key-name-right-value-wrong case a
@@ -262,23 +331,21 @@ def read_admin_dsn(path: Path) -> str:
     mode = stat.S_IMODE(os.stat(path).st_mode)
     if mode & 0o077:
         raise InstallError(f"{path} mode is {oct(mode)} — must be 0600 (it is a credential)")
-    keys_present: list[str] = []
-    dsn = None
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        key = key.strip()
-        keys_present.append(key)
-        if key == ADMIN_CRED_KEY:
-            val = val.strip().strip('"').strip("'")
-            if val:
-                dsn = val
-    if dsn is None:
+    assignments = _scan_credential_lines(path.read_text())
+    keys_present = [key for key, _val, _req in assignments]
+    match = next(((val, req) for key, val, req in assignments if key == ADMIN_CRED_KEY and val), None)
+    if match is None:
         raise InstallError(
             f"{ADMIN_CRED_KEY} not found in {path.name} — keys present: "
             f"{', '.join(keys_present) or '(none)'}"
+        )
+    dsn, required_flags = match
+    if required_flags:
+        say(
+            f"{ADMIN_CRED_KEY} in {path.name} is gated by an if-block requiring "
+            f"{', '.join(sorted(required_flags))} — allow-flag condition intentionally "
+            "not required here: sanctioned installer entrypoint (guard exception #2), "
+            "exact key only, ihsanos-residency asserted next (bus #79852/#79884 decision)"
         )
     try:
         expected_ref = provisioner_registry.store_ref(IHSANOS_STORE_ALIAS)
