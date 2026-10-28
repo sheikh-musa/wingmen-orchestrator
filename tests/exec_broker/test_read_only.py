@@ -31,6 +31,7 @@ from exec_broker.read_only import check_read_only_override, is_plain_read  # noq
     "SELECT * FROM t ORDER BY id OFFSET 5 LIMIT 2",                 # OFFSET does not trip a SET scan
     "select 1; select 2",                                           # multi-statement, all reads
     "(SELECT 1) UNION (SELECT 2)",                                  # parenthesized heads
+    "SELECT \"col one\", \"col two\" FROM t",                       # clean quoted identifiers: no hazard chars inside
     "SELECT 'insert into t values (1)' FROM t",                     # write words in a string -> blanked
     "-- delete from t\nSELECT 1",                                   # write words in a comment -> blanked
     'SELECT "set" FROM t',                                          # quoted column named set (no SET token in code)
@@ -62,6 +63,20 @@ def test_is_plain_read_accepts(sql):
     "", "   ",                                                       # empty is never a plain read
     "SELECT $$insert into t values (1)$$",                           # dollar-quoted string constant -- false refusal, fail-closed
     'SELECT "update" FROM t',                                        # quoted column named update -- false refusal, fail-closed
+    # --- whole-branch review Critical #1 (2026-10-28): legal SQL that BLINDS the
+    # vendored lexer -- a ', --, /* or $tag$ INSIDE a double-quoted identifier
+    # opens a bogus noise region that swallows the real code, and an E'' escape
+    # closes a string early, so denylisted writes vanish from every scan. The
+    # hazard pre-screen refuses the whole input class.
+    "SELECT 1 AS \"it's\", set_config('a', 'b', false)",             # ' inside quoted alias -> bogus string
+    "SELECT 1 AS \"a--b\", nextval('exec_broker_access_log_id_seq')",  # -- inside quoted alias eats the line
+    "SELECT \"x--y\"; DELETE FROM t",                                # also hides the ';' from the head split
+    "SELECT \"a/*b\", pg_terminate_backend(123)",                    # bogus block comment swallows to EOF
+    "SELECT E'\\'' AS x, set_config('a', 'b', false)",               # \' closes the lexer's string early
+    # same class, benign payloads -- documented false refusals (fail-closed):
+    "SELECT \"it's\" FROM t",                                        # legal apostrophe identifier
+    "SELECT 'a\\b' FROM t",                                          # backslash in a plain string
+    "SELECT E'\\x41' FROM t",                                        # E-string escape, harmless
 ])
 def test_is_plain_read_refuses(sql):
     assert is_plain_read(sql) is False

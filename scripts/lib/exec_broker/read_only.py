@@ -12,10 +12,22 @@ while the override is live, any guarded_sql that is not a plain read is
 refused, fail-closed, with ErrorCode.READ_ONLY_OVERRIDE.
 
 REUSE, NEVER REIMPLEMENT: the lexing comes from the vendored, sha256-pinned
-ddl_detect (strip_sql_noise / extract_dollar_bodies / strip_comments_only),
-and DDL detection is is_ddl_shaped itself. Never hand-edit the vendored file
-and never re-derive its context-aware lexing here — a second, divergent lexer
-is exactly the footgun the vendored copy exists to prevent.
+ddl_detect (strip_sql_noise / extract_dollar_bodies), and DDL detection is
+is_ddl_shaped itself. Never hand-edit the vendored file and never re-derive
+its context-aware lexing here — a second, divergent lexer is exactly the
+footgun the vendored copy exists to prevent.
+
+LEXICAL HAZARD PRE-SCREEN (whole-branch review Critical #1, 2026-10-28): the
+vendored lexer does not track double-quoted identifiers, so a ', --, /* or
+$tag$ appearing INSIDE a "..." region opens a bogus noise region that
+swallows the real code (and an E'..' backslash escape closes its string
+early), hiding denylisted writes from every scan in this module AND from
+is_ddl_shaped. The durable fix is upstream (ihsanos-irsyad) lexer awareness
+re-vendored under a new pin; until then _lexically_hazardous refuses the
+entire input class BEFORE any vendored call, fail-closed. Refusing the input
+class is doctrine: no legitimate broker statement needs an apostrophe inside
+a quoted identifier or a backslash anywhere, and a caller hitting one
+renames or re-quotes.
 
 KNOWN LIMITATION (same doctrine as ddl_detect): this is a best-effort TEXT
 screen, not a semantic analyzer. A read-shaped statement that calls an
@@ -26,8 +38,9 @@ exec_broker_access_log before validation, and arming requires a
 console-gated root action.
 
 FAIL-CLOSED DOCTRINE: false refusals are acceptable; a missed write is not.
-Concretely, a quoted column named "update"/"into"/"for" and a dollar-quoted
-string constant containing write words are REFUSED — the same deliberate
+Concretely, a quoted column named "update"/"into"/"for", a dollar-quoted
+string constant containing write words, a quoted identifier containing
+'/--/*/$, and any backslash anywhere are all REFUSED — the same deliberate
 over-refusal stance ddl_detect takes ("a false refusal is fail-safe for a
 screen"). A caller hitting one renames or re-quotes; nothing legitimate is
 silently let through the other way.
@@ -92,13 +105,110 @@ _BODY_TOKEN_RE = _word_regex(_FORBIDDEN_BODY_TOKENS)
 
 _HEAD_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
+# Dollar-quote opener: $$ or $tag$ where tag is [A-Za-z_]\w* — the SAME
+# pattern the vendored _DOLLAR_OPEN_RE uses, so the pre-screen tracks exactly
+# the regions the vendored lexer could mis-read.
+_DOLLAR_OPEN_RE = re.compile(r"\$([A-Za-z_]\w*|)\$")
+
+
+def _lexically_hazardous(sql: str) -> bool:
+    """True iff sql contains a construct that can blind the vendored lexer:
+    a ', --, /* or $tag$ inside a double-quoted identifier (the vendored
+    strip_sql_noise treats them as noise openers there and swallows the code
+    that follows). Backslashes are handled separately (any backslash, in any
+    context, is hazardous: E'' escapes close strings early in the vendored
+    lexer, and no broker-legitimate statement carries one).
+
+    Single left-to-right pass mirroring the vendored lexer's own region set
+    (code / 'string' / "identifier" / -- comment / nestable /* comment */ /
+    $tag$ body), so a "..." region is located exactly where PG locates it.
+    Divergences are all in the fail-closed direction:
+    - unterminated "..." or $tag$ runs to EOS for us; the code it would hide
+      is a PG syntax error upstream, never an executed write;
+    - a bare $ (e.g. a positional $1) is not an opener for us; those are not
+      a broker input class (statements arrive fully rendered).
+    """
+    i, n = 0, len(sql)
+    state = "code"
+    dollar_tag = ""
+    while i < n:
+        ch = sql[i]
+        two = sql[i:i + 2]
+        if state == "code":
+            if two == "--":
+                state = "line_comment"
+                i += 2
+            elif two == "/*":
+                state = "block_comment"
+                depth, i = 1, i + 2
+                while i < n and depth:
+                    if sql[i:i + 2] == "/*":
+                        depth, i = depth + 1, i + 2
+                    elif sql[i:i + 2] == "*/":
+                        depth, i = depth - 1, i + 2
+                    else:
+                        i += 1
+                continue
+            elif ch == "'":
+                state = "squote"
+                i += 1
+            elif ch == '"':
+                state = "dquote"
+                i += 1
+            else:
+                m = _DOLLAR_OPEN_RE.match(sql, i)
+                if m:
+                    dollar_tag = m.group(0)
+                    state = "dollar"
+                    i = m.end()
+                else:
+                    i += 1
+        elif state == "squote":
+            if ch == "'":
+                if two == "''":  # doubled quote: escaped, still in-string
+                    i += 2
+                else:
+                    state = "code"
+                    i += 1
+            else:
+                i += 1
+        elif state == "dquote":
+            if ch == '"':
+                if two == '""':  # doubled quote: escaped, still in-identifier
+                    i += 2
+                else:
+                    state = "code"
+                    i += 1
+            elif ch in ("'", "$") or two in ("--", "/*"):
+                return True  # hazard inside a quoted identifier
+            else:
+                i += 1
+        elif state == "line_comment":
+            if ch == "\n":
+                state = "code"
+            i += 1
+        else:  # dollar body — exact-tag close only
+            if sql.startswith(dollar_tag, i):
+                i += len(dollar_tag)
+                state = "code"
+            else:
+                i += 1
+    return False
+
 
 def is_plain_read(sql: str) -> bool:
-    """True iff sql is a plain read: not DDL-shaped (is_ddl_shaped), no
-    forbidden write/function token in top-level code position, no forbidden
-    function/body token inside any dollar-quoted body, and every top-level
-    statement starts with a read keyword (SELECT/WITH/TABLE/VALUES). Empty or
-    whitespace-only sql is NOT a plain read."""
+    """True iff sql is a plain read: not lexically hazardous, not DDL-shaped
+    (is_ddl_shaped), no forbidden write/function token in top-level code
+    position, no forbidden function/body token inside any dollar-quoted body,
+    and every top-level statement starts with a read keyword
+    (SELECT/WITH/TABLE/VALUES). Empty or whitespace-only sql is NOT a plain
+    read."""
+    # (0) lexical hazard pre-screen (Critical #1): refuse the input class
+    #     that can blind the vendored lexer BEFORE any vendored call — the
+    #     class defeats is_ddl_shaped below in the same stroke.
+    if "\\" in sql or _lexically_hazardous(sql):
+        return False
+
     # (a) DDL of any kind — top-level or inside a dollar body — via the
     #     vendored classifier itself.
     if is_ddl_shaped(sql):
