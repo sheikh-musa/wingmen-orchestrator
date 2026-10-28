@@ -510,7 +510,11 @@ def schema_drift_plan(table, drift, state):
 def schema_drift_watch(dry=False, read_live=None, send=None):
     """Impure. Returns tables paged. A failure here is printed loud and never fatal."""
     import json
-    from scripts import snapshot_live_checks
+    try:
+        from scripts import snapshot_live_checks
+    except Exception as e:  # noqa: BLE001 — never fatal to the sweep (console #80071)
+        print(f"SCHEMA DRIFT WATCH could not import snapshot_live_checks: {type(e).__name__}: {e}")
+        return []
     read_live = read_live or snapshot_live_checks.read_live
     try:
         state = json.loads(SCHEMA_DRIFT_STATE.read_text()) if SCHEMA_DRIFT_STATE.exists() else {}
@@ -555,6 +559,16 @@ def schema_drift_watch(dry=False, read_live=None, send=None):
         except Exception as e:  # noqa: BLE001
             print(f"SCHEMA DRIFT WATCH state write FAILED: {type(e).__name__}: {e}")
     return paged
+
+
+def run_schema_drift_step():
+    """The sweep's step-9 call: anything schema_drift_watch() fails to contain is printed LOUD
+    and the rest of the sweep keeps running (console #80071)."""
+    try:
+        return schema_drift_watch()
+    except Exception as e:  # noqa: BLE001
+        print(f"SCHEMA DRIFT WATCH FAILED (sweep continues): {type(e).__name__}: {e}")
+        return []
 
 
 def main():
@@ -697,7 +711,7 @@ def main():
         print("IDLE-IN-TX WARN: " + w)
     if idle_paged:
         print("IDLE-IN-TX WATCH paged orch-console: pids " + ", ".join(map(str, idle_paged)))
-    drift_paged = schema_drift_watch()
+    drift_paged = run_schema_drift_step()
     if drift_paged:
         print("SCHEMA DRIFT WATCH paged orch-console: " + ", ".join(drift_paged))
 

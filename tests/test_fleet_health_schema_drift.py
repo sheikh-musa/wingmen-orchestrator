@@ -81,3 +81,27 @@ def test_a_failed_page_is_not_remembered_so_it_retries(monkeypatch, tmp_path):
     assert fh.schema_drift_watch(read_live=lambda d, t: live, send=fail) == []
     ok = []
     assert fh.schema_drift_watch(read_live=lambda d, t: live, send=lambda *a, **k: ok.append(a)) == ["operator_asks"]
+
+
+def test_an_import_failure_is_loud_and_not_fatal(monkeypatch, tmp_path, capsys):
+    import sys
+    monkeypatch.setattr(fh, "SCHEMA_DRIFT_STATE", tmp_path / "s.json")
+    monkeypatch.setitem(sys.modules, "scripts.snapshot_live_checks", None)   # import -> ImportError
+    # `from scripts import X` reads the package attribute first, so drop that too
+    monkeypatch.delattr(sys.modules["scripts"], "snapshot_live_checks", raising=False)
+    assert fh.schema_drift_watch() == []
+    assert "could not import snapshot_live_checks" in capsys.readouterr().out
+
+
+def test_the_sweep_step_contains_any_escape_and_continues(monkeypatch, capsys):
+    def escape(*a, **k):
+        raise RuntimeError("unexpected")
+    monkeypatch.setattr(fh, "schema_drift_watch", escape)
+    assert fh.run_schema_drift_step() == []
+    assert "SCHEMA DRIFT WATCH FAILED (sweep continues)" in capsys.readouterr().out
+
+
+def test_main_calls_the_contained_step_not_the_raw_watch():
+    import inspect
+    src = inspect.getsource(fh.main)
+    assert "run_schema_drift_step()" in src and "schema_drift_watch()" not in src
