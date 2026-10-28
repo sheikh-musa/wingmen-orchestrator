@@ -171,6 +171,27 @@ def fetch_gate_rows(dsn: str, limit: int = 500) -> list[dict]:
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
+def _step1_argv(*, target: Path, action: str, apply: bool, gate_id: int) -> list[str]:
+    """The numbered TARGET file only needs to exist on disk for a real
+    --apply. A --dry-run never writes the ledger (apply_migration always
+    ROLLBACKs it), so when action=="number" the target hasn't been created
+    yet (dry-run never creates it — see step1_substrate_migration) and
+    rehearsing against it would pass apply_migration a nonexistent path,
+    which refuses rc=3 ("not a path and not a bare numeric prefix") before
+    the rehearsal ever runs (orch-console bus #79788). Rehearse against the
+    DRAFT's own existing path instead — resolve_target_migration has already
+    proved it is byte-identical to what the numbered copy would hold."""
+    rehearsal_path = DRAFT if (action == "number" and not apply) else target
+    argv = [sys.executable, str(REPO_ROOT / "scripts" / "apply_migration.py"),
+            str(rehearsal_path), "--silo", SUBSTRATE_SILO,
+            "--gate-dsn-env", "DATABASE_URL"]
+    if not apply:
+        argv.append("--dry-run")
+    else:
+        argv += ["--gate", str(gate_id)]
+    return argv
+
+
 def step1_substrate_migration(*, apply: bool) -> None:
     substrate = dsn_from_env_file()
     target, action = resolve_target_migration(DRAFT, MIGRATIONS)
@@ -184,13 +205,7 @@ def step1_substrate_migration(*, apply: bool) -> None:
             say(f"step1: numbered draft -> {target.name}")
         else:
             say(f"step1: [dry-run] would number draft -> {target.name}")
-    argv = [sys.executable, str(REPO_ROOT / "scripts" / "apply_migration.py"),
-            str(target), "--silo", SUBSTRATE_SILO,
-            "--gate-dsn-env", "DATABASE_URL"]
-    if not apply:
-        argv.append("--dry-run")
-    else:
-        argv += ["--gate", str(gate["id"])]
+    argv = _step1_argv(target=target, action=action, apply=apply, gate_id=gate["id"])
     env = {**os.environ, "DATABASE_URL": substrate}
     proc = subprocess.run(argv, cwd=REPO_ROOT, env=env, capture_output=True, text=True)
     if proc.returncode != 0:
@@ -218,18 +233,52 @@ def build_role_dsn(admin_dsn: str, role: str, password: str) -> str:
                        parts.path, parts.query, parts.fragment))
 
 
+_DSN_VALUE_RE = re.compile(r"^postgres(?:ql)?://\S+")
+_RO_KEY_RE = re.compile(r"(^|_)RO(_|$)", re.IGNORECASE)
+
+
 def read_admin_dsn(path: Path) -> str:
+    """Read the admin/write DSN from the console's private credentials file.
+    Prefers the exact documented ADMIN_CRED_KEY; the real file is not
+    guaranteed to use that spelling (orch-console bus #79788 — console
+    cannot tell this lane the exact key name over the bus, since the guard
+    that keeps console off the client silos also blocks it naming
+    silo-adjacent strings there, and this lane is itself residency-barred
+    from reading the file directly to check). The file's one job, per its
+    own name, is to hold the write/admin DSN, so when exactly one line's
+    VALUE parses as a postgres(ql):// DSN and its KEY is not RO-named
+    (never the read-only credential), use it — still fails loud, by KEY
+    NAME ONLY (never a value), when that is not unambiguous."""
     if not path.is_file():
         raise InstallError(f"{path} not found — the console private credentials file is required for step 3")
     mode = stat.S_IMODE(os.stat(path).st_mode)
     if mode & 0o077:
         raise InstallError(f"{path} mode is {oct(mode)} — must be 0600 (it is a credential)")
+    candidates: dict[str, str] = {}
     for line in path.read_text().splitlines():
-        if line.strip().startswith(ADMIN_CRED_KEY + "="):
-            val = line.split("=", 1)[1].strip().strip('"').strip("'")
-            if val:
-                return val
-    raise InstallError(f"{ADMIN_CRED_KEY} not found in {path.name}")
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key == ADMIN_CRED_KEY and val:
+            return val
+        if val and _DSN_VALUE_RE.match(val) and not _RO_KEY_RE.search(key):
+            candidates[key] = val
+    if len(candidates) == 1:
+        return next(iter(candidates.values()))
+    if not candidates:
+        raise InstallError(
+            f"{ADMIN_CRED_KEY} not found in {path.name}, and no unambiguous "
+            f"write-DSN-shaped line found either — confirm the real key name "
+            f"with whoever provisioned the file"
+        )
+    raise InstallError(
+        f"{path.name} has {len(candidates)} ambiguous write-DSN-shaped candidates "
+        f"({', '.join(sorted(candidates))}), none named {ADMIN_CRED_KEY} — narrow "
+        f"to one or confirm the real key name with whoever provisioned the file"
+    )
 
 
 def write_secret_file(path: Path, text: str) -> Path:

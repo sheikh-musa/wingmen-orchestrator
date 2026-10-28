@@ -139,6 +139,41 @@ def test_discover_gate_takes_newest_within_age_floor():
     assert inst.discover_gate(rows, sha12, now=NOW)["id"] == 401
 
 
+def test_step1_argv_rehearses_against_the_draft_when_unnumbered_dry_run():
+    # orch-console bus #79788: dry-run on an unnumbered draft said "would
+    # number draft -> 128_...sql" but never created that file, then still
+    # passed the (nonexistent) numbered path to apply_migration.py, which
+    # refused rc=3 ("not a path and not a bare numeric prefix") -- the
+    # rehearsal never ran. The numbered TARGET only needs to exist on disk
+    # for a REAL --apply; a --dry-run never writes the ledger (it always
+    # ROLLBACKs), so rehearsing against the draft's own existing path is
+    # exactly as safe and exercises identical bytes (resolve_target_migration
+    # already proved same-sha before this is ever called).
+    target = pathlib.Path("/repo/migrations/128_ceayj_provisioner_access_log.sql")
+    argv = inst._step1_argv(target=target, action="number", apply=False, gate_id=999)
+    assert str(inst.DRAFT) in argv
+    assert str(target) not in argv
+    assert "--dry-run" in argv
+
+
+def test_step1_argv_uses_numbered_target_on_apply():
+    target = pathlib.Path("/repo/migrations/128_ceayj_provisioner_access_log.sql")
+    argv = inst._step1_argv(target=target, action="number", apply=True, gate_id=999)
+    assert str(target) in argv
+    assert str(inst.DRAFT) not in argv
+    assert "--gate" in argv and "999" in argv
+
+
+def test_step1_argv_reuses_numbered_target_on_dry_run_when_already_numbered():
+    # action="reuse" means the numbered copy already exists on disk (prior
+    # run numbered it) -- the existing bug was specific to action="number"
+    # (nothing numbered yet); "reuse" rehearses against the real target.
+    target = pathlib.Path("/repo/migrations/128_ceayj_provisioner_access_log.sql")
+    argv = inst._step1_argv(target=target, action="reuse", apply=False, gate_id=999)
+    assert str(target) in argv
+    assert "--dry-run" in argv
+
+
 def test_discover_gate_age_check_converts_non_utc_aware_timestamps():
     # cc-quality Nit2 (#79345): psycopg returns timestamptz as an AWARE
     # datetime that may carry a non-UTC offset (e.g. a DB/session set to
@@ -202,6 +237,55 @@ def test_read_admin_dsn_refuses_loose_mode_and_missing_key(tmp_path):
     os.chmod(g, 0o600)
     with pytest.raises(inst.InstallError, match="IHSANOS_PROD_DATABASE_URL"):
         inst.read_admin_dsn(g)
+
+
+def test_read_admin_dsn_prefers_the_exact_documented_key_when_present(tmp_path):
+    f = tmp_path / "write_dsn.env"
+    f.write_text(
+        "IHSANOS_PROD_DATABASE_URL=" + _dsn("postgres.t", "x") + "\n"
+        "SOME_OTHER_WRITE_VAR=" + _dsn("postgres.t", "y") + "\n"
+    )
+    os.chmod(f, 0o600)
+    assert inst.read_admin_dsn(f).endswith(_dsn("postgres.t", "x"))
+
+
+def test_read_admin_dsn_falls_back_to_the_one_unambiguous_write_shaped_key(tmp_path):
+    # orch-console bus #79788: the real file does not use the documented
+    # ADMIN_CRED_KEY name. The file's one job (per its own filename) is to
+    # hold the write/admin DSN, so when exactly one line's VALUE parses as a
+    # postgres(ql):// DSN and its KEY is not RO-named, use it regardless of
+    # the exact key spelling -- still fails loud (below) when that is not
+    # unambiguous.
+    f = tmp_path / "write_dsn.env"
+    f.write_text(
+        "SOME_UNEXPECTED_KEY_NAME=" + _dsn("postgres.t", "x") + "\n"
+        "NOTES=not a dsn\n"
+    )
+    os.chmod(f, 0o600)
+    assert inst.read_admin_dsn(f).endswith(_dsn("postgres.t", "x"))
+
+
+def test_read_admin_dsn_excludes_ro_named_keys_from_the_fallback(tmp_path):
+    f = tmp_path / "write_dsn.env"
+    f.write_text("IHSANOS_PROD_RO_DATABASE_URL=" + _dsn("postgres.t", "x") + "\n")
+    os.chmod(f, 0o600)
+    with pytest.raises(inst.InstallError, match="IHSANOS_PROD_DATABASE_URL"):
+        inst.read_admin_dsn(f)
+
+
+def test_read_admin_dsn_refuses_ambiguous_write_shaped_candidates_by_name_only(tmp_path):
+    f = tmp_path / "write_dsn.env"
+    f.write_text(
+        "KEY_ONE=" + _dsn("postgres.t", "x") + "\n"
+        "KEY_TWO=" + _dsn("postgres.t", "y") + "\n"
+    )
+    os.chmod(f, 0o600)
+    with pytest.raises(inst.InstallError, match="KEY_ONE") as exc:
+        inst.read_admin_dsn(f)
+    assert "KEY_TWO" in str(exc.value)
+    # the error names the candidate KEYS only, never a value
+    assert "postgresql://" not in str(exc.value)
+    assert "ambiguous" in str(exc.value)
 
 
 def test_write_secret_file_enforces_0700_dir_0600_file(tmp_path):
