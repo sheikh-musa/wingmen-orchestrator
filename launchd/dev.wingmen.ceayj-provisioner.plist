@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  dev.wingmen.ceayj-provisioner — op#34565 option b (ceayj tenant-provisioner), gate bus #78463.
+
+  The unix-socket provisioner daemon: serves provision/revert verbs for
+  ceayj tenants behind a peer-uid ACL (macOS LOCAL_PEERCRED — SOL_LOCAL 0,
+  option 0x001; see scripts/lib/provisioner/peer.py) + per-verb console/cai
+  GO gate-binding (store ref + client_key + bundle sha256 + one-artifact-
+  per-gate spend). Verbs render their own SQL from specs; nothing
+  caller-supplied ever crosses the store wire.
+
+  LOADED + OWNED by cc-fleet-health (ops) AFTER orch-console gates + merges
+  the PR — that install/load step, plus minting the two credentials below,
+  is orch-console's. DO NOT load this from a build lane.
+
+  PATHS ARE FOR THE MINI (user sheikhmusa). IF YOU LOAD THIS FROM A
+  DIFFERENT HOST, RE-VERIFY EVERY PATH FIRST (residency_sweep precedent).
+
+  KeepAlive true: a socket server that is not up is a denied service; it
+  must restart on crash. RunAtLoad true so loaded == listening in one act.
+
+  NEVER put a DSN in this 0644 plist. Two credentials, both OUTSIDE it:
+  - bus DATABASE_URL: provisioner_daemon.py resolves it fresh per
+    connection via substrate_dsn.dsn_from_env_file() (the .env, 0600).
+  - store admin-write DSN: PROVISIONER_STORE_DSN_FILE below — a 0600 file
+    minted by orch-console at install (the build lane is residency-barred
+    from the ceayj admin DSN; the daemon reads it, nothing logs it, and
+    protocol.encode_error strips DSN-shaped text before the wire).
+
+  The socket lives under .secrets/ (0700 dir): filesystem permission is
+  defense-in-depth UNDER the peer-uid ACL — never a substitute for it.
+-->
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.wingmen.ceayj-provisioner</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>scripts/provisioner_daemon.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>EnvironmentVariables</key><dict>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>PROVISIONER_SOCKET</key><string>/Users/sheikhmusa/wingmen/orchestrator/.secrets/provisioner.sock</string>
+    <key>PROVISIONER_ALLOWED_UIDS</key><string>501</string>
+    <key>PROVISIONER_STORE_DSN_FILE</key><string>/Users/sheikhmusa/wingmen/orchestrator/.secrets/ceayj_admin_write.dsn</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/ceayj-provisioner.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/ceayj-provisioner.out.log</string>
+</dict></plist>
