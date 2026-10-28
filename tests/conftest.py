@@ -8,6 +8,7 @@ import socket
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -54,6 +55,35 @@ def _reap_orphaned_pg_clusters():
         import warnings
         warnings.warn(f"pgtest orphan sweep skipped: {e!r}")
 
+
+
+# Live-trigger exclusions for apply_live_checks(): each must be justified, and the parity test
+# re-asserts the justification against the snapshot so it can't go stale silently.
+NOT_MIRRORED_TRIGGERS = {
+    # AFTER trigger whose body swallows every exception (EXCEPTION WHEN OTHERS -> RAISE WARNING),
+    # so it can never block an operator_asks write; mirroring it would pull in mig114's whole
+    # work_item schema.
+    "work_item_mirror_ask_trg": "non-blocking AFTER mirror (EXCEPTION WHEN OTHERS)",
+}
+
+
+def live_checks_snapshot(table):
+    import json
+    p = Path(__file__).resolve().parent / "fixtures" / "schema" / f"{table}.live.json"
+    return json.loads(p.read_text())
+
+
+def apply_live_checks(cur, table):
+    """Add every live CHECK constraint (by its live name) and every live trigger + function
+    (except NOT_MIRRORED_TRIGGERS) from the committed snapshot to the fixture table."""
+    snap = live_checks_snapshot(table)
+    for name, definition in sorted(snap["checks"].items()):
+        cur.execute(f"ALTER TABLE {table} ADD CONSTRAINT {name} {definition}")
+    for name, trg in sorted(snap["triggers"].items()):
+        if name in NOT_MIRRORED_TRIGGERS:
+            continue
+        cur.execute(trg["function_def"])
+        cur.execute(trg["def"])
 
 @pytest.fixture(scope="session")
 def pg_dsn():
@@ -204,23 +234,29 @@ def operator_ledger_db(pg_dsn, monkeypatch):
                 waiting_on_operator boolean NOT NULL DEFAULT false,
                 chase_by            timestamptz,
                 outbound_msg_id     bigint,
-                triage_state        text NOT NULL DEFAULT 'captured'
-                                    CHECK (triage_state IN ('captured','ask','not_an_ask','done')),
+                triage_state        text NOT NULL DEFAULT 'captured',
                 triage_summary      text,
                 triage_evidence_ref text,
                 triaged_at          timestamptz,
                 triaged_by          text,
-                ask_surface         text NOT NULL DEFAULT 'operator'
-                                    CHECK (ask_surface IN ('operator','client-channel')),
-                committed_date      timestamptz
-                                    CHECK (committed_date IS NULL OR outbound_msg_id IS NOT NULL),
+                ask_surface         text NOT NULL DEFAULT 'operator',
+                committed_date      timestamptz,
                 -- migration 118 (needs-Musa flag + plain-language hero line)
                 needs_operator_decision boolean NOT NULL DEFAULT false,
                 operator_summary    text,
                 delivered_at        timestamptz,
-                slow_paged_at       timestamptz
+                slow_paged_at       timestamptz,
+                -- migration 127 (delivery provenance)
+                delivered_source       text,
+                delivered_evidence_ref text,
+                delivered_backfilled   boolean NOT NULL DEFAULT false,
+                no_deliverable_reason  text
             )
         """)
+        # CHECKs + triggers are NOT hand-copied: they come from the live snapshot
+        # (scripts/snapshot_live_checks.py), so the fixture can't silently lack a live check
+        # again (orch-console #79986). Parity: tests/test_operator_asks_fixture_parity.py.
+        apply_live_checks(cur, "operator_asks")
         cur.execute("""
             CREATE UNIQUE INDEX operator_asks_source_ask_uniq
               ON operator_asks (source_msg_id, ask)

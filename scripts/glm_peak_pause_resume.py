@@ -61,8 +61,10 @@ STATE_FILE = Path.home() / "wingmen" / "fleet-health" / "state" / "glm_peak_paus
 
 # glm-rollout-plan-20261013 line 35, standing doctrine: never move these onto GLM,
 # whatever a pointer file says. Exact lane names, not prefixes, except irsyad* which
-# is a whole family bar.
-HARD_EXCLUDE_LANES = {"cosem-adcda-photos", "cc-fleet-health"}
+# is a whole family bar. cc-paperclip-spike: orch-console ruling #79984 (2026-10-28) — its live
+# scope is operator/irsyad-adjacent, so Claude-only until that scope shrinks back to the
+# isolated spike (this also matches provider_policy, which fails it closed: no #79888 divergence).
+HARD_EXCLUDE_LANES = {"cosem-adcda-photos", "cc-fleet-health", "cc-paperclip-spike"}
 HARD_EXCLUDE_PREFIXES = ("irsyad", "hub", "console", "orch-console")
 
 
@@ -252,26 +254,83 @@ def check_hard_exclude_divergence(session: str, apply: bool) -> None:
               file=sys.stderr)
 
 
+def check_glm_policy(session: str) -> None:
+    """Impure: the same provider_policy resolution switch_lane_token.sh's flip-time gate
+    runs, read BEFORE anything is written. Raises ProviderNotAllowedError /
+    ProviderPolicyMisconfigured on a refusal, any other exception if the policy is
+    unreadable; returns None if the lane may use GLM."""
+    from scripts.lib import provider_policy as pp
+    policy_rows, override_rows = pp._default_fetch_rows()
+    pp.assert_glm_allowed(session, policy_rows=policy_rows, override_rows=override_rows)
+
+
+# switch_lane_token.sh exit codes that provably fire BEFORE its kill-session (so the lane
+# is untouched and the prior pointer is still the truth): 1 no session, 2 usage, 3/4 token,
+# 5 composer hold, 9 orch/lib missing. Exit 7 is BOTH the pre-kill policy-gate refusal AND
+# the post-kill new-session failure, so it only counts as pre-kill with the gate's message.
+_PRE_RELAUNCH_RCS = {1, 2, 3, 4, 5, 9}
+_GATE_REFUSED_MARK = "REFUSED by the provider_policy gate"
+
+
+def _restore_pointer(ptr: Path, prior: Optional[bytes]) -> None:
+    if prior is None:
+        ptr.unlink(missing_ok=True)
+    else:
+        ptr.write_bytes(prior)
+
+
 def flip_back_to_glm(session: str, orch_dir: Path, apply: bool, run=subprocess.run,
                       token_resolver=resolve_default_token,
-                      divergence_check=check_hard_exclude_divergence) -> Dict[str, str]:
+                      divergence_check=check_hard_exclude_divergence,
+                      policy_check=check_glm_policy) -> Dict[str, str]:
     divergence_check(session, apply)
     if is_hard_excluded(session):
         return {"session": session, "result": "SKIPPED", "detail": "hard-excluded lane — never flips to GLM"}
     if not apply:
         return {"session": session, "result": "DRY", "detail": "would flip back to glm-5.3"}
+    # #79897: the policy check runs BEFORE the pointer write — a refused flip used to leave
+    # .<session>_model=glm-5.3 behind on a lane that stayed on Claude.
+    from scripts.lib import provider_policy as pp
+    try:
+        policy_check(session)
+    except (pp.ProviderNotAllowedError, pp.ProviderPolicyMisconfigured) as e:
+        return {"session": session, "result": "REFUSED",
+                "detail": f"provider_policy refuses GLM, stays on Claude, pointer untouched: {e}"}
+    except Exception as e:  # noqa: BLE001 — unreadable policy = fail closed, never flip blind
+        return {"session": session, "result": "FAILED",
+                "detail": f"policy check failed, not flipping, pointer untouched: {e}"}
     try:
         token = token_resolver(session, orch_dir)
     except Exception as e:  # noqa: BLE001 — fail loud on this lane, keep going for the rest
         return {"session": session, "result": "FAILED", "detail": f"token resolve failed: {e}"}
-    (orch_dir / f".{session}_model").write_text("glm-5.3")
+    # switch_lane_token.sh reads the pointer to pick the model, so it must be written first;
+    # keep the prior bytes (or its absence) to put back if the switch never touched the lane.
+    ptr = orch_dir / f".{session}_model"
+    prior = ptr.read_bytes() if ptr.exists() else None
+    ptr.write_text("glm-5.3")
     env = dict(os.environ, CC_BASE_AGENT_ID="cc-fleet-health")
-    cp = run([str(orch_dir / "scripts" / "switch_lane_token.sh"), "--model-apply", "--drain",
-              session, token], capture_output=True, text=True, timeout=420, env=env, cwd=str(orch_dir))
-    ok = cp.returncode == 0
-    tail = (cp.stdout + cp.stderr).strip().splitlines()[-1:] if (cp.stdout or cp.stderr) else []
-    return {"session": session, "result": "OK" if ok else "FAILED",
-            "detail": f"token={os.path.basename(token)}; switch rc={cp.returncode}" + (f": {tail[0][:160]}" if tail and not ok else "")}
+    try:
+        cp = run([str(orch_dir / "scripts" / "switch_lane_token.sh"), "--model-apply", "--drain",
+                  session, token], capture_output=True, text=True, timeout=420, env=env, cwd=str(orch_dir))
+    except subprocess.TimeoutExpired:
+        return {"session": session, "result": "FAILED",
+                "detail": "switch timed out after 420s — lane may be mid-relaunch; pointer left at "
+                          "glm-5.3, VERIFY the lane's model + pointer by hand"}
+    except Exception as e:  # noqa: BLE001 — the switch never started, the lane is untouched
+        _restore_pointer(ptr, prior)
+        return {"session": session, "result": "FAILED", "detail": f"switch did not start ({e}); pointer restored"}
+    if cp.returncode == 0:
+        return {"session": session, "result": "OK",
+                "detail": f"token={os.path.basename(token)}; switch rc=0"}
+    out = (cp.stdout or "") + (cp.stderr or "")
+    tail = out.strip().splitlines()[-1:]
+    why = f"token={os.path.basename(token)}; switch rc={cp.returncode}" + (f": {tail[0][:160]}" if tail else "")
+    if cp.returncode in _PRE_RELAUNCH_RCS or (cp.returncode == 7 and _GATE_REFUSED_MARK in out):
+        _restore_pointer(ptr, prior)
+        return {"session": session, "result": "FAILED", "detail": f"{why}; lane untouched, pointer restored"}
+    return {"session": session, "result": "FAILED",
+            "detail": f"{why}; failed AFTER the relaunch step — pointer left at glm-5.3, VERIFY the "
+                      f"lane's live model + pointer by hand"}
 
 
 def resume_pause(session: str, apply: bool) -> Dict[str, str]:

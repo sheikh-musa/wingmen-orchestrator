@@ -219,4 +219,7 @@ if ! apply_provider_routing "$MODEL" "$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" "
     exit 1
 fi
 [ -n "${PROVIDER_ROUTING_LABEL:-}" ] && echo "[boot_cai] provider-routed: $PROVIDER_ROUTING_LABEL (model $MODEL)" >&2
+# Pin this singleton's tmux window to 200x50 before claude starts (orch-console #79940): an 80x24
+# window lets stale render residue sit on the composer border and lane_nudge refuses every nudge.
+source "$ORCH_DIR/scripts/lib/pin_singleton_window_size.sh"
 claude --dangerously-skip-permissions --model "$MODEL"

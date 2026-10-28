@@ -121,6 +121,10 @@ VENV_PY="$ORCH_DIR/.venv/bin/python3"
 #    orch-console owns/verifies + deploys.]
 source "$ORCH_DIR/scripts/lib/pin_fleet_host_id.sh"
 
+# Pin this singleton's tmux window to 200x50 before claude starts (orch-console #79940): an 80x24
+# window lets stale render residue sit on the composer border and lane_nudge refuses every nudge.
+source "$ORCH_DIR/scripts/lib/pin_singleton_window_size.sh"
+
 _console_heartbeat_loop() {
     while true; do
         sleep 300
