@@ -45,6 +45,11 @@ while [ $# -gt 0 ]; do
     *) _POSITIONAL+=("$1"); shift ;;
   esac
 done
+# --ask takes the ask TEXT as its value. `--ask --chase-hours 24 "msg"` once made
+# '--chase-hours' the ask, sent the operator a bare "24", and dropped the real
+# message (2026-10-27, op-msg 34668). Fail loud before anything is sent.
+case "$ASK" in --*) echo "nazim_send: --ask needs the ask text as its value (got flag '$ASK') — nothing sent" >&2; exit 2 ;; esac
+[ -z "$CHASE_HOURS" ] || [[ "$CHASE_HOURS" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "nazim_send: --chase-hours must be a number (got '$CHASE_HOURS') — nothing sent" >&2; exit 2; }
 if [ "${#_POSITIONAL[@]}" -gt 0 ]; then
   set -- "${_POSITIONAL[@]}"
 else
