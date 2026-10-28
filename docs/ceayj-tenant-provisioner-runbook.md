@@ -38,8 +38,11 @@ printf '%s\n' "$REQ" | socat - UNIX-CONNECT:~/wingmen/orchestrator/.secrets/prov
 
 `gate_id` must name an agent_messages row: from orch-console or cai,
 message_type decision/agreed, created in the past, whose subject+body
-mentions **the store ref (or its alias), the client_key, and the full 64-hex
-sha256 of the bundle as rendered by the code at request time**. The sha bind
+mentions **the store ref (or its alias), the client_key, the VERB
+(provision or revert — a GO for one never authorizes the other; the sha
+alone cannot separate them because it is always the FORWARD artifact's),
+and the full 64-hex sha256 of the bundle as rendered by the code at request
+time**. The sha bind
 is anti-drift: a GO written before a spec/template change silently stops
 matching the re-rendered artifact — re-approve or revert the change. A gate
 is spent once any attempt for it reaches `started` that didn't end in
@@ -70,7 +73,14 @@ at the DB level.
 - Revert: `{"verb":"revert",...}` with a FRESH GO (same binding rules; the
   revert twin keeps migration_ledger — it is store infra, not the client's).
 - Audit trail: substrate `provisioner_access_log` (who/what/gate/verdict) +
-  store `migration_ledger` (what applied where).
+  store `migration_ledger` (what applied where). The caller-supplied
+  `reason` free-text lands in the ledger VERBATIM — callers must not put
+  tenant data or credentials in it (cc-quality Minor c).
+- **Posture note (cc-quality review, PR#566)**: with
+  PROVISIONER_ALLOWED_UIDS=501, every fleet process on the Mini passes the
+  peer-uid ACL — the effective authorization boundary is the GO gate alone.
+  If ops wants a real second boundary, run the daemon under a dedicated
+  service user and set the allowlist to that uid (orch-console/ops call).
 
 ## Ruled by orch-console (bus #79050, 2026-10-28) — no longer open
 

@@ -174,7 +174,9 @@ def test_happy_path_provision_applies_the_bundle_and_audits():
 
 def test_happy_path_revert_applies_the_revert_twin():
     bundle = render_bundle(_spec())
-    bus_results = [{"id": 8}, None, _go_row(bundle)]
+    go = _go_row(bundle, subject="GO: revert bariq tenant",
+                 body=f"approved revert of bundle bariq {_REF} sha256 {bundle.sha256}")
+    bus_results = [{"id": 8}, None, go]
     srv, bus, store = _server(bus_results)
     resp = _run(srv, _request(verb="revert"))
     assert resp["status"] == "ok" and resp["verb"] == "revert"

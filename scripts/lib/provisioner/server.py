@@ -156,7 +156,7 @@ class ProvisionerServer:
                                                f"'{req.verb}' — one artifact per gate")
                     return
                 try:
-                    require_provision_gate(req.gate_id, spec=spec, bundle=bundle, cur=cur)
+                    require_provision_gate(req.gate_id, spec=spec, bundle=bundle, verb=req.verb, cur=cur)
                 except Exception as e:  # noqa: BLE001 -- Refuse and transient DB alike
                     self._finalize_and_respond(conn, bus, cur, row_id, ErrorCode.GATE_INVALID, str(e))
                     return

@@ -120,6 +120,16 @@ def test_bundle_applies_and_reverts_on_pg17(store):
         with conn.cursor() as cur:
             cur.execute(bundle.forward_sql)
         conn.commit()
+        # re-apply then DOUBLE revert back-to-back: the second revert is a
+        # no-op, not an error (cc-quality Medium 2: REVOKE against a role
+        # the first revert already dropped raised UndefinedObject — fails
+        # closed in-server but is not idempotent)
+        with conn.cursor() as cur:
+            cur.execute(bundle.revert_sql)
+        conn.commit()
+        with conn.cursor() as cur:
+            cur.execute(bundle.revert_sql)
+        conn.commit()
 
 
 def test_editor_least_privilege_roundtrip_on_pg17(store):

@@ -44,13 +44,17 @@ def require_provision_gate(
     *,
     spec: ClientSpec,
     bundle: Bundle,
+    verb: str,
     cur,
 ) -> None:
     """Re-fetches gate_id from the fleet bus via `cur` (a psycopg cursor
     opened with row_factory=psycopg.rows.dict_row) and validates the GO
     binds THIS client (spec), THIS store (bundle.silo_ref, registry-loaded
-    at render time), and THESE artifact bytes (bundle.sha256). Raises Refuse
-    on any failure, before any store connection is opened."""
+    at render time), THESE artifact bytes (bundle.sha256), and THIS VERB —
+    a provision GO must never authorize a revert, whose blast radius is the
+    whole tenant (cc-quality BLOCKER 1, PR#566 review; the sha alone cannot
+    separate them because it is always the FORWARD artifact's). Raises
+    Refuse on any failure, before any store connection is opened."""
     if not gate_id or not str(gate_id).isdigit():
         raise Refuse(f"gate_id {gate_id!r} must be a positive integer agent_messages id")
 
@@ -85,6 +89,13 @@ def require_provision_gate(
         raise Refuse(
             f"gate {gate_id} does not mention client_key {spec.client_key!r} — "
             "a GO for a different client on the same store authorizes nothing here"
+        )
+    if verb not in ("provision", "revert"):
+        raise Refuse(f"unknown verb {verb!r} — the gate binds provision/revert only")
+    if not _mentions_word(text, verb):
+        raise Refuse(
+            f"gate {gate_id} does not mention the verb {verb!r} — a GO for one "
+            "verb never authorizes the other (revert drops the tenant)"
         )
     if bundle.sha256.lower() not in text.lower():
         raise Refuse(

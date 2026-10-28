@@ -21,7 +21,9 @@ from .registry import Refuse, store_ref
 
 _SPECS_DIR = Path(__file__).resolve().parent / "specs"
 
-_KEY_RE = re.compile(r"^[a-z][a-z0-9-]{3,15}$")
+# identifier-safe unquoted set only: a hyphen would render invalid DDL
+# (cc-quality Minor b, PR#566) — refuse at validation, not at apply-time
+_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{3,15}$")
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 

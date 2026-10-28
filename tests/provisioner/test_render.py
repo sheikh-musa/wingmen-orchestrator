@@ -85,3 +85,31 @@ def test_renderer_refuses_an_unpinned_policy_template(monkeypatch):
     ])
     with pytest.raises(Refuse):
         render_mod.render_bundle(BARIQ)
+
+
+def test_audit_function_execute_revoked_from_public_too():
+    # cc-quality Minor a (PR#566): function EXECUTE defaults to PUBLIC, and
+    # revoking anon/authenticated alone leaves the anon-reachable path open
+    # per the standing SECDEF rule — the fn is trigger-only today, but the
+    # lockdown must not depend on reachability
+    out = render_mod.render_bundle(BARIQ)
+    assert (f"REVOKE ALL ON FUNCTION {BARIQ.content_table}_audit() "
+            "FROM anon, authenticated, PUBLIC;") in out.forward_sql
+
+
+def test_spec_rejects_hyphenated_client_keys():
+    # cc-quality Minor b: a hyphen renders invalid unquoted DDL — refuse at
+    # validation, not at apply-time parse (identifier-safe set: lower + digit
+    # + underscore, leading letter)
+    from provisioner.spec import ClientSpec
+    base = dict(
+        client_key="bad-key",
+        alias="ihsanos multi-tenant DB",
+        org_uuid="6261642d-7100-4000-8000-000000000001",  # hex("bad-") — shape-valid
+        org_name="Bad Hyphen Pte. Ltd.",
+        org_uen="202219999Z",
+        org_slug="bad-hyphen",
+        seed_keys=["site"],
+    )
+    with pytest.raises(Refuse):
+        ClientSpec.from_dict(base)

@@ -75,15 +75,16 @@ def _go_row(**overrides):
     return row
 
 
-def _call(row, gate_id="78463", bundle=None):
+def _call(row, gate_id="78463", bundle=None, verb="provision"):
     return gate_mod.require_provision_gate(gate_id, spec=_spec(),
-                                           bundle=bundle or _bundle(),
+                                           bundle=bundle or _bundle(), verb=verb,
                                            cur=FakeCursor(row))
 
 
 def test_gate_happy_path_reads_the_bus_row():
     cur = FakeCursor(_go_row())
-    gate_mod.require_provision_gate("78463", spec=_spec(), bundle=_bundle(), cur=cur)
+    gate_mod.require_provision_gate("78463", spec=_spec(), bundle=_bundle(),
+                                    verb="provision", cur=cur)
     sql, params = cur.executed
     assert "FROM agent_messages WHERE id = %s" in sql
     assert params == (78463,)
@@ -144,3 +145,24 @@ def test_gate_refuses_when_the_store_is_not_mentioned():
     row = _go_row(subject="GO", body=f"approved acme bundle sha256 {_SHA}")
     with pytest.raises(Refuse, match="silo|store|mention"):
         _call(row)
+
+
+def test_gate_binds_the_verb():
+    # cc-quality BLOCKER 1 (PR#566 review): a provision GO must not
+    # authorize a REVERT — revert drops both tables, drops the role, and
+    # deletes the org row. Same store, same client, same forward-sha, so
+    # only a VERB mention separates them. One test per direction.
+    ref = store_ref("ihsanos multi-tenant DB")
+    bundle = _bundle()
+    provision_go = _go_row(subject="GO: provision acme tenant",
+                           body=f"approved bundle {ref} acme sha256 {_SHA}")
+    revert_go = _go_row(subject="GO: revert acme tenant",
+                        body=f"approved revert of bundle {ref} acme sha256 {_SHA}")
+    # each verb passes under its own GO ...
+    _call(provision_go, verb="provision", bundle=bundle)
+    _call(revert_go, verb="revert", bundle=bundle)
+    # ... and refuses under the OTHER verb's GO
+    with pytest.raises(Refuse, match="verb"):
+        _call(provision_go, verb="revert", bundle=bundle)
+    with pytest.raises(Refuse, match="verb"):
+        _call(revert_go, verb="provision", bundle=bundle)
