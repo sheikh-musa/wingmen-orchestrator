@@ -395,10 +395,19 @@ def evaluate_alerts(samples: list[dict], now: datetime, th: dict = THRESHOLDS) -
     if sustained(samples, now, th["unreachable_window_min"], unreachable):
         win = _window(samples, now, th["unreachable_window_min"])
         last_ok = ok_samples[-1]["ts"] if ok_samples else None
-        out.append({"kind": "unreachable", "key": f"{HOST}:unreachable",
-                    "window_min": th["unreachable_window_min"], "failed_samples": len(win),
-                    "last_ok": _fmt_ts(last_ok) if last_ok else None,
-                    "last_error": (win[-1].get("error") or "")[:200]})
+        f = {"kind": "unreachable", "key": f"{HOST}:unreachable",
+             "window_min": th["unreachable_window_min"], "failed_samples": len(win),
+             "last_ok": _fmt_ts(last_ok) if last_ok else None,
+             "last_error": (win[-1].get("error") or "")[:200]}
+        # A failed ssh probe is "could not measure", not "asleep" (orch-console #79684): the
+        # runner status is fetched from the GitHub API on every sample, before ssh. If the
+        # latest KNOWN runner status in the window is online, the machine is up and only ssh is
+        # broken. Unknown (gh failed) is not online, so it keeps the original finding.
+        known = [r for r in (_m(s).get("runner") for s in win) if r and r.get("status")]
+        if known and known[-1]["status"] == "online":
+            f.update(kind="ssh_unreachable_runner_online", key=f"{HOST}:ssh_unreachable",
+                     runner_status="online", runner_busy=known[-1].get("busy"))
+        out.append(f)
     return out
 
 
@@ -505,9 +514,33 @@ def render_page(f: dict) -> tuple[str, str]:
             "WHAT TO DO: wake it / switch it on, and check Windows power settings (sleep should be "
             "'Never'). If it was turned off on purpose, ignore this."
         )
+    elif k == "ssh_unreachable_runner_online":
+        subj = (f"cubeasht: could not reach it over ssh for {f['window_min']}+ min, "
+                "but its CI runner is ONLINE (machine is up)")
+        body = (
+            f"TL;DR: the monitor could not reach cubeasht over ssh for {f['window_min']}+ minutes, "
+            "but GitHub shows its CI runner online"
+            f"{' and busy' if f.get('runner_busy') else ''}, so the machine is awake and working. "
+            "Only the ssh path is broken; temperatures/disk are UNMEASURED meanwhile, not bad.\n\n"
+            f"WHAT: all {f['failed_samples']} ssh attempts in the last {f['window_min']} min failed; "
+            f"last good sample {f['last_ok'] or 'not in the last hour'}. "
+            f"Last error: {f['last_error'] or 'n/a'}\n\n"
+            "WHY IT MATTERS: CI is NOT stalled, but we are blind to the desktop's health until "
+            "ssh answers again.\n\n"
+            "WHAT TO DO: check the Windows OpenSSH service (sshd) and firewall on cubeasht, and "
+            "the tailscale path (relay vs direct). No need to wake it."
+        )
     else:  # pragma: no cover - defensive
         raise MonitorError(f"unknown finding kind {k!r}")
     return subj, body + _FOOT
+
+
+def page_priority(f: dict) -> tuple[str, bool]:
+    """(priority, requires_response) for a finding. A machine that is up but ssh-unreachable
+    is a blind spot to fix, not an outage to wake anyone for."""
+    if f.get("kind") == "ssh_unreachable_runner_online":
+        return "P2", False
+    return "P1", True
 
 
 def _send_page(f: dict) -> int:
@@ -515,8 +548,9 @@ def _send_page(f: dict) -> int:
     from scripts.bus_send import send  # lazy: psycopg2/DB only on the live paging path
 
     subj, body = render_page(f)
+    prio, req = page_priority(f)
     row_id, _thread = send(from_agent=FROM_AGENT, to=TO_AGENT, mtype="update",
-                           subject=subj, body=body, priority="P1", req=True)
+                           subject=subj, body=body, priority=prio, req=req)
     return row_id
 
 

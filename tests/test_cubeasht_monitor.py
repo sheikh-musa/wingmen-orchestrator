@@ -422,3 +422,47 @@ def test_live_run_pages_once_then_cooldown(monkeypatch, hm_conn, tmp_path, capsy
     monkeypatch.setattr(cm, "collect", lambda: (True, metrics, None, ["runner status: gh api failed rc=1"]))
     assert cm.main(["--state-file", str(state)]) == 4
     assert "FAIL LOUD (sample stored)" in capsys.readouterr().err
+
+
+# --- orch-console #79684 (2026-10-28): an ssh timeout is "could not measure", not "asleep".
+# cubeasht's CI runners were online+busy (a Deploy succeeded on it) while ssh on :22 timed out,
+# and the monitor still said "likely asleep or off". The runner status is already fetched from
+# the GitHub API on every sample (before ssh), so an unreachable window whose latest KNOWN runner
+# status is online means the machine is up and only ssh is broken.
+
+def _down_runner(minutes_ago, status, busy=True):
+    s = _down(minutes_ago)
+    s["metrics"]["runner"] = {"name": "cubeasht-orchestrator", "status": status, "busy": busy}
+    return s
+
+
+def test_ssh_unreachable_but_runner_online_is_not_asleep():
+    s = [_down_runner(m, "online") for m in (30, 25, 20, 15, 10, 5, 0)]
+    assert kinds(s) == ["ssh_unreachable_runner_online"]
+    f = cm.evaluate_alerts(s, T0)[0]
+    assert f["runner_status"] == "online" and f["runner_busy"] is True
+    assert f["key"] != "cubeasht:unreachable"  # its own dedupe key: never suppresses a real outage page
+
+
+def test_latest_known_runner_status_decides():
+    # went offline at the end of the window: that IS the outage story
+    s = [_down_runner(m, "online") for m in (30, 25, 20)] + [_down_runner(m, "offline") for m in (15, 10, 5, 0)]
+    assert kinds(s) == ["unreachable"]
+    # gh failed on the latest samples (runner=None): fall back to the latest KNOWN status
+    s = [_down_runner(m, "online") for m in (30, 25, 20, 15, 10)] + [_down(m) for m in (5, 0)]
+    assert kinds(s) == ["ssh_unreachable_runner_online"]
+
+
+def test_runner_unknown_throughout_stays_unreachable():
+    # no runner info at all is "could not measure the runner either": keep the original finding
+    assert kinds([_down(m) for m in (30, 25, 20, 15, 10, 5, 0)]) == ["unreachable"]
+
+
+def test_ssh_unreachable_runner_online_wording_and_priority():
+    f = cm.evaluate_alerts([_down_runner(m, "online") for m in (30, 25, 20, 15, 10, 5, 0)], T0)[0]
+    subj, body = cm.render_page(f)
+    low = (subj + body).lower()
+    assert "could not reach" in low and "online" in low
+    assert "asleep" not in subj.lower() and "switch it on" not in low
+    assert cm.page_priority(f) == ("P2", False)
+    assert cm.page_priority({"kind": "unreachable"}) == ("P1", True)
