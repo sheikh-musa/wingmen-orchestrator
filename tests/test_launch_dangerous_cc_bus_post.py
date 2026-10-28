@@ -101,6 +101,29 @@ def test_post_swallows_a_raising_send(monkeypatch):
     assert ldcc_post.main() == 0
 
 
+def test_post_passes_connect_and_statement_timeout_to_send(monkeypatch):
+    # bus #80233/#80236 (coord's PR#591 review, fast-follow): SIGALRM only
+    # bounds a connect that fails outright, not one that succeeds and then
+    # stalls on a query -- the helper must ask send() for a real libpq-level
+    # bound too, not rely on the alarm alone.
+    _clear_ldcc_env(monkeypatch)
+    monkeypatch.setenv("LDCC_FROM_BASE", "cc-orchestrator")
+    monkeypatch.setenv("LDCC_TO", "cai")
+    monkeypatch.setenv("LDCC_TYPE", "update")
+    monkeypatch.setenv("LDCC_SUBJECT", "s")
+    monkeypatch.setenv("LDCC_BODY", "b")
+    monkeypatch.setenv("LDCC_PRIORITY", "P3")
+
+    calls = []
+    import scripts.bus_send as bs
+    monkeypatch.setattr(bs, "send", lambda *a, **k: calls.append(k))
+
+    assert ldcc_post.main() == 0
+    assert len(calls) == 1
+    assert calls[0]["connect_timeout"] == 5
+    assert calls[0]["statement_timeout_ms"] == 8000
+
+
 @pytest.fixture
 def db(pg_dsn):
     with psycopg.connect(pg_dsn, autocommit=True) as c, c.cursor() as cur:

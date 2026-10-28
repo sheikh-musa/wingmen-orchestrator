@@ -410,6 +410,83 @@ def test_send_sub_tag_defaults_to_none(monkeypatch):
     assert rpc[1][8] is None
 
 
+def test_send_default_connect_has_no_timeout_kwargs(monkeypatch):
+    # bus #80233 (coord's PR#591 review): SIGALRM can't interrupt a libpq call
+    # blocked in C, so a caller that doesn't ask for a bound must see UNCHANGED
+    # behavior -- no connect_timeout/options kwargs sneaking in by default.
+    import psycopg2
+    calls = []
+
+    def _capture(*a, **k):
+        calls.append((a, k))
+        raise RuntimeError("no live DB in tests")
+
+    monkeypatch.setattr(psycopg2, "connect", _capture)
+    with pytest.raises(RuntimeError, match="no live DB in tests"):
+        bs.send("cc-substrate", "cc-orchestrator", "update", "s",
+                 "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused")
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == ("postgresql://unused",)
+    assert kwargs == {}
+
+
+def test_send_passes_connect_timeout_and_statement_timeout_to_psycopg2_connect(monkeypatch):
+    # The actual fast-follow (bus #80233/#80236): a caller that wants a real,
+    # libpq-level bound (not just the SIGALRM backstop) can now ask for one.
+    # connect_timeout bounds TCP/auth; statement_timeout_ms bounds a query that
+    # hangs AFTER connect succeeds -- the exact gap coord's review found.
+    import psycopg2
+    calls = []
+
+    def _capture(*a, **k):
+        calls.append((a, k))
+        raise RuntimeError("no live DB in tests")
+
+    monkeypatch.setattr(psycopg2, "connect", _capture)
+    with pytest.raises(RuntimeError, match="no live DB in tests"):
+        bs.send("cc-substrate", "cc-orchestrator", "update", "s",
+                 "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
+                 connect_timeout=5, statement_timeout_ms=8000)
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == ("postgresql://unused",)
+    assert kwargs == {"connect_timeout": 5, "options": "-c statement_timeout=8000"}
+
+
+def test_statement_timeout_option_really_cancels_a_slow_query(pg_dsn):
+    # Real psycopg2.connect against the ephemeral PG fixture (no mocking) --
+    # proves the exact options= GUC string send() now builds actually bounds
+    # a query that hangs AFTER connect succeeds, the precise gap coord's
+    # review found (SIGALRM can't see into a blocked libpq call).
+    import psycopg2
+    import psycopg2.errors
+
+    conn = psycopg2.connect(pg_dsn, options="-c statement_timeout=100")
+    cur = conn.cursor()
+    with pytest.raises(psycopg2.errors.QueryCanceled):
+        cur.execute("SELECT pg_sleep(2)")
+    conn.close()
+
+
+def test_send_connect_timeout_without_statement_timeout(monkeypatch):
+    # The two knobs are independent -- a caller can bound connect without
+    # also bounding statement execution.
+    import psycopg2
+    calls = []
+
+    def _capture(*a, **k):
+        calls.append((a, k))
+        raise RuntimeError("no live DB in tests")
+
+    monkeypatch.setattr(psycopg2, "connect", _capture)
+    with pytest.raises(RuntimeError, match="no live DB in tests"):
+        bs.send("cc-substrate", "cc-orchestrator", "update", "s",
+                 "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
+                 connect_timeout=5)
+    assert calls[0][1] == {"connect_timeout": 5}
+
+
 def test_send_posts_through_the_rpc_not_a_raw_insert(monkeypatch):
     # backlog#124 step 2/4 (bus #74863): the fleet-wide cutover that must land
     # BEFORE migration 124 (the revoke) can safely apply -- send() must

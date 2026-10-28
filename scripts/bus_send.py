@@ -809,18 +809,36 @@ def send(
     req: bool = False, thread: str | None = None, reply_to: int | None = None,
     link_ask: int | None = None, dsn: str | None = None, allow_undeliverable: bool = False,
     sub_tag: str | None = None, is_test: bool = False, posted_by_identity: str | None = None,
+    connect_timeout: int | None = None, statement_timeout_ms: int | None = None,
 ) -> tuple[int, str]:
     """Do the actual INSERT. The one place the SQL lives — CLI (`main`) and
     every shim (`_bus_tmp.py`, `scratchpad/bus_send.py`) call this so there is
     exactly one INSERT INTO agent_messages in the whole fleet's ad-hoc-send
-    path. `priority` has no default here either — callers must pass it."""
+    path. `priority` has no default here either — callers must pass it.
+
+    `connect_timeout`/`statement_timeout_ms` (bus #80233/#80236, coord's
+    PR#591 review): both default to None, which reproduces the pre-existing
+    connect(dsn) call exactly -- no behavior change for the ~100 existing
+    callers that don't pass them. A caller that runs inside a bounded context
+    (e.g. an EXIT trap's SIGALRM backstop) should pass both: SIGALRM cannot
+    interrupt a libpq call blocked in C, so it only bounds a connect that
+    fails outright (DNS/refused/unroutable) -- a connect that SUCCEEDS and
+    then stalls on a slow query is invisible to it. connect_timeout bounds
+    the former at the libpq level; statement_timeout_ms (passed via the
+    `options` GUC, since libpq has no separate kwarg for it) bounds the
+    latter the same way."""
     if priority not in _VALID_PRIORITIES:
         raise ValueError(f"send(): priority must be one of {_VALID_PRIORITIES}, got {priority!r}")
     refuse_if_undeliverable(to, reply_to=reply_to, allow_undeliverable=allow_undeliverable)
 
     import psycopg2
 
-    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
+    connect_kwargs = {}
+    if connect_timeout is not None:
+        connect_kwargs["connect_timeout"] = connect_timeout
+    if statement_timeout_ms is not None:
+        connect_kwargs["options"] = f"-c statement_timeout={statement_timeout_ms}"
+    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")), **connect_kwargs)
     cur = conn.cursor()
     cur.execute("SELECT set_config('app.current_agent_id', %s, true)", (from_agent,))
 
