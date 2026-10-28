@@ -82,6 +82,26 @@ _HUB_AGENT = "cc-orchestrator"
 _HUMAN_OPENED = frozenset({"cto-desktop"})
 _UNDELIVERABLE_EXEMPT = frozenset({"musa"}) | _HUMAN_OPENED
 
+# bus #78935/#78954: a test process leaked a real escalation row to the live
+# substrate. Fixed, deployment-specific anchor for the "is this actually the
+# live checkout" check below -- deliberately NOT Path.home()-based, because a
+# test that fakes $HOME to sandbox itself would make a Path.home()-derived
+# reference move right along with it, defeating the whole point of the check.
+LIVE_ORCH_ROOT = "/Users/sheikhmusa/wingmen/orchestrator"
+
+# bus #78963: console's review of the above found it still misses the
+# INHERITED-DSN path -- when no .env FILE exists beside the script (exactly
+# the self-relative/test-repo case the (2) fix moves scripts toward), dburl()
+# falls through to the passed-in `database_url`, i.e. whatever DATABASE_URL
+# the calling shell already had exported. launch_dangerous_cc.sh `set -a`s
+# the live .env into every lane shell, so a test that sets
+# WINGMEN_TEST_SANDBOX=1 but forgets to override DATABASE_URL itself would
+# still silently post to production. This matches on the live Supabase
+# pooler's project ref (present in the DSN's username/host) rather than
+# string-equality with any particular .env line, since the inherited env var
+# and the file's own line are not guaranteed to be formatted identically.
+LIVE_SUBSTRATE_REF = "tscuymavysscrvoberrr"
+
 
 _LIVE_INSTANCE_WINDOW = "30 minutes"  # matches scripts/irsyad_autoscaler.py LIVE_HEARTBEAT_WINDOW
 
@@ -567,6 +587,56 @@ def resolve_sub_tag(from_agent: str, env: dict) -> str | None:
     return sub_tag
 
 
+def _refuse_if_sandboxed_but_live(env_path: str) -> None:
+    """Defense-in-depth backstop (bus #78935/#78954): a test process leaked a
+    real escalation row to the live substrate by resolving dburl()'s .env to
+    the LIVE checkout despite the test's own sandboxing attempt. A caller
+    that sets WINGMEN_TEST_SANDBOX=1 is asserting "I MUST be isolated from
+    the live checkout" -- REFUSE loudly here rather than silently connecting
+    if the .env dburl() is about to read is still inside LIVE_ORCH_ROOT, so a
+    script that forgot to resolve its own path self-relatively (or any future
+    script copy-pasting the old hardcoded-$HOME pattern) fails loudly in a
+    test instead of quietly posting a real escalation to production.
+
+    Console's ruling explicitly rejected a redirect hook (an env var that
+    picks a DIFFERENT database) in favor of this refusal: a redirect's
+    failure mode is a stray env var in a LIVE process silently sending REAL
+    escalations to a test DB -- escalations vanishing is worse than a fake
+    one appearing. This flag can only ever narrow what a sandboxed caller is
+    allowed to reach, never redirect where a live one connects.
+    """
+    if os.environ.get("WINGMEN_TEST_SANDBOX") != "1":
+        return
+    live_root = os.path.realpath(LIVE_ORCH_ROOT)
+    if os.path.realpath(env_path) == live_root or os.path.realpath(env_path).startswith(live_root + os.sep):
+        raise SystemExit(
+            f"WINGMEN_TEST_SANDBOX=1 but {env_path} resolves inside the LIVE "
+            f"checkout ({LIVE_ORCH_ROOT}) -- refusing to connect rather than "
+            "silently posting to production (bus #78935/#78954)."
+        )
+
+
+def _refuse_if_sandboxed_dsn_is_live(dsn: str | None) -> None:
+    """Gap (1) from bus #78963: the FILE-path check above misses the case where
+    NO .env exists beside the script -- dburl() then falls through to the
+    INHERITED `database_url` argument, i.e. whatever DATABASE_URL the calling
+    shell already had exported. launch_dangerous_cc.sh `set -a`s the live .env
+    into every lane shell, so a test that sets WINGMEN_TEST_SANDBOX=1 but
+    forgets to override DATABASE_URL itself would still silently connect to
+    production with no refusal. Match on the live substrate's project ref
+    (present in the DSN's pooler username/host) rather than string-equality
+    with any one .env line, since the inherited value and the file's own line
+    are not guaranteed to be formatted identically."""
+    if os.environ.get("WINGMEN_TEST_SANDBOX") != "1":
+        return
+    if dsn and LIVE_SUBSTRATE_REF in dsn:
+        raise SystemExit(
+            "WINGMEN_TEST_SANDBOX=1 but the resolved DSN targets the LIVE "
+            f"substrate (ref {LIVE_SUBSTRATE_REF}) -- refusing to connect "
+            "rather than silently posting to production (bus #78963)."
+        )
+
+
 def dburl(database_url: str | None) -> str:
     """Resolve the DSN. `database_url` must be the ALREADY-RESOLVED value (e.g.
     `os.environ.get("DATABASE_URL")`) -- NEVER the whole os.environ/env dict.
@@ -590,15 +660,19 @@ def dburl(database_url: str | None) -> str:
     fleet-wide (2026-09-28 rotation incident). The file is the rotation's single
     push-point (Mini .env; gzb .env -> /dev/shm secrets)."""
     env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+    _refuse_if_sandboxed_but_live(env_path)
     try:
         with open(env_path) as f:
             for line in f:
                 line = line.strip()
                 if line.startswith("DATABASE_URL="):
-                    return line.split("=", 1)[1].strip().strip('"')
+                    resolved = line.split("=", 1)[1].strip().strip('"')
+                    _refuse_if_sandboxed_dsn_is_live(resolved)
+                    return resolved
     except FileNotFoundError:
         pass
     if database_url:
+        _refuse_if_sandboxed_dsn_is_live(database_url)
         return database_url
     raise SystemExit("no DATABASE_URL: set it in the environment or .env")
 
