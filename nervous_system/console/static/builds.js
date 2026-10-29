@@ -151,6 +151,36 @@
       "</div></div>";
   }
 
+  // op#35502/35503 (orch-console 80983/80995): Ask→live times grouped by
+  // repo, each an expandable <details> section — collapsed by default except
+  // the one holding the most recent ship. The server (db.fetch_ask_delivery_
+  // times) already sorted by_repo most-recent-ship-first and computed the
+  // median, so this is pure paint: no client-side grouping logic to drift
+  // from the server's.
+  function repoSectionHtml(g, isDefaultOpen) {
+    var rows = "";
+    if (g.measured && g.measured.length) {
+      rows += '<div class="items">' + groupPending(g.measured).map(deliveryRow).join("") + "</div>";
+    }
+    if (g.not_measured && g.not_measured.length) {
+      rows += '<div class="items">' + groupPending(g.not_measured).map(notMeasuredRow).join("") + "</div>";
+    }
+    var meta = esc(String(g.count)) + (g.count === 1 ? " ask" : " asks");
+    if (g.median_hours != null) meta += " · " + esc(fmtHours(g.median_hours)) + " median";
+    // orch-console 81075: whole header row is the tap target (native
+    // <summary> already does this), a clearly visible rotating chevron, and
+    // an explicit aria-expanded kept in sync on toggle (see the listener
+    // wired in paint() below) for assistive tech that doesn't infer state
+    // from <details open> alone.
+    return '<details class="repo-group"' + (isDefaultOpen ? " open" : "") + '>' +
+      '<summary aria-expanded="' + (isDefaultOpen ? "true" : "false") + '">' +
+        '<span class="repo-left"><span class="chev" aria-hidden="true">&#10148;</span>' +
+        '<span class="repo-name">' + esc(g.label) + "</span></span>" +
+        '<span class="repo-meta">' + meta + "</span></summary>" +
+      rows +
+    "</details>";
+  }
+
   function notMeasuredRow(nm) {
     if (nm.collapsed) return collapsedRow("nm-row", nm);
     // NO time fields exist on the row (server contract) and none are painted:
@@ -168,6 +198,7 @@
     var measured = times.measured || [];
     var notMeasured = times.not_measured || [];
     var cov = times.coverage || {};
+    var byRepo = times.by_repo || [];
     if (!progs.length) {
       main.innerHTML = '<div class="empty">No programmes yet — seed via scripts/seed_build_programmes.py.</div>';
       return;
@@ -175,17 +206,44 @@
     var html = '<div class="section">Programmes</div><div class="items">' +
       progs.map(programmeCard).join("") + "</div>";
     html += '<div class="section">Ask → live times</div>';
+    // orch-console 81075: the hero stays to the two headline figures only —
+    // the unattributed count is internal jargon here and wrapped onto its
+    // own line; it still lives fully visible as its own group, last in the
+    // list, never hidden.
     html += '<div class="hero"><span class="big">' + esc(String(cov.measured || measured.length)) + "</span> measured" +
       '<span class="sep">·</span><span class="big warn">' + esc(String(cov.not_measured || notMeasured.length)) +
       "</span> not yet measured" +
       '<div class="herosub">times come from live-verified ships only — older asks have no clock yet · Dubai time (UTC+4)</div></div>';
-    if (measured.length) {
-      html += '<div class="items">' + groupPending(measured).map(deliveryRow).join("") + "</div>";
-    }
-    if (notMeasured.length) {
-      html += '<div class="items">' + groupPending(notMeasured).map(notMeasuredRow).join("") + "</div>";
+    if (byRepo.length) {
+      // the server already sorted by_repo most-recent-ship-first; only the
+      // group actually holding that ship opens by default (op#35502/35503).
+      var defaultOpenRepo = byRepo[0].latest_delivered_at ? byRepo[0].repo : null;
+      html += '<div class="repo-groups">' + byRepo.map(function (g) {
+        return repoSectionHtml(g, g.repo === defaultOpenRepo);
+      }).join("") + "</div>";
+    } else {
+      // fallback for a server response with no by_repo (older cached build) —
+      // the pre-grouping flat render.
+      if (measured.length) {
+        html += '<div class="items">' + groupPending(measured).map(deliveryRow).join("") + "</div>";
+      }
+      if (notMeasured.length) {
+        html += '<div class="items">' + groupPending(notMeasured).map(notMeasuredRow).join("") + "</div>";
+      }
     }
     main.innerHTML = html;
+    // keep aria-expanded in sync with <details open> as the operator taps a
+    // repo-group header — native <details> toggles `open` itself; it does
+    // not touch our explicit aria-expanded (orch-console 81075).
+    var groupEls = main.querySelectorAll ? main.querySelectorAll("details.repo-group") : [];
+    for (var gi = 0; gi < groupEls.length; gi++) {
+      (function (el) {
+        el.addEventListener("toggle", function () {
+          var s = el.querySelector && el.querySelector("summary");
+          if (s) s.setAttribute("aria-expanded", el.open ? "true" : "false");
+        });
+      })(groupEls[gi]);
+    }
   }
 
   var inFlight = false;
@@ -226,6 +284,6 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = { tokenFromHash: tokenFromHash, esc: esc, fmtAge: fmtAge,
       fmtHours: fmtHours, fmtDate: fmtDate, fmtDay: fmtDay, paint: paint,
-      groupPending: groupPending };
+      groupPending: groupPending, repoSectionHtml: repoSectionHtml };
   }
 })();

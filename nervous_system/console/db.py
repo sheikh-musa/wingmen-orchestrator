@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import re
 import threading
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
@@ -810,6 +811,201 @@ def _pending_summary_line(delegated_to: Optional[str]) -> str:
     )
 
 
+# Repo-grouping for the /builds Ask→live view (op#35502/35503, orch-console
+# 80983/80995, refined by orch-console 81006): resolved through the REGISTRY
+# (agents.repo_scope, fleet_lanes.worktree_path) — never by parsing/guessing
+# at the delegated_to agent id's own name. Only a handful of known repo
+# aliases are folded to the vocabulary Musa used; every other registry-
+# resolved repo surfaces under its own real name rather than a catch-all.
+_REPO_FOLD = {
+    "irsyad": "irsyad",
+    "ihsanos-irsyad": "irsyad",
+    "cosem-adcda": "adcda",
+    "cosem-adcda-hotfix": "adcda",
+    "cosem-platform": "platform",
+    "cosem-port-lane": "platform",
+    "cosem-exams-lane": "cosem-exams",
+    # the fleet's own tooling/ops repos are never a client-product repo —
+    # orch-console 81006: rows owned by orch-console/the hub with no lane
+    # repo (or whose lane IS the orchestrator/fleet-health tooling itself)
+    # fold to one explicit 'fleet / internal' group, distinct from
+    # 'unattributed' (which means delegated_to itself was NULL).
+    "wingmen-orchestrator": "fleet / internal",
+    "orchestrator": "fleet / internal",
+    "fleet-health": "fleet / internal",
+}
+
+
+def _candidate_base_ids(delegated_to: str) -> List[str]:
+    """Agent-id forms to try against the registry, most specific first: the
+    literal value, the same with a trailing -N instance suffix stripped, and
+    (for a bare owner with no cc- prefix — the real-production shape, e.g.
+    'irsyad-coord') both of those again with 'cc-' prepended."""
+    candidates = [delegated_to]
+    stripped = re.sub(r"-\d+$", "", delegated_to)
+    if stripped != delegated_to:
+        candidates.append(stripped)
+    if not delegated_to.startswith("cc-"):
+        candidates.append("cc-" + delegated_to)
+        if stripped != delegated_to:
+            candidates.append("cc-" + stripped)
+    out = []
+    for c in candidates:
+        if c not in out:
+            out.append(c)
+    return out
+
+
+def _normalize_repo_name(raw: str) -> str:
+    """'sheikh-musa/wingmen-orchestrator' -> 'wingmen-orchestrator';
+    'ihsanos-irsyad.wt-coord' -> 'ihsanos-irsyad' — strips an owner/ prefix
+    (agents.repo_scope sometimes carries 'owner/repo') and a worktree-lane
+    '.wt-<suffix>' tail (fleet_lanes.worktree_path basenames) so every
+    worktree of the same repo folds to one group."""
+    name = raw.rsplit("/", 1)[-1]
+    name = re.sub(r"\.wt-.*$", "", name)
+    return name.lower()
+
+
+def _load_repo_registry() -> Tuple[dict, dict]:
+    """ONE-shot load of the two registry sources that carry 'what repo does
+    this agent work on' (orch-console 81006): agents.repo_scope (curated,
+    preferred) and fleet_lanes.worktree_path (fallback, derived from the
+    lane's checkout dir). Both tables are small (low hundreds of rows); this
+    is cheap and run once per fetch_ask_delivery_times() call, not per row."""
+    agent_rows = _query("SELECT id, repo_scope FROM agents", [])
+    lane_rows = _query(
+        "SELECT base_agent_id, worktree_path FROM fleet_lanes "
+        "WHERE base_agent_id IS NOT NULL AND worktree_path IS NOT NULL",
+        [],
+    )
+    agent_repo_scope = {r["id"]: (r.get("repo_scope") or []) for r in agent_rows}
+    lane_worktree: dict = {}
+    for r in lane_rows:
+        lane_worktree.setdefault(r["base_agent_id"], []).append(r["worktree_path"])
+    return agent_repo_scope, lane_worktree
+
+
+def _repo_for_delegate(
+    delegated_to: Optional[str], agent_repo_scope: dict, lane_worktree: dict
+) -> Optional[str]:
+    """The /builds page's repo-grouping label for one delivery_times row,
+    resolved through the registry (agents/fleet_lanes) — NEVER by parsing the
+    delegated_to agent id's own text (orch-console 81006, correcting the
+    first cut of this which keyword-matched the id). Returns None only when
+    delegated_to itself is falsy: that row has no owner at all and cannot be
+    attributed to anything, so the caller must surface it as 'unattributed'.
+    A resolvable agent with an explicitly empty repo_scope AND no fleet_lanes
+    entry (a hub/ops body, not a repo-scoped lane) folds to 'fleet / internal'
+    — still attributed, just not to a product repo. An agent id the registry
+    has never heard of at all folds to 'other' — attributed to *someone*, but
+    a repo we can't name; distinct from both of the above.
+
+    THREE PASSES over the candidate base ids, not one check per candidate:
+    many auto-registered INSTANCE rows in `agents` carry an empty repo_scope
+    even though their BASE id's row carries the real one (e.g. cc-cosem-
+    adcda-3's own row is empty; cc-cosem-adcda's is ['cosem-adcda', ...]) —
+    stopping at the first candidate with ANY agents row would resolve the
+    instance's empty row and misfile it as 'fleet / internal'. A real repo
+    scope on ANY candidate always wins, over every candidate's fleet_lanes
+    fallback and over 'fleet / internal'."""
+    if not delegated_to:
+        return None
+    candidates = _candidate_base_ids(delegated_to)
+    for base in candidates:
+        real = [s for s in (agent_repo_scope.get(base) or []) if s and s != "*"]
+        if real:
+            raw = _normalize_repo_name(real[0])
+            return _REPO_FOLD.get(raw, raw)
+    for base in candidates:
+        worktrees = lane_worktree.get(base)
+        if worktrees:
+            raw = _normalize_repo_name(worktrees[0])
+            return _REPO_FOLD.get(raw, raw)
+    for base in candidates:
+        if base in agent_repo_scope:
+            return "fleet / internal"
+    return "other"
+
+
+def _median(values: List[float]) -> Optional[float]:
+    vals = sorted(v for v in values if v is not None)
+    if not vals:
+        return None
+    n = len(vals)
+    mid = n // 2
+    if n % 2:
+        return vals[mid]
+    return round((vals[mid - 1] + vals[mid]) / 2.0, 1)
+
+
+# The display label for the repo=None group (orch-console 81075: 'unattributed'
+# read as internal jargon to the operator). The STABLE internal key stays
+# 'unattributed' (tests, row-level bookkeeping); only the user-facing text
+# changes.
+_NO_REPO_LABEL = "no project linked"
+
+
+def _group_sort_key(key: Optional[str], group: dict) -> Tuple[int, int, float, str]:
+    """orch-console 81075: client/product repo groups FIRST, sorted by most
+    recent live-verified ship (a group with no ship at all sorts after every
+    group that has one, tiebroken alphabetically); then 'fleet / internal'
+    (the fleet's own tooling, not a product); then 'no project linked'
+    (repo=None) LAST, always -- regardless of either special group's own
+    ship recency, so an old 'unattributed' row never un-sorts itself up past
+    real product work, and a very-recent fleet/internal ship never jumps
+    ahead of product groups either."""
+    if key is None:
+        tier = 2
+    elif key == "fleet / internal":
+        tier = 1
+    else:
+        tier = 0
+    ts = group["latest_delivered_at"]
+    if ts is None:
+        return (tier, 1, 0.0, group["label"])
+    return (tier, 0, -ts.timestamp(), group["label"])
+
+
+def _group_delivery_by_repo(measured: List[dict], not_measured: List[dict]) -> List[dict]:
+    """Group delivery_times rows by repo (op#35502/35503) for the /builds
+    page's collapsible-by-repo sections. Rows share dict references with
+    `measured`/`not_measured` -- the caller's later in-place ISO-string
+    conversion of asked_at/delivered_at applies here too, no copy needed.
+    A None repo (delegated_to was NULL) collects under the stable key
+    'unattributed' (display label 'no project linked') so an ask that cannot
+    be attributed to a repo is surfaced, never dropped."""
+    buckets: dict = {}
+    order: List[Optional[str]] = []
+    for r in measured + not_measured:
+        key = r["repo"]
+        if key not in buckets:
+            buckets[key] = {"measured": [], "not_measured": []}
+            order.append(key)
+    for r in measured:
+        buckets[r["repo"]]["measured"].append(r)
+    for r in not_measured:
+        buckets[r["repo"]]["not_measured"].append(r)
+    paired = []
+    for key in order:
+        b = buckets[key]
+        hours = [m["total_hours"] for m in b["measured"] if m.get("total_hours") is not None]
+        delivered_ats = [m["delivered_at"] for m in b["measured"] if m.get("delivered_at")]
+        group = {
+            "repo": key or "unattributed",
+            "label": _NO_REPO_LABEL if key is None else key,
+            "count": len(b["measured"]) + len(b["not_measured"]),
+            "measured_count": len(b["measured"]),
+            "median_hours": _median(hours),
+            "latest_delivered_at": max(delivered_ats) if delivered_ats else None,
+            "measured": b["measured"],
+            "not_measured": b["not_measured"],
+        }
+        paired.append((key, group))
+    paired.sort(key=lambda kg: _group_sort_key(kg[0], kg[1]))
+    return [g for _, g in paired]
+
+
 def fetch_ask_delivery_times(limit: int = 50) -> dict:
     """Per-ask ask->live times for the build-status view (op#34919). HONESTY
     CONTRACT: an ask with no delivered_at stamp is NOT MEASURED — it lands in
@@ -820,7 +1016,15 @@ def fetch_ask_delivery_times(limit: int = 50) -> dict:
     #61117 never-raw rule; cc-quality #78556 blocker 2 caught the original
     COALESCE-to-ask leak). Each row carries `pending` (bool) so the client can
     group/collapse a run of identical pending lines instead of repeating the
-    same blank dozens of times (orch-console 80499, Musa op#35396)."""
+    same blank dozens of times (orch-console 80499, Musa op#35396).
+
+    `repo` (op#35502/35503, orch-console 80983/80995) is derived per-row from
+    delegated_to via _repo_for_delegate() — structured, never text-guessed —
+    and `by_repo` groups measured+not_measured into repo sections, most-
+    recent-ship first, for the /builds page's expandable-by-repo view. A row
+    with no delegated_to cannot be attributed to any repo; it carries
+    repo=None and lands in the 'unattributed' group, counted separately in
+    `coverage.unattributed` rather than silently disappearing."""
     measured_sql = (
         "SELECT a.id, a.operator_summary, a.triage_summary, a.delegated_to, "
         "  a.created_at AS asked_at, a.delivered_at, "
@@ -840,6 +1044,7 @@ def fetch_ask_delivery_times(limit: int = 50) -> dict:
     )
     measured = _query(measured_sql, [limit])
     not_measured = _query(not_measured_sql, [limit])
+    agent_repo_scope, lane_worktree = _load_repo_registry()
     for r in measured + not_measured:
         operator_summary = r.pop("operator_summary")
         triage_summary = r.pop("triage_summary")
@@ -847,17 +1052,30 @@ def fetch_ask_delivery_times(limit: int = 50) -> dict:
         summary = operator_summary or triage_summary
         r["pending"] = not summary
         r["line"] = summary or _pending_summary_line(delegated_to)
+        r["repo"] = _repo_for_delegate(delegated_to, agent_repo_scope, lane_worktree)
+    by_repo = _group_delivery_by_repo(measured, not_measured)
+    unattributed = sum(1 for r in measured + not_measured if r["repo"] is None)
     # app.py's _json is plain json.dumps — datetimes must leave here as ISO
     # text or the whole /api/build-status route 500s (the live fc-v87
-    # first-ship bug; locked by test_delivery_times_json_serializable).
+    # first-ship bug; locked by test_delivery_times_json_serializable). The
+    # by_repo rows are the SAME dict objects as measured/not_measured, so
+    # this loop also converts their asked_at/delivered_at.
     for r in measured + not_measured:
         for k in ("asked_at", "delivered_at"):
             if r.get(k) is not None and not isinstance(r[k], str):
                 r[k] = r[k].isoformat()
+    for g in by_repo:
+        if g["latest_delivered_at"] is not None and not isinstance(g["latest_delivered_at"], str):
+            g["latest_delivered_at"] = g["latest_delivered_at"].isoformat()
     return {
         "measured": measured,
         "not_measured": not_measured,
-        "coverage": {"measured": len(measured), "not_measured": len(not_measured)},
+        "coverage": {
+            "measured": len(measured),
+            "not_measured": len(not_measured),
+            "unattributed": unattributed,
+        },
+        "by_repo": by_repo,
     }
 
 

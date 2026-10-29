@@ -136,6 +136,34 @@
   .drow .when { overflow-wrap:anywhere; }
   .drow.nm-row .ttl { color:var(--dim); }
 
+  /* ---- op#35502/35503: Ask→live times grouped by repo, expandable ---- */
+  .repo-groups { padding: 0 14px 16px; }
+  details.repo-group {
+    background: var(--surface); border: 1px solid var(--hair-2);
+    border-radius: var(--r); box-shadow: var(--shadow);
+    margin: 8px 0; overflow: hidden;
+  }
+  details.repo-group > summary {
+    list-style: none; cursor: pointer; padding: 12px 14px; min-height: var(--tap);
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  details.repo-group > summary::-webkit-details-marker { display: none; }
+  details.repo-group .repo-left {
+    display: flex; align-items: center; gap: 8px; min-width: 0;
+    font: 600 14px/1.4 var(--sans); color: var(--txt); overflow-wrap: anywhere;
+  }
+  details.repo-group .chev {
+    flex: none; display: inline-block; width: 16px; font-size: 15px; line-height: 1;
+    color: var(--indigo); font-weight: 700; text-align: center;
+    transition: transform .15s ease;
+  }
+  details.repo-group[open] .chev { transform: rotate(90deg); }
+  details.repo-group .repo-meta {
+    flex: none; font: 11px/1.4 var(--mono); color: var(--faint); white-space: nowrap;
+  }
+  details.repo-group .items { padding: 0 14px 12px; }
+  details.repo-group .items .item { margin: 6px 0; }
+
   @media (min-width: 760px) {
     .token-row { width: auto; margin-left: auto; }
     .token-row input { width: 240px; flex: none; height: 34px; }
@@ -151,7 +179,7 @@
   <a class="navlink" href="/">&larr; Console</a>
   <a class="navlink" href="/asks">Asks</a>
   <a class="navlink" href="/docs">Docs</a>
-  <span id="build" class="build"><span class="d"></span>fc-v89</span>
+  <span id="build" class="build"><span class="d"></span>fc-v90</span>
   <div class="token-row">
     <input id="token" type="password" inputmode="text" placeholder="operator token" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
     <button id="connect">Connect</button>
