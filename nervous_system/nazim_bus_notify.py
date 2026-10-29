@@ -102,6 +102,22 @@ def _state(conn):
     return mx, need
 
 
+def _unread_count(conn, since_id: int) -> int:
+    """LIVE recount of still-UNREAD rows to orch-console with id>since_id, excluding
+    the suppressed pattern -- run at SEND TIME (orch-console #83404), not from the
+    earlier _state()/_new_priorities() snapshot. Between that snapshot and the
+    moment _nudge() actually fires, Nazim can reconcile some of those rows himself
+    (his own turn, or the generic '[wake]' backstop) -- a stale snapshot then nudges
+    about rows that are already handled. This recount is the final, authoritative
+    check right before a keystroke lands."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM agent_messages WHERE to_agent='orch-console' "
+                    "AND id>%s AND read_at IS NULL "
+                    f"AND NOT ({_WAKE_SUPPRESS_SQL})",
+                    (since_id, *_WAKE_SUPPRESS_PARAMS))
+        return cur.fetchone()[0]
+
+
 def _new_priorities(conn, since_id: int) -> list:
     """Priority of each row to orch-console with id>since_id — feeds the breakdown
     line (#445). A plain count already existed; this is the SAME rows, one extra
@@ -120,10 +136,22 @@ def _default_pane_busy(session: str) -> bool:
     return _pane_busy(session)
 
 
-def _nudge(n_new: int, n_need: int, priorities=(), *, pane_busy=_default_pane_busy) -> bool:
+def _nudge(n_new: int, n_need: int, priorities=(), *, pane_busy=_default_pane_busy,
+           recheck_unread=None) -> bool:
     """Send the coalesced count-only nudge. Returns True iff it actually sent (the
     caller only advances its high-water mark on True, so a deferred tick re-checks
-    and re-coalesces next poll rather than losing track of what's unread)."""
+    and re-coalesces next poll rather than losing track of what's unread).
+
+    `recheck_unread`, when given, is a zero-arg callable returning the LIVE count of
+    still-unread rows right now (orch-console #83404: ~half of one night's wakes
+    were for rows Nazim had already handled between the earlier snapshot and this
+    send). A zero recount means every row in range is already handled -- treat it
+    exactly like any other deferred tick (return False, no keystroke, caller does
+    not advance its high-water mark). None preserves the old snapshot-only
+    behaviour for callers that don't pass it."""
+    if recheck_unread is not None and recheck_unread() == 0:
+        _log("recount at send-time: 0 still unread (already handled) — skip")
+        return False
     # Session must be live; a missing session loses nothing (durable bus).
     if subprocess.run([TMUX, "has-session", "-t", f"={SESSION}"],
                       capture_output=True).returncode != 0:
@@ -232,10 +260,13 @@ def main() -> int:
                     priorities = _new_priorities(conn, last_max)
                     n_new = len(priorities)
                     # last_max advances ONLY on an actual send (#445 coalescing) --
-                    # a deferred (pane-busy) tick keeps last_max where it was, so the
-                    # next poll re-counts from the same point and any further
-                    # arrivals join the SAME eventual notifier instead of a new one.
-                    if _nudge(n_new, need, priorities):
+                    # a deferred (pane-busy, or now a zero-recount) tick keeps
+                    # last_max where it was, so the next poll re-counts from the
+                    # same point and any further arrivals join the SAME eventual
+                    # notifier instead of a new one.
+                    _since = last_max
+                    if _nudge(n_new, need, priorities,
+                              recheck_unread=lambda: _unread_count(conn, _since)):
                         last_max = mx
         except Exception as e:  # never die on a transient DB blip
             _log(f"poll error ({type(e).__name__}): {e}")
