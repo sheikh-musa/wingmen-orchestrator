@@ -445,8 +445,13 @@ def _deepseek_balance_section() -> list[str]:
     day_ago_rows = [r for r in rows if r["ts"] >= (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=24)).isoformat()]
     first_today = day_ago_rows[0] if day_ago_rows else rows[0]
     delta = first_today["balance_usd"] - latest["balance_usd"]
+    DAILY_BUDGET_USD = 7.80  # op#35703: cost of one Max plan/day
     L.append(f"- **Latest:** ${latest['balance_usd']:.2f} (polled {latest['ts']})")
-    L.append(f"- **24h spend:** ${delta:.2f} (from ${first_today['balance_usd']:.2f} at {first_today['ts']})")
+    L.append(f"- **24h spend:** ${delta:.2f} vs ${DAILY_BUDGET_USD:.2f}/day budget "
+             f"(op#35703; no per-lane split — the DeepSeek balance endpoint is account-level only) "
+             f"(from ${first_today['balance_usd']:.2f} at {first_today['ts']})")
+    if delta > DAILY_BUDGET_USD:
+        L.append(f"- **⚠ over the ${DAILY_BUDGET_USD:.2f}/day budget** — P2 alert already sent to orch-console by the poller.")
     if latest["balance_usd"] < 40:
         L.append(f"- **⚠ below the $40 floor** — P1 alert already sent to orch-console by the poller.")
     L.append("")

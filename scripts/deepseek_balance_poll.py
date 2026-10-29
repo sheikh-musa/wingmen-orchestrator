@@ -15,12 +15,13 @@ import os
 import subprocess
 import sys
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ORCH_DIR = Path(__file__).resolve().parent.parent
 STATE_PATH = Path.home() / "wingmen" / "fleet-health" / "state" / "deepseek_balance_history.jsonl"
 ALERT_FLOOR_USD = 40.0
+DAILY_BUDGET_USD = 7.80  # op#35703: cost of one Max plan/day -- DeepSeek only worth it under this
 BALANCE_URL = "https://api.deepseek.com/user/balance"
 
 
@@ -74,6 +75,42 @@ def send_alert(balance_usd: float) -> None:
     )
 
 
+def _trailing_24h_spend(now_iso: str, latest_balance: float) -> float:
+    """op#35703. Reads history, returns balance_24h_ago - latest (no per-lane split --
+    the DeepSeek balance endpoint is account-level only, not derivable per-lane)."""
+    try:
+        lines = STATE_PATH.read_text(encoding="utf-8").strip().splitlines()
+    except OSError:
+        return 0.0
+    rows = [json.loads(ln) for ln in lines]
+    cutoff = (datetime.fromisoformat(now_iso) - timedelta(hours=24)).isoformat()
+    older = [r for r in rows if r["ts"] <= cutoff]
+    baseline = older[-1] if older else (rows[0] if rows else None)
+    if baseline is None:
+        return 0.0
+    return baseline["balance_usd"] - latest_balance
+
+
+def send_budget_alert(spend_24h: float) -> None:
+    body = (
+        "TL;DR: DeepSeek spend over the last 24h is $%.2f, above the $%.2f/day budget "
+        "(op#35703 -- a Max plan's daily cost; DeepSeek is only worth it under that).\n\n"
+        "No per-lane split -- the DeepSeek /user/balance endpoint is account-level only, "
+        "not broken out per lane. History: %s"
+    ) % (spend_24h, DAILY_BUDGET_USD, STATE_PATH)
+    env = dict(os.environ)
+    env["CC_BASE_AGENT_ID"] = "cc-fleet-health"
+    subprocess.run(
+        [sys.executable, str(ORCH_DIR / "scripts" / "bus_send.py"),
+         "--from", "cc-fleet-health", "--to", "orch-console",
+         "--type", "update", "--priority", "P2",
+         "--subject", "DeepSeek daily spend $%.2f over $%.2f/day budget" % (spend_24h, DAILY_BUDGET_USD),
+         "--body", body,
+         "--evidence", "probe:trailing-24h delta from %s = %.2f" % (STATE_PATH, spend_24h)],
+        cwd=str(ORCH_DIR), env=env, check=False,
+    )
+
+
 def main() -> int:
     try:
         key = fetch_key()
@@ -92,6 +129,10 @@ def main() -> int:
 
     if balance_usd < ALERT_FLOOR_USD:
         send_alert(balance_usd)
+
+    spend_24h = _trailing_24h_spend(now, balance_usd)
+    if spend_24h > DAILY_BUDGET_USD:
+        send_budget_alert(spend_24h)
     return 0
 
 
