@@ -110,10 +110,15 @@ def doc_file(tmp_path, monkeypatch):
     return doc
 
 
-def test_render_includes_n_of_m_passing_line(floor_db, doc_file):
+def test_render_points_to_boot_briefing_arm_for_live_status(floor_db, doc_file):
+    # console bus #80912: the doc never carries a status verdict (PASS/FAIL/
+    # N of M) that can go stale in git -- it points at the live, DB-read
+    # governance_floor_status boot_briefing arm instead.
     assert ggf.main(["--dsn", floor_db]) == 0
     text = doc_file.read_text()
-    assert "1 of 1 floors passing" in text
+    assert "governance_floor_status" in text
+    assert "boot_briefing" in text
+    assert "passing" not in text.lower()
 
 
 def test_render_includes_floor_sentence_and_op_ref(floor_db, doc_file):
@@ -142,7 +147,7 @@ def test_missing_markers_refuses(floor_db, doc_file):
     assert ggf.main(["--dsn", floor_db]) == 1
 
 
-def test_no_floor_rows_still_renders_zero_of_zero(pg_dsn, doc_file):
+def test_no_floor_rows_still_renders_header_and_status_pointer(pg_dsn, doc_file):
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP SCHEMA public CASCADE")
         cur.execute("CREATE SCHEMA public")
@@ -166,14 +171,15 @@ def test_no_floor_rows_still_renders_zero_of_zero(pg_dsn, doc_file):
         )
         _make_substrate_ledger_row(cur)
     assert ggf.main(["--dsn", pg_dsn]) == 0
-    assert "0 of 0 floors passing" in doc_file.read_text()
+    text = doc_file.read_text()
+    assert "| Op ref | Floor | Enforced in code |" in text
+    assert "governance_floor_status" in text
 
 
 # ── Retirable floors (console bus #80595) ─────────────────────────────────
-def test_retired_floor_excluded_from_main_table_and_count(floor_db_with_retired, doc_file):
+def test_retired_floor_excluded_from_main_table(floor_db_with_retired, doc_file):
     ggf.main(["--dsn", floor_db_with_retired])
     text = doc_file.read_text()
-    assert "1 of 1 floors passing" in text
     assert "A lifted floor." not in text.split("Retired floors")[0]
 
 
@@ -183,48 +189,6 @@ def test_retired_floor_listed_separately_with_op_ref(floor_db_with_retired, doc_
     assert "Retired floors" in text
     assert "op#1" in text
     assert "op#99" in text
-
-
-# ── A floor with no checked_pass/checked_fail row must never render PASS
-# (console bus #80659: PR#608's doc shipped "PASS" before migration 131 ever
-# touched the real substrate or any check had run -- root cause was running
-# this generator against the ephemeral test harness and committing that
-# output into the real docs file, not a generator defect, but pin the
-# never-silently-PASS behavior with a direct test regardless). ────────────
-def test_floor_with_zero_audit_rows_renders_not_yet_checked_never_pass(pg_dsn, doc_file):
-    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("DROP SCHEMA public CASCADE")
-        cur.execute("CREATE SCHEMA public")
-        cur.execute("GRANT USAGE ON SCHEMA public TO public")
-        cur.execute(
-            """CREATE TABLE governance_floor (
-                 id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-                 sentence text NOT NULL, op_ref text NOT NULL,
-                 predicate_sql text NOT NULL, enforced_in_code boolean NOT NULL DEFAULT false,
-                 decision_ref text, retired_at timestamptz, retired_op_ref text,
-                 created_at timestamptz NOT NULL DEFAULT now()
-               )"""
-        )
-        cur.execute(
-            """CREATE TABLE governance_floor_audit (
-                 id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-                 floor_id bigint REFERENCES governance_floor(id),
-                 event text NOT NULL, actor text NOT NULL, op_ref text NOT NULL,
-                 at timestamptz NOT NULL DEFAULT now(), note text
-               )"""
-        )
-        # No INSERT INTO governance_floor_audit at all -- this floor has never
-        # been checked, by anything, ever.
-        cur.execute(
-            "INSERT INTO governance_floor (sentence, op_ref, predicate_sql) "
-            "VALUES ('never checked yet', 'op#1', 'SELECT true')"
-        )
-        _make_substrate_ledger_row(cur)
-    assert ggf.main(["--dsn", pg_dsn]) == 0
-    text = doc_file.read_text()
-    assert "not yet checked" in text
-    assert "PASS" not in text
-    assert "0 of 1 floors passing" in text
 
 
 # ── Must refuse to write the canonical path off a non-substrate DSN
@@ -241,10 +205,10 @@ def test_out_path_bypasses_the_substrate_check(floor_db_not_substrate, doc_file,
         "<!-- GENERATED:governance_floor:START -->\nold\n<!-- GENERATED:governance_floor:END -->\n"
     )
     assert ggf.main(["--dsn", floor_db_not_substrate, "--out", str(out)]) == 0
-    assert "1 of 1 floors passing" in out.read_text()
+    assert "No work_item sits abandoned past 72h." in out.read_text()
     assert out.read_text() != "old"
     # the canonical path (doc_file) is untouched by an --out run
-    assert "1 of 1 floors passing" not in doc_file.read_text()
+    assert "No work_item sits abandoned past 72h." not in doc_file.read_text()
 
 
 def test_out_path_still_refuses_without_markers(floor_db_not_substrate, doc_file, tmp_path):

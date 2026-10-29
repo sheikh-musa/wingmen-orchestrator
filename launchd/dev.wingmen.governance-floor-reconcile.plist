@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- op#35246 item 1, console bus #80903/#80912/#80915. Runs
+       governance_floor_reconcile.py with the record flag ONLY: writes checked_pass
+       or checked_fail audit rows via direct psycopg, touches NO files. It
+       must never also run gen_governance_floors.py: that script rewrites
+       docs/governance-floors.md on disk, and this plist runs on the live
+       checkout's fable/substrate-safe-fixes branch, so a cron that auto
+       commits/pushes that file is exactly what the no-direct-push-to-trunk
+       rule exists to prevent (console #80912 ruled this out explicitly, no
+       carve-out). The doc's floor LIST only changes via a reviewed PR when a
+       floor is added or retired; live PASS/FAIL/STALE status is read
+       separately from the governance_floor_status boot_briefing arm, never
+       written to git. Loaded and owned by orch-console (a governance
+       record, not ops, console's own call in #80903, distinct from
+       fleet-health owning the asks-reconcile/ops-charter plists). Cadence:
+       every 6h via StartInterval (not StartCalendarInterval, so there are no
+       host-TZ considerations for a plain interval cadence). Console
+       (#80915): 6h so the arm's STALE-past-2x-interval threshold (12h)
+       stays well under the 72h floor this reconciler is policing; a daily
+       cadence plus 48h staleness would leave that check blind two thirds of
+       the time. The record flag is baked into ProgramArguments
+       deliberately, same as asks-reconcile.plist: this plist IS the go-live
+       decision, and dry-run stays available via a manual re-run any time. -->
+  <key>Label</key><string>dev.wingmen.governance-floor-reconcile</string>
+  <key>ProgramArguments</key><array><string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string><string>/Users/sheikhmusa/wingmen/orchestrator/scripts/governance_floor_reconcile.py</string><string>--record</string></array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/sheikhmusa</string><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <key>StartInterval</key><integer>21600</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/governance-floor-reconcile.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/governance-floor-reconcile.log</string>
+</dict>
+</plist>
