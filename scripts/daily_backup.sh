@@ -1,7 +1,8 @@
 #!/bin/bash
 # Daily Supabase backup — orchestrator substrate (tscuymavysscrvoberrr) PLUS
 # client silos ihsanos-ceayj (IHSANOS_PROD_RO_DATABASE_URL) and irsyad-goumlyne
-# (GOUMLYNE_BACKUP_RO_DATABASE_URL, falling back to GOUMLYNE_RO_DATABASE_URL). READ-ONLY DSNs only for client silos — a backup
+# (GOUMLYNE_BACKUP_RO_DATABASE_URL from ~/.config/wingmen/goumlyne_backup_ro.env, falling back to
+# GOUMLYNE_RO_DATABASE_URL). READ-ONLY DSNs only for client silos — a backup
 # is read-only by nature and must never even have the capability to write; the
 # write-capable DSN vars must never be referenced here. Substrate files land at
 # the top level of the day's dir (layout preserved); each client silo dumps
@@ -54,6 +55,11 @@ SUPABASE_URL="https://tscuymavysscrvoberrr.supabase.co"
 
 # shellcheck disable=SC1090
 source "$ENV_FILE"
+# Cross-org goumlyne backup DSN lives in its own 0600 file, sourced ONLY here, so it never rides the
+# lane-sourced bundle built from .env (console #83193 ruling B). Sourced after .env so it wins.
+BACKUP_RO_ENV_FILE="$HOME/.config/wingmen/goumlyne_backup_ro.env"
+# shellcheck disable=SC1090
+if [ -r "$BACKUP_RO_ENV_FILE" ]; then source "$BACKUP_RO_ENV_FILE"; fi
 KEY="$SUPABASE_SERVICE_KEY"
 DSN="${SUPABASE_DB_URL:-${DATABASE_URL:-}}"
 # Alert via the operator bot (@wingmennorchbot), same as scripts/tg_send.sh.
