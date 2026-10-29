@@ -10,6 +10,7 @@ must never touch the live substrate.
 import re
 
 import psycopg
+import pytest
 
 from tests.conftest import NOT_MIRRORED_TRIGGERS, live_checks_snapshot
 
@@ -49,3 +50,26 @@ def test_each_excluded_trigger_is_still_non_blocking_in_the_live_snapshot():
 
 def test_the_check_that_bit_pr584_is_in_the_snapshot():
     assert "operator_asks_bus_evidence_backfill_only_chk" in SNAP["checks"]
+
+
+# ── migration 132 (console bus #80837/#80838): operator_asks_outbound_msg_chk
+# is a BLOCKING check (unlike the NOT_MIRRORED AFTER mirrors, which swallow
+# every exception), so structural parity above is necessary but not
+# sufficient -- prove the mirrored trigger actually bites in the fixture,
+# the same refusal prod gives. Needs operator_messages in the fixture,
+# which operator_ledger_db already carries. ────────────────────────────────
+def test_outbound_msg_id_chk_actually_blocks_a_bad_link_in_the_fixture(operator_ledger_db):
+    assert "operator_asks_outbound_msg_chk" not in NOT_MIRRORED_TRIGGERS
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "INSERT INTO operator_asks (ask) VALUES ('[__test__] parity probe') RETURNING id"
+        )
+        rid = cur.fetchone()[0]
+        c.commit()
+    with pytest.raises(psycopg.errors.RaiseException):
+        with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+            cur.execute(
+                "UPDATE operator_asks SET committed_date = now(), outbound_msg_id = 80678 "
+                "WHERE id = %s",
+                (rid,),
+            )

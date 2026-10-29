@@ -301,10 +301,10 @@ def test_fetch_overdue_finds_past_committed_open_ask(operator_ledger_db):
         ob = _insert_outbound(c)
         overdue_id = _insert_ask(c, triage_state="ask", triage_summary="late one",
                                   committed_date=_ago(days=2), delegated_to="cc-scholar",
-                                  outbound_msg_id=ob)
+                                  outbound_msg_id=ob, created_at=_ago(days=3))
         _insert_ask(c, ask="[__test__] future", triage_state="ask", triage_summary="future",
                     committed_date=(datetime.now(timezone.utc) + timedelta(days=2)).isoformat(),
-                    delegated_to="cc-scholar", outbound_msg_id=ob)
+                    delegated_to="cc-scholar", outbound_msg_id=ob, created_at=_ago(days=3))
         _insert_ask(c, ask="[__test__] no date", triage_state="ask", triage_summary="no date",
                     committed_date=None)
     with psycopg.connect(operator_ledger_db) as conn:
@@ -324,7 +324,8 @@ def test_fetch_overdue_excludes_closed_rows(operator_ledger_db):
 def test_fetch_overdue_excludes_non_ask_triage_state(operator_ledger_db):
     with psycopg.connect(operator_ledger_db) as c:
         ob = _insert_outbound(c)
-        _insert_ask(c, triage_state="captured", committed_date=_ago(days=2), outbound_msg_id=ob)
+        _insert_ask(c, triage_state="captured", committed_date=_ago(days=2), outbound_msg_id=ob,
+                    created_at=_ago(days=3))
     with psycopg.connect(operator_ledger_db) as conn:
         assert ard.fetch_overdue(conn) == []
 
@@ -540,7 +541,7 @@ def test_main_apply_overdue_page_checked_against_base_instance_refusal(operator_
     with psycopg.connect(operator_ledger_db) as c:
         ob = _insert_outbound(c)
         _insert_ask(c, triage_state="ask", triage_summary="late", delegated_to="cc-scholar",
-                    committed_date=_ago(days=2), outbound_msg_id=ob)
+                    committed_date=_ago(days=2), outbound_msg_id=ob, created_at=_ago(days=3))
 
     ard.main(["--apply"])
     assert "cc-scholar" in probed
@@ -560,7 +561,7 @@ def test_main_apply_overdue_page_skips_cleanly_when_base_has_live_instances(oper
     with psycopg.connect(operator_ledger_db) as c:
         ob = _insert_outbound(c)
         _insert_ask(c, triage_state="ask", triage_summary="late", delegated_to="cc-cosem-platform",
-                    committed_date=_ago(days=2), outbound_msg_id=ob)
+                    committed_date=_ago(days=2), outbound_msg_id=ob, created_at=_ago(days=3))
 
     rc = ard.main(["--apply"])
     assert rc == 1
