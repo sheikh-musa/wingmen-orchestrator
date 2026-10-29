@@ -899,14 +899,17 @@ def check_rule_d(command: str) -> str | None:
 # \w*_DB_URL (bus #52393 -- orch-console named this form explicitly, e.g. CONSOLE_DB_URL)
 # added alongside \w*_DSN/DATABASE_URL so Rule F catches every DSN-shaped var name the
 # fleet actually uses, not just the one that happened to leak in the real incident.
+# \w*DATABASE_URL (op#892/bus #83148 -- the BUS_DATABASE_URL rename): DATABASE_URL was
+# bare/exact, so a leak of the RENAMED var would have gone uncaught -- prefix-tolerant
+# like \w*_DB_URL above, for the same reason.
 SENSITIVE_VAR_RE = re.compile(
-    r"\$\{?(DATABASE_URL|WRITE_DSN|\w*_DSN(?:_\w+)?|\w*_DB_URL|\w*_TOKEN(?:_\w+)?|\w*_KEY(?:_\w+)?|"
+    r"\$\{?(\w*DATABASE_URL|WRITE_DSN|\w*_DSN(?:_\w+)?|\w*_DB_URL|\w*_TOKEN(?:_\w+)?|\w*_KEY(?:_\w+)?|"
     r"\w*SECRET\w*|\w*PASSWORD\w*|GOUMLYNE_\w*|API_KEY\w*)\b\}?"
 )
 # same name alternation, bare (no $ / braces) -- for matching a NAME string literal
 # inside os.environ['NAME'] / ENVIRON["NAME"], not a shell variable reference.
 SENSITIVE_VAR_NAME_RE = re.compile(
-    r"^(DATABASE_URL|WRITE_DSN|\w*_DSN(?:_\w+)?|\w*_DB_URL|\w*_TOKEN(?:_\w+)?|\w*_KEY(?:_\w+)?|"
+    r"^(\w*DATABASE_URL|WRITE_DSN|\w*_DSN(?:_\w+)?|\w*_DB_URL|\w*_TOKEN(?:_\w+)?|\w*_KEY(?:_\w+)?|"
     r"\w*SECRET\w*|\w*PASSWORD\w*|GOUMLYNE_\w*|API_KEY\w*)$"
 )
 
