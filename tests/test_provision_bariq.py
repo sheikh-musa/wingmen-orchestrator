@@ -183,6 +183,16 @@ def test_editor_dsn_keeps_unrelated_admin_query_params():
     assert q.get("sslmode") == ["require"]
 
 
+def test_editor_dsn_percent_encodes_spaces_not_plus():
+    # cc-quality #81751 note: libpq percent-decodes a URI query but does NOT
+    # map '+' back to a space, so quote_plus would corrupt a space-bearing
+    # pass-through param (e.g. options=-c some_setting=value).
+    admin = dsn("owner.ref", "aws-1-ap-southeast-1.pooler.supabase.com") + "?application_name=my%20app"
+    built = pb.build_editor_dsn(admin, "bariq_editor", "pw")
+    assert "+" not in built.split("?")[1]
+    assert parse_qs(urlsplit(built).query).get("application_name") == ["my app"]
+
+
 def make_fake_mint(order):
     """Connection-as-admin fake: role SQL executes, verify queries return exact
     grants / full seed (shared by the regen and apply-mode wiring tests)."""

@@ -246,6 +246,16 @@ def test_build_role_dsn_keeps_unrelated_admin_query_params():
     assert q.get("sslmode") == ["require"]
 
 
+def test_build_role_dsn_percent_encodes_spaces_not_plus(monkeypatch):
+    # cc-quality #81751 note: libpq percent-decodes a URI query but does NOT
+    # map '+' back to a space, so quote_plus would corrupt a space-bearing
+    # pass-through param (e.g. options=-c some_setting=value).
+    admin = _dsn("postgres.tnt", "x") + "?application_name=my%20app"
+    dsn = inst.build_role_dsn(admin, "fleet_provisioner", "pw")
+    assert "+" not in dsn.split("?")[1]
+    assert parse_qs(urlsplit(dsn).query).get("application_name") == ["my app"]
+
+
 # --- credential file handling --------------------------------------------------
 # Every admin-DSN fixture below must be pooler-tenant-suffixed to the REAL
 # ihsanos multi-tenant DB ref (loaded from the registry doc, never a fresh

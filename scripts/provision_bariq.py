@@ -39,7 +39,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import parse_qsl, quote_plus, urlencode, urlparse
+from urllib.parse import parse_qsl, quote, quote_plus, urlencode, urlparse
 
 ORCH_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ORCH_DIR / "scripts"))
@@ -174,7 +174,7 @@ def build_editor_dsn(admin_dsn: str, role: str, password: str) -> str:
              if k != "sslmode"] + [("sslmode", "require")]
     port = p.port or 5432
     return (f"{DSN_SCHEME}{user}:{quote_plus(password)}@{p.hostname}:{port}"
-            f"{p.path}?{urlencode(query)}")
+            f"{p.path}?{urlencode(query, quote_via=quote)}")
 
 
 def write_dsn_file(path: Path, dsn: str) -> None:

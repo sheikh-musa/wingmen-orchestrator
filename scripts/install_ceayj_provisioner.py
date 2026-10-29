@@ -55,7 +55,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, quote_plus, urlencode, urlsplit, urlunsplit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
@@ -243,7 +243,7 @@ def build_role_dsn(admin_dsn: str, role: str, password: str) -> str:
              if k != "sslmode"] + [("sslmode", "require")]
     return urlunsplit((parts.scheme, f"{userinfo}@{parts.hostname}"
                        + (f":{parts.port}" if parts.port else ""),
-                       parts.path, urlencode(query), parts.fragment))
+                       parts.path, urlencode(query, quote_via=quote), parts.fragment))
 
 
 IHSANOS_STORE_ALIAS = "ihsanos multi-tenant DB"
