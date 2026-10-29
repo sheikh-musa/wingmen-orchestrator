@@ -308,15 +308,34 @@ def flip_to_deepseek(session: str, orch_dir: Path, apply: bool, run=subprocess.r
     except Exception as e:  # noqa: BLE001 — fail loud on this lane, keep going for the rest
         return {"session": session, "result": "FAILED", "detail": f"token resolve failed, stays paused: {e}"}
     set_desired_state(session, "up")
-    (orch_dir / f".{session}_model").write_text("deepseek-flash")
+    # Same pointer-restore discipline as flip_back_to_glm (#79897): keep the prior bytes
+    # (or absence) to put back if the switch never actually moved the lane off GLM.
+    ptr = orch_dir / f".{session}_model"
+    prior = ptr.read_bytes() if ptr.exists() else None
+    ptr.write_text("deepseek-flash")
     env = dict(os.environ, CC_BASE_AGENT_ID="cc-fleet-health")
-    cp = run([str(orch_dir / "scripts" / "switch_lane_token.sh"), "--model-apply", "--drain",
-              session, token], capture_output=True, text=True, timeout=420, env=env, cwd=str(orch_dir))
-    ok = cp.returncode == 0
-    tail = (cp.stdout + cp.stderr).strip().splitlines()[-1:] if (cp.stdout or cp.stderr) else []
-    return {"session": session, "result": "OK" if ok else "FAILED",
-            "detail": f"token={os.path.basename(token)}; switch rc={cp.returncode}"
-                      + (f": {tail[0][:160]}" if tail and not ok else "")}
+    try:
+        cp = run([str(orch_dir / "scripts" / "switch_lane_token.sh"), "--model-apply", "--drain",
+                  session, token], capture_output=True, text=True, timeout=420, env=env, cwd=str(orch_dir))
+    except subprocess.TimeoutExpired:
+        return {"session": session, "result": "FAILED",
+                "detail": "switch timed out after 420s — lane may be mid-relaunch; pointer left at "
+                          "deepseek-flash, VERIFY the lane's model + pointer by hand"}
+    except Exception as e:  # noqa: BLE001 — the switch never started, the lane is untouched
+        _restore_pointer(ptr, prior)
+        return {"session": session, "result": "FAILED", "detail": f"switch did not start ({e}); pointer restored"}
+    if cp.returncode == 0:
+        return {"session": session, "result": "OK",
+                "detail": f"token={os.path.basename(token)}; switch rc=0"}
+    out = (cp.stdout or "") + (cp.stderr or "")
+    tail = out.strip().splitlines()[-1:]
+    why = f"token={os.path.basename(token)}; switch rc={cp.returncode}" + (f": {tail[0][:160]}" if tail else "")
+    if cp.returncode in _PRE_RELAUNCH_RCS or (cp.returncode == 7 and _GATE_REFUSED_MARK in out):
+        _restore_pointer(ptr, prior)
+        return {"session": session, "result": "FAILED", "detail": f"{why}; lane untouched, pointer restored"}
+    return {"session": session, "result": "FAILED",
+            "detail": f"{why}; failed AFTER the relaunch step — pointer left at deepseek-flash, VERIFY "
+                      f"the lane's live model + pointer by hand"}
 
 
 def check_hard_exclude_divergence(session: str, apply: bool) -> None:

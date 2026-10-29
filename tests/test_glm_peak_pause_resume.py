@@ -401,6 +401,30 @@ def test_flip_to_deepseek_token_resolve_failure_touches_nothing(tmp_path, monkey
     assert not (tmp_path / ".oeh_model").exists()
 
 
+@pytest.mark.parametrize("rc,out", [(1, ""), (4, ""), (5, "HOLD: staged composer text"),
+                                    (7, "ERROR: GLM flip REFUSED by the provider_policy gate")])
+def test_flip_to_deepseek_switch_fails_before_relaunch_restores_prior_pointer(tmp_path, monkeypatch, rc, out):
+    """[cc-quality PR#625 should-fix] flip_to_deepseek must restore the pointer on a
+    pre-relaunch switch failure, same as flip_back_to_glm (#79897) — not dormant once
+    GLM_PEAK_NONURGENT_ACTION=deepseek is actually armed."""
+    monkeypatch.setattr(g, "set_desired_state", lambda *a: None)
+    ptr = tmp_path / ".hc95-broker_model"
+    ptr.write_text("glm-5.3")
+    r = g.flip_to_deepseek("hc95-broker", tmp_path, apply=True, run=_rc(rc, out),
+                           token_resolver=_tok, policy_check=_allowed)
+    assert r["result"] == "FAILED" and ptr.read_text() == "glm-5.3"
+
+
+def test_flip_to_deepseek_switch_fails_after_relaunch_leaves_pointer_at_deepseek(tmp_path, monkeypatch):
+    monkeypatch.setattr(g, "set_desired_state", lambda *a: None)
+    ptr = tmp_path / ".hc95-broker_model"
+    ptr.write_text("glm-5.3")
+    r = g.flip_to_deepseek("hc95-broker", tmp_path, apply=True, run=_rc(6, "some other failure"),
+                           token_resolver=_tok, policy_check=_allowed)
+    assert r["result"] == "FAILED" and ptr.read_text() == "deepseek-flash"
+    assert "VERIFY the lane's live model" in r["detail"]
+
+
 def test_main_off_peak_reverses_both_flipped_and_deepseek_buckets(tmp_path, monkeypatch, capsys):
     """A deepseek-fallback lane was never paused (desired_state stayed 'up' the whole
     time) — off-peak must send it through flip_back_to_glm, same as a flipped-to-musa
