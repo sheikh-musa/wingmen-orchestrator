@@ -273,3 +273,80 @@ def test_gate_escalates_on_misconfigured_override_too():
         pass
     assert len(calls) == 1
     assert "ProviderPolicyMisconfigured" in calls[0][0]
+
+
+# ── provider_for_model: the flip gate is TOTAL, not a list (orch-console #81004) ──
+# Every non-Anthropic model id maps to a provider name the gate checks; only a
+# recognised Anthropic id (or the empty fleet default) skips it; anything else
+# fails CLOSED as an unknown provider no policy row can allow.
+
+def test_provider_for_model_anthropic_ids_skip_the_gate():
+    for m in ("", "claude-sonnet-5", "claude-opus-5-5", "claude-sonnet-5[1m]",
+              "opus", "sonnet", "haiku", "sonnet[1m]", "claude-haiku-5-5"):
+        assert pp.provider_for_model(m) is None, m
+
+
+def test_provider_for_model_maps_each_routed_prefix():
+    assert pp.provider_for_model("glm-5.3") == "zai"
+    assert pp.provider_for_model("deepseek-flash") == "deepseek"
+    assert pp.provider_for_model("deepseek-v4-pro") == "deepseek"
+    assert pp.provider_for_model("kimi-k2") == "moonshot"
+    assert pp.provider_for_model("moonshot-v1") == "moonshot"
+    assert pp.provider_for_model("qwen3-coder") == "qwen"
+
+
+def test_provider_for_model_openrouter_vendor_ids_map_to_openrouter():
+    for m in ("moonshotai/kimi-k2", "deepseek/deepseek-chat", "qwen/qwen3-coder", "z-ai/glm-4.6"):
+        assert pp.provider_for_model(m) == "openrouter", m
+
+
+def test_provider_for_model_unknown_id_fails_closed():
+    p = pp.provider_for_model("some-new-model-9")
+    assert p is not None and p.startswith("unknown:")
+
+
+_DS_ROWS = [
+    {"client_key": "irsyad", "allowed_providers": ["anthropic"], "text_only": False},
+    {"client_key": "mamadah", "allowed_providers": ["anthropic"], "text_only": False},
+    {"client_key": "ffsfulfilment", "allowed_providers": ["anthropic", "zai", "deepseek"], "text_only": True},
+]
+
+
+def test_gate_refuses_deepseek_for_irsyad_and_mamadah():
+    for sess in ("cc-irsyad-coord-1", "irsyad-coord", "cc-mamadah-1", "mamadah"):
+        calls = []
+        try:
+            pp.gate_or_post_refusal(sess, provider="deepseek", fetch_rows=_fetch(_DS_ROWS, []),
+                                    escalate=lambda *a: calls.append(a))
+            assert False, f"expected SystemExit for {sess}"
+        except SystemExit as e:
+            assert e.code == 1
+        assert len(calls) == 1 and "deepseek" in calls[0][0], sess
+
+
+def test_gate_allows_deepseek_where_the_row_allows_it():
+    calls = []
+    pp.gate_or_post_refusal("cc-ffsfulfilment", provider="deepseek", fetch_rows=_fetch(_DS_ROWS, []),
+                            escalate=lambda *a: calls.append(a))
+    assert calls == []
+
+
+def test_gate_refuses_unknown_provider_even_for_a_permissive_row():
+    rows = [{"client_key": "ffsfulfilment", "allowed_providers": ["anthropic", "zai", "deepseek"], "text_only": True}]
+    try:
+        pp.gate_or_post_refusal("cc-ffsfulfilment", provider=pp.provider_for_model("some-new-model-9"),
+                                fetch_rows=_fetch(rows, []), escalate=lambda *a: None)
+        assert False, "expected SystemExit"
+    except SystemExit as e:
+        assert e.code == 1
+
+
+def test_gate_main_cli_gates_by_model():
+    # the shell calls `python -m scripts.lib.provider_policy --gate-model <model> <session>`
+    calls = []
+    rc = pp.gate_model_main(["--gate-model", "deepseek-flash", "cc-mamadah-1"],
+                            fetch_rows=_fetch(_DS_ROWS, []), escalate=lambda *a: calls.append(a))
+    assert rc == 1 and len(calls) == 1
+    assert pp.gate_model_main(["--gate-model", "claude-sonnet-5", "cc-mamadah-1"],
+                              fetch_rows=_fetch(_DS_ROWS, []), escalate=lambda *a: calls.append(a)) == 0
+    assert len(calls) == 1  # an Anthropic model never consults the gate

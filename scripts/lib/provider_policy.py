@@ -214,9 +214,63 @@ def gate_or_post_refusal(session: str, *, actor: str = "cli", armed: bool = Fals
     except (ProviderNotAllowedError, ProviderPolicyMisconfigured) as e:
         operator_directed = armed or break_glass
         priority = "P1" if operator_directed else "P2"
-        subject = f"[provider-policy-refused] {session}: GLM flip hard-refused ({type(e).__name__})"
+        subject = f"[provider-policy-refused] {session}: {provider} flip hard-refused ({type(e).__name__})"
         body = (f"{e}\n\nactor={actor} armed={armed} break_glass={break_glass}. "
                 f"No kill/relaunch happened — lane state is UNCHANGED.")
         escalate(subject, body, priority, operator_directed)
         print(f"REFUSED: {e}", file=sys.stderr)
         raise SystemExit(1)
+
+
+# ── THE GATE IS TOTAL (orch-console #81004) ──────────────────────────────────
+# Which provider_policy vocabulary name a model id routes to. None ONLY for a
+# recognised Anthropic id (or the empty fleet default); every routed prefix in
+# scripts/lib/provider_routing.sh maps to a name; anything else fails CLOSED as
+# "unknown:<id>", which no allowed_providers row can contain. So a new routed
+# model is gated the day it appears, instead of waiting for someone to add it
+# to a list (deepseek-* ran ungated for this reason until 2026-10-29).
+_ANTHROPIC_ALIASES = {"opus", "sonnet", "haiku", "opusplan", "default"}
+
+
+def provider_for_model(model: str):
+    m = (model or "").strip()
+    base = m.split("[", 1)[0].lower()          # claude-sonnet-5[1m] -> claude-sonnet-5
+    if not base or base.startswith("claude-") or base in _ANTHROPIC_ALIASES:
+        return None
+    if "/" in base:                            # OpenRouter vendor/model ids
+        return "openrouter"
+    if base.startswith("glm-"):
+        return "zai"
+    if base.startswith("deepseek-"):
+        return "deepseek"
+    if base.startswith(("kimi-", "moonshot-")):
+        return "moonshot"
+    if base.startswith("qwen"):
+        return "qwen"
+    return f"unknown:{m}"
+
+
+def gate_model_main(argv=None, *, fetch_rows=None, escalate=None) -> int:
+    """CLI for switch_lane_token.sh: `--gate-model <model> <session>` [--actor A] [--armed] [--break-glass].
+    Exit 0 = allowed (or an Anthropic model, which never consults the gate); 1 = refused."""
+    import argparse
+    ap = argparse.ArgumentParser(prog="provider_policy --gate-model")
+    ap.add_argument("--gate-model", required=True, dest="model")
+    ap.add_argument("session")
+    ap.add_argument("--actor", default="cli")
+    ap.add_argument("--armed", action="store_true")
+    ap.add_argument("--break-glass", action="store_true", dest="break_glass")
+    a = ap.parse_args(argv)
+    provider = provider_for_model(a.model)
+    if provider is None:
+        return 0
+    try:
+        gate_or_post_refusal(a.session, actor=a.actor, armed=a.armed, break_glass=a.break_glass,
+                             provider=provider, fetch_rows=fetch_rows, escalate=escalate)
+    except SystemExit as e:
+        return int(e.code or 1)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(gate_model_main())

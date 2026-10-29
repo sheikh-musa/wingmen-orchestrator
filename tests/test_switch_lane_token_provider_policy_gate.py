@@ -1,5 +1,5 @@
-"""STATIC: switch_lane_token.sh wires the provider_policy flip gate for a glm-*
-model-apply (orch-console #74584/#74588, bus #74586 spec,
+"""STATIC: switch_lane_token.sh wires the provider_policy flip gate for EVERY
+non-Anthropic model-apply (total since orch-console #81004; glm-* only before) (orch-console #74584/#74588, bus #74586 spec,
 reports/provider-policy-flip-gate-spec-20261023.md).
 
 The actual gate logic (assert_glm_allowed, gate_or_post_refusal) is fully unit
@@ -19,16 +19,19 @@ def _src() -> str:
     return SCRIPT.read_text()
 
 
-def test_script_gates_glm_models_before_kill_relaunch():
+def test_script_gates_every_model_via_the_tested_cli():
     src = _src()
-    assert 'glm-*)' in src, "must branch on a glm-* model before applying it"
-    assert "gate_or_post_refusal" in src, "must call the real, tested gate function (not a reimplementation)"
-    assert "from scripts.lib.provider_policy import gate_or_post_refusal" in src
+    # the provider decision lives in provider_policy.provider_for_model (unit tested);
+    # the shell must not re-implement it with its own glm-*-style case list.
+    assert "-m scripts.lib.provider_policy" in src, "must call the real, tested gate CLI"
+    assert '--gate-model "$_APPLY_MODEL" "$SESS"' in src
+    assert "glm-*)" not in src.split("PROVIDER FLIP GATE", 1)[1].split("DRY-RUN (op#10706 R3)", 1)[0], \
+        "the gate block must not narrow itself to one provider prefix"
 
 
 def test_gate_block_comes_before_the_kill_step():
     src = _src()
-    gate_pos = src.index("gate_or_post_refusal")
+    gate_pos = src.index("--gate-model")
     kill_pos = src.index('echo "[switch_lane_token] killing')
     assert gate_pos < kill_pos, "the gate must run BEFORE the lane is killed/relaunched"
 
@@ -36,7 +39,7 @@ def test_gate_block_comes_before_the_kill_step():
 def test_gate_block_comes_before_dry_run_preview():
     # a dry-run preview must show the refusal, not a misleadingly clean plan.
     src = _src()
-    gate_pos = src.index("gate_or_post_refusal")
+    gate_pos = src.index("--gate-model")
     dry_run_pos = src.index('if [ "$DRY" = "1" ]; then')
     assert gate_pos < dry_run_pos
 
@@ -49,15 +52,13 @@ def test_script_hard_refuses_on_gate_failure():
 
 def test_gate_passes_actor_armed_breakglass_context():
     src = _src()
-    assert "GATE_ACTOR" in src
-    assert "GATE_ARMED" in src
-    assert "GATE_BREAKGLASS" in src
+    assert '--actor "${ACTOR:-cli}"' in src
+    assert "_GATE_ARGS+=(--armed)" in src
+    assert "_GATE_ARGS+=(--break-glass)" in src
 
 
-def test_gate_is_scoped_to_glm_only_not_other_providers():
-    # provider_policy's allowed_providers vocabulary today only covers "zai" —
-    # a kimi-*/deepseek-*/OpenRouter model is deliberately not gated (documented
-    # scope boundary in the surrounding comment, not a silent omission).
+def test_gate_is_total_not_a_provider_list():
+    # orch-console #81004: deepseek-* ran ungated while the gate matched glm-* only.
     src = _src()
-    comment_idx = src.index("deliberately NOT gated here")
-    assert comment_idx > 0
+    assert "deliberately NOT gated here" not in src
+    assert "made TOTAL" in src
