@@ -27,15 +27,19 @@ If any of these fails, the transaction rolls back. The role is created **NOLOGIN
 
 Applied on goumlyne 2026-10-29 under gate #83193. The owner-side read-back was accepted in #83206.
 
-## 2. Secrets holder: enable login and build the DSN
-Run once, out-of-band, never in a file or the transcript:
-```
-ALTER ROLE irsyad_monitor_ro LOGIN PASSWORD '<generated>';
-```
-Then build the pooler DSN (same host and port as the existing goumlyne pooler DSN), with user `irsyad_monitor_ro.goumlynecruxrlmzlntp` and `sslmode=require`.
+## 2. Enable login and build the DSN (coord, option A, console #83220)
+No secrets holder has a goumlyne admin credential, so coord runs this from the irsyad side, and the plaintext never leaves one process:
+- One `python3 -I` process on gzb generates a 32-byte random password. It writes `IRSYAD_MONITOR_RO_DATABASE_URL=<pooler DSN>` (user `irsyad_monitor_ro.goumlynecruxrlmzlntp`, `sslmode=require`, same host and port as the existing goumlyne pooler DSN) to `/home/gazzai/.config/wingmen/irsyad_monitor_ro.env` (0600, O_EXCL). It prints only `sha256(value)[:16]`.
+- The same process computes the SCRAM-SHA-256 verifier locally (4096 iterations, random 16-byte salt; checked against the RFC 7677 vector) and writes only `ALTER ROLE irsyad_monitor_ro LOGIN PASSWORD '<verifier>';` to a 0600 inner file.
+- Apply it via exec_prod under a goumlyne gate, then shred the inner file. Only the verifier transits exec_prod.
+- The read-back is boolean only: `rolcanlogin` = true and `rolpassword LIKE 'SCRAM-SHA-256$%'` = true.
+
+Done 2026-10-29 under gate #83220: DSN hash prefix `a9da8c15caef0776`. Hash both ends the same way: `cut -d= -f2- <file> | tr -d '\n' | sha256sum`.
+
+The DSN moves only host to host (scp/ssh over the tailnet, 0600 preserved, hash prefix confirmed at both ends), never via the bus, git or a transcript. It goes to cc-fleet-health for the section 6 hard-pass, and to **the Mini master** (`/Users/sheikhmusa/wingmen/orchestrator/.env`), which is the STEP 5 swap target. The gzb `/dev/shm/wingmen-secrets/.env` bundle is fetched FROM the Mini master, so the swap happens there, followed by a re-fetch. Never edit the gzb bundle directly.
 
 ## 3. Point the monitors at the new DSN
-In the secrets bundle that the gzbai monitors source (`/dev/shm/wingmen-secrets/.env`), set `GOUMLYNE_RO_DATABASE_URL` to the new DSN. Consumers that stay on this variable, all compatible with the 7-table, irsyad-only scope:
+Set `GOUMLYNE_RO_DATABASE_URL` to the new DSN **at the Mini master** (`/Users/sheikhmusa/wingmen/orchestrator/.env`), then re-fetch the gzb bundle the monitors source (`/dev/shm/wingmen-secrets/.env`) and confirm both copies by name + hash. Precondition: `GOUMLYNE_BACKUP_RO_DATABASE_URL` has already moved out of the Mini `.env` into its own file (PR#644, ruling B #83193), so the re-fetch can't carry the broad DSN into the bundle. Consumers that stay on this variable, all compatible with the 7-table, irsyad-only scope:
 
 | Consumer | Where | What it reads |
 |---|---|---|
