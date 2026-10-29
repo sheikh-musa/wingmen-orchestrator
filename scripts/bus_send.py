@@ -904,12 +904,29 @@ def send(
             )
 
     if reply_to:
-        cur.execute(
-            "UPDATE agent_messages SET read_at=coalesce(read_at,now()), "
-            "responded_at=coalesce(responded_at,now()), "
-            "response_ref=coalesce(response_ref,%s) WHERE id=%s",
-            (str(row_id), reply_to),
-        )
+        # orch-console #82607/#82608 (held_commitments#898): this used to stamp
+        # read_at/responded_at on the target row for ANY reply referencing it, including a
+        # SELF-follow-up (sender == the target row's own from_agent, answering nobody —
+        # just adding to its own earlier message). That silently marked genuine unread/
+        # unanswered P0/P1s as read+answered: 33 occurrences on orch-console's inbox in
+        # 12h, 15 of them P1. Only stamp when the sender of THIS reply is the target row's
+        # actual recipient (to_agent, base-or-instance match, same regex bus_send already
+        # uses elsewhere for this) -- i.e. a genuine answer. A self-follow-up's thread_id
+        # link is already handled upstream (reply_to backfills `thread` when the caller
+        # didn't pass one) -- nothing else to do here for that case.
+        cur.execute("SELECT from_agent, to_agent FROM agent_messages WHERE id=%s", (reply_to,))
+        target_row = cur.fetchone()
+        if target_row is not None:
+            target_from, target_to = target_row
+            sender_base = re.sub(r"-\d+$", "", from_agent or "")
+            target_to_base = re.sub(r"-\d+$", "", target_to or "")
+            if sender_base == target_to_base:
+                cur.execute(
+                    "UPDATE agent_messages SET read_at=coalesce(read_at,now()), "
+                    "responded_at=coalesce(responded_at,now()), "
+                    "response_ref=coalesce(response_ref,%s) WHERE id=%s",
+                    (str(row_id), reply_to),
+                )
 
     conn.commit()
     conn.close()

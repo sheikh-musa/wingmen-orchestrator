@@ -793,9 +793,13 @@ def test_cli_to_base_bypasses_refusal_and_reaches_send(monkeypatch):
 def test_send_without_link_ask_never_touches_operator_asks_on_a_reply(monkeypatch):
     # a reply_to riding an existing thread, still no --link-ask. The looked-up
     # thread_id is a full 36-char uuid so it skips the separate prefix-lookup
-    # branch (len(thread) < 36), which would otherwise consume a 3rd fetchone.
+    # branch (len(thread) < 36), which would otherwise consume an extra fetchone.
+    # Target row's to_agent is the sender ("orch-console") so the reply_to
+    # read_at/responded_at stamp (#898) fires as a genuine answer, same as before.
     full_thread = "22222222-2222-2222-2222-222222222222"
-    cur, conn = _fake_send(monkeypatch, fetch_queue=[(full_thread,), (2, full_thread)])
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[
+        (full_thread,), (2, full_thread), ("cc-irsyad", "orch-console"),
+    ])
     bs.send("orch-console", "cc-irsyad", "decision", "s",
             "x" * bs._MIN_BODY_BYTES, "P1", req=True, reply_to=99,
             dsn="postgresql://unused")
@@ -1567,3 +1571,45 @@ def test_non_singleton_base_still_redirects(monkeypatch):
 def test_the_blank_environ_baseline_keeps_the_sandbox_flag():
     # orch-console #80187: an empty baseline silently disarmed the sandbox refusals
     assert os.environ.get("WINGMEN_TEST_SANDBOX") == "1"
+
+
+# ---- reply_to stamping (orch-console #82607/#82608, held_commitments#898): only the
+# target row's ACTUAL recipient answering it may stamp read_at/responded_at. A SELF
+# follow-up (sender == the target row's own from_agent) must not — that silently marked
+# genuine unread/unanswered P0/P1s as read+answered (33 occurrences/12h on orch-console's
+# inbox, 15 P1). fetch_queue order for a reply_to send with no explicit --thread:
+# (1) thread_id backfill SELECT, (2) the post_agent_message RETURNING, (3) the new
+# from_agent/to_agent lookup this fix adds.
+
+def test_reply_to_stamps_read_and_responded_when_sender_is_the_actual_recipient(monkeypatch):
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[
+        ("11111111-1111-1111-1111-111111111111",),  # thread_id backfill
+        (4242, "11111111-1111-1111-1111-111111111111"),  # post_agent_message RETURNING
+        ("orch-console", "cc-fleet-health"),  # target row's (from_agent, to_agent)
+    ])
+    bs.send(
+        "cc-fleet-health", "orch-console", "update", "answering",
+        "x" * bs._MIN_BODY_BYTES, "P2", reply_to=99, dsn="postgresql://unused",
+    )
+    stamp = next(
+        (e for e in cur.executed if "agent_messages" in e[0] and "read_at" in e[0] and e[1][-1] == 99),
+        None,
+    )
+    assert stamp is not None, "the genuine recipient's reply must stamp read_at/responded_at"
+
+
+def test_reply_to_does_not_stamp_when_sender_is_a_self_followup(monkeypatch):
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[
+        ("22222222-2222-2222-2222-222222222222",),  # thread_id backfill
+        (4243, "22222222-2222-2222-2222-222222222222"),  # post_agent_message RETURNING
+        ("orch-console", "cc-fleet-health"),  # target row's (from_agent, to_agent) -- SAME from_agent as sender
+    ])
+    bs.send(
+        "orch-console", "cc-fleet-health", "update", "adding more",
+        "x" * bs._MIN_BODY_BYTES, "P2", reply_to=99, dsn="postgresql://unused",
+    )
+    stamp = next(
+        (e for e in cur.executed if "agent_messages" in e[0] and "read_at" in e[0] and e[1][-1] == 99),
+        None,
+    )
+    assert stamp is None, "a self-follow-up must never stamp read_at/responded_at on its own target row"
