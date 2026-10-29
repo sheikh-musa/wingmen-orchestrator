@@ -56,8 +56,75 @@ def test_blocks_raw_database_url_echo():
 
 # ---- must BLOCK: additional direct-exposure shapes --------------------------------
 
+# ---- hc#562 (bus #78523, 2026-10-27): read-verb gap on scratchpad env-shaped files --
+# cat/head of any file not literally named .env was ALLOWED (exit 0): .pgenv-exams.sh,
+# a scratchpad env.sh, ~/.pgpass. Same leak class as .env, just a different filename.
+
 def test_blocks_cat_dot_env():
     assert_blocked("Bash", {"command": "cat .env"})
+
+
+def test_blocks_cat_pgenv_file():
+    assert_blocked("Bash", {"command": "cat .pgenv-exams.sh"})
+
+
+def test_blocks_head_pgenv_file_no_leading_dot():
+    assert_blocked("Bash", {"command": "head -5 pgenv-product-exams.sh"})
+
+
+def test_blocks_cat_scratchpad_env_sh():
+    assert_blocked("Bash", {"command": "cat /tmp/claude-501/some-session/scratchpad/env.sh"})
+
+
+def test_blocks_cat_dot_pgpass():
+    assert_blocked("Bash", {"command": "cat ~/.pgpass"})
+
+
+def test_blocks_bat_dot_env():
+    assert_blocked("Bash", {"command": "bat .env"})
+
+
+def test_blocks_cat_credentials_json():
+    assert_blocked("Bash", {"command": "cat service-account-credentials.json"})
+
+
+def test_blocks_cat_secrets_yaml():
+    assert_blocked("Bash", {"command": "cat my-secrets.yaml"})
+
+
+def test_blocks_read_tool_on_pgenv_file():
+    assert_blocked("Read", {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/.pgenv-exams.sh"},
+                   expect_substr="this path is a secret file")
+
+
+def test_blocks_read_tool_on_dot_pgpass():
+    assert_blocked("Read", {"file_path": "/Users/sheikhmusa/.pgpass"},
+                   expect_substr="this path is a secret file")
+
+
+# ---- hc#562 FP guard: "secret"/"credentials" in a filename is not automatically a
+# secret-bearing DATA file -- the guard's OWN source, docs, and memory/reference files
+# that discuss secrets by name must stay readable, or the fix becomes a self-inflicted
+# false-positive wedge the moment anyone inspects this guard's own code.
+
+def test_allows_cat_of_the_guard_source_itself():
+    assert_allowed("Bash", {"command": "cat scripts/hooks/secrets_transcript_guard.py"})
+
+
+def test_allows_cat_of_secret_shape_patterns_source():
+    assert_allowed("Bash", {"command": "cat scripts/hooks/secret_shape_patterns.py"})
+
+
+def test_allows_read_tool_on_guard_test_file():
+    assert_allowed("Read", {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/tests/test_secrets_transcript_guard.py"})
+
+
+def test_allows_cat_of_markdown_mentioning_secrets():
+    assert_allowed("Bash", {"command": "cat docs/secrets-handling-notes.md"})
+
+
+def test_allows_cat_of_unrelated_sh_script_named_like_env_but_not_env_sh():
+    assert_allowed("Bash", {"command": "cat deploy_environment_check.sh"})
 
 
 def test_blocks_cat_write_dsn():

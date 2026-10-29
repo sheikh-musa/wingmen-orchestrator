@@ -178,10 +178,22 @@ SECRET_FILE_PATTERNS = [
     r"wingmen_personal.*\.json",
     r"gzb_to_mini$",  # the private half only -- gzb_to_mini.pub is public, not a secret
     r"zahidah_panopto_session\.txt",
+    # hc#562 (bus #78523, 2026-10-27): cat/head of any file not literally named .env
+    # was allowed -- same leak class, different filename. pgenv/.pgpass are strong,
+    # distinctive DB-credential-shell signals so matched broadly; credentials/secret(s)
+    # is a common English word that would false-positive on this guard's own source
+    # (secrets_transcript_guard.py, secret_shape_patterns.py) and on docs/memory that
+    # discuss secrets by name, so it's scoped to DATA file extensions only -- never .py
+    # or .md, where "secret"/"credentials" in the filename is near-certainly prose or
+    # code, not a secret-bearing file.
+    r"(^|/)[\w.-]*pgenv[\w.-]*$",
+    r"(^|/)\.pgpass$",
+    r"(^|/)env\.sh$",
+    r"(^|/)[\w.-]*(credentials|secrets?)[\w.-]*\.(json|ya?ml|env|txt)$",
 ]
 SECRET_FILE_RE = re.compile("|".join(SECRET_FILE_PATTERNS))
 
-FILE_PRINT_LEADING_RE = re.compile(r"^(cat|head|tail|less|more)\b")
+FILE_PRINT_LEADING_RE = re.compile(r"^(cat|head|tail|less|more|bat)\b")  # hc#562: bat was missing
 SED_PRINT_LEADING_RE = re.compile(r"^sed\b(?!.*-n)")  # sed without -n prints every line by default
 AWK_PRINT_LEADING_RE = re.compile(r"^awk\b")
 GREP_LEADING_RE = re.compile(r"^grep\b")
