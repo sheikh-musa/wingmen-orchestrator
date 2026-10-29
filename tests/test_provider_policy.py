@@ -350,3 +350,52 @@ def test_gate_main_cli_gates_by_model():
     assert pp.gate_model_main(["--gate-model", "claude-sonnet-5", "cc-mamadah-1"],
                               fetch_rows=_fetch(_DS_ROWS, []), escalate=lambda *a: calls.append(a)) == 0
     assert len(calls) == 1  # an Anthropic model never consults the gate
+
+
+# ── gate and routing must agree (orch-console #81044) ────────────────────────
+# provider_for_model() once checked '/' (openrouter) BEFORE the native prefixes,
+# while provider_routing.sh checks glm-*/kimi-*/moonshot-*/deepseek-* first, so
+# 'glm-4.6/x' GATED as openrouter but RAN on z.ai: fail-closed while no row
+# allows openrouter, a bypass the day one does. This test runs BOTH classifiers
+# over one corpus so they cannot drift again.
+import subprocess  # noqa: E402
+
+_ROUTING_SH = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "lib" / "provider_routing.sh"
+_HOST_TO_PROVIDER = {"api.z.ai": "zai", "api.moonshot.ai": "moonshot", "api.deepseek.com": "deepseek",
+                     "openrouter.ai": "openrouter", "coding-intl.dashscope.aliyuncs.com": "qwen"}
+_CORPUS = ["glm-5.3", "glm-4.6/x", "GLM-5", "kimi-k2", "kimi-k2/preview", "moonshot-v1", "moonshot-v1/x",
+           "deepseek-flash", "deepseek-v4-pro", "deepseek-flash/x", "moonshotai/kimi-k2",
+           "deepseek/deepseek-chat", "qwen/qwen3-coder", "z-ai/glm-4.6", "qwen3-coder", "qwen3.6-flash",
+           "openai/gpt-5", "claude-sonnet-5", "claude-opus-5-5", "claude-sonnet-5[1m]", "sonnet", "opus",
+           "", "mystery-model",
+           # whitespace (cc-quality #81079 nit): routing does NOT strip, the gate does, so the gate is equal or STRICTER
+           " glm-5.3 ", " glm-5.3", "glm-5.3 ", " deepseek-flash", " claude-sonnet-5", "claude-sonnet-5 "]
+
+
+def _routing_provider(model):
+    """What provider_routing.sh's _provider_for_model actually routes `model` to (None = not routed)."""
+    r = subprocess.run(["bash", "-c", 'source "$1" >/dev/null 2>&1; _provider_for_model "$2"', "_",
+                        str(_ROUTING_SH), model], capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    host = r.stdout.strip().split("|")[1].split("//", 1)[1].split("/", 1)[0]
+    return _HOST_TO_PROVIDER[host]
+
+
+def test_native_prefix_wins_over_slash_like_routing():
+    assert pp.provider_for_model("glm-4.6/x") == "zai"
+    assert pp.provider_for_model("kimi-k2/preview") == "moonshot"
+    assert pp.provider_for_model("deepseek-flash/x") == "deepseek"
+    assert pp.provider_for_model("z-ai/glm-4.6") == "openrouter"
+    assert pp.provider_for_model("qwen/qwen3-coder") == "openrouter"
+
+
+def test_gate_and_routing_agree_on_every_routed_model():
+    for m in _CORPUS:
+        routed = _routing_provider(m)
+        gated = pp.provider_for_model(m)
+        if routed is not None:
+            assert gated == routed, f"{m!r}: routing runs it on {routed} but the gate checks {gated}"
+        else:
+            # routing leaves it on Anthropic: the gate may skip (Anthropic id) or be STRICTER, never laxer
+            assert gated is None or gated.startswith("unknown:") or gated in _HOST_TO_PROVIDER.values(), m

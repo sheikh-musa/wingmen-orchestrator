@@ -237,16 +237,21 @@ def provider_for_model(model: str):
     base = m.split("[", 1)[0].lower()          # claude-sonnet-5[1m] -> claude-sonnet-5
     if not base or base.startswith("claude-") or base in _ANTHROPIC_ALIASES:
         return None
-    if "/" in base:                            # OpenRouter vendor/model ids
-        return "openrouter"
+    # SAME ORDER as provider_routing.sh's _provider_for_model case arms (orch-console
+    # #81044): a native prefix wins over a '/', so 'glm-4.6/x' is gated as zai because
+    # that is where it RUNS. tests/test_provider_policy.py runs both over one corpus.
     if base.startswith("glm-"):
         return "zai"
-    if base.startswith("deepseek-"):
-        return "deepseek"
     if base.startswith(("kimi-", "moonshot-")):
         return "moonshot"
+    if base.startswith("deepseek-"):
+        return "deepseek"
+    if base.startswith(("moonshotai/", "deepseek/", "qwen/", "z-ai/")):
+        return "openrouter"
     if base.startswith("qwen"):
         return "qwen"
+    if "/" in base:                            # any other vendor/model id: routing leaves it, gate stays strict
+        return "openrouter"
     return f"unknown:{m}"
 
 
