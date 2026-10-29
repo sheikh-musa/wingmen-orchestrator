@@ -1599,10 +1599,18 @@ def test_reply_to_stamps_read_and_responded_when_sender_is_the_actual_recipient(
 
 
 def test_reply_to_does_not_stamp_when_sender_is_a_self_followup(monkeypatch):
+    # "orch-console" vs target_to "cc-fleet-health" share no name-prefix
+    # relationship, so this falls through to the registry lookup -- two
+    # extra fetchone()s (sender's row, then target_to's row), both of which
+    # resolve to no shared base (NULL base_agent_id in both rows is the
+    # ordinary case for a base identity, so _is_genuine_recipient_reply
+    # falls back to the literal strings, which differ).
     cur, conn = _fake_send(monkeypatch, fetch_queue=[
         ("22222222-2222-2222-2222-222222222222",),  # thread_id backfill
         (4243, "22222222-2222-2222-2222-222222222222"),  # post_agent_message RETURNING
         ("orch-console", "cc-fleet-health"),  # target row's (from_agent, to_agent) -- SAME from_agent as sender
+        (None, True),   # _agent_status_row("orch-console")
+        (None, True),   # _agent_status_row("cc-fleet-health")
     ])
     bs.send(
         "orch-console", "cc-fleet-health", "update", "adding more",
@@ -1613,3 +1621,67 @@ def test_reply_to_does_not_stamp_when_sender_is_a_self_followup(monkeypatch):
         None,
     )
     assert stamp is None, "a self-follow-up must never stamp read_at/responded_at on its own target row"
+
+
+def test_reply_to_stamps_when_numbered_base_answers_its_own_instance_row(monkeypatch):
+    """The exact regression (bus #83138): cc-cosem-exams-2 is itself a BASE
+    name that ends in a digit (the digit is part of the family name, not an
+    instance suffix). It answers a row addressed to its own instance
+    cc-cosem-exams-2-1. Must stamp -- and must do so via the fast
+    name-prefix path (no agent_status round-trip), proven by an exhausted
+    fetch_queue with nothing left for a 4th/5th fetchone()."""
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[
+        ("33333333-3333-3333-3333-333333333333",),
+        (4244, "33333333-3333-3333-3333-333333333333"),
+        ("orch-console", "cc-cosem-exams-2-1"),  # target row's (from_agent, to_agent)
+    ])
+    bs.send(
+        "cc-cosem-exams-2", "orch-console", "update", "answering",
+        "x" * bs._MIN_BODY_BYTES, "P2", reply_to=99, dsn="postgresql://unused",
+    )
+    stamp = next(
+        (e for e in cur.executed if "agent_messages" in e[0] and "read_at" in e[0] and e[1][-1] == 99),
+        None,
+    )
+    assert stamp is not None, "a numbered-name base answering its own instance's row must stamp"
+
+
+def test_reply_to_stamps_when_numbered_instance_answers_its_own_base_row(monkeypatch):
+    """Reverse direction of the same regression: cc-cosem-exams-2-1 (an
+    instance) answers a row addressed to its own base cc-cosem-exams-2."""
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[
+        ("44444444-4444-4444-4444-444444444444",),
+        (4245, "44444444-4444-4444-4444-444444444444"),
+        ("orch-console", "cc-cosem-exams-2"),  # target row's (from_agent, to_agent)
+    ])
+    bs.send(
+        "cc-cosem-exams-2-1", "orch-console", "update", "answering",
+        "x" * bs._MIN_BODY_BYTES, "P2", reply_to=99, dsn="postgresql://unused",
+    )
+    stamp = next(
+        (e for e in cur.executed if "agent_messages" in e[0] and "read_at" in e[0] and e[1][-1] == 99),
+        None,
+    )
+    assert stamp is not None, "a numbered-name instance answering its own base's row must stamp"
+
+
+def test_reply_to_does_not_stamp_for_an_unrelated_third_party(monkeypatch):
+    """Neither sender nor the registry base of either side match -- must
+    NOT stamp. Exercises the registry-lookup slow path with two genuinely
+    distinct bases (not just two NULLs falling back to distinct literals)."""
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[
+        ("55555555-5555-5555-5555-555555555555",),
+        (4246, "55555555-5555-5555-5555-555555555555"),
+        ("cc-irsyad", "orch-console"),  # target row's (from_agent, to_agent)
+        ("cc-bariq", True),   # _agent_status_row("cc-bariq-2") -> base cc-bariq
+        (None, True),          # _agent_status_row("orch-console") -> no base, falls back
+    ])
+    bs.send(
+        "cc-bariq-2", "cc-irsyad", "update", "unrelated reply", "x" * bs._MIN_BODY_BYTES,
+        "P2", reply_to=99, dsn="postgresql://unused",
+    )
+    stamp = next(
+        (e for e in cur.executed if "agent_messages" in e[0] and "read_at" in e[0] and e[1][-1] == 99),
+        None,
+    )
+    assert stamp is None, "an unrelated third party's reply must never stamp someone else's row"
