@@ -590,15 +590,22 @@ BEGIN
     END;
   END LOOP;
 
-  -- ── (c) auth.uid() is NULL for the role, and the 3 SECDEF helpers return EMPTY sets when called directly ──
+  -- ── (c) the role CANNOT name the auth schema (no USAGE on it, by design, console #82781): calling
+  --     auth.uid() by name must be refused 42501. Policies still evaluate it by OID (see
+  --     c_no_function_permission_denied). Then the 3 SECDEF helpers return EMPTY sets when called directly ──
   BEGIN
     EXECUTE 'SET LOCAL ROLE irsyad_monitor_ro';
     EXECUTE 'SELECT auth.uid() IS NULL' INTO v_bool;
     EXECUTE format('SET LOCAL ROLE %I', v_owner);
-    IF v_bool THEN v_out := v_out || c_nl || 'PASS'; ELSE v_fail := v_fail + 1; v_out := v_out || c_nl || 'FAIL'; END IF;
-    v_out := v_out || ' c_auth_uid_is_null=' || v_bool;
+    v_fail := v_fail + 1;
+    v_out := v_out || c_nl || 'FAIL c_auth_schema_not_nameable: the role could call auth.uid() by name (expected 42501)';
   EXCEPTION WHEN others THEN
-    v_fail := v_fail + 1; v_out := v_out || c_nl || 'FAIL c_auth_uid sqlstate=' || SQLSTATE || ' ' || left(SQLERRM, 160);
+    IF SQLSTATE = '42501' THEN
+      v_out := v_out || c_nl || 'PASS c_auth_schema_not_nameable sqlstate=42501';
+    ELSE
+      v_fail := v_fail + 1;
+      v_out := v_out || c_nl || 'FAIL c_auth_schema_not_nameable sqlstate=' || SQLSTATE || ' ' || left(SQLERRM, 160);
+    END IF;
   END;
 
   FOREACH v_t IN ARRAY c_helpers LOOP
