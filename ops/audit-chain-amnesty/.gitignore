@@ -1,3 +1,5 @@
 # The raw chain dump carries audit_log PAYLOADS (client audit content) — NEVER commit it.
 # It is a re-derivable intermediate; regenerate with rederive_dump.py.
 goumlyne_chain.jsonl
+chain.jsonl
+*.jsonl
