@@ -45,19 +45,22 @@ either is supplied, the full independent digit-boundary match
 function of the same name) is used instead, exactly as this module's kwargs
 always anticipated.
 
-STILL OPEN, deliberately NOT closed by the above (orch-console ruling, bus
-#79468, pending feasibility question #79471): LEXICALLY HAZARDOUS SQL
-(backslash / dquote-hazard / identifier-$, per is_lexically_hazardous) is
-refused UNCONDITIONALLY in require_gate even when migration/pr are supplied
-and match the gate text — a text-only match is not enough for a class of
-input is_ddl_shaped cannot reliably classify at all. Console approved
-letting it through only behind an ADDITIONAL byte-binding check (the
-executed bytes' sha12 matching a sha12 the gate cites), not yet built — see
-require_gate's `if hazardous:` branch. Do not relax that branch without the
-byte-binding check landing first.
+GAP CLOSED (Part A 2/2, orch-console ruling bus #79477 after the feasibility
+question in #79471): LEXICALLY HAZARDOUS SQL is now allowed, but ONLY behind a
+byte binding. The gater cites sha256(wrap(file))[:12] -- the WRAPPED bytes,
+computed by exec_prod.py --show-gate-sha at the cited commit, NOT the raw
+file's sha12 that apply_migration.py cites for its own, unchanged convention --
+and require_gate refuses unless sha256(guarded_sql)[:12] equals it. The broker
+never calls wrap() and never reads the migration file: it proves the executed
+bytes equal what the gater hashed; the file identity is attested by the gater,
+not verified by the broker. Refusals on that axis are the additive
+GATE_MISMATCH code; every failure the ruling lists as "unchanged" (expired /
+out-of-scope / unauthorized gate, ungated hazardous SQL) still refuses, and a
+byte match does NOT replace the migration/PR specificity check.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime, timezone
 
@@ -238,23 +241,54 @@ def require_gate(
         )
 
     if hazardous:
-        # Part A gap, ruled on by orch-console (bus #79465/#79468,
-        # 2026-10-28): a text-only migration/pr match is NOT enough for
-        # lexically hazardous SQL (backslash / dquote-hazard / identifier-$)
-        # -- console approved letting it through ONLY with an additional
-        # byte-binding check (sha256 of the exact executed bytes matching a
-        # sha12 the gate cites), which is not built yet (open feasibility
-        # question on the citation convention, bus #79471). Until that
-        # lands, hazardous SQL is refused unconditionally here, REGARDLESS
-        # of how well migration/pr match the gate text -- do not fold this
-        # into the migration/pr branch below without the byte-binding check
-        # landing first.
-        raise BrokerValidationError(
-            ErrorCode.GATE_INVALID,
-            f"gate {gate_id} is shape-valid but this statement is lexically "
-            "hazardous, which cannot be authorized by a migration/PR text "
-            "match alone pending the byte-binding check (bus #79468/#79471)",
-        )
+        # Part A 2/2 (orch-console ruling bus #79477, resolving the byte-shape
+        # problem raised in #79471): lexically hazardous SQL may be authorized
+        # ONLY by binding the gate to the EXACT executed bytes. Two things are
+        # required, in this order:
+        #   1. the same migration/PR specificity every other DDL statement
+        #      needs -- a byte match says nothing on its own about WHICH
+        #      migration the gate authorizes, so it is not a substitute for
+        #      that check (deliberately fail-closed: byte binding is
+        #      ADDITIONAL, never an alternative);
+        #   2. the gate must cite sha256(guarded_sql)[:12] -- which the gater
+        #      computes as sha256(wrap(file))[:12] via exec_prod.py
+        #      --show-gate-sha at the cited commit -- and it must match.
+        # The broker never calls wrap() and never reads the migration file, per
+        # the ruling: "the broker proves the executed bytes equal what the
+        # gater hashed; the file identity is attested by the gater (via
+        # --show-gate-sha at the cited commit), not verified by the broker".
+        # Do not widen this to a text-only match, and do not narrow it to a
+        # byte match alone.
+        if not (migration or pr):
+            raise BrokerValidationError(
+                ErrorCode.GATE_INVALID,
+                f"gate {gate_id} authorizes lexically hazardous SQL, which "
+                "additionally requires the migration or PR it is for on the "
+                "wire (bus #79477)",
+            )
+        if not _text_mentions_migration_or_pr(text, migration, pr):
+            raise BrokerValidationError(
+                ErrorCode.GATE_INVALID,
+                f"gate {gate_id} does not mention migration {migration!r} or PR {pr!r}",
+            )
+        cited = _cited_wrapped_sha12s(text)
+        executed = _executed_sha12(guarded_sql)
+        if not cited:
+            raise BrokerValidationError(
+                ErrorCode.GATE_MISMATCH,
+                f"gate {gate_id} cites no wrapped-sha12, but this statement is "
+                f"lexically hazardous and hashes to {executed}; the gater must "
+                "cite the wrapped sha12 printed by exec_prod.py --show-gate-sha "
+                "at the cited commit (bus #79477)",
+            )
+        if cited != {executed}:
+            raise BrokerValidationError(
+                ErrorCode.GATE_MISMATCH,
+                f"executed bytes hash to {executed}, but gate {gate_id} cites "
+                f"{sorted(cited)} -- the statement being executed is not the one "
+                "the gate authorized (bus #79477)",
+            )
+        return
 
     if migration or pr:
         # Forward-compat path for rollout step (c), once the wire contract
@@ -284,8 +318,8 @@ def require_gate(
 
 
 def _text_mentions_migration_or_pr(text: str, migration: str | None, pr: str | None) -> bool:
-    """Digit-boundary match (cc-quality #56681 finding 1) — ported for
-    forward-compat with the migration/pr kwargs; unused by any current caller."""
+    """Digit-boundary match (cc-quality #56681 finding 1) — the same check
+    exec_prod._require_gate performs, ported verbatim in logic."""
     t = text.lower()
     if migration:
         if re.search(rf"(?<!\d){re.escape(migration.lower())}(?!\d)", t):
@@ -296,3 +330,34 @@ def _text_mentions_migration_or_pr(text: str, migration: str | None, pr: str | N
             if re.search(pat, t):
                 return True
     return False
+
+
+# A gate that authorizes LEXICALLY HAZARDOUS SQL must cite
+# sha256(guarded_sql)[:12] -- the WRAPPED bytes, not the raw migration file --
+# under this label. Exactly 12 hex chars with a word boundary after them, so a
+# full 64-char digest, or the row's separate raw-file sha12 sitting unlabelled
+# elsewhere in the text, can never be mistaken for the citation (bus #79477:
+# the raw-file convention stays reserved for apply_migration.py, unchanged; the
+# wrap()ed-byte convention is what binds a broker call).
+_WRAPPED_SHA12_RE = re.compile(
+    r"wrapped[\s_-]*sha12\s*[:=]\s*([0-9a-fA-F]{12})\b", re.IGNORECASE
+)
+
+
+def _cited_wrapped_sha12s(text: str) -> set[str]:
+    """Every DISTINCT wrapped-sha12 the gate text cites, lowercased. More than
+    one distinct value is treated as ambiguous by require_gate (refuse, never
+    pick one) -- see
+    test_hazardous_refused_when_gate_cites_two_conflicting_wrapped_sha12s."""
+    return {m.group(1).lower() for m in _WRAPPED_SHA12_RE.finditer(text)}
+
+
+def _executed_sha12(guarded_sql: str) -> str:
+    """sha256 of the EXACT bytes the broker is about to hand the management
+    API, first 12 hex chars -- the same truncation apply_migration.py already
+    uses for its (separate, unchanged) raw-file gate citations, applied here to
+    the wrap()ed payload. The digest is over the request's `guarded_sql` str
+    encoded as UTF-8: that is the wire encoding, it is the same str value the
+    JSON body carries to the management API, and it is therefore the same byte
+    string the gater hashed with --show-gate-sha."""
+    return hashlib.sha256(guarded_sql.encode("utf-8")).hexdigest()[:12]

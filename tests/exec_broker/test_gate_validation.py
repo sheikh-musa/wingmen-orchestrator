@@ -1,6 +1,7 @@
 """hc#95 exec-broker gate + project_ref re-validation (contract §4)."""
 from __future__ import annotations
 
+import hashlib
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -274,17 +275,16 @@ def test_require_gate_full_match_still_works_once_migration_pr_supplied():
     )  # no raise
 
 
-def test_require_gate_hazardous_still_refused_even_with_matching_migration_pr():
-    # The gap orch-console ruled on (bus #79465/#79468, 2026-10-28): wiring
-    # migration/pr through must NOT also let LEXICALLY HAZARDOUS SQL pass on
-    # a text-mention match alone -- console approved allowing hazardous SQL
-    # through only WITH an additional byte-binding check (sha256 of the
-    # executed bytes matching a sha12 the gate cites), which does not exist
-    # yet (open feasibility question, bus #79471). Until that lands,
-    # hazardous SQL stays refused regardless of how well migration/pr match
-    # the gate text -- this is the fail-closed INTERIM behavior, pinned so a
-    # future byte-binding PR has to deliberately change this test, not drift
-    # into it by accident.
+def test_hazardous_with_matching_migration_pr_but_no_cited_sha12_is_a_gate_mismatch():
+    # This test USED to pin the interim fail-closed behavior (hazardous SQL
+    # refused even with a matching migration/pr, because no byte binding
+    # existed). Part A 2/2 is exactly the change it predicted would have to
+    # happen deliberately: the byte binding now exists, so a matching
+    # migration/pr with NO cited wrapped sha12 is refused as GATE_MISMATCH
+    # rather than GATE_INVALID -- the gate does not bind to these exact
+    # bytes. The ALLOW path (matching migration/pr AND a correct citation)
+    # is pinned by test_hazardous_passes_when_gate_cites_the_executed_bytes_sha12
+    # in the Part A 2/2 section at the bottom of this file.
     row = {"from_agent": "orch-console", "message_type": "decision",
            "subject": "apply migration 435 to goumlyne", "body": "", "is_past": True}
     with pytest.raises(BrokerValidationError) as exc:
@@ -292,7 +292,7 @@ def test_require_gate_hazardous_still_refused_even_with_matching_migration_pr():
             'SELECT "x--y"; DROP TABLE t', "56485", "goumlynecruxrlmzlntp",
             cur=FakeCursor(row), migration="435",
         )
-    assert exc.value.code == ErrorCode.GATE_INVALID
+    assert exc.value.code == ErrorCode.GATE_MISMATCH
 
 
 def test_require_gate_full_match_rejects_mismatched_migration_once_supplied():
@@ -321,3 +321,183 @@ def test_ref_override_is_live_expiry_is_strict():
     assert ref_override_is_live(ref, boundary, now=boundary - timedelta(seconds=1)) is True
     assert ref_override_is_live(ref, boundary, now=boundary) is False  # == expiry is expired
     assert ref_override_is_live(ref, boundary, now=boundary + timedelta(seconds=1)) is False
+
+
+# --- Part A 2/2 (orch-console ruling bus #79477): the byte binding for
+# LEXICALLY HAZARDOUS SQL.
+#
+# The rule: the gater cites sha256(wrap(file))[:12] in the gate row; the
+# broker refuses unless sha256(guarded_sql)[:12] equals that cited sha12.
+# The broker never calls wrap() and never sees the migration file -- in
+# console's words, "the broker proves the executed bytes equal what the
+# gater hashed; the file identity is attested by the gater (via
+# --show-gate-sha at the cited commit), not verified by the broker".
+#
+# These are the four pin tests named in #79477, plus the fail-closed edges
+# the ruling's "unchanged" list implies (fragment/concatenation, ambiguous
+# citation, and the non-hazardous branch not becoming reachable this way).
+#
+# NOTE ON THE SILO REF THESE USE: a synthetic ref, never a client one. The
+# silo-mention check is plain whole-word matching against whatever
+# project_ref the caller passes (the alias table only ADDS needles for real
+# aliases), so nothing on this path is specific to a client silo -- and
+# "code only, no client data" applies to test fixtures too.
+
+_HAZ = 'SELECT "x--y"; DROP TABLE t'
+_SYNTH_REF = "syntheticbrokerqfakesilo"
+
+
+def _sha12(sql: str) -> str:
+    """sha256 of the EXACT executed bytes, first 12 hex chars -- the same
+    convention apply_migration.py already uses for gate citations
+    (hashlib.sha256(...).hexdigest()[:12]), applied to the wrap()ed payload
+    rather than to the raw file (the whole point of ruling (B))."""
+    return hashlib.sha256(sql.encode("utf-8")).hexdigest()[:12]
+
+
+def _bytebound_row(
+    cited: str | None = "__EXECUTED__",
+    *,
+    migration: str = "435",
+    extra: str = "",
+) -> dict:
+    """A gate row shaped the way --show-gate-sha is meant to produce it: the
+    commit, BOTH sha12s, with the wrapped one LABELLED (the raw-file one is
+    recorded for cross-checking against apply_migration.py's separate,
+    unchanged convention, and must never be what authorizes the call)."""
+    body = "commit 5053826e; raw-sha12: 0123456789ab"
+    if cited is not None:
+        body += f"\nwrapped-sha12: {_sha12(_HAZ) if cited == '__EXECUTED__' else cited}"
+    body += extra
+    return {
+        "from_agent": "orch-console",
+        "message_type": "decision",
+        "subject": f"apply migration {migration} to {_SYNTH_REF}",
+        "body": body,
+        "is_past": True,
+    }
+
+
+# (1) gated + byte-identical hazardous migration PASSES -- the ALLOW path the
+# ruling exists to create. Without this, every real hazardous migration would
+# still be refused and the ruling's intent silently defeated (the exact
+# dead-on-arrival risk bus #79471 flagged).
+def test_hazardous_passes_when_gate_cites_the_executed_bytes_sha12():
+    require_gate(
+        _HAZ, "56485", _SYNTH_REF,
+        cur=FakeCursor(_bytebound_row()), migration="435",
+    )  # no raise
+
+
+# (2) one-byte-different hazardous SQL is REFUSED -- the exact failure the
+# check exists to catch. A single trailing space changes sha256 but leaves
+# every TEXT-matched axis (migration 435, silo, shape) identical.
+def test_hazardous_refused_when_executed_bytes_differ_by_one_byte():
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(
+            _HAZ + " ", "56485", _SYNTH_REF,
+            cur=FakeCursor(_bytebound_row()), migration="435",
+        )
+    assert exc.value.code == ErrorCode.GATE_MISMATCH
+
+
+# (3) name-match but different file-sha REFUSED: the gate names the right
+# migration and the right silo, but cites the sha12 of different bytes. This
+# is the "gate approving one migration must not authorize another" property,
+# now enforced on BYTES rather than on a number appearing in prose.
+def test_hazardous_refused_when_gate_cites_a_different_sha12():
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(
+            _HAZ, "56485", _SYNTH_REF,
+            cur=FakeCursor(_bytebound_row("deadbeefcafe")), migration="435",
+        )
+    assert exc.value.code == ErrorCode.GATE_MISMATCH
+
+
+# (4) ungated hazardous REFUSED (GATE_REQUIRED, before any gate lookup) --
+# listed in the ruling's unchanged set; pinned here too so this section
+# carries all four named tests even though the pre-existing
+# hazardous-without-gate tests above already cover the same path.
+def test_hazardous_without_a_gate_is_refused_by_the_byte_binding_path_too():
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_HAZ, None, _SYNTH_REF, cur=FakeCursor())
+    assert exc.value.code == ErrorCode.GATE_REQUIRED
+
+
+# A gate that names the right migration and silo but cites NO wrapped sha12
+# (e.g. the old-shaped gate row, raw-file sha only) must be REFUSED: absence
+# of a citation is not "nothing to compare, allow by default".
+def test_hazardous_refused_when_gate_cites_no_wrapped_sha12():
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(
+            _HAZ, "56485", _SYNTH_REF,
+            cur=FakeCursor(_bytebound_row(None)), migration="435",
+        )
+    assert exc.value.code == ErrorCode.GATE_MISMATCH
+
+
+# Ambiguous citation (two DIFFERENT labelled wrapped sha12s) is refused
+# rather than resolved by picking one -- an append/edit that leaves stale
+# text behind must fail closed, not silently authorize whichever value the
+# parser happened to see first.
+def test_hazardous_refused_when_gate_cites_two_conflicting_wrapped_sha12s():
+    row = _bytebound_row(extra="\nwrapped-sha12: deadbeefcafe")
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_HAZ, "56485", _SYNTH_REF, cur=FakeCursor(row), migration="435")
+    assert exc.value.code == ErrorCode.GATE_MISMATCH
+
+
+# An UNLABELLED 12-hex token is not a citation: the raw-file sha12 in the
+# same row must not be mistaken for one (that would let the OLD convention
+# authorize a wrapped call, i.e. re-create the #79471 byte-shape mismatch as
+# a silent always-match).
+def test_hazardous_refused_when_only_an_unlabelled_hex_token_is_present():
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(
+            _HAZ, "56485", _SYNTH_REF,
+            # 0123456789ab is the row's raw-sha12, and here it is the whole
+            # body -- no `wrapped-sha12:` label anywhere.
+            cur=FakeCursor({"from_agent": "orch-console", "message_type": "decision",
+                            "subject": f"apply migration 435 to {_SYNTH_REF}",
+                            "body": "0123456789ab", "is_past": True}),
+            migration="435",
+        )
+    assert exc.value.code == ErrorCode.GATE_MISMATCH
+
+
+# Byte binding is ADDITIONAL, never a substitute for specificity (this
+# module's deliberately fail-closed reading of the ruling): a gate whose
+# citation is correct but which does not mention the migration/PR the caller
+# claims is still GATE_INVALID -- exactly as the same gate would be for
+# non-hazardous DDL.
+def test_hazardous_still_requires_migration_or_pr_match_alongside_the_byte_binding():
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(
+            _HAZ, "56485", _SYNTH_REF,
+            cur=FakeCursor(_bytebound_row(migration="435")), migration="999",
+        )
+    assert exc.value.code == ErrorCode.GATE_INVALID
+
+
+# ...and with NEITHER migration nor pr on the wire (an old 6-key caller),
+# a hazardous statement is still refused -- the byte binding does not open a
+# second, un-upgraded route into the hazardous path.
+def test_hazardous_refused_for_an_old_caller_that_supplies_no_migration_or_pr():
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_HAZ, "56485", _SYNTH_REF, cur=FakeCursor(_bytebound_row()))
+    assert exc.value.code == ErrorCode.GATE_INVALID
+
+
+# The NON-hazardous DDL branch must NOT become reachable via a citation: a
+# gate citing the right sha12 for a plain DDL statement, with no migration/pr
+# on the wire, is still the milestone-(a) unconditional refusal. This pins
+# the byte binding to the hazardous path only, as ruled ("for
+# broker-executed lexically-hazardous SQL only").
+def test_non_hazardous_ddl_cannot_pass_on_a_cited_sha12_alone():
+    sql = "drop table t"
+    row = {"from_agent": "orch-console", "message_type": "decision",
+           "subject": f"apply to {_SYNTH_REF}", "is_past": True,
+           "body": f"wrapped-sha12: {_sha12(sql)}"}
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(sql, "56485", _SYNTH_REF, cur=FakeCursor(row))
+    assert exc.value.code == ErrorCode.GATE_INVALID
