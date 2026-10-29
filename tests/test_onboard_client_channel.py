@@ -265,6 +265,74 @@ def test_render_migration_without_invite_has_no_invite_block():
     assert "bot_channel_invites" not in sql_text
 
 
+# ── op#35542 (orch-console, 2026-10-29): bot_channel_invites + its deny-all
+# policy are process-wide -- created by the FIRST --invite channel ever
+# onboarded (bariq, migration 126). Every LATER --invite channel's render
+# (e.g. faizul, migration 133) hits both already existing. A bare
+# CREATE POLICY there made that second channel's migration fail outright
+# ("policy already exists") and roll back the whole apply. ──────────────
+
+def test_render_migration_invite_policy_guard_is_idempotent_shape():
+    # the policy creation must be guarded (checked against pg_policies, never
+    # a bare CREATE POLICY) so a second --invite render can't collide with a
+    # sibling's already-applied policy of the same name.
+    _, sql_text = tool.render_migration(
+        make_args(audience="client", token_env_key="WINGMENDEVBOT_TOKEN",
+                  invite=True, invite_token="tok", chat_ids=[], owner_lane="coffeemedia"),
+        200, "supervised",
+    )
+    assert "IF NOT EXISTS (\n    SELECT 1 FROM pg_policies" in sql_text
+    assert "policyname = 'deny_all_bot_channel_invites'" in sql_text
+    # never drop a live security policy to re-create it (orch-console directive)
+    assert "DROP POLICY" not in sql_text
+
+
+def test_render_migration_invite_block_applies_cleanly_for_a_second_channel(pg_dsn):
+    """Real-Postgres proof, not just a string-shape check: apply two
+    different channels' FULL rendered migrations back to back against a
+    DB that starts empty -- the second must not raise, because it hits
+    bot_channel_invites (and its policy) already created by the first."""
+    import psycopg
+
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP SCHEMA public CASCADE")
+        cur.execute("CREATE SCHEMA public")
+        cur.execute("GRANT USAGE ON SCHEMA public TO public")
+        for role in ("anon", "authenticated"):
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+            if not cur.fetchone():
+                cur.execute(f"CREATE ROLE {role}")
+        cur.execute(
+            """
+            CREATE TABLE public.bot_channels (
+                channel_key       TEXT PRIMARY KEY,
+                token_env_key     TEXT, mode TEXT, inject_target TEXT,
+                inject_prefix     TEXT, responder_ref TEXT,
+                allowed_chat_ids  BIGINT[], allowed_usernames TEXT[],
+                group_routing     JSONB, channel_tag TEXT, log_target TEXT,
+                enabled           BOOLEAN, poll_offset BIGINT,
+                audience          TEXT, owner_lane TEXT
+            )
+            """
+        )
+        for key, token in (("bariq", "bariq-secret"), ("faizul", "faizul-secret")):
+            args = make_args(
+                channel_key=key, audience="client", token_env_key="WINGMENDEVBOT_TOKEN",
+                invite=True, invite_token=token, chat_ids=[], owner_lane="coffeemedia",
+                self_description=f"Site-edit channel for {key}",
+            )
+            _, sql_text = tool.render_migration(args, 200, "supervised")
+            cur.execute(sql_text)  # the SECOND channel's apply must not raise
+
+        cur.execute(
+            "SELECT count(*) FROM pg_policies WHERE schemaname='public' "
+            "AND tablename='bot_channel_invites' AND policyname='deny_all_bot_channel_invites'"
+        )
+        assert cur.fetchone()[0] == 1  # created once, not duplicated, never dropped+recreated
+        cur.execute("SELECT channel_key FROM public.bot_channel_invites ORDER BY channel_key")
+        assert [r[0] for r in cur.fetchall()] == ["bariq", "faizul"]
+
+
 def test_bot_username_for_known_token_and_refusal():
     assert tool.bot_username_for("WINGMENDEVBOT_TOKEN", None) == "wingmendevbot"
     assert tool.bot_username_for("MYSTERY_TOKEN", "custombot") == "custombot"
