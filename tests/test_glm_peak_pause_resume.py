@@ -68,7 +68,7 @@ def test_peak_candidates_skips_already_handled():
 
 def test_fresh_state_for_shape():
     s = g.fresh_state_for("2026-10-15")
-    assert s == {"window_date": "2026-10-15", "flipped": [], "paused": [], "resume_done": False}
+    assert s == {"window_date": "2026-10-15", "flipped": [], "paused": [], "deepseek": [], "resume_done": False}
 
 
 def test_load_state_resets_on_new_day(tmp_path, monkeypatch):
@@ -277,14 +277,172 @@ def test_flip_back_switch_raising_restores_prior_pointer(tmp_path):
 def test_main_peak_dry_run_dispatches_urgent_vs_pause(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(g, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(g, "ORCH_DIR", tmp_path)
+    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
+    monkeypatch.delenv("GLM_PEAK_URGENT_POOL", raising=False)
+    monkeypatch.delenv("GLM_PEAK_NONURGENT_ACTION", raising=False)
     (tmp_path / ".cosem-port_model").write_text("glm-5.3")
     (tmp_path / ".cosem-exams_model").write_text("glm-5.3")
     monkeypatch.setattr(g, "read_urgent_flags", lambda sessions: {"cosem-port": True, "cosem-exams": False})
     rc = g.main([], now=_utc(7, 0))  # dry-run (no --apply)
     out = capsys.readouterr().out
-    assert "URGENT->musa cosem-port: DRY" in out
+    assert "URGENT->musa-oauth-token cosem-port: DRY" in out
     assert "pause cosem-exams: DRY" in out
     assert rc == 0
+
+
+def test_main_peak_dry_run_honours_config_knobs(tmp_path, monkeypatch, capsys):
+    """[orch-console #81291] GLM_PEAK_URGENT_POOL=syed + GLM_PEAK_NONURGENT_ACTION=
+    deepseek change the dispatch, with NO code change — the whole point of the fix."""
+    monkeypatch.setattr(g, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(g, "ORCH_DIR", tmp_path)
+    (tmp_path / ".cosem-port_model").write_text("glm-5.3")
+    (tmp_path / ".cosem-exams_model").write_text("glm-5.3")
+    monkeypatch.setattr(g, "read_urgent_flags", lambda sessions: {"cosem-port": True, "cosem-exams": False})
+    monkeypatch.setenv("GLM_PEAK_URGENT_POOL", "syed")
+    monkeypatch.setenv("GLM_PEAK_NONURGENT_ACTION", "deepseek")
+    rc = g.main([], now=_utc(7, 0))
+    out = capsys.readouterr().out
+    assert "URGENT->syed-oauth-token cosem-port: DRY" in out
+    assert "nonurgent->deepseek cosem-exams: DRY" in out
+    assert rc == 0
+
+
+def test_urgent_pool_token_rejects_unknown_value(monkeypatch):
+    monkeypatch.setenv("GLM_PEAK_URGENT_POOL", "gazzabyte")
+    with pytest.raises(RuntimeError, match="GLM_PEAK_URGENT_POOL"):
+        g.urgent_pool_token()
+
+
+def test_nonurgent_action_rejects_unknown_value(monkeypatch):
+    monkeypatch.setenv("GLM_PEAK_NONURGENT_ACTION", "shrug")
+    with pytest.raises(RuntimeError, match="GLM_PEAK_NONURGENT_ACTION"):
+        g.nonurgent_action()
+
+
+def test_urgent_pool_token_defaults_to_musa(tmp_path, monkeypatch):
+    monkeypatch.delenv("GLM_PEAK_URGENT_POOL", raising=False)
+    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
+    assert g.urgent_pool_token() == g.MUSA_TOKEN
+
+
+def test_nonurgent_action_defaults_to_pause(tmp_path, monkeypatch):
+    monkeypatch.delenv("GLM_PEAK_NONURGENT_ACTION", raising=False)
+    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
+    assert g.nonurgent_action() == "pause"
+
+
+def test_urgent_pool_token_reads_config_file_when_no_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("GLM_PEAK_URGENT_POOL", raising=False)
+    cfg = tmp_path / "glm_peak_pool_config.json"
+    cfg.write_text(json.dumps({"urgent_pool": "syed"}))
+    monkeypatch.setattr(g, "CONFIG_FILE", cfg)
+    assert g.urgent_pool_token() == g.SYED_TOKEN
+
+
+def test_nonurgent_action_reads_config_file_when_no_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("GLM_PEAK_NONURGENT_ACTION", raising=False)
+    cfg = tmp_path / "glm_peak_pool_config.json"
+    cfg.write_text(json.dumps({"nonurgent_action": "deepseek"}))
+    monkeypatch.setattr(g, "CONFIG_FILE", cfg)
+    assert g.nonurgent_action() == "deepseek"
+
+
+def test_env_override_wins_over_config_file(tmp_path, monkeypatch):
+    cfg = tmp_path / "glm_peak_pool_config.json"
+    cfg.write_text(json.dumps({"urgent_pool": "syed"}))
+    monkeypatch.setattr(g, "CONFIG_FILE", cfg)
+    monkeypatch.setenv("GLM_PEAK_URGENT_POOL", "musa")
+    assert g.urgent_pool_token() == g.MUSA_TOKEN
+
+
+def test_flip_to_deepseek_dry_run_changes_nothing(tmp_path, monkeypatch):
+    called = []
+    r = g.flip_to_deepseek("cosem-port", tmp_path, apply=False, run=lambda *a, **k: called.append(a))
+    assert r["result"] == "DRY"
+    assert called == []
+
+
+def test_flip_to_deepseek_apply_unpauses_and_writes_deepseek_pointer(tmp_path, monkeypatch):
+    calls = []
+    run = _rc(0)
+    monkeypatch.setattr(g, "set_desired_state", lambda session, state: calls.append(("desired_state", session, state)))
+    r = g.flip_to_deepseek("hc95-broker", tmp_path, apply=True, run=run,
+                           token_resolver=_tok, policy_check=_allowed)
+    assert r["result"] == "OK"
+    assert (tmp_path / ".hc95-broker_model").read_text() == "deepseek-flash"
+    assert ("desired_state", "hc95-broker", "up") in calls
+    assert run.calls == [[str(tmp_path / "scripts" / "switch_lane_token.sh"), "--model-apply", "--drain",
+                           "hc95-broker", "/fake/syed-oauth-token"]]
+
+
+def test_flip_to_deepseek_policy_refusal_touches_nothing(tmp_path, monkeypatch):
+    calls = []
+    run = _rc(0)
+    monkeypatch.setattr(g, "set_desired_state", lambda *a: calls.append(a))
+    r = g.flip_to_deepseek("irsyad-coord", tmp_path, apply=True, run=run, policy_check=_refused)
+    assert r["result"] == "REFUSED"
+    assert calls == []
+    assert run.calls == []
+    assert not (tmp_path / ".irsyad-coord_model").exists()
+
+
+def test_flip_to_deepseek_token_resolve_failure_touches_nothing(tmp_path, monkeypatch):
+    calls = []
+    run = _rc(0)
+
+    def bad_resolver(s, d):
+        raise RuntimeError("no default token resolved")
+
+    monkeypatch.setattr(g, "set_desired_state", lambda *a: calls.append(a))
+    r = g.flip_to_deepseek("oeh", tmp_path, apply=True, run=run,
+                           token_resolver=bad_resolver, policy_check=_allowed)
+    assert r["result"] == "FAILED" and "token resolve failed" in r["detail"]
+    assert calls == [] and run.calls == []
+    assert not (tmp_path / ".oeh_model").exists()
+
+
+@pytest.mark.parametrize("rc,out", [(1, ""), (4, ""), (5, "HOLD: staged composer text"),
+                                    (7, "ERROR: GLM flip REFUSED by the provider_policy gate")])
+def test_flip_to_deepseek_switch_fails_before_relaunch_restores_prior_pointer(tmp_path, monkeypatch, rc, out):
+    """[cc-quality PR#625 should-fix] flip_to_deepseek must restore the pointer on a
+    pre-relaunch switch failure, same as flip_back_to_glm (#79897) — not dormant once
+    GLM_PEAK_NONURGENT_ACTION=deepseek is actually armed."""
+    monkeypatch.setattr(g, "set_desired_state", lambda *a: None)
+    ptr = tmp_path / ".hc95-broker_model"
+    ptr.write_text("glm-5.3")
+    r = g.flip_to_deepseek("hc95-broker", tmp_path, apply=True, run=_rc(rc, out),
+                           token_resolver=_tok, policy_check=_allowed)
+    assert r["result"] == "FAILED" and ptr.read_text() == "glm-5.3"
+
+
+def test_flip_to_deepseek_switch_fails_after_relaunch_leaves_pointer_at_deepseek(tmp_path, monkeypatch):
+    monkeypatch.setattr(g, "set_desired_state", lambda *a: None)
+    ptr = tmp_path / ".hc95-broker_model"
+    ptr.write_text("glm-5.3")
+    r = g.flip_to_deepseek("hc95-broker", tmp_path, apply=True, run=_rc(6, "some other failure"),
+                           token_resolver=_tok, policy_check=_allowed)
+    assert r["result"] == "FAILED" and ptr.read_text() == "deepseek-flash"
+    assert "VERIFY the lane's live model" in r["detail"]
+
+
+def test_main_off_peak_reverses_both_flipped_and_deepseek_buckets(tmp_path, monkeypatch, capsys):
+    """A deepseek-fallback lane was never paused (desired_state stayed 'up' the whole
+    time) — off-peak must send it through flip_back_to_glm, same as a flipped-to-musa
+    urgent lane, never resume_pause()."""
+    monkeypatch.setattr(g, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(g, "ORCH_DIR", tmp_path)
+    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    g.save_state({"window_date": today, "flipped": ["cosem-port"],
+                  "paused": ["cosem-exams"], "deepseek": ["hc95-broker"], "resume_done": False})
+    seen = []
+    monkeypatch.setattr(g, "flip_back_to_glm", lambda s, *a, **k: (seen.append(("glm", s)) or {"session": s, "result": "DRY", "detail": "x"}))
+    monkeypatch.setattr(g, "resume_pause", lambda s, *a, **k: (seen.append(("unpause", s)) or {"session": s, "result": "DRY", "detail": "x"}))
+    rc = g.main([], now=_utc(11, 0))
+    assert rc == 0
+    assert ("glm", "cosem-port") in seen
+    assert ("glm", "hc95-broker") in seen
+    assert ("unpause", "cosem-exams") in seen
+    assert ("unpause", "hc95-broker") not in seen
 
 
 def test_main_offpeak_resumes_recorded_state(tmp_path, monkeypatch, capsys):

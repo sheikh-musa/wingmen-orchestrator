@@ -3,13 +3,20 @@
 #67477/#67479/#67504/#67507, Musa op#30538/op#30543/op#30563, 2026-10-15).
 
 Musa's rule, final form: at GLM peak (z.ai burns quota ~3x faster), a lane doing
-URGENT work should MOVE to the Musa/Anthropic pool and keep working; a lane doing
-non-urgent/backlog work should PAUSE instead (0 pool burn). At off-peak, reverse
-both: urgent lanes move back to GLM, paused lanes resume. No human in the loop at
-fire time — that is the actual ask ("i shouldnt have to remind you everyday").
-The one thing a human (orch-console, NOT Musa) still does is keep
-`fleet_lanes.glm_peak_urgent` current as the day's hot work shifts — that is a
-coordination judgment call, not something this script can infer.
+URGENT work should MOVE to a Claude pool and keep working; a lane doing
+non-urgent/backlog work should either PAUSE (0 pool burn) or move to DeepSeek
+(near-0 Claude-pool burn, keeps moving). At off-peak, reverse both: urgent and
+deepseek-fallback lanes move back to GLM, paused lanes resume. No human in the
+loop at fire time — that is the actual ask ("i shouldnt have to remind you
+everyday"). Two things a human (orch-console, NOT Musa) still does, same
+coordination-judgment-call shape, neither inferable by this script:
+- keep `fleet_lanes.glm_peak_urgent` current as the day's hot work shifts;
+- keep today's pool/fallback CONFIG current — see GLM_PEAK_URGENT_POOL and
+  GLM_PEAK_NONURGENT_ACTION below (orch-console #81291, 2026-10-29: a 2026-10-15
+  build hardcoded "urgent -> Musa, else pause" as policy, not just a default, so
+  when pool pacing or DeepSeek availability changed which destination was safe
+  TODAY, the next scheduled run silently undid the hand correction. Fix is to
+  read both as env-set config each run, never cache or hardcode them).
 
 PEAK WINDOW: 06:00-10:00 UTC (confirmed live 2026-10-13/#65625 and reconfirmed
 2026-10-15/#67507; z.ai peak = 14:00-18:00 UTC+8). A PERIODIC check against this
@@ -57,7 +64,60 @@ sys.path.insert(0, str(ORCH_DIR))
 PEAK_START_HOUR = 6   # UTC, inclusive
 PEAK_END_HOUR = 10    # UTC, exclusive
 MUSA_TOKEN = str(Path.home() / ".wingmen" / "keys" / "musa-oauth-token")
+SYED_TOKEN = str(Path.home() / ".wingmen" / "keys" / "syed-oauth-token")
 STATE_FILE = Path.home() / "wingmen" / "fleet-health" / "state" / "glm_peak_pause_resume.json"
+
+# orch-console #81291 (2026-10-29): the 10-15 build hardcoded "urgent -> Musa,
+# non-urgent -> pause" as the whole policy. That stopped being true the moment
+# pool pacing or a new provider (DeepSeek) changes which pool is safe to land
+# urgent work on TODAY — the next invocation (a fresh script run, NOT a live
+# process — there is no standing daemon to hold an env var) then silently
+# re-created whatever an operator had just corrected by hand. Both legs are now
+# a daily, human-set knob living in a small CONFIG_FILE next to STATE_FILE —
+# same "orch-console keeps it current, read fresh every run, never cached"
+# shape as `fleet_lanes.glm_peak_urgent` itself and as the MODEL-env>pin-file>
+# default precedence used elsewhere in this fleet. GLM_PEAK_URGENT_POOL /
+# GLM_PEAK_NONURGENT_ACTION env vars still win when set — that path exists for
+# tests and a one-off hand override in a single invocation, not as the durable
+# knob (an export does not survive past this process).
+CONFIG_FILE = Path.home() / "wingmen" / "fleet-health" / "state" / "glm_peak_pool_config.json"
+_URGENT_POOL_TOKENS = {"musa": MUSA_TOKEN, "syed": SYED_TOKEN}
+_NONURGENT_ACTIONS = {"pause", "deepseek"}
+
+
+def _config_value(key: str, env_var: str, default: str) -> str:
+    env = os.environ.get(env_var)
+    if env is not None and env.strip():
+        return env.strip().lower()
+    try:
+        cfg = json.loads(CONFIG_FILE.read_text())
+        val = cfg.get(key)
+        if val:
+            return str(val).strip().lower()
+    except FileNotFoundError:
+        pass
+    return default
+
+
+def urgent_pool_token() -> str:
+    pool = _config_value("urgent_pool", "GLM_PEAK_URGENT_POOL", "musa")
+    try:
+        return _URGENT_POOL_TOKENS[pool]
+    except KeyError:
+        raise RuntimeError(
+            f"urgent_pool={pool!r} (from {CONFIG_FILE} or GLM_PEAK_URGENT_POOL) not recognised "
+            f"(must be one of {sorted(_URGENT_POOL_TOKENS)}) — refusing to guess a pool for urgent lanes"
+        )
+
+
+def nonurgent_action() -> str:
+    action = _config_value("nonurgent_action", "GLM_PEAK_NONURGENT_ACTION", "pause")
+    if action not in _NONURGENT_ACTIONS:
+        raise RuntimeError(
+            f"nonurgent_action={action!r} (from {CONFIG_FILE} or GLM_PEAK_NONURGENT_ACTION) not "
+            f"recognised (must be one of {sorted(_NONURGENT_ACTIONS)}) — refusing to guess the fallback"
+        )
+    return action
 
 # glm-rollout-plan-20261013 line 35, standing doctrine: never move these onto GLM,
 # whatever a pointer file says. Exact lane names, not prefixes, except irsyad* which
@@ -110,7 +170,7 @@ def glm_pointer_lanes(orch_dir: Path) -> List[str]:
 
 
 def fresh_state_for(today: str) -> Dict:
-    return {"window_date": today, "flipped": [], "paused": [], "resume_done": False}
+    return {"window_date": today, "flipped": [], "paused": [], "deepseek": [], "resume_done": False}
 
 
 def load_state() -> Dict:
@@ -123,6 +183,7 @@ def load_state() -> Dict:
         return fresh_state_for(today)
     s.setdefault("flipped", [])
     s.setdefault("paused", [])
+    s.setdefault("deepseek", [])
     s.setdefault("resume_done", False)
     return s
 
@@ -187,14 +248,17 @@ def resolve_default_token(session: str, orch_dir: Path) -> str:
 
 
 # ── actions (apply=False is a no-op describe; apply=True acts) ────────────────
-def flip_to_musa(session: str, orch_dir: Path, apply: bool, run=subprocess.run) -> Dict[str, str]:
+def flip_to_musa(session: str, orch_dir: Path, apply: bool, run=subprocess.run,
+                  token: str = MUSA_TOKEN) -> Dict[str, str]:
+    """Move an urgent lane onto `token` (today's urgent pool — see urgent_pool_token();
+    the name stays 'flip_to_musa' for back-compat, the destination is now a parameter)."""
     if not apply:
         return {"session": session, "result": "DRY", "detail": "would flip to musa"}
     model = read_lane_model(session) or "claude-sonnet-5"
     (orch_dir / f".{session}_model").write_text(model)
     env = dict(os.environ, CC_BASE_AGENT_ID="cc-fleet-health")
     cp = run([str(orch_dir / "scripts" / "switch_lane_token.sh"), "--model-apply", "--drain",
-              session, MUSA_TOKEN], capture_output=True, text=True, timeout=420, env=env, cwd=str(orch_dir))
+              session, token], capture_output=True, text=True, timeout=420, env=env, cwd=str(orch_dir))
     ok = cp.returncode == 0
     tail = (cp.stdout + cp.stderr).strip().splitlines()[-1:] if (cp.stdout or cp.stderr) else []
     return {"session": session, "result": "OK" if ok else "FAILED",
@@ -206,6 +270,72 @@ def pause_lane(session: str, apply: bool) -> Dict[str, str]:
         return {"session": session, "result": "DRY", "detail": "would set desired_state=paused"}
     set_desired_state(session, "paused")
     return {"session": session, "result": "OK", "detail": "desired_state=paused"}
+
+
+def check_deepseek_policy(session: str) -> None:
+    """Same shape as check_glm_policy, for the deepseek non-urgent fallback (#81291)."""
+    from scripts.lib import provider_policy as pp
+    policy_rows, override_rows = pp._default_fetch_rows()
+    pp.assert_glm_allowed(session, policy_rows=policy_rows, override_rows=override_rows, provider="deepseek")
+
+
+def flip_to_deepseek(session: str, orch_dir: Path, apply: bool, run=subprocess.run,
+                      token_resolver=resolve_default_token,
+                      policy_check=check_deepseek_policy) -> Dict[str, str]:
+    """[orch-console #81291] The non-urgent fallback when GLM_PEAK_NONURGENT_ACTION=
+    deepseek: unpause (desired_state=up) and move the lane onto deepseek-flash
+    instead of pausing it, so backlog work keeps moving at ~0 Claude-pool burn
+    instead of stalling. Policy-gated the SAME way flip_back_to_glm is (#79897):
+    the provider_policy check runs BEFORE the model pointer is ever written, so a
+    refused flip leaves NOTHING changed — never a stray deepseek-flash pointer on
+    a lane the policy actually bars (e.g. a future irsyad/mamadah-family lane
+    landing in this non-urgent list). switch_lane_token.sh's own flip-time gate is
+    a second, independent check at kill-time; this is belt-and-suspenders, same
+    shape as flip_back_to_glm, not a duplicate of its authority."""
+    if not apply:
+        return {"session": session, "result": "DRY", "detail": "would unpause + flip to deepseek-flash"}
+    from scripts.lib import provider_policy as pp
+    try:
+        policy_check(session)
+    except (pp.ProviderNotAllowedError, pp.ProviderPolicyMisconfigured) as e:
+        return {"session": session, "result": "REFUSED",
+                "detail": f"provider_policy refuses deepseek, stays paused, nothing touched: {e}"}
+    except Exception as e:  # noqa: BLE001 — unreadable policy = fail closed, never flip blind
+        return {"session": session, "result": "FAILED",
+                "detail": f"policy check failed, stays paused, nothing touched: {e}"}
+    try:
+        token = token_resolver(session, orch_dir)
+    except Exception as e:  # noqa: BLE001 — fail loud on this lane, keep going for the rest
+        return {"session": session, "result": "FAILED", "detail": f"token resolve failed, stays paused: {e}"}
+    set_desired_state(session, "up")
+    # Same pointer-restore discipline as flip_back_to_glm (#79897): keep the prior bytes
+    # (or absence) to put back if the switch never actually moved the lane off GLM.
+    ptr = orch_dir / f".{session}_model"
+    prior = ptr.read_bytes() if ptr.exists() else None
+    ptr.write_text("deepseek-flash")
+    env = dict(os.environ, CC_BASE_AGENT_ID="cc-fleet-health")
+    try:
+        cp = run([str(orch_dir / "scripts" / "switch_lane_token.sh"), "--model-apply", "--drain",
+                  session, token], capture_output=True, text=True, timeout=420, env=env, cwd=str(orch_dir))
+    except subprocess.TimeoutExpired:
+        return {"session": session, "result": "FAILED",
+                "detail": "switch timed out after 420s — lane may be mid-relaunch; pointer left at "
+                          "deepseek-flash, VERIFY the lane's model + pointer by hand"}
+    except Exception as e:  # noqa: BLE001 — the switch never started, the lane is untouched
+        _restore_pointer(ptr, prior)
+        return {"session": session, "result": "FAILED", "detail": f"switch did not start ({e}); pointer restored"}
+    if cp.returncode == 0:
+        return {"session": session, "result": "OK",
+                "detail": f"token={os.path.basename(token)}; switch rc=0"}
+    out = (cp.stdout or "") + (cp.stderr or "")
+    tail = out.strip().splitlines()[-1:]
+    why = f"token={os.path.basename(token)}; switch rc={cp.returncode}" + (f": {tail[0][:160]}" if tail else "")
+    if cp.returncode in _PRE_RELAUNCH_RCS or (cp.returncode == 7 and _GATE_REFUSED_MARK in out):
+        _restore_pointer(ptr, prior)
+        return {"session": session, "result": "FAILED", "detail": f"{why}; lane untouched, pointer restored"}
+    return {"session": session, "result": "FAILED",
+            "detail": f"{why}; failed AFTER the relaunch step — pointer left at deepseek-flash, VERIFY "
+                      f"the lane's live model + pointer by hand"}
 
 
 def check_hard_exclude_divergence(session: str, apply: bool) -> None:
@@ -360,10 +490,13 @@ def main(argv: Optional[List[str]] = None, now: Optional[dt.datetime] = None) ->
     state = load_state()
 
     print(f"{now:%Y-%m-%d %H:%M:%SZ} peak={peak} window_date={state['window_date']} "
-          f"flipped={state['flipped']} paused={state['paused']} resume_done={state['resume_done']}")
+          f"flipped={state['flipped']} paused={state['paused']} deepseek={state['deepseek']} "
+          f"resume_done={state['resume_done']}")
 
     if peak:
-        handled = set(state["flipped"]) | set(state["paused"])
+        urgent_token = urgent_pool_token()        # raises loud on a bad config value — never guess
+        nonurgent = nonurgent_action()
+        handled = set(state["flipped"]) | set(state["paused"]) | set(state["deepseek"])
         lanes = glm_pointer_lanes(ORCH_DIR)
         cands = peak_candidates(lanes, handled)
         if not cands:
@@ -373,10 +506,15 @@ def main(argv: Optional[List[str]] = None, now: Optional[dt.datetime] = None) ->
         results = []
         for s in cands:
             if urgent.get(s, False):
-                r = flip_to_musa(s, ORCH_DIR, a.apply)
-                print(f"  URGENT->musa {s}: {r['result']} — {r['detail']}")
+                r = flip_to_musa(s, ORCH_DIR, a.apply, token=urgent_token)
+                print(f"  URGENT->{os.path.basename(urgent_token)} {s}: {r['result']} — {r['detail']}")
                 if a.apply and r["result"] == "OK":
                     state["flipped"].append(s)
+            elif nonurgent == "deepseek":
+                r = flip_to_deepseek(s, ORCH_DIR, a.apply)
+                print(f"  nonurgent->deepseek {s}: {r['result']} — {r['detail']}")
+                if a.apply and r["result"] == "OK":
+                    state["deepseek"].append(s)
             else:
                 r = pause_lane(s, a.apply)
                 print(f"  pause {s}: {r['result']} — {r['detail']}")
@@ -389,15 +527,21 @@ def main(argv: Optional[List[str]] = None, now: Optional[dt.datetime] = None) ->
             failed = [r for r in results if r["result"] not in ("OK", "DRY")]
             lines = "\n".join(f"- {r['session']}: {r['result']}: {r['detail']}" for r in results)
             page(f"GLM peak: {len(ok)} lane(s) handled ({len(failed)} failed)" if ok or failed else "GLM peak: handled",
-                 f"TL;DR: peak-start pass -- urgent lanes moved to Musa, the rest paused.\n\n{lines}", a.apply)
+                 f"TL;DR: peak-start pass -- urgent lanes moved to today's urgent pool "
+                 f"({os.path.basename(urgent_token)}), non-urgent lanes "
+                 f"{'moved to deepseek' if nonurgent == 'deepseek' else 'paused'}.\n\n{lines}", a.apply)
         return 1 if any(r["result"] == "FAILED" for r in results) else 0
 
     # off-peak: reverse anything this run (today) handled and hasn't reversed yet
-    if state["resume_done"] or not (state["flipped"] or state["paused"]):
+    if state["resume_done"] or not (state["flipped"] or state["paused"] or state["deepseek"]):
         print("  off-peak, nothing to resume")
         return 0
     results = []
-    for s in state["flipped"]:
+    for s in state["flipped"] + state["deepseek"]:
+        # Both buckets reverse the SAME way: back onto GLM, policy-gated — a deepseek-
+        # fallback lane was never paused (desired_state stayed 'up' the whole time, it
+        # just ran on a cheaper provider), so it needs the token-pointer reversal, not
+        # resume_pause()'s desired_state flip.
         r = flip_back_to_glm(s, ORCH_DIR, a.apply)
         print(f"  resume->glm {s}: {r['result']} — {r['detail']}")
         results.append(r)
@@ -411,7 +555,7 @@ def main(argv: Optional[List[str]] = None, now: Optional[dt.datetime] = None) ->
         failed = [r for r in results if r["result"] not in ("OK", "DRY", "SKIPPED")]
         lines = "\n".join(f"- {r['session']}: {r['result']}: {r['detail']}" for r in results)
         page(f"GLM off-peak: resumed {len(results) - len(failed)} lane(s) ({len(failed)} failed)",
-             f"TL;DR: off-peak pass -- urgent lanes back on GLM, paused lanes resumed.\n\n{lines}", a.apply)
+             f"TL;DR: off-peak pass -- urgent + deepseek-fallback lanes back on GLM, paused lanes resumed.\n\n{lines}", a.apply)
     return 1 if any(r["result"] == "FAILED" for r in results) else 0
 
 
