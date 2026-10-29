@@ -80,7 +80,8 @@ BEGIN
 
     IF msg_created_at IS NULL THEN
         RAISE EXCEPTION 'operator_asks.outbound_msg_id % is not a real outbound '
-            'operator_messages row', NEW.outbound_msg_id;
+            'operator_messages row -- clear committed_date + outbound_msg_id, '
+            'or link the real outbound', NEW.outbound_msg_id;
     END IF;
 
     -- console bus #80764 fix 1: the predates check belongs HERE, not only in
@@ -89,7 +90,8 @@ BEGIN
     -- its date.
     IF msg_created_at < NEW.created_at THEN
         RAISE EXCEPTION 'operator_asks.outbound_msg_id % (sent %) predates this ask '
-            '(created %); it cannot have committed this date',
+            '(created %); it cannot have committed this date -- clear committed_date '
+            '+ outbound_msg_id, or link the real outbound',
             NEW.outbound_msg_id, msg_created_at, NEW.created_at;
     END IF;
 

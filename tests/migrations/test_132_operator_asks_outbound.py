@@ -228,6 +228,36 @@ def test_reopening_a_closed_row_with_a_bad_link_raises(oa_db):
         _exec(oa_db, "UPDATE operator_asks SET closed_at = NULL WHERE id = %s", (ask_id,))
 
 
+# ── console bus #80804: the reopen-raises case is intended (no reopen
+# carrying a fake promise) but the error must say how to fix it. ───────────
+def test_reopen_raise_message_names_the_fix_for_a_nonexistent_link(oa_db):
+    with psycopg.connect(oa_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO operator_asks (ask, closed_at, committed_date, outbound_msg_id) "
+            "VALUES ('legacy bad link', now(), now(), 80678) RETURNING id"
+        )
+        ask_id = cur.fetchone()[0]
+    with pytest.raises(psycopg.errors.RaiseException) as excinfo:
+        _exec(oa_db, "UPDATE operator_asks SET closed_at = NULL WHERE id = %s", (ask_id,))
+    assert "clear committed_date" in str(excinfo.value)
+    assert "outbound_msg_id" in str(excinfo.value)
+
+
+def test_reopen_raise_message_names_the_fix_for_a_predating_link(oa_db):
+    outbound_id = _insert_outbound(oa_db, created_at="now() - interval '2 days'")
+    with psycopg.connect(oa_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO operator_asks (ask, closed_at, committed_date, outbound_msg_id, created_at) "
+            "VALUES ('legacy predating link', now(), now(), %s, now() - interval '1 day') RETURNING id",
+            (outbound_id,),
+        )
+        ask_id = cur.fetchone()[0]
+    with pytest.raises(psycopg.errors.RaiseException) as excinfo:
+        _exec(oa_db, "UPDATE operator_asks SET closed_at = NULL WHERE id = %s", (ask_id,))
+    assert "clear committed_date" in str(excinfo.value)
+    assert "outbound_msg_id" in str(excinfo.value)
+
+
 def test_reopening_a_closed_row_with_a_real_link_succeeds(oa_db):
     with psycopg.connect(oa_db, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("INSERT INTO operator_asks (ask) VALUES ('legacy good link') RETURNING id")
