@@ -196,27 +196,38 @@ def _agent_status_row(agent_id: str, dsn: str | None = None) -> tuple | None:
 
 def _is_genuine_recipient_reply(sender: str, target_to: str, dsn: str | None = None) -> bool:
     """True iff `sender` is a genuine answerer of a row addressed to
-    `target_to` -- exact match, base<->instance by NAME PREFIX (never a
-    blind -\\d+$ strip on either side), or both resolve to the same registry
-    base_agent_id via agent_status (the same lookup refuse_if_instance_stale_
-    and_base_live already uses, not a fresh guess).
+    `target_to` -- exact match, or both resolve to the SAME registry
+    base_agent_id via agent_status (the same lookup
+    refuse_if_instance_stale_and_base_live already uses, not a fresh guess).
+    A name-shape relationship is NEVER by itself proof of same-family and is
+    not checked here -- the registry is the only non-exact test.
 
     bus #83138 (held_commitments#898 regression, found same-day): the prior
-    version stripped a trailing -<digits> from BOTH sides with one regex.
-    For a lane whose BASE NAME itself ends in a digit (cc-cosem-exams-2,
-    cc-cosem-adcda-1, cc-cosem-platform-2/4 -- the digit is part of the
-    family name, not an instance suffix), that turned cc-cosem-exams-2 into
-    cc-cosem-exams while its own instance cc-cosem-exams-2-1 (one real
-    suffix stripped) correctly stayed cc-cosem-exams-2 -- no match, no
-    stamp, for a genuinely answering base. 13 rows caught, feeding tonight's
-    false SLA/wake-backstop pages."""
+    version stripped a trailing -<digits> from BOTH sides with one regex,
+    breaking any lane whose BASE NAME itself ends in a digit (cc-cosem-exams-2,
+    cc-cosem-adcda-1, cc-cosem-platform-2/4).
+
+    bus #83150/#83152 (same-day re-regression, caught by cc-quality before
+    merge, spec correction owned by console): the FIRST fix for #83138 added
+    two dash-prefix fast paths (target_to.startswith(sender+"-") and the
+    reverse) to catch base<->instance without a DB round-trip. Those are
+    UNSOUND in this namespace: a base name can itself be a dash-prefix of a
+    totally DIFFERENT base (cc-irsyad < cc-irsyad-coord, cc-cosem-exams <
+    cc-cosem-exams-2, cc-console < cc-console-revamp, cc-storefront <
+    cc-storefront-c) -- 68 such cross-base pairs exist, 20 with live
+    traffic, cc-irsyad<->cc-irsyad-coord alone carrying 609 messages. The
+    prefix check short-circuited BEFORE the registry comparison that would
+    have correctly rejected those pairs, reintroducing the exact #640
+    false-stamp bug (a self-follow-up on cc-irsyad falsely stamping
+    cc-irsyad-coord's genuinely unanswered row) for every one of them.
+    Dropped entirely -- the registry is authoritative, full stop. A missed
+    stamp only over-alerts; a wrong stamp hides a message, so an unresolvable
+    name (no agent_status row on either side) falls back to the literal
+    string and so, correctly, does NOT stamp unless the strings are
+    identical."""
     if not sender or not target_to:
         return False
     if sender == target_to:
-        return True
-    if target_to.startswith(sender + "-"):
-        return True
-    if sender.startswith(target_to + "-"):
         return True
     sender_row = _agent_status_row(sender, dsn=dsn)
     target_row = _agent_status_row(target_to, dsn=dsn)
