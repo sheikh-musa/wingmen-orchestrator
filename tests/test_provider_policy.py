@@ -367,7 +367,9 @@ _CORPUS = ["glm-5.3", "glm-4.6/x", "GLM-5", "kimi-k2", "kimi-k2/preview", "moons
            "deepseek-flash", "deepseek-v4-pro", "deepseek-flash/x", "moonshotai/kimi-k2",
            "deepseek/deepseek-chat", "qwen/qwen3-coder", "z-ai/glm-4.6", "qwen3-coder", "qwen3.6-flash",
            "openai/gpt-5", "claude-sonnet-5", "claude-opus-5-5", "claude-sonnet-5[1m]", "sonnet", "opus",
-           "", "mystery-model"]
+           "", "mystery-model",
+           # whitespace (cc-quality #81079 nit): routing does NOT strip, the gate does, so the gate is equal or STRICTER
+           " glm-5.3 ", " glm-5.3", "glm-5.3 ", " deepseek-flash", " claude-sonnet-5", "claude-sonnet-5 "]
 
 
 def _routing_provider(model):
