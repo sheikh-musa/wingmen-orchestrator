@@ -46,7 +46,10 @@ def test_planted_secret_is_dropped():
         MUSA_TELEGRAM_ID="DROP-123456",               # not allow-listed -> dropped
     )
     pairs = _scrub("cc-anything", env)
-    assert pairs.get("DATABASE_URL") == "KEEP-DB-sentinel"
+    # op#892: the bus DSN is renamed on the way out -- a bare DATABASE_URL must
+    # never reach a lane (it would shadow a client lane's own var of that name).
+    assert pairs.get("BUS_DATABASE_URL") == "KEEP-DB-sentinel"
+    assert "DATABASE_URL" not in pairs
     assert pairs.get("GH_TOKEN") == "KEEP-GH-sentinel"
     assert pairs.get("CLAUDE_CODE_OAUTH_TOKEN") == "KEEP-OAUTH-sentinel"
     assert "SECRET_BOT_TOKEN" not in pairs
@@ -94,5 +97,24 @@ def test_optin_map_adds_extra_for_named_lane_only():
 def test_values_with_spaces_and_equals_survive_intact():
     env = _base_env(DATABASE_URL="val with spaces = and = equals", GH_TOKEN="a b c")
     pairs = _scrub("cc-x", env)
-    assert pairs.get("DATABASE_URL") == "val with spaces = and = equals"
+    assert pairs.get("BUS_DATABASE_URL") == "val with spaces = and = equals"
     assert pairs.get("GH_TOKEN") == "a b c"
+
+
+def test_bare_database_url_never_reaches_the_scrub():
+    """op#892: the ONLY way a lane's scrubbed env should ever carry a variable
+    literally named DATABASE_URL or SUPABASE_DB_URL is a future regression --
+    the rename's whole point is that neither bare name survives the scrub."""
+    env = _base_env(DATABASE_URL="d", SUPABASE_DB_URL="s")
+    pairs = _scrub("cc-x", env)
+    assert "DATABASE_URL" not in pairs
+    assert "SUPABASE_DB_URL" not in pairs
+    assert pairs.get("BUS_DATABASE_URL") == "d"
+    assert pairs.get("BUS_SUPABASE_DB_URL") == "s"
+
+
+def test_bus_dsn_absent_when_source_vars_unset():
+    env = _base_env()  # no DATABASE_URL / SUPABASE_DB_URL at all
+    pairs = _scrub("cc-x", env)
+    assert "BUS_DATABASE_URL" not in pairs
+    assert "BUS_SUPABASE_DB_URL" not in pairs
