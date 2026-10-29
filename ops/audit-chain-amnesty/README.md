@@ -104,6 +104,12 @@ They are **gitignored** and must **never be committed**. Do not keep them on any
 derive what you need, then delete them. Committed here: the two scripts, `snapshot_meta.json`, and `frozen_amnesty_goumlyne.json`
 (ids + counts + snapshot metadata, payload-free).
 
+**Regeneration rule (console #81737).** Any dump of the irsyad chain runs ONLY on gzbai (never on the Mac Mini
+or a personal machine), writes into a fresh temporary directory, and deletes that directory in the SAME command
+that consumes it, e.g. `D=$(mktemp -d) && python3 rederive_dump.py --out "$D" ... && <derive> ; rm -rf -- "$D"`.
+No chain dump is left on disk afterwards. A dump of raw irsyad audit payloads previously sat on the Mac Mini and
+was deleted on 2026-10-29 (console #81737).
+
 ## Source of truth & mirror
 
 - **Substrate (citable):** orch substrate `audit_chain_boundaries` row id=1 — `amnesty_mechanism='row-id-list'`,
