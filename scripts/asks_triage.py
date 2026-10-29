@@ -32,6 +32,15 @@ Usage:
   'bus-report' is backfill-only, ruling #78610). Validated BEFORE any write, so
   a bad ref changes nothing.
 
+  Either --delivered or --delivered-at REFUSES (raises ValueError, nothing
+  written) unless a summary exists: triage_summary or operator_summary
+  already on the row, or --musa-summary supplied this call (--summary only
+  applies to action=ask). Console op#35502/35503 follow-up, orch-console bus
+  #81244: operator_asks #5690 was stamped `done --evidence ... --delivered-at
+  op#35467` with no summary ever written, so /builds fell back to showing the
+  internal 'summary pending from X (topic)' placeholder next to a real
+  elapsed-time pill -- reads like a leak on a card that looks delivered.
+
   (any action) [--answers ASK_ID] — the row being triaged IS Musa's answer to
   open ask ASK_ID: confirm+close it, linking the answering operator message
   (bus #78269 — he answers with fresh messages, not TG replies, so the
@@ -221,6 +230,37 @@ def resolve_delivered_at(cur, item_id: int, value: str, *, now=None):
         raise ValueError(f"--delivered-at {value}: {ts.isoformat()} is before the ask itself "
                          f"({row[0].isoformat()})")
     return ts, ref, source
+
+
+def check_summary_before_delivery(cur, item_id: int, *, summary: str | None,
+                                   musa_summary: str | None) -> None:
+    """Refuse a --delivered/--delivered-at stamp when no summary exists on the
+    row and none is supplied in this call (console op#35502/35503 follow-up,
+    orch-console bus #81244). A delivered_at with no triage_summary/
+    operator_summary falls back on the /builds board to the internal
+    'summary pending from X (topic)' placeholder sitting next to a real
+    elapsed-time pill -- reads like a leak on a card that looks complete.
+    Root-caused live on operator_asks #5690: `done --evidence ... --delivered-
+    at op#35467` with no --musa-summary and no prior `ask --summary` ever
+    run, so triage_summary/operator_summary stayed NULL. --summary only
+    applies to action=ask; --musa-summary rides along with any action and
+    also counts (it's operator_summary, the other half of the fallback's
+    OR)."""
+    if (summary and summary.strip()) or (musa_summary and musa_summary.strip()):
+        return
+    cur.execute(
+        "SELECT triage_summary, operator_summary FROM operator_asks WHERE id = %s",
+        (item_id,),
+    )
+    row = cur.fetchone()
+    if row and ((row[0] and row[0].strip()) or (row[1] and row[1].strip())):
+        return
+    raise ValueError(
+        "a --delivered/--delivered-at stamp requires a written summary -- none "
+        "exists on this row and none was supplied. Pass --musa-summary \"<line>\" "
+        "(or triage it `ask --summary \"<line>\"` first) so /builds never shows "
+        "the internal pending-placeholder next to a real elapsed time."
+    )
 
 
 def check_bare_delivered(cur, item_id: int, evidence: str | None, *, now=None) -> None:
@@ -503,6 +543,8 @@ def _precheck_delivery(args):
     if not dsn:
         raise RuntimeError("no DATABASE_URL/SUPABASE_DB_URL")
     with psycopg.connect(dsn, autocommit=True, connect_timeout=10) as conn, conn.cursor() as cur:
+        check_summary_before_delivery(cur, args.id, summary=args.summary,
+                                       musa_summary=args.musa_summary)
         if args.delivered_at:
             return resolve_delivered_at(cur, args.id, args.delivered_at)
         check_bare_delivered(cur, args.id, args.evidence)

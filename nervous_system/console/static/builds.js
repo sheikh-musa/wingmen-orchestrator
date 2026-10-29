@@ -141,6 +141,38 @@
       '<span class="pill">×' + esc(String(g.count)) + "</span></div></div>";
   }
 
+  // op#35502/35503 follow-up (orch-console bus #81240/#81244): two
+  // operator_asks can be genuinely SEPARATE asks that one shipment resolved
+  // together -- same written summary, delivered_at identical to the
+  // microsecond (db.py never fabricates this; root-caused live on irsyad
+  // #5526/#5527 and #5626/#5627 -- two distinct follow-up messages, one ship).
+  // Shown as two cards with the same text they read as a mirror/dedupe bug;
+  // collapse consecutive same-line+same-delivered_at MEASURED rows into one
+  // card with an ×N badge. Display only -- the server's data/coverage counts
+  // are untouched, this never changes what's "measured". Pending rows (no
+  // written summary) are left alone here; groupPending's own >3 collapse
+  // still runs on whatever this leaves behind.
+  function groupDuplicateDeliveries(rows) {
+    var seen = [];
+    var index = {};
+    var out = [];
+    (rows || []).forEach(function (r) {
+      if (r.pending || r.delivered_at == null) { out.push(r); return; }
+      var key = r.line + "\u0000" + r.delivered_at;
+      if (!index[key]) { index[key] = { line: r.line, items: [] }; seen.push(key); }
+      index[key].items.push(r);
+    });
+    seen.forEach(function (key) {
+      var items = index[key].items;
+      if (items.length > 1) {
+        out.push({ collapsed: true, pending: false, line: items[0].line, count: items.length });
+      } else {
+        out = out.concat(items);
+      }
+    });
+    return out;
+  }
+
   function deliveryRow(m) {
     if (m.collapsed) return collapsedRow("m-row", m);
     return '<div class="item drow m-row">' +
@@ -160,7 +192,7 @@
   function repoSectionHtml(g, isDefaultOpen) {
     var rows = "";
     if (g.measured && g.measured.length) {
-      rows += '<div class="items">' + groupPending(g.measured).map(deliveryRow).join("") + "</div>";
+      rows += '<div class="items">' + groupPending(groupDuplicateDeliveries(g.measured)).map(deliveryRow).join("") + "</div>";
     }
     if (g.not_measured && g.not_measured.length) {
       rows += '<div class="items">' + groupPending(g.not_measured).map(notMeasuredRow).join("") + "</div>";
@@ -284,6 +316,7 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = { tokenFromHash: tokenFromHash, esc: esc, fmtAge: fmtAge,
       fmtHours: fmtHours, fmtDate: fmtDate, fmtDay: fmtDay, paint: paint,
-      groupPending: groupPending, repoSectionHtml: repoSectionHtml };
+      groupPending: groupPending, groupDuplicateDeliveries: groupDuplicateDeliveries,
+      repoSectionHtml: repoSectionHtml };
   }
 })();

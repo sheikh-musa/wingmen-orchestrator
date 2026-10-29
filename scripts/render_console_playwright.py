@@ -7,6 +7,16 @@ a desktop-shell render). Emulates the device viewport/DPR/mobile-UA, and INJECTS
 representative iOS safe-area-inset (Playwright's chromium reports 0 for the notch;
 real Safari sets it) so inset/double-inset bugs get caught here too.
 Real-device (operator) stays the final backstop; this gets the gate ~all the way.
+
+backlog #141: the status/builds pages (Calm Command mobile-app-shell pattern)
+scroll inside `#main { overflow: auto }`, not the page body — `document.body.
+scrollHeight` never grows, so a plain `page.screenshot(full_page=True)` only
+captured ONE viewport of `#main` and silently truncated anything further down
+(caught live: the builds.png gate render showed only the Programmes section,
+never the repo-grouped Ask->live times further down `#main`). Before the
+shot, if `#main` exists, its scroll is neutralized (`overflow: visible`,
+`height: auto`) so `full_page` sees the whole thing. No-op for fleet/lanes/
+asks, which have no `#main` element and already scroll the body.
 """
 import sys, os
 from playwright.sync_api import sync_playwright
@@ -33,6 +43,19 @@ with sync_playwright() as p:
     # below a notch, catching header-overlap/double-inset without real Safari.
     page.add_style_tag(content=SAFE_AREA_INJECT)
     page.wait_for_timeout(1200)
+    # backlog #141: free #main's internal scroll so full_page sees all of it.
+    page.evaluate(
+        """() => {
+            const m = document.getElementById('main');
+            if (m) {
+                m.style.overflow = 'visible';
+                m.style.height = 'auto';
+                m.style.maxHeight = 'none';
+            }
+            document.body.style.height = 'auto';
+            document.documentElement.style.height = 'auto';
+        }"""
+    )
     page.screenshot(path=out, full_page=True)
     browser.close()
     print(f"  playwright[{device_name}] rendered -> {out}")
