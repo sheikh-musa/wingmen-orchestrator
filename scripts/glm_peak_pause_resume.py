@@ -45,6 +45,23 @@ reason. A new UTC day resets state fresh regardless of how the prior day ended
 
 FAIL LOUD: an unreadable DB or a lane that won't drain is reported, never
 silently skipped and dropped from the record.
+
+PINS + EXCLUDES (orch-console #81954, 2026-10-29): two config-driven lists in
+CONFIG_FILE, read fresh every run via config_lane_set() — never code constants,
+so console can edit them without a redeploy (via cc-fleet-health; "I edit pins
+via you"). 'excluded_lanes': a lane whose provider this daemon must never touch
+because something else manages it (e.g. the DeepSeek rollout — resuming those
+lanes back onto GLM at off-peak would silently undo that decision). 'pinned_lanes':
+a lane console is holding for a specific reason RIGHT NOW (e.g. mid-task, or
+carrying a deploy that must not be interrupted) — lifted by editing this file,
+not a standing policy. Both route through the single is_blocked() gate, checked
+at every dispatch site (peak AND off-peak, every action, not just the GLM flip)
+before any state change; a blocked lane gets a SKIPPED result, same as the
+existing hard-exclude mechanism. Caught live 2026-10-29 (bus #81944/#81954): the
+10:00Z off-peak resume was about to flip a pinned lane and reflip the DeepSeek
+rollout's lanes back onto GLM with no human in the loop to stop it mid-run —
+this is the fix. Every lane this daemon touches or even just considers gets its
+own bus row to orch-console (log_move()), not only the end-of-run aggregate.
 """
 from __future__ import annotations
 
@@ -146,6 +163,44 @@ def is_hard_excluded(session: str) -> bool:
     if session in HARD_EXCLUDE_LANES:
         return True
     return any(session.startswith(p) for p in HARD_EXCLUDE_PREFIXES)
+
+
+def config_lane_set(key: str) -> set:
+    """orch-console #81954 (2026-10-29): a config-driven list this daemon must
+    never act on, read fresh every run (same shape as urgent_pool/nonurgent_action
+    — CONFIG_FILE is the human-set knob, never cached or hardcoded). Two keys
+    share this reader: 'excluded_lanes' (a provider managed elsewhere, e.g. the
+    DeepSeek rollout — standing until someone changes the config) and
+    'pinned_lanes' (a console-directed hold on a specific lane for a specific
+    reason, e.g. mid-task — lifted by console editing this same file)."""
+    try:
+        cfg = json.loads(CONFIG_FILE.read_text())
+    except FileNotFoundError:
+        return set()
+    val = cfg.get(key) or []
+    if not isinstance(val, list):
+        raise RuntimeError(f"{key} in {CONFIG_FILE} must be a list, got {type(val).__name__}")
+    return set(val)
+
+
+def is_config_excluded(session: str) -> bool:
+    return session in config_lane_set("excluded_lanes")
+
+
+def is_pinned(session: str) -> bool:
+    return session in config_lane_set("pinned_lanes")
+
+
+def is_blocked(session: str) -> Optional[str]:
+    """Single gate every action/dispatch site checks before touching a lane.
+    Returns the reason string if blocked, None if the daemon may act normally."""
+    if is_hard_excluded(session):
+        return "hard-excluded (standing never-list)"
+    if is_config_excluded(session):
+        return "config-excluded (provider managed elsewhere, e.g. DeepSeek rollout)"
+    if is_pinned(session):
+        return "pinned (console hold)"
+    return None
 
 
 def glm_pointer_lanes(orch_dir: Path) -> List[str]:
@@ -414,8 +469,9 @@ def flip_back_to_glm(session: str, orch_dir: Path, apply: bool, run=subprocess.r
                       divergence_check=check_hard_exclude_divergence,
                       policy_check=check_glm_policy) -> Dict[str, str]:
     divergence_check(session, apply)
-    if is_hard_excluded(session):
-        return {"session": session, "result": "SKIPPED", "detail": "hard-excluded lane — never flips to GLM"}
+    block_reason = is_blocked(session)
+    if block_reason:
+        return {"session": session, "result": "SKIPPED", "detail": f"{block_reason} — never flips to GLM"}
     if not apply:
         return {"session": session, "result": "DRY", "detail": "would flip back to glm-5.3"}
     # #79897: the policy check runs BEFORE the pointer write — a refused flip used to leave
@@ -480,6 +536,16 @@ def page(subject: str, body: str, apply: bool) -> None:
                   body=body, priority="P2", req=False)
 
 
+def log_move(phase: str, result: Dict[str, str], apply: bool) -> None:
+    """orch-console #81954 (2026-10-29): every lane this daemon touches or
+    considers this run gets its own bus row to orch-console, not just the
+    end-of-run aggregate — a pin/exclude SKIPPED result is itself worth
+    seeing (it's the proof the hold is actually working), not only a
+    successful flip."""
+    page(f"GLM {phase} {result['session']}: {result['result']}",
+         f"TL;DR: {phase} pass, {result['session']} -> {result['result']}.\n\n{result['detail']}", apply)
+
+
 # ── main ────────────────────────────────────────────────────────────────────
 def main(argv: Optional[List[str]] = None, now: Optional[dt.datetime] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -505,7 +571,11 @@ def main(argv: Optional[List[str]] = None, now: Optional[dt.datetime] = None) ->
         urgent = read_urgent_flags(cands)
         results = []
         for s in cands:
-            if urgent.get(s, False):
+            block_reason = is_blocked(s)
+            if block_reason:
+                r = {"session": s, "result": "SKIPPED", "detail": f"{block_reason} — not dispatched"}
+                print(f"  blocked {s}: {r['detail']}")
+            elif urgent.get(s, False):
                 r = flip_to_musa(s, ORCH_DIR, a.apply, token=urgent_token)
                 print(f"  URGENT->{os.path.basename(urgent_token)} {s}: {r['result']} — {r['detail']}")
                 if a.apply and r["result"] == "OK":
@@ -521,10 +591,11 @@ def main(argv: Optional[List[str]] = None, now: Optional[dt.datetime] = None) ->
                 if a.apply and r["result"] == "OK":
                     state["paused"].append(s)
             results.append(r)
+            log_move("peak", r, a.apply)
         if a.apply:
             save_state(state)
             ok = [r for r in results if r["result"] == "OK"]
-            failed = [r for r in results if r["result"] not in ("OK", "DRY")]
+            failed = [r for r in results if r["result"] not in ("OK", "DRY", "SKIPPED")]
             lines = "\n".join(f"- {r['session']}: {r['result']}: {r['detail']}" for r in results)
             page(f"GLM peak: {len(ok)} lane(s) handled ({len(failed)} failed)" if ok or failed else "GLM peak: handled",
                  f"TL;DR: peak-start pass -- urgent lanes moved to today's urgent pool "
@@ -541,14 +612,23 @@ def main(argv: Optional[List[str]] = None, now: Optional[dt.datetime] = None) ->
         # Both buckets reverse the SAME way: back onto GLM, policy-gated — a deepseek-
         # fallback lane was never paused (desired_state stayed 'up' the whole time, it
         # just ran on a cheaper provider), so it needs the token-pointer reversal, not
-        # resume_pause()'s desired_state flip.
+        # resume_pause()'s desired_state flip. flip_back_to_glm() has its own is_blocked()
+        # gate (returns SKIPPED), so a pinned/config-excluded lane here is handled safely
+        # without a duplicate check — but check here too (belt-and-suspenders, same shape
+        # as the rest of this file) so resume_pause() below gets the identical protection.
         r = flip_back_to_glm(s, ORCH_DIR, a.apply)
         print(f"  resume->glm {s}: {r['result']} — {r['detail']}")
         results.append(r)
+        log_move("off-peak", r, a.apply)
     for s in state["paused"]:
-        r = resume_pause(s, a.apply)
+        block_reason = is_blocked(s)
+        if block_reason:
+            r = {"session": s, "result": "SKIPPED", "detail": f"{block_reason} — not resumed"}
+        else:
+            r = resume_pause(s, a.apply)
         print(f"  resume-unpause {s}: {r['result']} — {r['detail']}")
         results.append(r)
+        log_move("off-peak", r, a.apply)
     if a.apply:
         state["resume_done"] = True
         save_state(state)
