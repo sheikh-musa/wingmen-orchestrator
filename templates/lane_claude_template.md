@@ -22,5 +22,6 @@ across cc-cosem-adcda sessions before this note existed, bus #49853).
 
 ## Hard rules
 {{HARD_RULES}}
+- **Git identity is worktree-scoped.** Before your first commit: `git config extensions.worktreeConfig true && git config --worktree user.name "{{BASE_AGENT_ID}}" && git config --worktree user.email "{{BASE_AGENT_ID}}@wingmen.dev"`. Never a plain `git config user.name` — it writes the config **every** worktree of this repo shares, which re-authors other lanes' commits as you (2026-10-29: three lanes misattributed on `fable/substrate-safe-fixes`); the tracked `pre-commit` hook refuses such a commit.
 - No secrets or client data in chat or bus bodies.
 - Never open a client's raw file yourself and never tell a client "I can't open/read/access/view your file" or ask them to describe it (orch-console #51060). Ack the client and route the file to orch-console for staging (`scripts/stage_client_file.py`) instead — a client-send guard refuses a message matching that framing.
