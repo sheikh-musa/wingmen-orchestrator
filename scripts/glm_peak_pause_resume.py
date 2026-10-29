@@ -526,14 +526,36 @@ def resume_pause(session: str, apply: bool) -> Dict[str, str]:
     return {"session": session, "result": "OK", "detail": "desired_state=up"}
 
 
-def page(subject: str, body: str, apply: bool) -> None:
+def page(subject: str, body: str, apply: bool, priority: str = "P2", to: Optional[List[str]] = None) -> None:
+    targets = to or ["orch-console"]
     if not apply:
-        print(f"[DRY] would page orch-console: {subject}")
+        for t in targets:
+            print(f"[DRY] would page {t}: {subject}")
         return
     os.environ.setdefault("CC_BASE_AGENT_ID", "cc-fleet-health")
     from scripts import bus_send
-    bus_send.send(from_agent="cc-fleet-health", to="orch-console", mtype="update", subject=subject,
-                  body=body, priority="P2", req=False)
+    for t in targets:
+        bus_send.send(from_agent="cc-fleet-health", to=t, mtype="update", subject=subject,
+                      body=body, priority=priority, req=False)
+
+
+def config_readable() -> bool:
+    """orch-console #81981 (2026-10-29), should-fix #2 made BINDING: missing or
+    malformed config must mean the daemon does NOT trust its own exclude/pin
+    rules -- a deleted glm_peak_pool_config.json must not silently unpin a lane
+    mid-task. urgent_pool_token()/nonurgent_action() keep their own sane
+    defaults (those are for REPORTING only, per console's ruling); this gate
+    is the one that decides whether any lane MOVE is allowed to run at all."""
+    try:
+        json.loads(CONFIG_FILE.read_text())
+        return True
+    except (OSError, ValueError):
+        # OSError: FileNotFoundError, PermissionError, IsADirectoryError, ...
+        # ValueError: json.JSONDecodeError, or read_text() hitting bad encoding.
+        # Any of these means "can't trust the config" -- same zero-moves response,
+        # just with a graceful P1 page instead of an unhandled crash (cc-quality
+        # PR#632 polish nit).
+        return False
 
 
 def log_move(phase: str, result: Dict[str, str], apply: bool) -> None:
@@ -581,6 +603,16 @@ def main(argv: Optional[List[str]] = None, now: Optional[dt.datetime] = None) ->
     print(f"{now:%Y-%m-%d %H:%M:%SZ} peak={peak} window_date={state['window_date']} "
           f"flipped={state['flipped']} paused={state['paused']} deepseek={state['deepseek']} "
           f"resume_done={state['resume_done']}")
+
+    if not config_readable():
+        print(f"  CONFIG UNREADABLE ({CONFIG_FILE}) — making ZERO lane moves this run")
+        page("GLM daemon: config unreadable, NO lane moves made this run",
+             f"TL;DR: {CONFIG_FILE} is missing or not valid JSON. Per orch-console #81981, that "
+             f"means the daemon can't trust its own exclude/pin rules, so it made ZERO lane moves "
+             f"this run (peak or off-peak) instead of risking a flip on a pinned/excluded lane blind. "
+             f"Restore the config file to resume normal operation.",
+             a.apply, priority="P1", to=["orch-console", "cc-fleet-health"])
+        return 1
 
     validate_pin_exclude_config(ORCH_DIR, a.apply)
 

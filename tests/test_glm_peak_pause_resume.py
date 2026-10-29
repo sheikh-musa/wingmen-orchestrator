@@ -20,6 +20,17 @@ def _utc(h, m=0, day=15):
     return dt.datetime(2026, 10, day, h, m, tzinfo=dt.timezone.utc)
 
 
+def _empty_config(tmp_path):
+    """orch-console #81981: main() now refuses to move any lane unless CONFIG_FILE
+    exists and is valid JSON -- tests that only care about urgent_pool/nonurgent_action
+    defaults (no excluded/pinned lanes) point CONFIG_FILE here instead of a nonexistent
+    path, so they exercise the real 'config present, keys absent' default path rather
+    than the now-fatal 'config missing entirely' path."""
+    cfg = tmp_path / "glm_peak_pool_config.json"
+    cfg.write_text("{}")
+    return cfg
+
+
 @pytest.mark.parametrize("hour,minute,expected", [
     (5, 59, False), (6, 0, True), (7, 30, True), (9, 59, True), (10, 0, False), (14, 0, False),
 ])
@@ -277,7 +288,7 @@ def test_flip_back_switch_raising_restores_prior_pointer(tmp_path):
 def test_main_peak_dry_run_dispatches_urgent_vs_pause(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(g, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(g, "ORCH_DIR", tmp_path)
-    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
+    monkeypatch.setattr(g, "CONFIG_FILE", _empty_config(tmp_path))
     monkeypatch.delenv("GLM_PEAK_URGENT_POOL", raising=False)
     monkeypatch.delenv("GLM_PEAK_NONURGENT_ACTION", raising=False)
     (tmp_path / ".cosem-port_model").write_text("glm-5.3")
@@ -295,7 +306,7 @@ def test_main_peak_dry_run_honours_config_knobs(tmp_path, monkeypatch, capsys):
     deepseek change the dispatch, with NO code change — the whole point of the fix."""
     monkeypatch.setattr(g, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(g, "ORCH_DIR", tmp_path)
-    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
+    monkeypatch.setattr(g, "CONFIG_FILE", _empty_config(tmp_path))
     (tmp_path / ".cosem-port_model").write_text("glm-5.3")
     (tmp_path / ".cosem-exams_model").write_text("glm-5.3")
     monkeypatch.setattr(g, "read_urgent_flags", lambda sessions: {"cosem-port": True, "cosem-exams": False})
@@ -432,7 +443,7 @@ def test_main_off_peak_reverses_both_flipped_and_deepseek_buckets(tmp_path, monk
     urgent lane, never resume_pause()."""
     monkeypatch.setattr(g, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(g, "ORCH_DIR", tmp_path)
-    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
+    monkeypatch.setattr(g, "CONFIG_FILE", _empty_config(tmp_path))
     today = dt.datetime.now(dt.timezone.utc).date().isoformat()
     g.save_state({"window_date": today, "flipped": ["cosem-port"],
                   "paused": ["cosem-exams"], "deepseek": ["hc95-broker"], "resume_done": False})
@@ -450,7 +461,7 @@ def test_main_off_peak_reverses_both_flipped_and_deepseek_buckets(tmp_path, monk
 def test_main_offpeak_resumes_recorded_state(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(g, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(g, "ORCH_DIR", tmp_path)
-    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
+    monkeypatch.setattr(g, "CONFIG_FILE", _empty_config(tmp_path))
     today = dt.datetime.now(dt.timezone.utc).date().isoformat()
     g.save_state({"window_date": today, "flipped": ["cosem-port"], "paused": ["cosem-exams"], "resume_done": False})
     rc = g.main([], now=_utc(11, 0))  # dry-run
@@ -463,7 +474,7 @@ def test_main_offpeak_resumes_recorded_state(tmp_path, monkeypatch, capsys):
 def test_main_offpeak_noop_once_resume_done(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(g, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(g, "ORCH_DIR", tmp_path)
-    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
+    monkeypatch.setattr(g, "CONFIG_FILE", _empty_config(tmp_path))
     today = dt.datetime.now(dt.timezone.utc).date().isoformat()
     g.save_state({"window_date": today, "flipped": ["cosem-port"], "paused": [], "resume_done": True})
     rc = g.main([], now=_utc(11, 0))
@@ -795,3 +806,87 @@ def test_validate_pin_exclude_config_silent_when_lists_empty(tmp_path, monkeypat
     monkeypatch.setattr(g, "page", lambda subject, body, apply: pages.append((subject, body)))
     g.validate_pin_exclude_config(tmp_path, True)
     assert pages == []
+
+
+# ── config_readable() fail-closed gate (orch-console #81981, binding ruling on
+# cc-quality's should-fix #2: missing/malformed config == ZERO lane moves, not
+# "assume nothing is excluded") ──────────────────────────────────────────────
+def test_config_readable_true_for_valid_json(tmp_path, monkeypatch):
+    cfg = tmp_path / "glm_peak_pool_config.json"
+    cfg.write_text(json.dumps({"urgent_pool": "syed"}))
+    monkeypatch.setattr(g, "CONFIG_FILE", cfg)
+    assert g.config_readable() is True
+
+
+def test_config_readable_false_for_missing_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
+    assert g.config_readable() is False
+
+
+def test_config_readable_false_for_malformed_json(tmp_path, monkeypatch):
+    cfg = tmp_path / "glm_peak_pool_config.json"
+    cfg.write_text("{not valid json")
+    monkeypatch.setattr(g, "CONFIG_FILE", cfg)
+    assert g.config_readable() is False
+
+
+def test_main_peak_makes_zero_moves_when_config_missing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(g, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(g, "ORCH_DIR", tmp_path)
+    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
+    (tmp_path / ".cosem-port_model").write_text("glm-5.3")  # a real peak candidate, if the gate failed open
+    called = []
+    monkeypatch.setattr(g, "flip_to_musa", lambda *a, **k: called.append("flip_to_musa"))
+    monkeypatch.setattr(g, "pause_lane", lambda *a, **k: called.append("pause_lane"))
+    monkeypatch.setattr(g, "flip_to_deepseek", lambda *a, **k: called.append("flip_to_deepseek"))
+    pages = []
+    monkeypatch.setattr(g, "page", lambda subject, body, apply, **kw: pages.append((subject, body, apply, kw)))
+    rc = g.main(["--apply"], now=_utc(7, 0))  # peak window
+    out = capsys.readouterr().out
+    assert called == []  # no mutator was ever invoked
+    assert rc == 1
+    assert "CONFIG UNREADABLE" in out
+    assert len(pages) == 1
+    subject, body, apply, kw = pages[0]
+    assert "NO lane moves" in subject
+    assert apply is True
+    assert kw.get("priority") == "P1"
+    assert set(kw.get("to", [])) == {"orch-console", "cc-fleet-health"}
+
+
+def test_main_offpeak_makes_zero_moves_when_config_malformed(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(g, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(g, "ORCH_DIR", tmp_path)
+    cfg = tmp_path / "glm_peak_pool_config.json"
+    cfg.write_text("{not valid json")
+    monkeypatch.setattr(g, "CONFIG_FILE", cfg)
+    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    g.save_state({"window_date": today, "flipped": ["cosem-adcda-urgent"], "paused": ["cosem-tdu-coord"],
+                  "deepseek": ["hc95-broker"], "resume_done": False})
+    called = []
+    monkeypatch.setattr(g, "flip_back_to_glm", lambda *a, **k: called.append("flip_back_to_glm"))
+    monkeypatch.setattr(g, "resume_pause", lambda *a, **k: called.append("resume_pause"))
+    pages = []
+    monkeypatch.setattr(g, "page", lambda subject, body, apply, **kw: pages.append((subject, body, apply, kw)))
+    rc = g.main(["--apply"], now=_utc(11, 0))  # off-peak window
+    out = capsys.readouterr().out
+    assert called == []  # not even flip_back_to_glm's own internal gate ran -- main() never dispatched
+    assert rc == 1
+    assert "CONFIG UNREADABLE" in out
+    assert len(pages) == 1
+    assert pages[0][3].get("priority") == "P1"
+
+
+def test_page_prints_dry_for_every_target(capsys):
+    g.page("subject", "body", False, to=["orch-console", "cc-fleet-health"])
+    out = capsys.readouterr().out
+    assert "[DRY] would page orch-console: subject" in out
+    assert "[DRY] would page cc-fleet-health: subject" in out
+
+
+def test_config_readable_false_for_permission_denied(tmp_path, monkeypatch):
+    cfg = tmp_path / "glm_peak_pool_config.json"
+    cfg.write_text(json.dumps({"urgent_pool": "syed"}))
+    monkeypatch.setattr(g, "CONFIG_FILE", cfg)
+    monkeypatch.setattr(g.Path, "read_text", lambda self: (_ for _ in ()).throw(PermissionError("denied")))
+    assert g.config_readable() is False
