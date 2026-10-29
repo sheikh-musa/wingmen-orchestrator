@@ -43,8 +43,9 @@ if [ -n "$_git_dir" ] && [ -n "$_common_dir" ]; then
     for key in user.name user.email; do
       line="$(git config --show-origin --get "$key" 2>/dev/null || true)"
       [ -n "$line" ] || continue
-      origin="${line%%	*}"
-      value="${line#*	}"
+      # --show-origin prints "<origin><TAB><value>"; split on a NAMED tab rather than an
+      # invisible literal one, so a reformat cannot silently turn the separator into spaces.
+      IFS="$(printf '\t')" read -r origin value <<<"$line"
       origin_path="${origin#file:}"
       case "$origin_path" in
         /*) ;;
