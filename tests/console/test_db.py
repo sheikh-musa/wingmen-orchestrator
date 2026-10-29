@@ -207,7 +207,11 @@ def test_fleet_asks_query_pins_needs_musa_rows_to_top():
 @pytest.fixture
 def asks_delivery_db(pg_dsn, monkeypatch):
     """Ephemeral PG with operator_asks in the real column shape, wired into
-    db.resolve_dsn() so fetch_ask_delivery_times runs its REAL SQL."""
+    db.resolve_dsn() so fetch_ask_delivery_times runs its REAL SQL. Also
+    carries EMPTY agents/fleet_lanes tables (op#35502/35503, orch-console
+    81006): fetch_ask_delivery_times now resolves each row's repo through
+    those two registry tables unconditionally, so they must exist even for
+    tests that don't care about repo attribution."""
     from tests.conftest import assert_dsn_is_not_production
     import queue as _queue
 
@@ -227,6 +231,19 @@ def asks_delivery_db(pg_dsn, monkeypatch):
                 created_at       timestamptz NOT NULL DEFAULT now(),
                 delivered_at     timestamptz,
                 closed_at        timestamptz
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE agents (
+                id         text PRIMARY KEY,
+                repo_scope text[] NOT NULL DEFAULT '{}'
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE fleet_lanes (
+                lane           text,
+                base_agent_id  text,
+                worktree_path  text
             )
         """)
         cur.execute("""
@@ -330,3 +347,196 @@ def test_delivery_times_json_serializable(asks_delivery_db):
         assert isinstance(r["delivered_at"], str)
     for r in out["not_measured"]:
         assert isinstance(r["asked_at"], str)
+
+
+# ── fetch_ask_delivery_times: grouped by repo (op#35502/35503, orch-console
+# 80983/80995, corrected per orch-console 81006: resolved through the
+# registry, never by parsing the delegated_to agent id's own text) ──────────
+
+def test_repo_for_delegate_resolves_through_registry_not_agent_name():
+    """orch-console 81006: map agent to repo via the registry (agents.
+    repo_scope / fleet_lanes.worktree_path), never by string-matching the
+    delegated_to agent id itself. NULL/empty delegated_to cannot be
+    attributed to anything and must come back None."""
+    agent_scope = {
+        # an auto-registered INSTANCE row with an EMPTY scope must not shadow
+        # its BASE id's real scope (the bug the 3-pass resolution fixes).
+        "cc-cosem-adcda-3": [],
+        "cc-cosem-adcda": ["cosem-adcda", "cosem-adcda-hotfix"],
+        "cc-cosem-platform": ["cosem-platform", "cosem-port-lane"],
+        "cc-irsyad-coord": [],       # known to the registry, no repo scope
+        "cc-fleet-health": [],       # a hub/ops body, not a repo-scoped lane
+        "cc-orchestrator": ["wingmen-orchestrator"],
+        "cc-console-revamp": ["sheikh-musa/wingmen-orchestrator"],
+    }
+    lane_worktree = {
+        "cc-irsyad-coord": ["/Users/x/wingmen/projects/ihsanos-irsyad.wt-coord"],
+        "cc-substrate": ["/Users/x/wingmen/projects/orchestrator.wt-cleanup"],
+    }
+    assert db._repo_for_delegate("cc-cosem-adcda-3", agent_scope, lane_worktree) == "adcda", (
+        "the instance row's OWN empty scope must not win over its base id's real scope"
+    )
+    assert db._repo_for_delegate("cc-cosem-platform-2", agent_scope, lane_worktree) == "platform"
+    assert db._repo_for_delegate("irsyad-coord", agent_scope, lane_worktree) == "irsyad", (
+        "bare owner (no cc- prefix) resolves via the cc-prefixed registry entry"
+    )
+    assert db._repo_for_delegate("cc-irsyad-coord-1", agent_scope, lane_worktree) == "irsyad", (
+        "empty agents scope falls back to the fleet_lanes worktree dir"
+    )
+    assert db._repo_for_delegate("cc-orchestrator", agent_scope, lane_worktree) == "fleet / internal"
+    assert db._repo_for_delegate("cc-console-revamp-1", agent_scope, lane_worktree) == "fleet / internal"
+    assert db._repo_for_delegate("cc-substrate", agent_scope, lane_worktree) == "fleet / internal", (
+        "no agents row at all, but fleet_lanes resolves it to the orchestrator checkout"
+    )
+    assert db._repo_for_delegate("cc-fleet-health", agent_scope, lane_worktree) == "fleet / internal", (
+        "known to the registry, explicitly no repo scope, no lane fallback either"
+    )
+    assert db._repo_for_delegate("cc-totally-unknown-lane-9", agent_scope, lane_worktree) == "other", (
+        "an agent id the registry has never heard of at all -- attributed to someone, repo unknown"
+    )
+    assert db._repo_for_delegate(None, agent_scope, lane_worktree) is None
+    assert db._repo_for_delegate("", agent_scope, lane_worktree) is None
+
+
+@pytest.fixture
+def delivery_by_repo_db(pg_dsn, monkeypatch):
+    """Ephemeral PG seeded with distinct, ordered ship times across several
+    owners, PLUS the agents/fleet_lanes registry rows fetch_ask_delivery_
+    times() now resolves repo through, so the by_repo grouping's sort order
+    (most-recent-ship-first) and median can be asserted deterministically —
+    the shared-`now()` rows in asks_delivery_db above are too close together
+    for that."""
+    from tests.conftest import assert_dsn_is_not_production
+    import queue as _queue
+
+    assert_dsn_is_not_production(pg_dsn)
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP SCHEMA public CASCADE")
+        cur.execute("CREATE SCHEMA public")
+        cur.execute("""
+            CREATE TABLE operator_asks (
+                id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                ask              text NOT NULL,
+                triage_state     text NOT NULL DEFAULT 'captured',
+                triage_summary   text,
+                operator_summary text,
+                ask_surface      text,
+                delegated_to     text,
+                created_at       timestamptz NOT NULL DEFAULT now(),
+                delivered_at     timestamptz,
+                closed_at        timestamptz
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE agents (
+                id         text PRIMARY KEY,
+                repo_scope text[] NOT NULL DEFAULT '{}'
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE fleet_lanes (
+                lane           text,
+                base_agent_id  text,
+                worktree_path  text
+            )
+        """)
+        cur.execute("""
+            INSERT INTO agents (id, repo_scope) VALUES
+              ('cc-irsyad-coord', '{}'),
+              ('cc-cosem-adcda', '{cosem-adcda,cosem-adcda-hotfix}'),
+              ('cc-cosem-platform', '{cosem-platform,cosem-port-lane}'),
+              ('cc-fleet-health', '{}')
+        """)
+        cur.execute("""
+            INSERT INTO fleet_lanes (lane, base_agent_id, worktree_path) VALUES
+              ('irsyad-coord', 'cc-irsyad-coord', '/Users/x/wingmen/projects/ihsanos-irsyad.wt-coord')
+        """)
+        cur.execute("""
+            INSERT INTO operator_asks
+              (ask, triage_state, operator_summary, delegated_to, created_at, delivered_at)
+            VALUES
+              ('RAW irsyad oldest', 'ask', 'irsyad line A', 'irsyad-coord',
+                now() - interval '60 hours', now() - interval '48 hours'),
+              ('RAW irsyad newest', 'ask', 'irsyad line B', 'cc-irsyad-coord-1',
+                now() - interval '3 hours',  now() - interval '1 hour'),
+              ('RAW adcda ship',    'ask', 'adcda line',    'cc-cosem-adcda-1',
+                now() - interval '30 hours', now() - interval '24 hours'),
+              ('RAW platform ship', 'ask', 'platform line', 'cc-cosem-platform-2',
+                now() - interval '40 hours', now() - interval '36 hours'),
+              ('RAW fleet-health ship', 'ask', 'fleet-health line', 'cc-fleet-health',
+                now() - interval '50 hours', now() - interval '30 minutes')
+        """)
+        cur.execute("""
+            INSERT INTO operator_asks (ask, triage_state, delegated_to)
+            VALUES ('RAW unattributed open ask', 'ask', NULL)
+        """)
+    monkeypatch.setenv("CONSOLE_DB_URL", pg_dsn)
+    monkeypatch.setattr(db, "_idle", _queue.LifoQueue())
+    monkeypatch.setattr(db, "_pool_size", 0)
+    return pg_dsn
+
+
+def test_delivery_times_repo_field_on_rows(delivery_by_repo_db):
+    """Each row carries the repo resolved through the registry for its OWN
+    delegated_to — never a guess from the ask's text or the agent id's own
+    spelling."""
+    out = db.fetch_ask_delivery_times()
+    by_line = {r["line"]: r for r in out["measured"]}
+    assert by_line["irsyad line A"]["repo"] == "irsyad"
+    assert by_line["irsyad line B"]["repo"] == "irsyad"
+    assert by_line["adcda line"]["repo"] == "adcda"
+    assert by_line["platform line"]["repo"] == "platform"
+    assert by_line["fleet-health line"]["repo"] == "fleet / internal"
+    nm = out["not_measured"][0]
+    assert nm["repo"] is None, "NULL delegated_to cannot be attributed to a repo"
+
+
+def test_delivery_times_by_repo_groups_and_orders_most_recent_ship_first(delivery_by_repo_db):
+    """Musa op#35502/35503 (refined by orch-console 81006 + 81075): the
+    /builds page groups Ask→live times by repo, each an expandable section,
+    collapsed by default except the one holding the most recent ship. Client/
+    product groups sort by recency first; 'fleet / internal' always comes
+    after ALL of them regardless of its OWN recency (its ship here, 30min
+    ago, beats every client group's -- it must still sort last-but-one); 'no
+    project linked' (repo=None, display label for the stable 'unattributed'
+    key) is always LAST, no matter what. A row with no owner at all (no
+    delegated_to) lands in that group, distinct from 'fleet / internal' (an
+    owner the registry knows has no product repo)."""
+    out = db.fetch_ask_delivery_times()
+    assert [g["repo"] for g in out["by_repo"]] == (
+        ["irsyad", "adcda", "platform", "fleet / internal", "unattributed"]
+    ), (
+        "irsyad's newest ship (1h ago) beats adcda (24h) and platform (36h) among "
+        "CLIENT groups; fleet/internal's 30min-ago ship is the most recent of "
+        "ALL groups but the tier rule still puts it after every client group; "
+        "unattributed has no ship at all so it sorts last of all"
+    )
+    by_repo = {g["repo"]: g for g in out["by_repo"]}
+    irsyad = by_repo["irsyad"]
+    assert irsyad["label"] == "irsyad"
+    assert irsyad["count"] == 2
+    assert irsyad["measured_count"] == 2
+    assert irsyad["median_hours"] == 7.0, "median of [12.0h, 2.0h] is 7.0h"
+    fleet_internal = by_repo["fleet / internal"]
+    assert fleet_internal["label"] == "fleet / internal"
+    unattributed = by_repo["unattributed"]
+    assert unattributed["label"] == "no project linked", (
+        "orch-console 81075: display label renamed from the internal 'unattributed' key"
+    )
+    assert unattributed["count"] == 1
+    assert unattributed["measured"] == []
+    assert len(unattributed["not_measured"]) == 1
+    assert unattributed["median_hours"] is None, "no measured row in this group -- never a fake median"
+    assert out["coverage"]["unattributed"] == 1, "exactly one row had no owner at all"
+
+
+def test_delivery_times_by_repo_json_serializable(delivery_by_repo_db):
+    """Same contract as test_delivery_times_json_serializable: by_repo must
+    survive app.py's plain json.dumps, including its datetime field."""
+    import json as _json
+
+    out = db.fetch_ask_delivery_times()
+    _json.dumps({"programmes": [], "delivery_times": out})
+    for g in out["by_repo"]:
+        if g["latest_delivered_at"] is not None:
+            assert isinstance(g["latest_delivered_at"], str)

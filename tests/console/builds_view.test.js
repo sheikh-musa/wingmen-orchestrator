@@ -298,5 +298,101 @@ console.log("tokenFromHash flow: ok");
   assert.strictEqual(groupedFour[0].count, 4, "collapsed count is exactly 4 at the boundary");
   console.log("collapse boundary (3 vs 4): ok");
 
+  // ---- op#35502/35503: Ask→live times grouped by repo, expandable sections,
+  // collapsed by default except the one holding the most recent ship ----
+  var byRepoPayload = {
+    programmes: payload.programmes,
+    delivery_times: {
+      measured: [
+        { id: 8000, repo: "irsyad", line: "irsyad real summary",
+          asked_at: "2026-10-26T10:00:00Z", delivered_at: "2026-10-28T13:00:00Z",
+          total_hours: 2.0, surface: "client-channel" },
+      ],
+      not_measured: [
+        { id: 8001, repo: "adcda", line: "adcda open ask",
+          asked_at: "2026-10-28T09:00:00Z", surface: "client-channel" },
+      ],
+      coverage: { measured: 1, not_measured: 1, unattributed: 1 },
+      by_repo: [
+        {
+          repo: "irsyad", label: "irsyad", count: 1, measured_count: 1,
+          median_hours: 2.0, latest_delivered_at: "2026-10-28T13:00:00Z",
+          measured: [
+            { id: 8000, repo: "irsyad", line: "irsyad real summary",
+              asked_at: "2026-10-26T10:00:00Z", delivered_at: "2026-10-28T13:00:00Z",
+              total_hours: 2.0, surface: "client-channel" },
+          ],
+          not_measured: [],
+        },
+        {
+          repo: "adcda", label: "adcda", count: 1, measured_count: 0,
+          median_hours: null, latest_delivered_at: null,
+          measured: [],
+          not_measured: [
+            { id: 8001, repo: "adcda", line: "adcda open ask",
+              asked_at: "2026-10-28T09:00:00Z", surface: "client-channel" },
+          ],
+        },
+        {
+          repo: "unattributed", label: "no project linked", count: 1, measured_count: 0,
+          median_hours: null, latest_delivered_at: null,
+          measured: [],
+          not_measured: [
+            { id: 8002, repo: null, line: "summary pending from no owner assigned (other)",
+              asked_at: "2026-10-28T08:00:00Z", surface: "operator" },
+          ],
+        },
+      ],
+    },
+  };
+  const main3 = makeEl();
+  const api3 = loadPage("builds.js", {
+    els: { main: main3, token: Object.assign(makeEl(), { value: TOK }) },
+    localStorage: { getItem() { return TOK; }, setItem() {}, removeItem() {} },
+    fetch: function () { return new Promise(function () {}); },
+  });
+  api3.paint(byRepoPayload);
+  const html3 = main3.innerHTML;
+  assert.ok(html3.indexOf('<details class="repo-group" open>') !== -1,
+    "the first (most-recent-ship) group starts open");
+  assert.strictEqual((html3.match(/<details class="repo-group" open>/g) || []).length, 1,
+    "exactly ONE group is expanded by default");
+  assert.ok(html3.indexOf(">irsyad<") !== -1, "irsyad group header visible");
+  assert.ok(html3.indexOf(">adcda<") !== -1, "adcda group header visible");
+  assert.ok(html3.indexOf(">no project linked<") !== -1,
+    "orch-console 81075: unattributed group shows the operator-facing label, not the internal key");
+  assert.ok(html3.indexOf(">unattributed<") === -1, "the internal jargon label never reaches the page");
+  assert.ok(html3.indexOf("2h median") !== -1, "repo header shows the median time");
+  assert.ok(html3.indexOf("irsyad real summary") !== -1, "measured row rendered inside its repo group");
+  assert.ok(html3.indexOf("adcda open ask") !== -1, "not-measured row rendered inside its repo group");
+  assert.ok(html3.indexOf("no clock yet") !== -1, "honesty contract holds inside a repo group too");
+  // orch-console 81075: hero stays to the two headline figures; the
+  // unattributed count is never rendered there (it has its own group).
+  assert.ok(html3.indexOf("no repo on the ask") === -1, "the jargon hero clause is gone");
+  assert.ok(html3.indexOf(">1</span> measured") !== -1 && html3.indexOf("not yet measured") !== -1,
+    "hero still shows the two headline figures");
+  // a clearly-visible chevron, aria-expanded on every summary, matching the
+  // group's actual open/closed state.
+  assert.strictEqual((html3.match(/class="chev"/g) || []).length, 3, "every group has a chevron");
+  assert.ok(html3.indexOf('aria-expanded="true"') !== -1, "the open group is marked expanded");
+  assert.strictEqual((html3.match(/aria-expanded="false"/g) || []).length, 2,
+    "the two collapsed groups are marked not expanded");
+  console.log("by_repo grouping: ok");
+
+  // fallback: an older/cached server response with no by_repo still renders
+  // the flat measured/not_measured lists (no regression for an in-flight
+  // client/server version mismatch).
+  const main4 = makeEl();
+  const api4 = loadPage("builds.js", {
+    els: { main: main4, token: Object.assign(makeEl(), { value: TOK }) },
+    localStorage: { getItem() { return TOK; }, setItem() {}, removeItem() {} },
+    fetch: function () { return new Promise(function () {}); },
+  });
+  api4.paint(payload); // the original fixture above has no by_repo
+  const html4 = main4.innerHTML;
+  assert.ok(html4.indexOf("Personal-issue field") !== -1, "flat fallback still renders measured rows");
+  assert.ok(html4.indexOf("repo-group") === -1, "no repo-group markup when by_repo is absent");
+  console.log("by_repo fallback: ok");
+
   console.log("\nall passed");
 })().catch(function (e) { console.error(e.message); process.exit(1); });
