@@ -529,10 +529,11 @@ BEGIN
   EXCEPTION WHEN others THEN
     v_out := v_out || c_nl || 'INFO c_setup_set_role_grant sqlstate=' || SQLSTATE || ' ' || left(SQLERRM, 160);
   END;
-  -- A monitor connection carries no JWT claims: clear any claims the exec path set (txn-local).
-  PERFORM set_config('request.jwt.claims', '{}', true);
-  PERFORM set_config('request.jwt.claim.sub', '', true);
-  PERFORM set_config('request.jwt.claim.role', '', true);
+  -- The exec path owns actor identity and refuses SQL that touches the JWT claims, so auth.uid()
+  -- here is the agent actor (a real member of one QA org). That makes the decoy check STRICTER
+  -- (a real member's identity must still see no other org's rows); the helper sets reflect that
+  -- actor's memberships, whereas a monitor connection with no claims gets empty sets.
+  v_out := v_out || c_nl || 'INFO c_auth_uid_is_set ' || (auth.uid() IS NOT NULL)::text;
 
   -- ── (c) row visibility per table, as irsyad_monitor_ro ──
   FOREACH v_t IN ARRAY c_tables LOOP
