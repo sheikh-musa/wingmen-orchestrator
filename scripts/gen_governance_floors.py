@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""gen_governance_floors.py — regenerate the floor-rows block in
-docs/governance-floors.md from governance_floor (+ its latest
-governance_floor_audit check, if any) (op#35246 Phase 1a, PR#555).
+"""gen_governance_floors.py — regenerate the floor LIST block in
+docs/governance-floors.md from governance_floor (op#35246 Phase 1a, PR#555;
+split from live status per console bus #80912/#80915).
+
+Renders op_ref/sentence/enforced-in-code only -- no PASS/FAIL/N-of-M. Live
+check status is read separately, from the governance_floor_status
+boot_briefing arm, and never committed to git: a status line baked into this
+doc can go stale the moment it's committed (the exact failure mode behind
+console bus #80659/#80664). This block changes only when a floor is added or
+retired, through a reviewed PR -- it is not meant to run on a schedule.
 
 Same partition-on-markers mechanism as gen_data_store_registry.py: only the
 block between the GENERATED markers is rewritten; everything else in the doc
-(all the hand-authored prose) stays byte-for-byte untouched. governance-floors.md
-carries rulings in prose rows can't yet express -- this is additive, not a
-full-file regeneration.
+(all the hand-authored prose) stays byte-for-byte untouched.
 """
 from __future__ import annotations
 
@@ -42,18 +47,23 @@ def _source_line(is_substrate: bool) -> str:
 
 
 def render_table(rows: list[tuple], retired_rows: list[tuple], source_line: str) -> str:
-    passing = sum(1 for _, _, _, status in rows if status == "checked_pass")
-    total = len(rows)
+    """Renders the floor LIST only (console bus #80912): no PASS/FAIL/N-of-M
+    here -- that is live state, read separately from the governance_floor_status
+    boot_briefing arm, never committed to git. This block changes only when a
+    floor is added or retired, through a reviewed PR."""
     lines = [
-        "| Op ref | Floor | Enforced in code | Last check |",
-        "|---|---|---|---|",
+        "| Op ref | Floor | Enforced in code |",
+        "|---|---|---|",
     ]
-    for op_ref, sentence, enforced_in_code, status in rows:
+    for op_ref, sentence, enforced_in_code in rows:
         enforced = "yes" if enforced_in_code else "no"
-        last_check = {"checked_pass": "PASS", "checked_fail": "FAIL", None: "not yet checked"}[status]
-        lines.append(f"| {op_ref} | {sentence} | {enforced} | {last_check} |")
+        lines.append(f"| {op_ref} | {sentence} | {enforced} |")
     lines.append("")
-    lines.append(f"**{passing} of {total} floors passing.**")
+    lines.append(
+        "Live PASS/FAIL/STALE status is read separately and never committed "
+        "here (console bus #80912) -- query the `governance_floor_status` "
+        "arm of `boot_briefing`."
+    )
     lines.append("")
     if retired_rows:
         lines.append("Retired floors (lifted or withdrawn by Musa; no longer evaluated):")
@@ -94,17 +104,8 @@ def main(argv=None) -> int:
 
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
-            """
-            SELECT gf.op_ref, gf.sentence, gf.enforced_in_code, latest.event
-              FROM governance_floor gf
-              LEFT JOIN LATERAL (
-                  SELECT event FROM governance_floor_audit
-                   WHERE floor_id = gf.id AND event IN ('checked_pass', 'checked_fail')
-                   ORDER BY at DESC LIMIT 1
-              ) latest ON true
-             WHERE gf.retired_at IS NULL
-             ORDER BY gf.id
-            """
+            "SELECT op_ref, sentence, enforced_in_code FROM governance_floor "
+            "WHERE retired_at IS NULL ORDER BY id"
         )
         rows = cur.fetchall()
 
