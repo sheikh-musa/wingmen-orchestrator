@@ -108,7 +108,7 @@ derive what you need, then delete them. Committed here: the two scripts, `snapsh
 or a personal machine), writes into a fresh temporary directory, and deletes that directory in the SAME command
 that consumes it, e.g. `D=$(mktemp -d) && python3 rederive_dump.py --out "$D" ... && <derive> ; rm -rf -- "$D"`.
 No chain dump is left on disk afterwards. A dump of raw irsyad audit payloads previously sat on the Mac Mini and
-was deleted on 2026-10-29 (console #81737).
+was ordered deleted on 2026-10-29 (console #81737; deletion evidence reported by cc-fleet-health).
 
 ## Source of truth & mirror
 
