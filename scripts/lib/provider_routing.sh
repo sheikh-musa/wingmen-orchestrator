@@ -154,8 +154,12 @@ apply_provider_routing() {
     # lane's family has no row. Every other provider arm is untouched.
     if [[ "$resolved_model" == deepseek-* ]]; then
         local family_vault_key
-        family_vault_key="$("$venv_py" "$family_key_script" "$agent_id")"
-        if [ -z "$family_vault_key" ]; then
+        # Guard on BOTH the exit code and empty-stdout (cc-quality PR#636
+        # review nicety): empty-stdout-on-failure is the resolver's own
+        # contract today (test-locked), but checking rc too is defense in
+        # depth against a future resolver edit that prints something on an
+        # error path without also returning non-zero.
+        if ! family_vault_key="$("$venv_py" "$family_key_script" "$agent_id")" || [ -z "$family_vault_key" ]; then
             echo "FATAL: no per-client DeepSeek vault-key mapping for agent ${agent_id} (model ${resolved_model}) -- see the reason above. Refusing to boot (no silent fallback to the shared DEEPSEEK_CODING_KEY)." >&2
             return 1
         fi
