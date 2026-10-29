@@ -384,6 +384,38 @@ def test_arm_row_happy_path_fires_and_audit_cites_the_row_and_authority(tmp_path
     assert str(h.resolve()) in keys
 
 
+def test_arm_row_path_attributes_to_console_even_with_reset_by_env_set(tmp_path):
+    """orch-console #83363 (correction of record, after bus #83362's
+    misattribution): once gate 3b has PROVEN the caller is the console body,
+    every downstream mention (the audit row's --by, the boot message) must
+    name orch-console -- unconditionally, overriding any RESET_BY the caller's
+    env happens to carry (fleet_health_boundaries' whole point: the SRE must
+    never appear to have fired a singleton reset it has no authority to
+    fire)."""
+    h = _handoff(tmp_path / "reports", "cc-quality-handoff-x.md")
+    log = tmp_path / "keys.log"
+    r, keys = _run(tmp_path, "quality", arm_row=1,
+                   extra=_arm_env(tmp_path, log, extra={"RESET_BY": "cc-fleet-health"}))
+    assert r.returncode == 0, r.stderr + r.stdout
+    audit_line = _audit_line(keys)
+    assert "--by orch-console" in audit_line, f"audit row must cite orch-console, not cc-fleet-health: {audit_line}"
+    assert "cc-fleet-health" not in audit_line
+    assert "reset IN-PLACE by orch-console" in keys
+    assert str(h.resolve()) in keys
+
+
+def test_tty_path_reset_by_is_unchanged_still_env_or_default(tmp_path):
+    """Sanity: the attribution fix is scoped to the arm-row branch only --
+    the pre-existing tty self-fire path keeps its own env-or-default
+    RESET_BY (still cc-fleet-health in the normal/no-override case)."""
+    h = _handoff(tmp_path / "reports", "cc-storefront-HANDOFF-20261002.md")
+    r, keys = _run(tmp_path, "storefront", extra={"RESET_AUDITOR_ARMED": "1"})
+    assert r.returncode == 0, r.stderr + r.stdout
+    audit_line = _audit_line(keys)
+    assert "--by cc-fleet-health" in audit_line
+    assert str(h.resolve()) in keys
+
+
 def test_arm_row_busy_gate_refusal_leaves_row_unconsumed(tmp_path):
     """console #83304's required test: a busy-gate refusal must leave the
     arm-row UNCONSUMED (check already passed at gate 3, but consume never

@@ -140,6 +140,17 @@ if [ -n "$ARM_ROW_ID" ]; then
     echo "[reset_auditor] CALLER-IDENTITY REFUSED: --arm-row requires the caller to BE the console body (ORCH_BODY_ROLE=console, no CC_BASE_AGENT_ID) -- got ORCH_BODY_ROLE='${ORCH_BODY_ROLE:-}' CC_BASE_AGENT_ID='${CC_BASE_AGENT_ID:-}'. A row alone, even a genuine one, never arms this (CAI-RESP-1451)." >&2
     exit 5
   fi
+  # ATTRIBUTION FIX (orch-console #83363, after bus #83362's misattribution):
+  # the caller is now PROVEN to be the console body -- attribute every
+  # downstream mention (the audit row's --by, its from_agent==to_agent self-
+  # addressed pair, the LAYER-2-fail escalation sender, the boot message's
+  # "reset IN-PLACE by ...") to orch-console, UNCONDITIONALLY -- not an
+  # env-overridable default like the tty path's RESET_BY, since fleet_health_
+  # boundaries.assert_no_sre_red_reset's whole point is that the SRE itself
+  # must never appear as having fired a singleton reset it has no authority
+  # to fire. This line must stay AFTER the console-caller check above, never
+  # before it (attribution follows proof, not the other way round).
+  RESET_BY="orch-console"
   # (ii) read-only check (never writes -- safe under RESET_DRYRUN too). This
   # is what decides gate 3; the actual single-use consume happens much later,
   # right before the audit row (section 7.5), never here.
