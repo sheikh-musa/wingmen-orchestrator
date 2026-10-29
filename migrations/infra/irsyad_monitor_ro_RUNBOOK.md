@@ -14,14 +14,18 @@ Run `irsyad_monitor_ro_qa_proof.sql` on irsyad-qa (ref `oovskwogvefnznfowjky`) t
 ## 1. Apply on goumlyne
 Apply `irsyad_monitor_ro_goumlyne.sql` on goumlyne through the gated exec path (`--gate` naming `goumlyne`, this PR, and console #81213/#82720). The file has no BEGIN/COMMIT of its own. Its final DO block asserts:
 - the role's attributes;
-- no role memberships;
+- the role is a member of no other role;
 - `default_transaction_read_only=on`;
 - RLS is on for all 7 tables;
 - SELECT on exactly 7 public tables, and no write privilege anywhere in public;
-- EXECUTE on the 3 helpers and on `auth.uid()`, plus USAGE on `auth`;
+- EXECUTE on the 3 helpers. There is no USAGE on `auth`: postgres holds no grant option there, so `auth.uid()` is not nameable by this role (42501), which the QA proof asserts;
 - the 14 policies.
 
 If any of these fails, the transaction rolls back. The role is created **NOLOGIN**.
+
+**Expected after apply (console #83206):** `postgres` is a member OF `irsyad_monitor_ro`, with grantor `supabase_admin`, admin_option=true, inherit_option=false and set_option=false. This is PG16's automatic grant to a non-superuser role's creator. It lets postgres ALTER and DROP the role, which section 2 (LOGIN PASSWORD) and section 7 (DROP ROLE) need. It cannot use or SET ROLE to the role's privileges. Leave it; do not revoke it.
+
+Applied on goumlyne 2026-10-29 under gate #83193. The owner-side read-back was accepted in #83206.
 
 ## 2. Secrets holder: enable login and build the DSN
 Run once, out-of-band, never in a file or the transcript:
