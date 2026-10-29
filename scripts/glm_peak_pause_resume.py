@@ -549,7 +549,12 @@ def config_readable() -> bool:
     try:
         json.loads(CONFIG_FILE.read_text())
         return True
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (OSError, ValueError):
+        # OSError: FileNotFoundError, PermissionError, IsADirectoryError, ...
+        # ValueError: json.JSONDecodeError, or read_text() hitting bad encoding.
+        # Any of these means "can't trust the config" -- same zero-moves response,
+        # just with a graceful P1 page instead of an unhandled crash (cc-quality
+        # PR#632 polish nit).
         return False
 
 

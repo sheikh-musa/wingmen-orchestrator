@@ -882,3 +882,11 @@ def test_page_prints_dry_for_every_target(capsys):
     out = capsys.readouterr().out
     assert "[DRY] would page orch-console: subject" in out
     assert "[DRY] would page cc-fleet-health: subject" in out
+
+
+def test_config_readable_false_for_permission_denied(tmp_path, monkeypatch):
+    cfg = tmp_path / "glm_peak_pool_config.json"
+    cfg.write_text(json.dumps({"urgent_pool": "syed"}))
+    monkeypatch.setattr(g, "CONFIG_FILE", cfg)
+    monkeypatch.setattr(g.Path, "read_text", lambda self: (_ for _ in ()).throw(PermissionError("denied")))
+    assert g.config_readable() is False
