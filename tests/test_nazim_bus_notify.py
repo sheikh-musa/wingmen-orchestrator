@@ -85,6 +85,51 @@ def test_nudge_omits_need_a_reply_tail_when_zero(monkeypatch):
     assert "need a reply" not in line_call[5]
 
 
+def test_nudge_skips_when_recheck_finds_zero_unread(monkeypatch):
+    """orch-console #83404: a stale snapshot (n_new=3 from a poll ago) must not
+    fire if Nazim already handled all 3 by send time -- the live recount wins."""
+    calls, fake_run = _fake_run_factory()
+    monkeypatch.setattr(nbn.subprocess, "run", fake_run)
+    monkeypatch.setattr(nbn.fire_window, "is_held", lambda s: False)
+    sent = nbn._nudge(3, 1, ["P1", "P3", "P3"], pane_busy=lambda s: False,
+                       recheck_unread=lambda: 0)
+    assert sent is False
+    assert not any(c[1] == "send-keys" for c in calls), \
+        "a zero live recount must never reach a keystroke"
+
+
+def test_nudge_sends_when_recheck_finds_nonzero_unread(monkeypatch):
+    calls, fake_run = _fake_run_factory()
+    monkeypatch.setattr(nbn.subprocess, "run", fake_run)
+    monkeypatch.setattr(nbn.fire_window, "is_held", lambda s: False)
+    sent = nbn._nudge(3, 1, ["P1", "P3", "P3"], pane_busy=lambda s: False,
+                       recheck_unread=lambda: 2)
+    assert sent is True
+    assert any(c[1] == "send-keys" for c in calls)
+
+
+def test_nudge_recheck_omitted_preserves_old_snapshot_only_behaviour(monkeypatch):
+    """Every pre-existing caller that doesn't pass recheck_unread (None, the
+    default) must behave exactly as before this fix -- no new required arg."""
+    calls, fake_run = _fake_run_factory()
+    monkeypatch.setattr(nbn.subprocess, "run", fake_run)
+    monkeypatch.setattr(nbn.fire_window, "is_held", lambda s: False)
+    sent = nbn._nudge(1, 0, ["P2"], pane_busy=lambda s: False)
+    assert sent is True
+
+
+def test_nudge_recheck_runs_before_the_pane_busy_check(monkeypatch):
+    """A zero live recount should short-circuit before even touching tmux --
+    cheapest, most decisive gate first."""
+    calls, fake_run = _fake_run_factory()
+    monkeypatch.setattr(nbn.subprocess, "run", fake_run)
+    sent = nbn._nudge(1, 0, ["P2"], pane_busy=lambda s: (_ for _ in ()).throw(
+        AssertionError("pane_busy must not be called when recheck is already 0")),
+        recheck_unread=lambda: 0)
+    assert sent is False
+    assert calls == []
+
+
 def test_breakdown_line_import_matches_shared_helper():
     from scripts.lib.priority_breakdown import breakdown_line
     assert nbn.breakdown_line is breakdown_line
@@ -152,6 +197,40 @@ def test_new_priorities_query_excludes_suppressed_pattern():
     sql, params = cur.calls[0]
     assert "NOT" in sql and nbn._WAKE_SUPPRESS_SQL in sql
     assert params == (100, *nbn._WAKE_SUPPRESS_PARAMS)
+
+
+def test_unread_count_query_excludes_suppressed_pattern_and_already_read_rows():
+    cur = _FakeCursor([(0,)])
+    nbn._unread_count(_FakeConn(cur), since_id=100)
+    sql, params = cur.calls[0]
+    assert "read_at IS NULL" in sql
+    assert "NOT" in sql and nbn._WAKE_SUPPRESS_SQL in sql
+    assert params == (100, *nbn._WAKE_SUPPRESS_PARAMS)
+
+
+def test_unread_count_returns_the_scalar_count(monkeypatch):
+    cur = _FakeCursor([(5,)])
+    n = nbn._unread_count(_FakeConn(cur), since_id=100)
+    assert n == 5
+
+
+def test_deferred_poll_then_recheck_catches_a_fresh_arrival(monkeypatch):
+    """Simulates the exact scenario #83404 described: poll 1 snapshots n_new=2,
+    but by send time Nazim has already handled both (recount=0) -- deferred, no
+    send, last_max does NOT advance. Poll 2: one of the original 2 is STILL
+    unread plus the deferred window is re-evaluated from the same since_id --
+    recount now finds 1 -- it sends, for exactly the row that still needs it."""
+    calls, fake_run = _fake_run_factory()
+    monkeypatch.setattr(nbn.subprocess, "run", fake_run)
+    monkeypatch.setattr(nbn.fire_window, "is_held", lambda s: False)
+
+    recounts = iter([0, 1])  # poll 1: all handled already; poll 2: one still open
+    sent1 = nbn._nudge(2, 0, ["P2", "P2"], pane_busy=lambda s: False,
+                        recheck_unread=lambda: next(recounts))
+    assert sent1 is False
+    sent2 = nbn._nudge(2, 0, ["P2", "P2"], pane_busy=lambda s: False,
+                        recheck_unread=lambda: next(recounts))
+    assert sent2 is True
 
 
 def test_autoack_suppressed_updates_only_the_suppressed_pattern_and_returns_count():
