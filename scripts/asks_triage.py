@@ -441,6 +441,9 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                 sql = (
                     "UPDATE operator_asks SET "
                     "  triage_state = 'done', closed_at = now(), closed_reason = 'done', "
+                    # console #81245: --summary was silently dropped on 'done', leaving
+                    # a 'summary pending' row on the Builds page. Keep any existing line.
+                    "  triage_summary = COALESCE(NULLIF(btrim(%s), ''), triage_summary), "
                     "  triage_evidence_ref = %s, triaged_at = now(), triaged_by = %s, "
                     "  committed_date = COALESCE(%s, committed_date), "
                     "  outbound_msg_id = COALESCE(%s, outbound_msg_id), "
@@ -450,7 +453,7 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                     "  operator_summary = COALESCE(%s, operator_summary) "
                     "WHERE id = %s AND closed_at IS NULL"
                 )
-                params = (evidence, triaged_by, committed_date, outbound_msg_id,
+                params = (summary, evidence, triaged_by, committed_date, outbound_msg_id,
                           needs_musa, needs_musa, musa_summary, item_id)
             elif action == "ask":
                 # committed_date/outbound_msg_id are optional here: a plain "in
