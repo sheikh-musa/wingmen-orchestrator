@@ -18,25 +18,43 @@ below reuse this pattern rather than inventing a second one.
 ## A. Shared fleet memory
 
 A substrate table, not files: a fact told to one agent becomes readable by
-every agent at boot and before acting.
+every agent at boot and before acting. Store: the **orchestrator substrate,
+project ref `tscuymavysscrvoberrr`** (per `docs/data-store-registry.md`,
+LAYER-VOCAB-001 — this is the same database `boot_briefing` lives in, not a
+client silo).
 
 - `fleet_memory(id, scope, scope_key, fact text, op_ref text NOT NULL,
-  created_by, created_at, retired_at, retired_op_ref,
+  created_by, created_at, supersedes_id, retired_at, retired_op_ref,
   CHECK (retired_at IS NULL OR retired_op_ref IS NOT NULL))`
   - `scope` ∈ `fleet | client | repo`; `scope_key` is null for fleet-wide,
     else a client slug or repo name. Scoping is columns, not separate tables,
     so one query covers "everything relevant to me."
   - `fleet_memory_audit`: append-only via REVOKE-ALL-then-GRANT-INSERT,
     written by the same `SECURITY DEFINER` trigger shape as migration 131.
-  - Staleness/supersession: a new row with the same `(scope, scope_key)` and
-    an overlapping subject retires the old one (`retired_at` + `retired_op_ref`
-    citing the new row's `op_ref`) rather than deleting it — audit trail stays
-    intact, readers only ever see non-retired rows by default.
+  - Supersession is explicit, never inferred: `supersedes_id` is a nullable
+    FK to `fleet_memory.id`, set BY THE WRITER at insert time (the writer
+    names which row it replaces — there is no "overlapping subject"
+    heuristic). A trigger sets the named row's `retired_at = now()` and
+    `retired_op_ref = NEW.op_ref` when `supersedes_id` is set. Audit trail
+    stays intact; readers only ever see non-retired rows by default.
+  - Write path (who may INSERT/retire): INSERT via a `SECURITY DEFINER`
+    function only (no direct table grants to agent roles), which stamps
+    `created_by` from the caller's resolved agent identity — fail-closed,
+    same shape as `bus_send.py`'s identity resolution; a call with no
+    resolvable identity is refused, not defaulted. RLS: `fleet_memory_insert`
+    policy restricted to that function's role; plain SELECT is open to every
+    agent role (read-all is the point). No role gets table-level
+    UPDATE/DELETE — retiring a row only happens through the supersede path
+    above, never a bare UPDATE.
 - Integrates with, does not replace, per-agent memory files: a lane's own
   `MEMORY.md`/memory files stay for personal working notes; `fleet_memory` is
   for facts that must survive a `/clear` and reach OTHER agents. Boot sequence
-  gets one more step: `SELECT * FROM fleet_memory WHERE retired_at IS NULL AND
-  scope_key IN (<my repos/clients>) OR scope = 'fleet'`.
+  gets one more step: `SELECT * FROM fleet_memory WHERE retired_at IS NULL
+  AND (scope = 'fleet' OR scope_key IN (<my repos/clients>))` — note the
+  parens: written as `retired_at IS NULL AND scope = 'fleet' OR scope_key IN
+  (...)` it returns retired fleet-scope rows (AND binds tighter than OR, so
+  the retired-filter only applies to the first disjunct). Add a regression
+  test seeding one retired fleet-scope row and asserting it is excluded.
 - CAI-1034: rows store rule TEXT + op# refs only. No client data (names, IDs,
   transactions) ever lands in `fact` or `scope_key` beyond a client *slug*.
 - Migration: direct psycopg-apply only, from a worktree PR to
@@ -48,26 +66,33 @@ every agent at boot and before acting.
 Generated from code (not hand-maintained prose), refreshed on every merge,
 with a staleness alarm.
 
-- Populates the existing but-empty `repo_context.architecture_summary` column
-  — no new table needed here, unlike (A).
+- Populates the existing but-empty `repo_context.architecture_summary`
+  column — no new TABLE needed here, unlike (A). There IS still a small
+  migration: `repo_context` needs one new column,
+  `architecture_summary_updated_at timestamptz`, added in the same
+  slice-1 console-gated, direct-psycopg migration as (A)'s `fleet_memory`
+  tables (two changes, one migration file).
 - Generator: a script run post-merge (git hook or CI step on the repo, not a
   human) that walks the repo's top-level structure + entry points and writes
   a short structured summary (modules, owned tables/services, key entry
   files) — scoped small on purpose, not a full AST dump.
-- Staleness alarm: `repo_context` gets a `architecture_summary_updated_at`
-  check; `cc-fleet-health`'s existing sweep pattern (it already runs a
-  periodic self-heal sweep for sequence drift etc.) adds a check that pages
-  if a repo's `architecture_summary_updated_at` is older than its latest
-  merged commit.
+- Staleness alarm: `cc-fleet-health`'s existing sweep pattern (it already
+  runs a periodic self-heal sweep for sequence drift etc.) adds a check that
+  pages if a repo's `architecture_summary_updated_at` is older than its
+  latest merged commit.
 - Starting repos (smallest blast radius first): `cosem-adcda`,
   `cosem-platform`, `ihsanos`.
 
 ## C. Slices, with honest dates
 
-1. **2026-10-31** — `fleet_memory` + `fleet_memory_audit` migration written,
-   console-gated, applied direct-psycopg. First rows seeded: the irsyad
-   standing client-rules seed list (#80901) as `scope=client, scope_key=irsyad`
-   — strongest first-slice candidate since it's already costing coord re-asks
+1. **2026-10-31** — one migration: `fleet_memory` + `fleet_memory_audit`
+   (with the `SECURITY DEFINER` insert function, RLS policy, and the
+   supersede trigger) plus `repo_context.architecture_summary_updated_at`,
+   written, console-gated, applied direct-psycopg. First rows seeded: the
+   irsyad standing client-rules seed list (#80901) as `scope=client,
+   scope_key=irsyad`, rule text + op refs only (CAI-1034), inserted through
+   `cc-irsyad-coord` per the console/irsyad execution-separation rule —
+   strongest first-slice candidate since it's already costing coord re-asks
    today, and it's the smallest possible slice (seed a handful of existing
    rows, no new generator to build).
 2. **2026-11-03** — boot-sequence read step wired in (one `SELECT` added to
