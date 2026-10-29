@@ -29,11 +29,28 @@ no new gateway, no custom subprocess/API wrapper. REPO_NAME is just the cwd's
 git toplevel basename and is not looked up in REPOS.json, so pointing it at a
 worktree that isn't registered there is fine.
 
-1. **Spec-writer**: `--scheduled-prompt prompts/spec_writer.md`, task brief
-   piped in as the prompt's input. Writes the spec + acceptance tests, calls
+**Addendum (found while reading the launcher, 2026-10-29):** `launch_dangerous_cc.sh`
+runs claude under `env -i` plus a strict allow-list
+(`scripts/lib/lane_env_allowlist.sh`) -- a custom var like a task id or `MODEL`
+does NOT reach the role session's process env unless added to the git-tracked
+opt-in map, and this pilot has no standing reason to widen that allow-list.
+So per-task parameters flow via **files written into the task worktree before
+the role is launched**, never via env: the harness (`run_pilot.py`) writes
+`.loop-task/brief.md` before the spec-writer role runs, and each role prompt
+tells the session to read that path. Same reasoning for metadata the role
+can't know about itself -- `spec_writer_model` in the manifest is filled in
+by the harness's own patch call (it chose the model, so it knows it for
+certain), not guessed by the role session. See `record_manifest.py`'s
+`--spec-writer-model` default.
+
+1. **Spec-writer**: `--scheduled-prompt prompts/spec_writer.md`. Reads the
+   task brief from `.loop-task/brief.md` (written into the worktree by
+   `run_pilot.py` before launch). Writes the spec + acceptance tests, calls
    `scripts/loop/record_manifest.py` to snapshot the test files, commits
-   spec + tests + manifest in one commit on the task branch. That commit's
-   sha is `spec_commit_sha`.
+   spec + tests + manifest in one commit on the task branch. `run_pilot.py`
+   then reads the resulting HEAD sha and makes a second `record_manifest.py`
+   call (`--spec-commit-sha --spec-writer-model`) to patch both fields in
+   with authoritative values.
 2. **Builder**: `--scheduled-prompt prompts/builder.md`. Prompt explicitly
    lists the manifest's test paths as off-limits. Builder commits
    implementation only, opens the PR against `loop-pilot/base`.

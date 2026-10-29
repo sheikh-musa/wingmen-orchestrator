@@ -5,7 +5,7 @@ Shared by check_spec_tests_unchanged.py, reviewer_verdict.py and
 local_ci_runner.sh (the three cc-loop merge-gate checks, op#35690) so there is
 exactly one place that shells out to `gh api .../statuses/:sha` — hifz's
 GitHub Actions budget is exhausted, so these checks post local-runner-sourced
-statuses instead of Actions check runs (reports/loop-pilot-design-20261029.md
+statuses instead of Actions check runs (docs/loop-pilot-design-v1.md
 section 3).
 """
 from __future__ import annotations

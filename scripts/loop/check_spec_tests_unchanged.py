@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """check_spec_tests_unchanged.py — the "spec-tests-unchanged" merge-gate check.
 
-Part of the cc-loop 3-role loop (op#35690, reports/loop-pilot-design-20261029.md).
+Part of the cc-loop 3-role loop (op#35690, docs/loop-pilot-design-v1.md).
 The builder role may implement, but may NOT edit the acceptance test files the
 spec-writer committed. This check is the enforcement: it re-reads the manifest
 AS COMMITTED AT the spec commit (never trusting whatever the manifest claims
