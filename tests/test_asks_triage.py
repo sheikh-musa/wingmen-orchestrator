@@ -781,7 +781,8 @@ def test_delivered_at_bus_ref_stamps_that_rows_time(operator_ledger_db):
     with psycopg.connect(operator_ledger_db) as c:
         rid = _aged_ask(c)
         bus_id, bus_ts = _bus_row(c, age_min=240)
-    rc = at.main([str(rid), "done", "--evidence", f"bus#{bus_id}", "--delivered-at", f"bus#{bus_id}"])
+    rc = at.main([str(rid), "done", "--evidence", f"bus#{bus_id}", "--delivered-at", f"bus#{bus_id}",
+                  "--musa-summary", "s"])
     assert rc == 0
     d_at, src, ref, closed = _delivery(operator_ledger_db, rid)
     # 'manual', never 'bus-report': that source is backfill-only (ruling #78610) and the live
@@ -793,7 +794,7 @@ def test_delivered_at_op_ref_stamps_the_operator_message_time(operator_ledger_db
     with psycopg.connect(operator_ledger_db) as c:
         rid = _aged_ask(c)
         op_id, op_ts = _op_row(c, age_min=90)
-    assert at.main([str(rid), "done", "--delivered-at", f"op#{op_id}"]) == 0
+    assert at.main([str(rid), "done", "--delivered-at", f"op#{op_id}", "--musa-summary", "s"]) == 0
     d_at, src, ref, _ = _delivery(operator_ledger_db, rid)
     assert d_at == op_ts and src == "manual" and ref == f"op#{op_id}"
 
@@ -802,7 +803,8 @@ def test_delivered_at_iso_stamps_exactly_that_time(operator_ledger_db):
     with psycopg.connect(operator_ledger_db) as c:
         rid = _aged_ask(c)
     when = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=3)).replace(microsecond=0)
-    assert at.main([str(rid), "done", "--delivered-at", when.isoformat().replace("+00:00", "Z")]) == 0
+    assert at.main([str(rid), "done", "--delivered-at", when.isoformat().replace("+00:00", "Z"),
+                    "--musa-summary", "s"]) == 0
     d_at, src, ref, _ = _delivery(operator_ledger_db, rid)
     assert d_at == when and src == "manual" and ref.startswith("iso:")
 
@@ -831,7 +833,8 @@ def test_bare_delivered_with_old_evidence_refuses_with_hint(operator_ledger_db, 
     with psycopg.connect(operator_ledger_db) as c:
         rid = _aged_ask(c)
         bus_id, _ = _bus_row(c, age_min=120)
-    assert at.main([str(rid), "done", "--evidence", f"bus#{bus_id}", "--delivered"]) == 2
+    assert at.main([str(rid), "done", "--evidence", f"bus#{bus_id}", "--delivered",
+                    "--musa-summary", "s"]) == 2
     err = capsys.readouterr().err
     assert f"--delivered-at bus#{bus_id}" in err
     d_at, _, _, closed = _delivery(operator_ledger_db, rid)
@@ -854,7 +857,8 @@ def test_bare_delivered_with_fresh_evidence_still_stamps_now(operator_ledger_db)
     with psycopg.connect(operator_ledger_db) as c:
         rid = _aged_ask(c)
         bus_id, _ = _bus_row(c, age_min=5)
-    assert at.main([str(rid), "done", "--evidence", f"bus#{bus_id}", "--delivered"]) == 0
+    assert at.main([str(rid), "done", "--evidence", f"bus#{bus_id}", "--delivered",
+                    "--musa-summary", "s"]) == 0
     d_at = _delivery(operator_ledger_db, rid)[0]
     assert abs((_dt.datetime.now(_dt.timezone.utc) - d_at).total_seconds()) < 60
 
@@ -862,7 +866,65 @@ def test_bare_delivered_with_fresh_evidence_still_stamps_now(operator_ledger_db)
 def test_bare_delivered_without_any_ref_still_stamps_now(operator_ledger_db):
     with psycopg.connect(operator_ledger_db) as c:
         rid = _aged_ask(c)
-    assert at.main([str(rid), "done", "--evidence", "verified live in the console just now", "--delivered"]) == 0
+    assert at.main([str(rid), "done", "--evidence", "verified live in the console just now", "--delivered",
+                    "--musa-summary", "s"]) == 0
+    assert _delivery(operator_ledger_db, rid)[0] is not None
+
+
+# ── no-summary refuses a delivery stamp (console op#35502/35503 follow-up,   ──
+# orch-console bus #81244, root-caused live on operator_asks #5690: `done
+# --evidence ... --delivered-at op#...` with no summary left /builds showing
+# the internal pending-placeholder next to a real elapsed time) ──
+def test_delivered_refuses_with_no_summary_anywhere(operator_ledger_db, capsys):
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _aged_ask(c)
+        bus_id, _ = _bus_row(c, age_min=5)
+    rc = at.main([str(rid), "done", "--evidence", f"bus#{bus_id}", "--delivered"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "requires a written summary" in err
+    assert _delivery(operator_ledger_db, rid)[:2] == (None, None)
+
+
+def test_delivered_at_refuses_with_no_summary_writes_nothing(operator_ledger_db):
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _aged_ask(c)
+        op_id, _ = _op_row(c, age_min=5)
+    assert at.main([str(rid), "done", "--delivered-at", f"op#{op_id}"]) == 2
+    d_at, _, _, closed = _delivery(operator_ledger_db, rid)
+    assert d_at is None and closed is None, "refused BEFORE the triage write, not half-applied"
+
+
+def test_delivered_succeeds_when_musa_summary_supplied_this_call(operator_ledger_db):
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _aged_ask(c)
+        bus_id, _ = _bus_row(c, age_min=5)
+    rc = at.main([str(rid), "done", "--evidence", f"bus#{bus_id}", "--delivered",
+                  "--musa-summary", "Added the thing Musa asked for"])
+    assert rc == 0
+    assert _delivery(operator_ledger_db, rid)[0] is not None
+
+
+def test_delivered_succeeds_when_triage_summary_already_on_the_row(operator_ledger_db):
+    """A prior `ask --summary ...` triage already wrote triage_summary; a later
+    `done --delivered` (no new summary) must not be refused -- the summary
+    exists, it just wasn't supplied THIS call."""
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _aged_ask(c)
+        bus_id, _ = _bus_row(c, age_min=5)
+    assert at.main([str(rid), "ask", "--summary", "already triaged earlier"]) == 0
+    assert at.main([str(rid), "done", "--evidence", f"bus#{bus_id}", "--delivered"]) == 0
+    assert _delivery(operator_ledger_db, rid)[0] is not None
+
+
+def test_delivered_rides_with_ask_action_summary_this_call_satisfies_the_gate(operator_ledger_db):
+    """--summary only applies to action=ask, but it DOES count as 'a summary
+    was supplied this call' for the delivery gate -- covered already by
+    test_delivered_rides_along_with_ask_and_keeps_the_row_open, this adds the
+    explicit no-prior-row-summary case."""
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _aged_ask(c)
+    assert at.main([str(rid), "ask", "--summary", "LIVE now", "--delivered"]) == 0
     assert _delivery(operator_ledger_db, rid)[0] is not None
 
 

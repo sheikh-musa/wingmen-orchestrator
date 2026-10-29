@@ -394,5 +394,71 @@ console.log("tokenFromHash flow: ok");
   assert.ok(html4.indexOf("repo-group") === -1, "no repo-group markup when by_repo is absent");
   console.log("by_repo fallback: ok");
 
+  // ---- op#35502/35503 follow-up (orch-console bus #81240/#81244): two
+  // genuinely separate asks resolved by ONE shipment share the same written
+  // summary and an identical delivered_at -- collapse them into one card
+  // with an ×N badge instead of showing the same text twice (root-caused
+  // live on irsyad #5526/#5527 and #5626/#5627) ----
+  assert.ok(api.groupDuplicateDeliveries, "builds.js must export groupDuplicateDeliveries");
+  const sameTs = "2026-10-28T18:36:42.147334Z";
+  const dup = [
+    { id: 5626, line: "Weekly reports can now be signed with tins checked outside the report dates",
+      delivered_at: sameTs, total_hours: 4.4, pending: false },
+    { id: 5627, line: "Weekly reports can now be signed with tins checked outside the report dates",
+      delivered_at: sameTs, total_hours: 4.3, pending: false },
+  ];
+  const groupedDup = api.groupDuplicateDeliveries(dup);
+  assert.strictEqual(groupedDup.length, 1, "two rows, same line + same delivered_at, collapse to one");
+  assert.strictEqual(groupedDup[0].collapsed, true);
+  assert.strictEqual(groupedDup[0].count, 2);
+  assert.strictEqual(groupedDup[0].line, dup[0].line);
+
+  // a near-miss (different delivered_at, or different text) must NOT collapse
+  const notDup = [
+    { id: 1, line: "same text", delivered_at: "2026-10-28T10:00:00Z", total_hours: 1, pending: false },
+    { id: 2, line: "same text", delivered_at: "2026-10-28T11:00:00Z", total_hours: 1, pending: false },
+    { id: 3, line: "different text", delivered_at: "2026-10-28T10:00:00Z", total_hours: 1, pending: false },
+  ];
+  assert.strictEqual(api.groupDuplicateDeliveries(notDup).length, 3,
+    "different delivered_at or different text never collapses");
+
+  // a measured-but-pending row (no written summary -- the #5690 placeholder
+  // leak) is left alone here; it's groupPending's job, not this one's.
+  const pendingMeasured = [
+    { id: 9, line: "summary pending from irsyad coordinator (irsyad)", delivered_at: sameTs,
+      total_hours: 0.0, pending: true },
+    { id: 10, line: "summary pending from irsyad coordinator (irsyad)", delivered_at: sameTs,
+      total_hours: 0.0, pending: true },
+  ];
+  assert.strictEqual(api.groupDuplicateDeliveries(pendingMeasured).length, 2,
+    "pending rows pass through untouched -- groupPending handles those separately");
+  console.log("groupDuplicateDeliveries: ok");
+
+  // end-to-end through paint(): the irsyad group renders ONE card with an
+  // ×2 badge for the duplicate pair, not two identical cards.
+  const dupPayload = {
+    programmes: payload.programmes,
+    delivery_times: {
+      measured: dup, not_measured: [],
+      coverage: { measured: 2, not_measured: 0, unattributed: 0 },
+      by_repo: [
+        { repo: "irsyad", label: "irsyad", count: 2, measured_count: 2, median_hours: 4.35,
+          latest_delivered_at: sameTs, measured: dup, not_measured: [] },
+      ],
+    },
+  };
+  const main5 = makeEl();
+  const api5 = loadPage("builds.js", {
+    els: { main: main5, token: Object.assign(makeEl(), { value: TOK }) },
+    localStorage: { getItem() { return TOK; }, setItem() {}, removeItem() {} },
+    fetch: function () { return new Promise(function () {}); },
+  });
+  api5.paint(dupPayload);
+  const html5 = main5.innerHTML;
+  assert.strictEqual((html5.match(/Weekly reports can now be signed/g) || []).length, 1,
+    "the duplicate text appears exactly once on the painted page");
+  assert.ok(html5.indexOf(">×2<") !== -1, "the collapsed card shows the ×2 badge");
+  console.log("duplicate-delivery collapse end-to-end: ok");
+
   console.log("\nall passed");
 })().catch(function (e) { console.error(e.message); process.exit(1); });
