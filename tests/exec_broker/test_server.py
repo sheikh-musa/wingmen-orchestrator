@@ -6,6 +6,7 @@ need Linux — Task 6's own tests already cover the real SO_PEERCRED syscall.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -297,6 +298,53 @@ def test_ddl_still_refused_end_to_end_when_wire_migration_does_not_match_the_gat
         "migration": "999", "pr": None,
     })
     assert resp["error"]["code"] == "GATE_INVALID"
+
+
+# --- Part A 2/2 (orch-console ruling bus #79477): the byte binding for
+# LEXICALLY HAZARDOUS SQL, end to end through the real socket. The unit-level
+# pins live in test_gate_validation.py's Part A 2/2 section; these two prove
+# the wiring (wire migration/pr + the gate's cited sha12 both reach
+# require_gate) and that GATE_MISMATCH actually crosses the wire as an
+# additive §5 code.
+
+_HAZ_SQL = 'SELECT "x--y"; DROP TABLE t'
+
+
+def test_hazardous_passes_end_to_end_when_gate_cites_the_executed_bytes_sha12(tmp_path):
+    sha12 = hashlib.sha256(_HAZ_SQL.encode("utf-8")).hexdigest()[:12]
+    gate_row = {"from_agent": "orch-console", "message_type": "decision",
+                "subject": "apply migration 435 to qa", "is_past": True,
+                "body": f"commit 5053826e; raw-sha12: 0123456789ab\nwrapped-sha12: {sha12}"}
+    db = FakeDb(gate_row=gate_row)
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [])
+    resp = _send(sock_path, {
+        "project_ref": "oovskwogvefnznfowjky", "guarded_sql": _HAZ_SQL, "reason": "",
+        "gate_id": "56485", "caller": "c", "exec_ledger_id": "e",
+        "migration": "435", "pr": None,
+    })
+    assert resp == {"status": "ok", "rows": []}
+
+
+def test_hazardous_one_byte_diff_refused_end_to_end_with_gate_mismatch(tmp_path):
+    # Same gate row as the passing test above; the EXECUTED bytes differ by a
+    # single trailing space. Every text-matched axis still matches -- only the
+    # digest differs -- so this is the byte binding doing the work, and the
+    # refusal must cross the wire as the additive GATE_MISMATCH code (not
+    # GATE_INVALID), with the vault row finalized as an error.
+    sha12 = hashlib.sha256(_HAZ_SQL.encode("utf-8")).hexdigest()[:12]
+    gate_row = {"from_agent": "orch-console", "message_type": "decision",
+                "subject": "apply migration 435 to qa", "is_past": True,
+                "body": f"commit 5053826e; raw-sha12: 0123456789ab\nwrapped-sha12: {sha12}"}
+    db = FakeDb(gate_row=gate_row)
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [])
+    resp = _send(sock_path, {
+        "project_ref": "oovskwogvefnznfowjky", "guarded_sql": _HAZ_SQL + " ", "reason": "",
+        "gate_id": "56485", "caller": "c", "exec_ledger_id": "e",
+        "migration": "435", "pr": None,
+    })
+    assert resp["status"] == "error"
+    assert resp["error"]["code"] == "GATE_MISMATCH"
+    assert list(db.vault_rows.values())[0]["error_code"] == "GATE_MISMATCH"
 
 
 def test_old_six_key_dml_caller_unaffected_by_migration_pr_amendment_end_to_end(tmp_path):

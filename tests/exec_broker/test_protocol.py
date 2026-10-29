@@ -181,3 +181,14 @@ def test_read_only_override_error_code_exists_and_encodes():
     assert ErrorCode.READ_ONLY_OVERRIDE.value == "READ_ONLY_OVERRIDE"
     payload = json.loads(encode_error(ErrorCode.READ_ONLY_OVERRIDE, "broker is read-only").decode("utf-8"))
     assert payload == {"status": "error", "error": {"code": "READ_ONLY_OVERRIDE", "message": "broker is read-only"}}
+
+
+def test_gate_mismatch_error_code_exists_and_encodes():
+    # Additive eighth §5 code (orch-console ruling bus #79477, backing the
+    # byte-binding check for lexically hazardous SQL): the executed bytes'
+    # sha12 does not equal the sha12 the gate cites. Additive exactly like
+    # READ_ONLY_OVERRIDE -- response shape unchanged, and a caller that does
+    # not know the code yet must still parse the response.
+    assert ErrorCode.GATE_MISMATCH.value == "GATE_MISMATCH"
+    payload = json.loads(encode_error(ErrorCode.GATE_MISMATCH, "bytes differ").decode("utf-8"))
+    assert payload == {"status": "error", "error": {"code": "GATE_MISMATCH", "message": "bytes differ"}}

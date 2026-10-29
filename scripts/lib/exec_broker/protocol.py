@@ -18,12 +18,17 @@ from enum import Enum
 # is the additive seventh, added by the SELECT-only-override-mode follow-up
 # (orch-console GO #78974, assignment bus #79024): while the bounded ref
 # override is live, a non-plain-read statement is refused with this code.
-# Response shape is unchanged; callers must tolerate an unknown code string.
+# GATE_MISMATCH is the additive eighth, added by Part A rollout step (c)'s
+# byte-binding check for lexically hazardous SQL (orch-console ruling bus
+# #79477): the executed bytes' sha12 does not equal the sha12 the gate cites,
+# so the gate does not bind to these exact bytes. Response shape is unchanged;
+# callers must tolerate an unknown code string.
 class ErrorCode(str, Enum):
     ACL_DENIED = "ACL_DENIED"
     BAD_PROJECT_REF = "BAD_PROJECT_REF"
     GATE_REQUIRED = "GATE_REQUIRED"
     GATE_INVALID = "GATE_INVALID"
+    GATE_MISMATCH = "GATE_MISMATCH"
     READ_ONLY_OVERRIDE = "READ_ONLY_OVERRIDE"
     UPSTREAM_ERROR = "UPSTREAM_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
