@@ -388,6 +388,113 @@ def test_client_channel_ask_with_committed_date_extends_chase_by(operator_ledger
     assert chase_by >= committed_date
 
 
+# ── migration 132 (console bus #80707/#80718/#80719): --outbound-msg-id must
+# be a REAL outbound operator_messages row that actually postdates the ask
+# and (warn, not refuse) actually states the committed date ────────────────
+def _insert_outbound_msg(conn, *, text="[__test__] outbound", created_at="now()"):
+    """`created_at` is a raw SQL expression (e.g. "now() - interval '1 day'"),
+    interpolated directly like _insert_ask/_insert_client_channel's own
+    created_at handling — never a bind parameter."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO operator_messages (direction, channel, tag, text, delivered, created_at) "
+            f"VALUES ('outbound','telegram','gazzabyte-irsyad',%s,true,{created_at}) RETURNING id",
+            (text,),
+        )
+        mid = cur.fetchone()[0]
+    conn.commit()
+    return mid
+
+
+def test_outbound_msg_id_rejects_a_nonexistent_row(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_client_channel(c)
+    with pytest.raises(ValueError):
+        at.triage(rid, "ask", summary="dated", committed_date="2026-11-06T00:00:00Z",
+                  outbound_msg_id=999999999)
+
+
+def test_outbound_msg_id_rejects_an_inbound_row(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        rid = _insert_client_channel(c)
+        cur.execute(
+            "INSERT INTO operator_messages (direction, channel, text, delivered) "
+            "VALUES ('inbound','telegram','[__test__] musa asked something',true) RETURNING id"
+        )
+        inbound_id = cur.fetchone()[0]
+        c.commit()
+    with pytest.raises(ValueError):
+        at.triage(rid, "ask", summary="dated", committed_date="2026-11-06T00:00:00Z",
+                  outbound_msg_id=inbound_id)
+
+
+def test_outbound_msg_id_rejects_a_message_sent_before_the_ask_existed(operator_ledger_db):
+    """A message from before the ask existed cannot have committed its date
+    (console bus #80718)."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        outbound_id = _insert_outbound_msg(c, created_at="now() - interval '1 day'")
+        rid = _insert_client_channel(c)
+    with pytest.raises(ValueError):
+        at.triage(rid, "ask", summary="dated", committed_date="2026-11-06T00:00:00Z",
+                  outbound_msg_id=outbound_id)
+
+
+def test_outbound_msg_id_accepts_a_message_sent_after_the_ask_was_created(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_client_channel(c)
+        outbound_id = _insert_outbound_msg(c, text="Confirmed: 2026-11-06.")
+    n = at.triage(rid, "ask", summary="dated", committed_date="2026-11-06T00:00:00Z",
+                  outbound_msg_id=outbound_id)
+    assert n == 1
+
+
+def test_outbound_msg_id_warns_but_does_not_refuse_when_date_not_in_text(operator_ledger_db, capsys):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_client_channel(c)
+        outbound_id = _insert_outbound_msg(c, text="[__test__] no date mentioned here at all")
+    n = at.triage(rid, "ask", summary="dated", committed_date="2026-11-06T00:00:00Z",
+                  outbound_msg_id=outbound_id)
+    assert n == 1, "must warn, never refuse, when the date doesn't visibly appear"
+    captured = capsys.readouterr()
+    assert "does not appear" in captured.err
+
+
+@pytest.mark.parametrize("form", ["iso", "mmdd", "day_mon", "mon_day", "weekday_day_mon"])
+def test_outbound_msg_id_no_warning_when_date_appears_in_a_recognized_form(operator_ledger_db, capsys, form):
+    import datetime as _dt
+    import psycopg
+    d = _dt.date(2026, 11, 6)
+    text_by_form = {
+        "iso": f"Confirmed: {d.strftime('%Y-%m-%d')}.",
+        "mmdd": f"Confirmed: {d.strftime('%m-%d')}.",
+        "day_mon": f"Confirmed: {d.day} {d.strftime('%b')}.",
+        "mon_day": f"Confirmed: {d.strftime('%b')} {d.day}.",
+        "weekday_day_mon": f"Confirmed: {d.strftime('%a')} {d.day} {d.strftime('%b')}.",
+    }
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_client_channel(c)
+        outbound_id = _insert_outbound_msg(c, text=text_by_form[form])
+    at.triage(rid, "ask", summary="dated", committed_date="2026-11-06T00:00:00Z",
+              outbound_msg_id=outbound_id)
+    captured = capsys.readouterr()
+    assert "does not appear" not in captured.err
+
+
+def test_console_80719_correction_6_nov_2026_is_a_friday():
+    """Pure sanity anchor for console's own correction (bus #80719): 6 Nov
+    2026 is a FRIDAY, not a Thursday as console's #80718 example first said.
+    Documents why the weekday form in _date_appears_in_text must always be
+    computed from the date (strftime), never hard-coded — a wrong hard-coded
+    weekday would have baked that exact slip into this suite."""
+    import datetime as _dt
+    assert _dt.date(2026, 11, 6).strftime("%a") == "Fri"
+
+
 # --- migration 118: needs-Musa flag + plain-language operator_summary --------
 # (orch-console bus #75387: the seed path, and the go-forward maintenance path —
 # asks_triage.py sets/unsets the flag and writes the Musa-readable line.)
