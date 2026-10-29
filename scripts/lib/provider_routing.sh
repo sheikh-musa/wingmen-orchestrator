@@ -23,7 +23,7 @@
 # PRODUCTION path for whichever provider wins the benchmark, moved off
 # OpenRouter's per-token markup once there's a winner to move.
 #
-# apply_provider_routing <resolved_model> <orch_dir> <venv_py> <agent_id> [fetch_script]
+# apply_provider_routing <resolved_model> <orch_dir> <venv_py> <agent_id> [fetch_script] [family_key_script]
 #
 #   - resolved_model not matching any known provider prefix (every claude-*
 #     lane, today's only case): returns 0, exports NOTHING. Byte-identical to
@@ -36,9 +36,18 @@
 #   - matching prefix + vault fetch fails (empty key): prints FATAL to
 #     stderr, exports NOTHING, returns 1. Fail-closed — the caller must abort
 #     the boot rather than silently fall back to Anthropic/metered billing.
+#   - deepseek-* specifically (Musa op#35814, bus #82358): the vault_key from
+#     the table below is a per-CLIENT name, resolved via family_key_script
+#     (agent_id -> family -> deepseek_key_map.json -> vault key name), NOT
+#     the table's own hardcoded placeholder. A lane whose family has no map
+#     row prints FATAL and returns 1 — fails closed, never silently reuses
+#     the shared (leak-flagged) DEEPSEEK_CODING_KEY. Every other provider arm
+#     is unaffected by this.
 #
 #   fetch_script defaults to provider_vault_fetch.py (the real vault read);
-#   tests override it with a stub so no test call ever touches the vault.
+#   family_key_script defaults to deepseek_key_for_family.py (the real
+#   family->key-name resolver). Tests override either with a stub so no test
+#   call ever touches the vault or needs a real orch_dir on disk.
 
 # _provider_for_model <resolved_model>
 # Echoes "label|base_url|vault_key|small_default|small_override_env|api_key_mode"
@@ -83,7 +92,10 @@ _provider_for_model() {
         deepseek-*)
             # api-docs.deepseek.com/guides/anthropic_api confirms
             # deepseek-flash as the cheap/fast model; deepseek-v4-pro is the
-            # larger one.
+            # larger one. DEEPSEEK_CODING_KEY here is a PLACEHOLDER only —
+            # apply_provider_routing overwrites it with the per-client key
+            # name resolved by family (op#35814); this row's own vault_key
+            # field is never actually fetched once that resolution runs.
             echo "DeepSeek (native)|https://api.deepseek.com/anthropic|DEEPSEEK_CODING_KEY|deepseek-flash|DEEPSEEK_SMALL_MODEL|unset"
             ;;
         moonshotai/*|deepseek/*|qwen/*|z-ai/*)
@@ -128,10 +140,31 @@ apply_provider_routing() {
 
     local resolved_model="$1" orch_dir="$2" venv_py="$3" agent_id="$4"
     local fetch_script="${5:-$orch_dir/scripts/lib/provider_vault_fetch.py}"
+    local family_key_script="${6:-$orch_dir/scripts/lib/deepseek_key_for_family.py}"
     local row label base_url vault_key small_default small_override_env api_key_mode
 
     row="$(_provider_for_model "$resolved_model")" || return 0
     IFS='|' read -r label base_url vault_key small_default small_override_env api_key_mode <<< "$row"
+
+    # Per-client DeepSeek keys (Musa op#35814, bus #82358): the native
+    # deepseek-* row above hardcodes DEEPSEEK_CODING_KEY (the shared key that
+    # got leak-flagged after a Telegram paste). Once a per-family map is
+    # live, every deepseek-* lane must resolve ITS OWN vault key name by
+    # family -- fail CLOSED (never silently reuse the shared key) if the
+    # lane's family has no row. Every other provider arm is untouched.
+    if [[ "$resolved_model" == deepseek-* ]]; then
+        local family_vault_key
+        # Guard on BOTH the exit code and empty-stdout (cc-quality PR#636
+        # review nicety): empty-stdout-on-failure is the resolver's own
+        # contract today (test-locked), but checking rc too is defense in
+        # depth against a future resolver edit that prints something on an
+        # error path without also returning non-zero.
+        if ! family_vault_key="$("$venv_py" "$family_key_script" "$agent_id")" || [ -z "$family_vault_key" ]; then
+            echo "FATAL: no per-client DeepSeek vault-key mapping for agent ${agent_id} (model ${resolved_model}) -- see the reason above. Refusing to boot (no silent fallback to the shared DEEPSEEK_CODING_KEY)." >&2
+            return 1
+        fi
+        vault_key="$family_vault_key"
+    fi
 
     local key
     key="$(cd "$orch_dir" && AGENT_ID="$agent_id" "$venv_py" "$fetch_script" "$vault_key" "$label" 2>/dev/null || true)"
