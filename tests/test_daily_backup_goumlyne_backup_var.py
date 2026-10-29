@@ -28,3 +28,27 @@ def test_expansion_precedence():
     assert _expand({"GOUMLYNE_BACKUP_RO_DATABASE_URL": "B", "GOUMLYNE_RO_DATABASE_URL": "R"}) == "B"
     assert _expand({"GOUMLYNE_RO_DATABASE_URL": "R"}) == "R"
     assert _expand({}) == ""
+
+
+def test_backup_var_sourced_from_dedicated_file_after_env():
+    """console #83193 ruling B: the broad DSN lives in its own 0600 file, never in the bundle-feeding .env."""
+    text = SCRIPT.read_text()
+    assert 'BACKUP_RO_ENV_FILE="$HOME/.config/wingmen/goumlyne_backup_ro.env"' in text
+    guarded = 'if [ -r "$BACKUP_RO_ENV_FILE" ]; then source "$BACKUP_RO_ENV_FILE"; fi'
+    assert guarded in text
+    assert text.index('source "$ENV_FILE"') < text.index(guarded) < text.index('backup_client_silo "irsyad-goumlyne"')
+
+
+def test_dedicated_file_wins_and_is_optional(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("GOUMLYNE_BACKUP_RO_DATABASE_URL=OLD\n")
+    backup_file = tmp_path / "goumlyne_backup_ro.env"
+    snippet = (
+        f'source "{env_file}"; BACKUP_RO_ENV_FILE="{backup_file}"; '
+        'if [ -r "$BACKUP_RO_ENV_FILE" ]; then source "$BACKUP_RO_ENV_FILE"; fi; '
+        'printf %s "${GOUMLYNE_BACKUP_RO_DATABASE_URL:-}"'
+    )
+    run = lambda: subprocess.run(["bash", "-c", snippet], env={}, capture_output=True, text=True, check=True).stdout
+    assert run() == "OLD"
+    backup_file.write_text("GOUMLYNE_BACKUP_RO_DATABASE_URL=NEW\n")
+    assert run() == "NEW"
