@@ -126,6 +126,53 @@ def test_triage_done_closes_with_evidence(operator_ledger_db):
     assert evidence_ref == "am#12345"
 
 
+def test_triage_done_keeps_summary(operator_ledger_db):
+    """console #81245: a 'done' close passed --summary must store triage_summary
+    (it was silently dropped, leaving a 'summary pending' row on the Builds page)."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    n = at.triage(rid, "done", summary="Answered in chat", evidence="am#1")
+    assert n == 1
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT triage_summary FROM operator_asks WHERE id=%s", (rid,))
+        assert cur.fetchone()[0] == "Answered in chat"
+
+
+def test_triage_done_without_summary_keeps_existing_summary(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    at.triage(rid, "ask", summary="Original line")
+    at.triage(rid, "done", evidence="am#2")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT triage_summary FROM operator_asks WHERE id=%s", (rid,))
+        assert cur.fetchone()[0] == "Original line"
+
+
+def test_triage_not_keeps_summary(operator_ledger_db):
+    """console #81296: a 'not' close passed --summary must store triage_summary."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    n = at.triage(rid, "not", summary="Acknowledgement, no request")
+    assert n == 1
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT triage_state, triage_summary FROM operator_asks WHERE id=%s", (rid,))
+        assert cur.fetchone() == ("not_an_ask", "Acknowledgement, no request")
+
+
+def test_triage_not_without_summary_keeps_existing_summary(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    at.triage(rid, "ask", summary="Original line")
+    at.triage(rid, "not")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT triage_summary FROM operator_asks WHERE id=%s", (rid,))
+        assert cur.fetchone()[0] == "Original line"
+
+
 def test_triage_not_on_already_closed_row_updates_zero(operator_ledger_db):
     import psycopg
     with psycopg.connect(operator_ledger_db) as c:
