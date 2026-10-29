@@ -56,6 +56,12 @@ with sync_playwright() as p:
             document.documentElement.style.height = 'auto';
         }"""
     )
-    page.screenshot(path=out, full_page=True)
+    # #main can legitimately hold hundreds of items (status.html: 547 live
+    # rows observed) once its scroll is freed above -- a full-page shot of
+    # that many box-shadowed cards can exceed Playwright's 30s default
+    # screenshot timeout (caught live: status timed out at fc-v91 while
+    # fleet/lanes/asks, with no #main, rendered fine). Give it real headroom
+    # rather than trading the backlog #141 fix back for a truncated capture.
+    page.screenshot(path=out, full_page=True, timeout=120_000)
     browser.close()
     print(f"  playwright[{device_name}] rendered -> {out}")
