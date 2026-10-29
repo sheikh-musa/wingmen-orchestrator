@@ -1,4 +1,4 @@
-"""TDD proof for migrations/133_work_item_ask_chase_by_due_at.sql (op#35246,
+"""TDD proof for migrations/134_work_item_ask_chase_by_due_at.sql (op#35246,
 console bus #81038/#81040): the work_item mirror of an operator_asks row must
 derive due_at from GREATEST(committed_date, chase_by), not committed_date
 alone -- a deliberately-deferred ask (future chase_by, no committed_date yet)
@@ -8,8 +8,8 @@ flagged it as stuck.
 Two layers, same convention as test_114/test_132:
   1. A dry-run through the canonical scripts/apply_migration.py.
   2. Direct behavioral exercise of the trigger + backfill against a hand-built
-     "114 already ran, 133 has not yet" fixture (the ORIGINAL pre-133
-     work_item_derive_ask()/work_item_mirror_ask_trg()/trigger), applying 133's
+     "114 already ran, 134 has not yet" fixture (the ORIGINAL pre-134
+     work_item_derive_ask()/work_item_mirror_ask_trg()/trigger), applying 134's
      raw file content directly.
 
 Runs entirely against tests/conftest.py's ephemeral pg_dsn. NEVER touches
@@ -27,7 +27,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "scripts"))
 import apply_migration as am  # noqa: E402
 
-MIGRATION_PATH = Path(__file__).resolve().parent.parent.parent / "migrations" / "133_work_item_ask_chase_by_due_at.sql"
+MIGRATION_PATH = Path(__file__).resolve().parent.parent.parent / "migrations" / "134_work_item_ask_chase_by_due_at.sql"
 SILO = "tscuymavysscrvoberrr"
 
 
@@ -68,10 +68,10 @@ def _make_ledger_table(dsn: str) -> None:
         )
 
 
-def _make_pre_133_source(dsn: str) -> None:
+def _make_pre_134_source(dsn: str) -> None:
     """Minimal stand-in for the relevant subset of migration 114: operator_asks,
     work_item/work_item_audit, work_item_derived, work_item_mirror(), and the
-    ORIGINAL (pre-133) work_item_derive_ask()/work_item_mirror_ask_trg() + trigger."""
+    ORIGINAL (pre-134) work_item_derive_ask()/work_item_mirror_ask_trg() + trigger."""
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(
             """CREATE TABLE operator_asks (
@@ -213,15 +213,15 @@ def _make_pre_133_source(dsn: str) -> None:
 
 
 @pytest.fixture
-def pre133_db(fresh_db):
+def pre134_db(fresh_db):
     dsn = f"{fresh_db} application_name={SILO}"
     created = [r for r in ("anon", "authenticated", "service_role") if _ensure_role(dsn, r)]
-    _make_pre_133_source(dsn)
+    _make_pre_134_source(dsn)
     yield dsn
     _drop_roles_created(dsn, created)
 
 
-def _apply_133_raw(dsn: str) -> None:
+def _apply_134_raw(dsn: str) -> None:
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(MIGRATION_PATH.read_text())
 
@@ -232,7 +232,7 @@ def test_dry_run_via_apply_migration(fresh_db):
     created = [r for r in ("anon", "authenticated", "service_role") if _ensure_role(dsn, r)]
     try:
         _make_ledger_table(dsn)
-        _make_pre_133_source(dsn)
+        _make_pre_134_source(dsn)
         result = am.apply_migration(dsn, MIGRATION_PATH, silo=SILO, dry_run=True)
         assert result["status"] == "dry_run_ok"
     finally:
@@ -240,10 +240,10 @@ def test_dry_run_via_apply_migration(fresh_db):
 
 
 # ── Layer 2: behavioral exercise ─────────────────────────────────────────────
-def test_before_fix_future_chase_by_mirrors_due_at_null(pre133_db):
-    # proves the bug exists in the pre-133 fixture, so the fix test below is
+def test_before_fix_future_chase_by_mirrors_due_at_null(pre134_db):
+    # proves the bug exists in the pre-134 fixture, so the fix test below is
     # proving something that actually changes.
-    with psycopg.connect(pre133_db, autocommit=True) as c, c.cursor() as cur:
+    with psycopg.connect(pre134_db, autocommit=True) as c, c.cursor() as cur:
         cur.execute(
             "INSERT INTO operator_asks (ask, triage_state, delegated_to, chase_by) "
             "VALUES ('deferred', 'ask', 'cc-someone', %s) RETURNING id",
@@ -254,16 +254,16 @@ def test_before_fix_future_chase_by_mirrors_due_at_null(pre133_db):
         assert cur.fetchone()[0] is None
 
 
-def test_after_fix_future_chase_by_mirrors_into_due_at(pre133_db):
-    with psycopg.connect(pre133_db, autocommit=True) as c, c.cursor() as cur:
+def test_after_fix_future_chase_by_mirrors_into_due_at(pre134_db):
+    with psycopg.connect(pre134_db, autocommit=True) as c, c.cursor() as cur:
         cur.execute(
             "INSERT INTO operator_asks (ask, triage_state, delegated_to, chase_by) "
             "VALUES ('deferred', 'ask', 'cc-someone', %s) RETURNING id",
             (_future(hours=100),),
         )
         oid = cur.fetchone()[0]
-    _apply_133_raw(pre133_db)
-    with psycopg.connect(pre133_db, autocommit=True) as c, c.cursor() as cur:
+    _apply_134_raw(pre134_db)
+    with psycopg.connect(pre134_db, autocommit=True) as c, c.cursor() as cur:
         # a fresh UPDATE after the fix must derive due_at from chase_by
         cur.execute("UPDATE operator_asks SET triaged_by = 'x' WHERE id = %s", (oid,))
         cur.execute("SELECT due_at FROM work_item WHERE source_table='operator_asks' AND source_id=%s", (oid,))
@@ -272,9 +272,9 @@ def test_after_fix_future_chase_by_mirrors_into_due_at(pre133_db):
     assert due_at > datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=50)
 
 
-def test_both_committed_date_and_chase_by_set_due_at_is_the_greater(pre133_db):
-    _apply_133_raw(pre133_db)
-    with psycopg.connect(pre133_db, autocommit=True) as c, c.cursor() as cur:
+def test_both_committed_date_and_chase_by_set_due_at_is_the_greater(pre134_db):
+    _apply_134_raw(pre134_db)
+    with psycopg.connect(pre134_db, autocommit=True) as c, c.cursor() as cur:
         cur.execute(
             "INSERT INTO operator_asks (ask, triage_state, delegated_to, committed_date, chase_by) "
             "VALUES ('both', 'ask', 'cc-someone', %s, %s) RETURNING id",
@@ -286,9 +286,9 @@ def test_both_committed_date_and_chase_by_set_due_at_is_the_greater(pre133_db):
     assert due_at > datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=150)
 
 
-def test_neither_committed_date_nor_chase_by_due_at_stays_null(pre133_db):
-    _apply_133_raw(pre133_db)
-    with psycopg.connect(pre133_db, autocommit=True) as c, c.cursor() as cur:
+def test_neither_committed_date_nor_chase_by_due_at_stays_null(pre134_db):
+    _apply_134_raw(pre134_db)
+    with psycopg.connect(pre134_db, autocommit=True) as c, c.cursor() as cur:
         cur.execute(
             "INSERT INTO operator_asks (ask, triage_state, delegated_to) "
             "VALUES ('neither', 'ask', 'cc-someone') RETURNING id"
@@ -298,8 +298,8 @@ def test_neither_committed_date_nor_chase_by_due_at_stays_null(pre133_db):
         assert cur.fetchone()[0] is None
 
 
-def test_backfill_corrects_existing_mirrored_row_without_touching_updated_at(pre133_db):
-    with psycopg.connect(pre133_db, autocommit=True) as c, c.cursor() as cur:
+def test_backfill_corrects_existing_mirrored_row_without_touching_updated_at(pre134_db):
+    with psycopg.connect(pre134_db, autocommit=True) as c, c.cursor() as cur:
         cur.execute(
             "INSERT INTO operator_asks (ask, triage_state, delegated_to, chase_by) "
             "VALUES ('already mirrored wrong', 'ask', 'cc-someone', %s) RETURNING id",
@@ -313,9 +313,9 @@ def test_backfill_corrects_existing_mirrored_row_without_touching_updated_at(pre
         wid, due_before, updated_before = cur.fetchone()
         assert due_before is None  # the bug, pre-fix
 
-    _apply_133_raw(pre133_db)
+    _apply_134_raw(pre134_db)
 
-    with psycopg.connect(pre133_db, autocommit=True) as c, c.cursor() as cur:
+    with psycopg.connect(pre134_db, autocommit=True) as c, c.cursor() as cur:
         cur.execute("SELECT due_at, updated_at FROM work_item WHERE id = %s", (wid,))
         due_after, updated_after = cur.fetchone()
     assert due_after is not None
@@ -323,9 +323,9 @@ def test_backfill_corrects_existing_mirrored_row_without_touching_updated_at(pre
     assert updated_after == updated_before  # backfill must never touch updated_at
 
 
-def test_backfill_is_a_noop_for_a_row_already_correct(pre133_db):
+def test_backfill_is_a_noop_for_a_row_already_correct(pre134_db):
     # a genuinely stale row (no chase_by, no committed_date) must be left exactly alone
-    with psycopg.connect(pre133_db, autocommit=True) as c, c.cursor() as cur:
+    with psycopg.connect(pre134_db, autocommit=True) as c, c.cursor() as cur:
         cur.execute(
             "INSERT INTO operator_asks (ask, triage_state, delegated_to) "
             "VALUES ('genuinely stale', 'ask', 'cc-someone') RETURNING id"
@@ -337,9 +337,9 @@ def test_backfill_is_a_noop_for_a_row_already_correct(pre133_db):
         )
         wid, due_before, updated_before = cur.fetchone()
 
-    _apply_133_raw(pre133_db)
+    _apply_134_raw(pre134_db)
 
-    with psycopg.connect(pre133_db, autocommit=True) as c, c.cursor() as cur:
+    with psycopg.connect(pre134_db, autocommit=True) as c, c.cursor() as cur:
         cur.execute("SELECT due_at, updated_at FROM work_item WHERE id = %s", (wid,))
         due_after, updated_after = cur.fetchone()
     assert due_after == due_before  # still NULL, not touched
