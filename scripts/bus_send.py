@@ -960,8 +960,11 @@ def send(
         # -\d+$ strip on BOTH sides to detect base<->instance, which silently broke every
         # numbered-NAME lane family (cc-cosem-exams-2, cc-cosem-adcda-1/2/3,
         # cc-cosem-platform-2/4 -- the digit is the family name, not an instance suffix).
-        # _is_genuine_recipient_reply() uses name-prefix matching + the registry's own
-        # base_agent_id instead of guessing from the string shape.
+        # bus #83150/#83152 (same-day re-regression): the prefix-matching fast path added
+        # for the above was itself unsound (cc-irsyad vs cc-irsyad-coord and 67 other
+        # cross-base dash-prefix pairs) and was dropped. _is_genuine_recipient_reply() is
+        # now registry-base_agent_id-only (plus the exact-match shortcut) -- never
+        # name-shape guessing.
         cur.execute("SELECT from_agent, to_agent FROM agent_messages WHERE id=%s", (reply_to,))
         target_row = cur.fetchone()
         if target_row is not None:
