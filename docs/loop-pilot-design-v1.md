@@ -56,7 +56,23 @@ certain), not guessed by the role session. See `record_manifest.py`'s
    implementation only, opens the PR against `loop-pilot/base`.
 3. **Reviewer**: a *different* session from the builder (own worktree, own
    `--scheduled-prompt prompts/reviewer.md`), reading spec + diff + running
-   tests. `scripts/loop/reviewer_verdict.py` posts the verdict (see below).
+   tests. `scripts/loop/reviewer_verdict.py` writes the verdict file (on the
+   shared `loop-pilot/reviews` branch, not the PR branch -- see section 3);
+   `scripts/loop/gh_status.py` posts the actual GitHub status.
+
+### `.loop-task/` harness contract
+
+Before launching ANY role, `run_pilot.py` writes these into that role's
+worktree (never via env -- section 1's addendum on why):
+
+| file | content |
+|---|---|
+| `.loop-task/task_id.txt` | the task id, first line |
+| `.loop-task/brief.md` | the task brief (spec-writer only needs this one) |
+| `.loop-task/orch_dir.txt` | absolute path to the orchestrator checkout, so a role can invoke `record_manifest.py` / `reviewer_verdict.py` / `gh_status.py` by that path (they live in the orchestrator repo, not in hifz) |
+
+`tasks/loop-pilot/<task-id>/hidden/{seeded-bugs.json,grader.py}` is
+deliberately NOT in this list -- see section 4.
 
 ## 2. Manifest schema (`.loop/<task_id>/manifest.json`, committed in the spec commit)
 
@@ -97,6 +113,19 @@ timestamp) keyed by the exact head sha it reviewed, and the posted GitHub
 status is for that same sha. A new commit on the PR has no status at its own
 sha (GitHub just shows no check there) until a fresh reviewer run posts one --
 this is what "any new commit voids the verdict" means in code, not a promise.
+
+The verdict file is committed on a separate, shared **`loop-pilot/reviews`**
+branch, never on the PR branch itself -- committing it onto the PR branch
+would produce a new head sha, making the verdict describe a commit other
+than the one it's filed under. The reviewer role: captures `HEAD_SHA` the
+moment its worktree starts (before anything else), reviews/tests the PR at
+that sha, writes the verdict file there, THEN `git checkout`s
+`loop-pilot/reviews` in the same worktree to commit+push just that one file,
+and finally posts the GitHub status for the ORIGINAL `HEAD_SHA` (captured in
+step 1) -- not whatever commit switching branches produced. `GH_TOKEN` is on
+launch_dangerous_cc.sh's env allow-list (scripts/lib/lane_env_allowlist.sh,
+KEEP tier), so the reviewer session can call `gh api` directly; no separate
+credential plumbing needed.
 
 No HMAC/signature beyond "the status was posted by the fleet's gh-authenticated
 token and the JSON is the audit trail" -- flagged to orch-console as a design
