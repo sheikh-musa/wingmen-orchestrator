@@ -547,6 +547,29 @@ def log_move(phase: str, result: Dict[str, str], apply: bool) -> None:
 
 
 # ── main ────────────────────────────────────────────────────────────────────
+def validate_pin_exclude_config(orch_dir: Path, apply: bool) -> None:
+    """orch-console #81954 should-fix (cc-quality #81964 review of PR#631): an
+    excluded/pinned lane name that doesn't match any real .{lane}_model pointer
+    silently no-ops (is_blocked() just never matches that lane) -- is_pinned/
+    is_config_excluded are exact-match while lane naming is inconsistent
+    (.bariq_model vs .cc-ffsfulfilment_model), so a wrong-form entry or a typo
+    would otherwise flip despite the hold with zero signal. Turn that into a
+    loud warning instead of a silent bypass."""
+    orphans = []
+    for key in ("excluded_lanes", "pinned_lanes"):
+        for lane in sorted(config_lane_set(key)):
+            if not (orch_dir / f".{lane}_model").exists():
+                orphans.append((key, lane))
+    if not orphans:
+        return
+    lines = "\n".join(f"- {key}: '{lane}' has no matching .{lane}_model pointer" for key, lane in orphans)
+    plural = len(orphans) != 1
+    page(f"GLM pin/exclude config: {len(orphans)} orphan entr{'ies' if plural else 'y'}",
+         f"TL;DR: {len(orphans)} entr{'ies' if plural else 'y'} in glm_peak_pool_config.json don't match any "
+         f"real lane pointer -- silently inert, won't actually block anything. Check the lane name form "
+         f"(it's the pointer basename, e.g. 'cc-ffsfulfilment' not 'ffsfulfilment').\n\n{lines}", apply)
+
+
 def main(argv: Optional[List[str]] = None, now: Optional[dt.datetime] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--apply", action="store_true", help="act (default is dry-run)")
@@ -558,6 +581,8 @@ def main(argv: Optional[List[str]] = None, now: Optional[dt.datetime] = None) ->
     print(f"{now:%Y-%m-%d %H:%M:%SZ} peak={peak} window_date={state['window_date']} "
           f"flipped={state['flipped']} paused={state['paused']} deepseek={state['deepseek']} "
           f"resume_done={state['resume_done']}")
+
+    validate_pin_exclude_config(ORCH_DIR, a.apply)
 
     if peak:
         urgent_token = urgent_pool_token()        # raises loud on a bad config value — never guess

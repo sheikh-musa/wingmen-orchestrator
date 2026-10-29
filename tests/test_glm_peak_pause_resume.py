@@ -295,6 +295,7 @@ def test_main_peak_dry_run_honours_config_knobs(tmp_path, monkeypatch, capsys):
     deepseek change the dispatch, with NO code change — the whole point of the fix."""
     monkeypatch.setattr(g, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(g, "ORCH_DIR", tmp_path)
+    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
     (tmp_path / ".cosem-port_model").write_text("glm-5.3")
     (tmp_path / ".cosem-exams_model").write_text("glm-5.3")
     monkeypatch.setattr(g, "read_urgent_flags", lambda sessions: {"cosem-port": True, "cosem-exams": False})
@@ -431,6 +432,7 @@ def test_main_off_peak_reverses_both_flipped_and_deepseek_buckets(tmp_path, monk
     urgent lane, never resume_pause()."""
     monkeypatch.setattr(g, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(g, "ORCH_DIR", tmp_path)
+    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
     today = dt.datetime.now(dt.timezone.utc).date().isoformat()
     g.save_state({"window_date": today, "flipped": ["cosem-port"],
                   "paused": ["cosem-exams"], "deepseek": ["hc95-broker"], "resume_done": False})
@@ -448,6 +450,7 @@ def test_main_off_peak_reverses_both_flipped_and_deepseek_buckets(tmp_path, monk
 def test_main_offpeak_resumes_recorded_state(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(g, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(g, "ORCH_DIR", tmp_path)
+    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
     today = dt.datetime.now(dt.timezone.utc).date().isoformat()
     g.save_state({"window_date": today, "flipped": ["cosem-port"], "paused": ["cosem-exams"], "resume_done": False})
     rc = g.main([], now=_utc(11, 0))  # dry-run
@@ -460,6 +463,7 @@ def test_main_offpeak_resumes_recorded_state(tmp_path, monkeypatch, capsys):
 def test_main_offpeak_noop_once_resume_done(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(g, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(g, "ORCH_DIR", tmp_path)
+    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
     today = dt.datetime.now(dt.timezone.utc).date().isoformat()
     g.save_state({"window_date": today, "flipped": ["cosem-port"], "paused": [], "resume_done": True})
     rc = g.main([], now=_utc(11, 0))
@@ -758,3 +762,36 @@ def test_log_move_sends_a_bus_row_per_lane(monkeypatch):
     assert "cosem-port" in subject and "OK" in subject
     assert "model=claude-sonnet-5" in body
     assert apply is True
+
+
+def test_validate_pin_exclude_config_warns_on_orphan_entry(tmp_path, monkeypatch):
+    cfg = tmp_path / "glm_peak_pool_config.json"
+    cfg.write_text(json.dumps({"excluded_lanes": ["ffsfulfilment"]}))  # wrong form -- real pointer is .cc-ffsfulfilment_model
+    monkeypatch.setattr(g, "CONFIG_FILE", cfg)
+    (tmp_path / ".cc-ffsfulfilment_model").write_text("deepseek-flash")
+    pages = []
+    monkeypatch.setattr(g, "page", lambda subject, body, apply: pages.append((subject, body)))
+    g.validate_pin_exclude_config(tmp_path, True)
+    assert len(pages) == 1
+    assert "orphan" in pages[0][0]
+    assert "ffsfulfilment" in pages[0][1]
+
+
+def test_validate_pin_exclude_config_silent_when_all_match(tmp_path, monkeypatch):
+    cfg = tmp_path / "glm_peak_pool_config.json"
+    cfg.write_text(json.dumps({"excluded_lanes": ["hc95-broker"], "pinned_lanes": ["cosem-adcda-urgent"]}))
+    monkeypatch.setattr(g, "CONFIG_FILE", cfg)
+    (tmp_path / ".hc95-broker_model").write_text("deepseek-flash")
+    (tmp_path / ".cosem-adcda-urgent_model").write_text("claude-sonnet-5")
+    pages = []
+    monkeypatch.setattr(g, "page", lambda subject, body, apply: pages.append((subject, body)))
+    g.validate_pin_exclude_config(tmp_path, True)
+    assert pages == []
+
+
+def test_validate_pin_exclude_config_silent_when_lists_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(g, "CONFIG_FILE", tmp_path / "nonexistent.json")
+    pages = []
+    monkeypatch.setattr(g, "page", lambda subject, body, apply: pages.append((subject, body)))
+    g.validate_pin_exclude_config(tmp_path, True)
+    assert pages == []
