@@ -19,6 +19,7 @@ import os
 import pathlib
 import stat
 import sys
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -208,7 +209,8 @@ def test_build_role_dsn_derives_tenant_suffix_from_admin_username():
     dsn = inst.build_role_dsn(admin, "fleet_provisioner", "newpw")
     expected = _dsn("fleet_provisioner.ceayjeamtmcyzzvqflus", "newpw",
                     host="aws-1-ap-southeast-1.pooler.example", db="postgres")
-    assert dsn == expected
+    # the minted DSN also carries the forced TLS pin (#81597)
+    assert dsn == expected + "?sslmode=require"
 
 
 def test_build_role_dsn_password_is_url_encoded():
@@ -220,6 +222,38 @@ def test_build_role_dsn_password_is_url_encoded():
 def test_build_role_dsn_refuses_unsuffixed_admin_username():
     with pytest.raises(inst.InstallError, match="tenant"):
         inst.build_role_dsn(_dsn("postgres", "x"), "fleet_provisioner", "pw")
+
+
+# --- SSL pinning (cc-irsyad-coord #81597 ahead of the gated SSL window) ------
+def test_build_role_dsn_pins_sslmode_require_when_admin_has_none():
+    # the minted credential must carry the pin itself: the admin source DSN
+    # need not have it, and a re-mint must never silently downgrade to the
+    # libpq default "prefer"
+    dsn = inst.build_role_dsn(_dsn("postgres.tnt", "x"), "fleet_provisioner", "pw")
+    assert parse_qs(urlsplit(dsn).query).get("sslmode") == ["require"]
+
+
+def test_build_role_dsn_forces_require_over_a_weaker_admin_value():
+    admin = _dsn("postgres.tnt", "x") + "?sslmode=prefer"
+    dsn = inst.build_role_dsn(admin, "fleet_provisioner", "pw")
+    assert parse_qs(urlsplit(dsn).query).get("sslmode") == ["require"]
+
+
+def test_build_role_dsn_keeps_unrelated_admin_query_params():
+    admin = _dsn("postgres.tnt", "x") + "?application_name=provisioner"
+    q = parse_qs(urlsplit(inst.build_role_dsn(admin, "fleet_provisioner", "pw")).query)
+    assert q.get("application_name") == ["provisioner"]
+    assert q.get("sslmode") == ["require"]
+
+
+def test_build_role_dsn_percent_encodes_spaces_not_plus(monkeypatch):
+    # cc-quality #81751 note: libpq percent-decodes a URI query but does NOT
+    # map '+' back to a space, so quote_plus would corrupt a space-bearing
+    # pass-through param (e.g. options=-c some_setting=value).
+    admin = _dsn("postgres.tnt", "x") + "?application_name=my%20app"
+    dsn = inst.build_role_dsn(admin, "fleet_provisioner", "pw")
+    assert "+" not in dsn.split("?")[1]
+    assert parse_qs(urlsplit(dsn).query).get("application_name") == ["my app"]
 
 
 # --- credential file handling --------------------------------------------------
