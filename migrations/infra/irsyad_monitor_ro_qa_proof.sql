@@ -58,9 +58,11 @@ $qa_guard$;
 --
 -- REQUIRED EXTRA GRANTS (verified live on goumlyne): the existing PUBLIC SELECT policy on persons
 --   calls three SECURITY DEFINER helpers that have NO PUBLIC EXECUTE (REVOKE ALL FROM PUBLIC in
---   migs 192/228/229/291/455), and several policies call auth.uid(), which needs USAGE on schema
---   auth (PUBLIC lacks it). Without these, every SELECT by this role on persons fails with
---   "permission denied for function". auth.uid() itself is EXECUTE-able by PUBLIC. With no JWT
+--   migs 192/228/229/291/455). Without these, every SELECT by this role on persons fails with
+--   "permission denied for function". Several policies also call auth.uid(): a policy stores the
+--   function by OID, so evaluating it needs only EXECUTE (PUBLIC has it), not USAGE on schema auth.
+--   No auth-schema grant is made: postgres has no GRANT OPTION on schema auth (owned by
+--   supabase_admin) on either silo, verified 29 Oct; the QA proof shows no permission error. With no JWT
 --   claims on the monitor's connection, auth.uid() is NULL, so the helpers return empty sets and
 --   the PUBLIC policies grant nothing; visibility comes only from the policies below.
 --   Helper signatures (all zero-arg, RETURNS SETOF uuid, SECURITY DEFINER), latest definitions:
@@ -108,7 +110,6 @@ $nomember$;
 
 -- 4. Grants.
 GRANT USAGE ON SCHEMA public TO irsyad_monitor_ro;
-GRANT USAGE ON SCHEMA auth TO irsyad_monitor_ro;
 
 GRANT SELECT ON TABLE public.audit_log            TO irsyad_monitor_ro;
 GRANT SELECT ON TABLE public.persons              TO irsyad_monitor_ro;
@@ -213,9 +214,8 @@ BEGIN
   END IF;
 
   -- The policy-support grants must have actually landed (a GRANT without grant option only WARNs).
-  IF NOT has_schema_privilege('irsyad_monitor_ro', 'public', 'USAGE')
-     OR NOT has_schema_privilege('irsyad_monitor_ro', 'auth', 'USAGE') THEN
-    RAISE EXCEPTION 'irsyad_monitor_ro_post: missing USAGE on schema public or auth';
+  IF NOT has_schema_privilege('irsyad_monitor_ro', 'public', 'USAGE') THEN
+    RAISE EXCEPTION 'irsyad_monitor_ro_post: missing USAGE on schema public';
   END IF;
   IF NOT has_function_privilege('irsyad_monitor_ro', 'public.auth_nonadmin_staff_student_person_ids()', 'EXECUTE')
      OR NOT has_function_privilege('irsyad_monitor_ro', 'public.auth_subadmin_student_person_ids()', 'EXECUTE')

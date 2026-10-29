@@ -59,7 +59,8 @@ def test_grants_and_policy_pairs():
     for fn in ("auth_nonadmin_staff_student_person_ids", "auth_subadmin_student_person_ids",
                "auth_user_subadmin_org_ids"):
         assert f"GRANT EXECUTE ON FUNCTION public.{fn}()" in code
-    assert "GRANT USAGE ON SCHEMA auth TO irsyad_monitor_ro" in code
+    # postgres has no GRANT OPTION on schema auth on either silo; policies resolve auth.uid() by OID.
+    assert "SCHEMA auth" not in code
 
 
 def test_proof_ends_in_rollback_raise():
