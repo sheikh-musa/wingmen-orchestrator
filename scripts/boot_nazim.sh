@@ -40,9 +40,15 @@ export ZDOTDIR="$ORCH_DIR/deploy/agent-zdotdir"
 # NOT in the shared .env — lanes/auditors never see them). Only console/cai boots + the 2
 # named writer tools may read it; the store's L3 tripwire refuses (return-based, non-fatal to
 # this sourced boot) unless WRITE_DSN_ALLOWED=1 is set here first. Loud-but-non-fatal: no set -e.
+# >>> write-dsn (tests/test_console_boot_no_goumlyne_write.py runs this slice)
 export WRITE_DSN_ALLOWED=1
 set -a; . "$HOME/.wingmen/private/write_dsn.env"; set +a
 unset WRITE_DSN_ALLOWED
+# op#21944 key separation (console #81299 C): console never executes irsyad work;
+# coord applies irsyad changes through exec_prod. So a console boot must not carry
+# the irsyad (goumlyne) live write DSN. Other silos in the store are unchanged.
+unset GOUMLYNE_DATABASE_URL
+# <<< write-dsn
 
 # OAuth account resolution — precedence: explicit OVERRIDE (a live re-token) >
 # durable pointer (.nazim_default_token, reversible per-body default; op#9920/#11326,
