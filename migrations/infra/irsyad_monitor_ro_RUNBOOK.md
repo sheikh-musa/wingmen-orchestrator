@@ -49,6 +49,13 @@ Set `GOUMLYNE_RO_DATABASE_URL` to the new DSN **at the Mini master** (`/Users/sh
 | Rederive dump (manual) | `ops/audit-chain-amnesty/rederive_dump.py:18` | audit_log WHERE org_id = irsyad |
 | Issue digest | `scripts/irsyad_daily_issue_digest.py:27` | ui_events + org_members. Dormant: last sent 30 Jul, not scheduled anywhere |
 
+Consumers that must NOT use this variable (found at STEP 5, console #83276 ruling A):
+
+| Consumer | Where | Why not | Now |
+|---|---|---|---|
+| Person-actor audit monitor | ihsanos `scripts/monitor/irsyad_person_actor_audit_monitor.py:69` | reads `auth.users`, `auth.sessions` and every org's audit_log | prefers `GOUMLYNE_BACKUP_RO_DATABASE_URL` (ihsanos PR#1196). A hand run must happen on a host holding the dedicated backup file. **Unscheduled; scheduling is an OPEN item, deferred to that monitor's redesign (console Q6).** |
+| DMS shop donation import `--reconcile` | ihsanos `scripts/import/dms-shop-donation-import.ts` | reads donations, receipts, donation_categories | run its checks as exec_prod RO aggregates, never over the RO DSN |
+
 Notes on these consumers:
 - **Cisco watch:** `cisco_reconcile_watch.py:181`, an unscoped `SELECT count(*)` on tabung_coin_deposits, now counts irsyad rows only. Before, it counted the whole silo, including the second (QA) org. This is intended, but the logged total may drop.
 - **Weekly audit-chain check:** it reads `GOUMLYNE_RO_DATABASE_URL` from `orchestrator/.env`, so set the new DSN there too. See step 4 for why the auditor DSN must leave that file.
