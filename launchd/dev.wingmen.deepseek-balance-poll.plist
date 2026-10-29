@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.deepseek-balance-poll</string>
+  <key>ProgramArguments</key><array><string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string><string>scripts/deepseek_balance_poll.py</string></array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/sheikhmusa</string><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string><key>CC_BASE_AGENT_ID</key><string>cc-fleet-health</string><key>AGENT_ID</key><string>cc-fleet-health</string></dict>
+  <!-- cc-fleet-health, op#35698 (console #81729). Hourly poll of the DeepSeek
+       native-API balance via scripts/lib/provider_vault_fetch.py (key never
+       printed, used only in the one HTTPS request's Authorization header).
+       Appends {ts, balance_usd} to state/deepseek_balance_history.jsonl and
+       sends a P1 bus alert to orch-console if balance_usd < 40. Fails loud
+       to stderr/log on any error (vault miss, HTTP error, bad payload shape)
+       never swallows, never fabricates a reading. -->
+  <key>StartCalendarInterval</key><dict><key>Minute</key><integer>5</integer></dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/deepseek_balance_poll.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/deepseek_balance_poll.log</string>
+</dict>
+</plist>
