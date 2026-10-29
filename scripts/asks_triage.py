@@ -141,7 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("id", type=int, help="operator_asks.id")
     ap.add_argument("action", choices=("ask", "not", "done"))
-    ap.add_argument("--summary", default=None, help="required for action=ask: triage_summary")
+    ap.add_argument("--summary", default=None, help="triage_summary: required for action=ask; stored on done/not when given (an existing line is kept when omitted)")
     ap.add_argument("--delegated-to", default=None, help="action=ask only: agents.agent_id owner")
     ap.add_argument("--evidence", default=None, help="action=done only: triage_evidence_ref")
     ap.add_argument("--committed-date", default=None,
@@ -492,6 +492,8 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                     "UPDATE operator_asks SET "
                     "  triage_state = 'not_an_ask', closed_at = now(), closed_reason = 'not_a_request', "
                     "  chase_by = NULL, "
+                    # console #81296: 'not' dropped --summary too. Keep any existing line.
+                    "  triage_summary = COALESCE(NULLIF(btrim(%s), ''), triage_summary), "
                     "  triaged_at = now(), triaged_by = %s, "
                     # migration 118: needs-musa axis rides along on any action
                     "  needs_operator_decision = CASE WHEN %s = 'on' THEN true "
@@ -499,7 +501,7 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                     "  operator_summary = COALESCE(%s, operator_summary) "
                     "WHERE id = %s AND closed_at IS NULL"
                 )
-                params = (triaged_by, needs_musa, needs_musa, musa_summary, item_id)
+                params = (summary, triaged_by, needs_musa, needs_musa, musa_summary, item_id)
 
             cur.execute(sql, params)
             # The PRIMARY action's count is what the CLI exit code hangs on —
