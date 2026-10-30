@@ -14,6 +14,7 @@ Pages speculative:                        28288.
 Pages throttled:                              0.
 Pages wired down:                        300000.
 Pages purgeable:                           2663.
+Anonymous pages:                         500000.
 Pages occupied by compressor:            100000.
 """
 
@@ -25,6 +26,7 @@ def test_parse_vm_stat_extracts_expected_fields():
     assert pages["inactive"] == 700000
     assert pages["wired"] == 300000
     assert pages["compressed"] == 100000
+    assert pages["anonymous"] == 500000
 
 
 def test_parse_vm_stat_raises_on_missing_fields():
@@ -33,16 +35,35 @@ def test_parse_vm_stat_raises_on_missing_fields():
 
 
 def test_compute_memory_excludes_inactive_and_free_from_real_used():
-    pages = {"active": 800000, "wired": 300000, "compressed": 100000, "inactive": 700000, "free": 36749}
+    pages = {"anonymous": 500000, "active": 800000, "wired": 300000, "compressed": 100000,
+              "inactive": 700000, "free": 36749}
     page_size = 4096
-    mem_total_bytes = (800000 + 300000 + 100000 + 700000 + 36749) * page_size
+    mem_total_bytes = (500000 + 300000 + 100000 + 700000 + 36749) * page_size
     out = mm.compute_memory(pages, page_size, mem_total_bytes)
-    real_used_pages = 800000 + 300000 + 100000  # inactive and free excluded
-    expected_pct = round(real_used_pages / (800000 + 300000 + 100000 + 700000 + 36749) * 100, 1)
+    real_used_pages = 500000 + 300000 + 100000  # anonymous + wired + compressed; inactive/free excluded
+    expected_pct = round(real_used_pages / (500000 + 300000 + 100000 + 700000 + 36749) * 100, 1)
     assert out["mem_real_used_pct"] == pytest.approx(expected_pct, abs=0.1)
     # naive total-minus-free would be much higher since it counts inactive as used
     naive_pct = round((mem_total_bytes - 36749 * page_size) / mem_total_bytes * 100, 1)
     assert out["mem_real_used_pct"] < naive_pct
+
+
+def test_compute_memory_does_not_overcount_file_backed_cache_as_active():
+    # cc-quality's PR#660 Finding (1): active includes reclaimable file-backed
+    # cache pages, not just anonymous (app/heap) memory. A box with heavy file
+    # cache (active huge) but modest real app memory (anonymous small) must
+    # NOT be reported as nearly-full.
+    page_size = 4096
+    pages = {"anonymous": 200000, "active": 4_000_000, "inactive": 100000,
+             "wired": 300000, "compressed": 50000, "free": 50000}
+    mem_total_bytes = 5_000_000 * page_size
+    out = mm.compute_memory(pages, page_size, mem_total_bytes)
+    real_used_pages = 200000 + 300000 + 50000  # anonymous + wired + compressed
+    assert out["mem_real_used_mb"] == round(real_used_pages * page_size / 1_048_576, 1)
+    naive_active_based_pct = round((4_000_000 + 300000 + 50000) / 5_000_000 * 100, 1)
+    assert out["mem_real_used_pct"] < naive_active_based_pct
+    assert out["mem_active_mb"] == round(4_000_000 * page_size / 1_048_576, 1)
+    assert out["mem_anonymous_mb"] == round(200000 * page_size / 1_048_576, 1)
 
 
 def test_parse_swapusage_normal_line():

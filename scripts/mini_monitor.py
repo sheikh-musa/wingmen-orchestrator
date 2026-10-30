@@ -98,7 +98,7 @@ def _run(args: list[str], timeout: int) -> subprocess.CompletedProcess:
 _VMSTAT_FIELDS = {
     "Pages free": "free", "Pages active": "active", "Pages inactive": "inactive",
     "Pages speculative": "speculative", "Pages wired down": "wired",
-    "Pages occupied by compressor": "compressed",
+    "Pages occupied by compressor": "compressed", "Anonymous pages": "anonymous",
 }
 
 
@@ -118,20 +118,23 @@ def parse_vm_stat(text: str) -> dict:
         if not digits.lstrip("-").isdigit():
             continue
         out[_VMSTAT_FIELDS[label]] = int(digits)
-    if "free" not in out or "active" not in out:
+    if "free" not in out or "anonymous" not in out:
         raise ProbeParseError(f"vm_stat output missing expected fields: {text[:300]!r}")
     return out
 
 
 def compute_memory(pages: dict, page_size: int, mem_total_bytes: int) -> dict:
-    """Real-used = (active + wired + compressed) / total -- inactive and free
-    pages are reclaimable/cache-like and must NOT count as used (the same
-    class of mistake PR#658 fixed for cubeasht's Windows-level reading)."""
+    """Real-used = (anonymous + wired + compressed) / total. "active" also
+    includes active FILE-BACKED pages (reclaimable disk cache), which would
+    over-count; "anonymous" is app/heap memory that isn't disk-backed and
+    can't be reclaimed the same way. inactive/free/active are reported but
+    NOT counted as used (same class of mistake PR#658 fixed for cubeasht's
+    Windows-level reading; this one caught by cc-quality on PR#660 review)."""
     to_mb = lambda n: round(n * page_size / 1_048_576, 1)
-    active, wired = pages.get("active", 0), pages.get("wired", 0)
-    compressed, inactive = pages.get("compressed", 0), pages.get("inactive", 0)
-    free = pages.get("free", 0)
-    real_used_pages = active + wired + compressed
+    anonymous, wired = pages.get("anonymous", 0), pages.get("wired", 0)
+    compressed = pages.get("compressed", 0)
+    active, inactive, free = pages.get("active", 0), pages.get("inactive", 0), pages.get("free", 0)
+    real_used_pages = anonymous + wired + compressed
     total_mb = round(mem_total_bytes / 1_048_576, 1)
     real_used_mb = to_mb(real_used_pages)
     return {
@@ -139,7 +142,9 @@ def compute_memory(pages: dict, page_size: int, mem_total_bytes: int) -> dict:
         "mem_real_used_mb": real_used_mb,
         "mem_real_used_pct": round(real_used_mb / total_mb * 100, 1) if total_mb else None,
         "mem_free_mb": to_mb(free),
+        "mem_active_mb": to_mb(active),  # includes reclaimable file-backed pages; info only
         "mem_inactive_mb": to_mb(inactive),  # reclaimable/cache-like, NOT counted as used
+        "mem_anonymous_mb": to_mb(anonymous),
         "mem_compressed_mb": to_mb(compressed),
     }
 
