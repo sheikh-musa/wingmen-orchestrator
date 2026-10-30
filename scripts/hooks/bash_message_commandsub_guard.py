@@ -52,64 +52,102 @@ _FIX_MESSAGE = (
 _FLAG_RE = re.compile(r"(?<!\S)(--body|--subject|--title|-m)(?:(=)|(?=\s|$))")
 
 
-def _is_single_quoted(value: str) -> bool:
-    return len(value) >= 2 and value[0] == "'" and value[-1] == "'"
-
-
 def _has_command_substitution(value: str) -> bool:
     return "`" in value or "$(" in value
 
 
-def _scan_value(cmd: str, pos: int):
-    """Extract the argument value starting at `pos` (right after the flag, or
-    right after its '='). Returns (value_text_INCLUDING_any_surrounding_quote_
-    chars, end_index). Raises ValueError on an unbalanced quote -- caller fails
-    closed. A single/double quoted value absorbs everything up to its own
-    unescaped matching quote, including embedded whitespace; an unquoted value
-    ends at the next whitespace."""
+def _scan_word(cmd: str, pos: int):
+    """Extract a full shell WORD starting at `pos` (right after the flag, or
+    right after its '='), as the CONCATENATION of adjacent quoted/unquoted
+    segments bash would glue into one word -- e.g. "x"`cmd` is ONE word, not
+    a safely-quoted value followed by stray trailing text (cc-quality PR#657
+    review, Finding A: the earlier single-segment scan missed exactly this
+    adjacent-concatenation shape, a confirmed bypass grounded against real
+    bash). Returns (segments, end_index) where segments is a list of
+    (kind, text_WITHOUT_surrounding_quote_chars) and kind is one of 'single'
+    (quotes suppress all expansion -- always safe), 'double', or 'unquoted'
+    (both expand backtick/$(...) -- checked by the caller). Raises ValueError
+    on an unbalanced quote -- caller fails closed."""
     n = len(cmd)
     while pos < n and cmd[pos] in " \t":
         pos += 1
     if pos >= n:
         raise ValueError("flag has no value")
-    quote = cmd[pos]
-    if quote == "'":
-        end = cmd.find("'", pos + 1)
-        if end == -1:
-            raise ValueError("unbalanced single quote")
-        return cmd[pos:end + 1], end + 1
-    if quote == '"':
-        i = pos + 1
-        while i < n:
-            if cmd[i] == "\\":
-                i += 2
-                continue
-            if cmd[i] == '"':
-                return cmd[pos:i + 1], i + 1
-            i += 1
-        raise ValueError("unbalanced double quote")
-    i = pos
-    while i < n and cmd[i] not in " \t":
-        i += 1
-    return cmd[pos:i], i
+    segments = []
+    while pos < n and cmd[pos] not in " \t":
+        ch = cmd[pos]
+        if ch == "'":
+            end = cmd.find("'", pos + 1)
+            if end == -1:
+                raise ValueError("unbalanced single quote")
+            segments.append(("single", cmd[pos + 1:end]))
+            pos = end + 1
+        elif ch == '"':
+            i = pos + 1
+            seg_start = i
+            while True:
+                if i >= n:
+                    raise ValueError("unbalanced double quote")
+                if cmd[i] == "\\":
+                    i += 2
+                    continue
+                if cmd[i] == '"':
+                    break
+                i += 1
+            segments.append(("double", cmd[seg_start:i]))
+            pos = i + 1
+        else:
+            start = pos
+            while pos < n and cmd[pos] not in " \t'\"":
+                pos += 1
+            segments.append(("unquoted", cmd[start:pos]))
+    return segments, pos
 
 
 def _find_dangerous_flag_values(cmd: str):
-    """Returns a list of (flag, value) for every GUARDED flag whose value
-    contains a backtick or $( and is NOT single-quoted. Raises ValueError if a
-    matched flag's value can't be parsed (unbalanced quote) -- caller fails
-    closed."""
+    """Returns a list of (flag, raw_value) for every GUARDED flag whose full
+    shell WORD (the concatenation of its adjacent quoted/unquoted segments)
+    contains a backtick or $( in any NON-single-quoted segment -- a
+    single-quoted segment is always safe even when concatenated next to a
+    dangerous one, since single quotes still suppress expansion in their own
+    span. Raises ValueError if a matched flag's value can't be parsed
+    (unbalanced quote) -- caller fails closed."""
     findings = []
     for m in _FLAG_RE.finditer(cmd):
         flag, has_inline_eq = m.group(1), m.group(2)
         start = m.end(2) if has_inline_eq else m.end(1)
-        value, _end = _scan_value(cmd, start)
-        if not _is_single_quoted(value) and _has_command_substitution(value):
-            findings.append((flag, value))
+        value_start = start
+        while value_start < len(cmd) and cmd[value_start] in " \t":
+            value_start += 1
+        segments, end = _scan_word(cmd, start)
+        dangerous = any(
+            kind != "single" and _has_command_substitution(text)
+            for kind, text in segments
+        )
+        if dangerous:
+            findings.append((flag, cmd[value_start:end]))
     return findings
 
 
 def main() -> int:
+    try:
+        return _main_inner()
+    except Exception:
+        # Fail closed (cc-quality PR#657 review, Finding B): check (4) requires
+        # that a hook exception REFUSES, not allows -- a bare `sys.exit(main())`
+        # with no outer guard would let any unanticipated exception propagate
+        # out of main() entirely, exit the process with code 1 (not 2), and a
+        # PreToolUse hook exit of 1 is a non-blocking error -- the tool call
+        # PROCEEDS. This outer catch-all is the one-line fix: whatever goes
+        # wrong, refuse rather than silently fail open.
+        sys.stderr.write(
+            "BLOCKED by bash_message_commandsub_guard: unexpected error while checking "
+            "this command; refusing rather than risk a silent fail-open (fail-closed).\n"
+        )
+        return 2
+
+
+def _main_inner() -> int:
     try:
         payload = json.load(sys.stdin)
     except Exception:

@@ -104,3 +104,39 @@ def test_fails_closed_on_unparseable_input(monkeypatch):
 def test_fails_closed_on_unbalanced_quotes_in_command(monkeypatch):
     cmd = 'scripts/bus_send.py --to orch-console --body "unterminated'
     assert _run(cmd, monkeypatch) == 2
+
+
+# --- cc-quality PR#657 review, Finding A: adjacent-concatenation bypass ---
+# A shell WORD can be a concatenation of adjacent quoted/unquoted segments
+# with no whitespace between them -- bash runs a command substitution in
+# ANY of those segments. The single-segment scan this guard shipped with
+# missed this; these are the exact bypasses cc-quality grounded against bash.
+
+def test_refuses_double_quote_then_adjacent_unquoted_backtick(monkeypatch):
+    cmd = 'scripts/bus_send.py --to orch-console --body "x"`echo SUBRAN`'
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_refuses_single_quote_then_adjacent_unquoted_backtick(monkeypatch):
+    cmd = "scripts/bus_send.py --to orch-console --body ''`echo SUBRAN`"
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_refuses_single_quote_then_adjacent_unquoted_dollar_paren(monkeypatch):
+    cmd = "scripts/bus_send.py --to orch-console --body ''$(echo SUBRAN)"
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_allows_single_quoted_segment_concatenated_with_safe_unquoted_text(monkeypatch):
+    cmd = "scripts/bus_send.py --to orch-console --body 'hello'world"
+    assert _run(cmd, monkeypatch) == 0
+
+
+# --- cc-quality PR#657 review, Finding B: no outer catch-all = fail-open risk ---
+
+def test_unexpected_exception_in_main_fails_closed(monkeypatch):
+    def _boom():
+        raise RuntimeError("simulated unexpected failure")
+
+    monkeypatch.setattr(guard, "_main_inner", _boom)
+    assert guard.main() == 2
