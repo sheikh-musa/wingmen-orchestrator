@@ -396,7 +396,23 @@ not a signal anything is wrong.
    pass (my no-cross-contamination test only varied retrievability, never
    isLeech, so a bug that leaked isLeech into tajweedWeak sailed through)
    -- fixed by adding an isLeech-specific no-cross-contamination test; not
-   yet run live. 1 more task still needed to hit the 6-task floor.
+   yet run live. **task-06-fsrs-export-payload** drafted 2026-10-30 (H-9's
+   full FSRS state + audit log export -- distinct from the existing,
+   already-shipped `backup/service.ts createBackupPayload()`, which
+   covers progress/sessions/downloads/settings but not FSRS scheduler
+   state or `fsrs_audit_events`; out of scope to touch that function) --
+   oracle verified clean against a correct reference and catches all 6
+   seeded-bug variants (uses-date-now-instead-of-param,
+   wrong-row-counts, shallow-reference-leak, mutates-input-arrays,
+   dedupes-rows, wrong-schema-version-type); not yet run live.
+
+   **6 of 6 minimum pilot tasks now drafted and individually
+   oracle-verified** (each against a correct reference implementation
+   AND every one of its own seeded-bug variants, in a scratch worktree,
+   before being trusted) -- none run live yet except task-01. Next: get
+   PR#666 merged (orch-console + cc-quality both waiting on green CI,
+   "no live runs until it lands" per #83851), then run the full A-vs-B
+   measured pilot across all 6 tasks.
 2. Whether hifz already has a local-runner GH-status mechanism to reuse
    instead of `local_ci_runner.sh` -- asked cc-hifz-1, no answer yet.
 3. `switch_lane_token`-for-one-shot-session and the builder-worktree isolation
