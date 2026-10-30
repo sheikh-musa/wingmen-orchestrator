@@ -570,7 +570,14 @@ two are interchangeable.
    that removes the `Date` branch (fails, pinpointing exactly that case).
    This is a real, if narrow, correctness fix to the pilot's own
    infrastructure, not just a finding -- any future run of task-06's grader
-   is now strictly stronger ground truth than it was in section 8.
+   is now strictly stronger ground truth than it was in section 8. Raw
+   execution proof (per cc-quality review #84769's one ask) at
+   `~/wingmen/loop-pilot-state/grader-fix-proof-real-build.json` (real
+   build, `any_bug_survived: false`) and
+   `~/wingmen/loop-pilot-state/grader-fix-proof-mutant.json` (the
+   clean-deletion mutant, `any_bug_survived: true`, pinpointing exactly the
+   added Date case and nothing else -- the Map/Set cases it did not touch
+   still pass).
 2. **36 of 36 cataloged `seeded-bugs.json` variants across all 6 tasks are
    caught by each task's own real acceptance tests**, now confirmed
    mechanically (Stryker's 100% mutation scores on 4/6 impl files, plus an
