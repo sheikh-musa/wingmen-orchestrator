@@ -539,15 +539,48 @@ well-specified algorithmic tasks, DeepSeek-only cost ~24x less than
 Claude-reviewed for the same observed outcome -- useful as a cost data
 point, not as a safety verdict.
 
-## 9. Mutation pass (2026-10-30, op#35690, orch-console bus #84668)
+## 9. Mutation pass (2026-10-30, op#35690, orch-console bus #84668/#84744)
 
 Section 8's pilot never measured a real bug because none occurred. orch-
 console asked for a follow-up: use a mechanical mutation tool (not Claude
 spend) to find real surviving mutants, then run reviewer-only (condition A
 vs B) on the survivors, with the acceptance tests in context as in
-production, spend capped at $10 Claude. This section is that follow-up.
+production, spend capped at $10 Claude.
 
-### 9a. Mechanical sweep, all 6 tasks (Stryker, compute-only, $0 spend)
+**Headline: no difference was found between the two reviewers on this task
+set's one real defect -- that is not the same claim as "the two reviewers
+are equally good."** The trial that could have shown a gap (4 reviewer runs
+on 1 real bug) didn't produce one, but a null result from 4 trials cannot
+establish equivalence; it only says this specific, small sample didn't
+distinguish them. Treat this as "no difference found," not as evidence the
+two are interchangeable.
+
+### 9a. Two real findings, before the measurement
+
+1. **The hidden grader for task-06 had the same gap as the real acceptance
+   tests, and has now been fixed.** `deepClone()`'s `Date`/`Map`/`Set`
+   branches were covered by neither the real acceptance suite NOR the
+   task's own hidden oracle (`tasks/loop-pilot/task-06-fsrs-export-payload/hidden/grader.py`)
+   -- both happened to only ever construct plain `{id, value}` rows. That
+   means the pilot's own ground truth had a blind spot for this task.
+   **Filed and fixed in this PR**: `grader.py`'s oracle now includes three
+   more cases (a `Date`, a `Map`, and a `Set` value nested in a row, each
+   asserted to round-trip as itself, not `{}`), verified against both the
+   real correct build (passes, `any_bug_survived: false`) and the mutant
+   that removes the `Date` branch (fails, pinpointing exactly that case).
+   This is a real, if narrow, correctness fix to the pilot's own
+   infrastructure, not just a finding -- any future run of task-06's grader
+   is now strictly stronger ground truth than it was in section 8.
+2. **36 of 36 cataloged `seeded-bugs.json` variants across all 6 tasks are
+   caught by each task's own real acceptance tests**, now confirmed
+   mechanically (Stryker's 100% mutation scores on 4/6 impl files, plus an
+   equivalent-mutant-only result on the 5th -- see 9b), on top of the
+   direct test-assertion matching already done for all 6 before this sweep.
+   This task set's spec-writer-authored tests are comprehensive enough that
+   finding *any* real survivor required a mechanical search past the known
+   catalog -- and even then, only one file in six had one (9b).
+
+### 9b. Mechanical sweep, all 6 tasks (Stryker, compute-only, $0 spend)
 
 Instead of the 2 tasks asked for, ran `@stryker-mutator/core` against all 6
 tasks' real impl files (each scoped to one file, run against that task's
@@ -588,9 +621,10 @@ a `Date`/`Map`/`Set` instance is `[]`, since their state lives off
 `Object.keys`) -- a real, silent, data-losing defect that contradicts the
 module's own docstring ("Supports arrays, plain objects, Date, Map, and
 Set") and the spec's "contents preserved exactly" line, invisible to both
-grading mechanisms the pilot otherwise trusts as ground truth.
+grading mechanisms the pilot otherwise trusts as ground truth (now fixed in
+the hidden grader, see 9a item 1).
 
-### 9b. Reviewer-only comparison on the task-06 defect
+### 9c. Reviewer-only comparison on the task-06 defect
 
 Built a minimal one-off runner (not landed as permanent tooling -- a side
 analysis reusing `run_pilot.py`'s own `launch_role()`/`make_worktree()`,
@@ -621,28 +655,49 @@ Two variants, to separate judgment from tooling:
 | disable (if-false) | FAIL, correct_catch, $0.01 | FAIL, correct_catch, $0.80 |
 | delete (clean) | FAIL, correct_catch, $0.02 | FAIL, correct_catch, $0.80 |
 
-4/4 correct_catch, 0/4 false_pass, 0/4 false_alarm. **No discriminating
-result between conditions:** on the one real, test-invisible, oracle-
-invisible defect this 6-task set contains, the cheap reviewer caught it as
-reliably as the expensive one, in both its tooling-visible and
-tooling-invisible forms. Total spend: $1.63 (Claude $1.60, DeepSeek $0.03)
-against the $10 cap.
+4/4 correct_catch, 0/4 false_pass, 0/4 false_alarm. **No difference found
+between conditions** -- not "the two are equal": on the one real,
+test-invisible, oracle-invisible defect this 6-task set contains, the cheap
+reviewer caught it in all 4 trials, same as the expensive one, in both the
+tooling-visible and tooling-invisible forms. Total spend: $1.63 (Claude
+$1.60, DeepSeek $0.03) against the $10 cap. With n=1 defect and 4 trials,
+this sample cannot distinguish the two models' review quality either way --
+it is silent on the question, not an answer to it.
 
-### 9c. Honest framing
+### 9d. What would actually answer ask 5822
 
-Per orch-console's own stated acceptance criterion, "could not measure, the
-test suites are too strong" with the mutation scores as evidence was an
-acceptable outcome going in -- a survivor did turn up (task-06), so this is
-a real measurement, not that fallback. But it is **one defect, two phrasings
-of it, four trials** -- nowhere near enough to generalize "DeepSeek review
-matches Claude review." What it narrowly supports: on the single genuine
-gap this task set exposed, a cheap reviewer model performed identically to
-an expensive one, including after removing the lint/typecheck signal that
-made the first phrasing easy. Combined with 9a: **all 36 cataloged
-seeded-bugs.json variants across all 6 tasks are mechanically caught by
-each task's own acceptance tests** (now confirmed by Stryker's 100% scores
-on 4/6 files plus the equivalent-mutant-only result on a 5th, on top of the
-direct test-assertion matching done for all 6 before this sweep) -- this
-task set's spec-writer-authored tests are comprehensive enough that finding
-*any* real survivor required a mechanical search past the known catalog,
-and even then only one file in six had one.
+A task set whose own tests catch 36/36 known bugs and whose only real gap
+took a mechanical mutation search to find is, by construction, a weak
+instrument for measuring reviewer quality -- there is almost nothing left
+for a reviewer to catch that the tests haven't already caught. Two paths
+that would produce a usable answer, with spend estimates:
+
+1. **Real pass rate of DeepSeek-built PRs at cc-quality, on a small live
+   trial.** Route ~15-20 small real backlog items through DeepSeek as
+   builder in production (not a toy pilot -- real tasks, real ambiguity,
+   real incentive to cut corners), and measure cc-quality's actual
+   pass/revise/reject rate, same way it reviews everything else. Estimated
+   spend: ~$0.1-0.3 DeepSeek build cost per task (~$2-6 total) + cc-quality
+   review cost, which the reviewer-only measurements in this doc put at
+   roughly $0.8/review for a Claude-model reviewer doing real work --
+   ~$12-16 for 15-20 reviews. Total ballpark **$15-20**. This measures the
+   real question (is DeepSeek's own output trustworthy) under real
+   conditions, not a reviewer's ability to catch an injected defect.
+2. **A new task set with deliberately thinner acceptance tests** -- instruct
+   the spec-writer to write a normal/minimal test bar instead of the
+   exhaustive boundary-and-adversarial style this task set's spec-writers
+   produced (which is what made 9b's sweep so hard to find a survivor in).
+   This re-opens space for the builder to ship something a thin test suite
+   doesn't catch, so reviewer judgment is actually load-bearing. Estimated
+   spend: same shape as section 8's full pilot (6 tasks x 2 conditions,
+   3 roles) -- ~$11 Claude (condition B spec-writer+reviewer) + ~$0.4
+   DeepSeek (condition A), **~$11-12 total**, plus whatever a handful of
+   tasks' worth of design time costs to write deliberately-thin briefs.
+
+(1) answers the production question more directly and is slightly cheaper;
+(2) stays inside this pilot's existing harness and reuses everything already
+built. Recommend (1) if the goal is "can we trust DeepSeek in builder
+lanes" specifically; (2) if the goal is "does a cheap reviewer catch what an
+expensive one catches," which is the narrower question this mutation pass
+tried and mostly failed to get traction on, for lack of a test-set weak
+enough to need a reviewer's judgment at all.
