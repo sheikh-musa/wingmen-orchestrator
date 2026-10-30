@@ -334,6 +334,20 @@ def test_run_wires_resolved_author_into_the_alert_body(monkeypatch):
     assert "cc-cosem-adcda-2" in body
 
 
+def test_run_skips_an_ambiguous_resolution_without_alerting(monkeypatch):
+    # bus #85217/#85259: a bare "PR#636 -- PASS" (no repo hint) that collides across 2+ known
+    # repos must never be cited -- run() just skips it, same as an unresolved (None) PR.
+    saved = {}
+    now_epoch = 10_000
+    verdicts = [(1, "cc-orchestrator", "PR#636 -- PASS", now_epoch - THRESHOLD - 10)]
+    resolved = {"636": spw.Ambiguous(["cosem-platform", "wingmen-orchestrator"])}
+    cur, conn = _wire(monkeypatch, verdicts, resolved_by_pr=resolved, saved=saved)
+    monkeypatch.setattr(spw.time, "time", lambda: now_epoch)
+    spw.run(conn, dry=False)
+    assert cur.inserts == []
+    assert saved.get("alerted", []) == []
+
+
 def test_run_does_not_repage_an_already_alerted_pair(monkeypatch):
     saved = {}
     now_epoch = 10_000
@@ -435,6 +449,24 @@ def test_resolve_pr_without_a_hint_still_tries_every_known_repo(monkeypatch):
         lambda owner, repo, n: {"state": "OPEN"} if repo == "wingmen-orchestrator" else None,
     )
     assert spw._resolve_pr(known, None, "692") == ("sheikh-musa", "wingmen-orchestrator", {"state": "OPEN"})
+
+
+# bus #85217/#85259 (console ruling, following up on cc-quality's #85256 divergence note): a
+# bare "PR#636 -- PASS" with no repo hint, where PR#636 genuinely exists in 2+ known repos at
+# once, must report the collision and cite NOTHING -- never silently pick whichever repo
+# happened to be checked first.
+def test_resolve_pr_without_a_hint_reports_ambiguous_on_a_real_collision(monkeypatch):
+    known = [("sheikh-musa", "cosem-adcda"), ("sheikh-musa", "wingmen-orchestrator")]
+    monkeypatch.setattr(spw, "_pr_view", lambda owner, repo, n: {"state": "OPEN"})  # both match
+    result = spw._resolve_pr(known, None, "636")
+    assert isinstance(result, spw.Ambiguous)
+    assert sorted(result.repos) == ["cosem-adcda", "wingmen-orchestrator"]
+
+
+def test_resolve_pr_without_a_hint_still_returns_none_when_no_repo_matches(monkeypatch):
+    known = [("sheikh-musa", "cosem-adcda"), ("sheikh-musa", "wingmen-orchestrator")]
+    monkeypatch.setattr(spw, "_pr_view", lambda owner, repo, n: None)
+    assert spw._resolve_pr(known, None, "999") is None
 
 
 # ── _latest_commit_epoch ──────────────────────────────────────────────────────

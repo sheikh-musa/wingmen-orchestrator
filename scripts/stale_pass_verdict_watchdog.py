@@ -247,6 +247,22 @@ def _resolve_author(repo: str, pr_json: dict) -> "str | None":
         return None
 
 
+class Ambiguous:
+    """Sentinel: a bare (no-hint) PR# exists in 2+ known repos at once (bus #85217/#85259,
+    console ruling) -- e.g. orchestrator's real PR#636 vs cosem-platform's real PR#636. Never
+    guess which one a bare 'PR#636 -- PASS' meant; the caller reports it and skips, exactly
+    like an unresolved (None) PR -- it just carries the candidate repo names for the log line,
+    since 'unresolved' and 'ambiguous' are different failures worth telling apart on the page."""
+    def __init__(self, repos):
+        self.repos = repos
+
+    def __repr__(self):
+        return f"Ambiguous(repos={self.repos!r})"
+
+    def __eq__(self, other):
+        return isinstance(other, Ambiguous) and self.repos == other.repos
+
+
 def _resolve_pr(owner_candidates, repo_hint, pr_number):
     """When repo_hint is given, resolve ONLY against that repo -- never fall
     through to a different one (bus #85217, console: the same cross-repo
@@ -254,19 +270,33 @@ def _resolve_pr(owner_candidates, repo_hint, pr_number):
     fleet-wide, e.g. orchestrator's real PR#636 vs cosem-platform's real
     PR#636, so a hint that happens not to match must mean 'unresolved', not
     license to go looking elsewhere and cite a different PR under the same
-    number). Only when NO hint was extracted does this try every known repo
-    (no hint to trust OR distrust) and return the first match. Either way:
-    None if the PR isn't found in any permitted candidate repo -- never
-    guessed."""
+    number). Returns None (no match) or (owner, repo, pr_json) (exactly one).
+
+    When NO hint was extracted (console ruling, bus #85259, following up on
+    cc-quality's #85256 divergence note): try every known repo (no hint to
+    trust OR distrust). If exactly one has a live PR with that number,
+    cite it -- same as before. If 2+ do, return Ambiguous(repos) instead of
+    silently citing whichever repo happened to be checked first; the caller
+    reports the collision and cites nothing. 0 matches -> None, same as the
+    hinted path. Never guessed, either way."""
     if repo_hint:
         candidates = [(o, r) for (o, r) in owner_candidates if r == repo_hint]
-    else:
-        candidates = list(owner_candidates)
-    for owner, repo in candidates:
+        for owner, repo in candidates:
+            pr = _pr_view(owner, repo, pr_number)
+            if pr is not None:
+                return owner, repo, pr
+        return None
+
+    matches = []
+    for owner, repo in owner_candidates:
         pr = _pr_view(owner, repo, pr_number)
         if pr is not None:
-            return owner, repo, pr
-    return None
+            matches.append((owner, repo, pr))
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    return Ambiguous([repo for _, repo, _ in matches])
 
 
 def _latest_commit_epoch(pr_json: dict) -> "int | None":
@@ -331,6 +361,10 @@ def run(conn, dry: bool = False) -> int:
                 resolved = _resolve_cached(repo_hint, pr_number)
                 if resolved is None:
                     continue  # unresolvable -- never guess, just skip this scan
+                if isinstance(resolved, Ambiguous):
+                    print(f"    AMBIGUOUS PR#{pr_number} exists in {resolved.repos} "
+                          f"(no repo hint) -- skipping, no citation (bus #85217/#85259)")
+                    continue
                 owner, repo, pr_json = resolved
                 latest_commit = _latest_commit_epoch(pr_json)
                 if not is_stale(pr_json.get("state"), pr_json.get("mergedAt"),
