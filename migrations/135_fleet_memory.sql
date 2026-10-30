@@ -59,33 +59,43 @@
 -- assert: no_table_privilege anon public.fleet_memory UPDATE
 -- assert: no_table_privilege anon public.fleet_memory DELETE
 -- assert: no_table_privilege anon public.fleet_memory TRUNCATE
+-- assert: no_table_privilege anon public.fleet_memory SELECT
 -- assert: no_table_privilege authenticated public.fleet_memory UPDATE
 -- assert: no_table_privilege authenticated public.fleet_memory DELETE
 -- assert: no_table_privilege authenticated public.fleet_memory TRUNCATE
+-- assert: no_table_privilege authenticated public.fleet_memory SELECT
 -- assert: no_table_privilege service_role public.fleet_memory UPDATE
 -- assert: no_table_privilege service_role public.fleet_memory DELETE
 -- assert: no_table_privilege service_role public.fleet_memory TRUNCATE
+-- assert: no_table_privilege service_role public.fleet_memory SELECT
 -- assert: no_table_privilege anon public.fleet_memory_audit UPDATE
 -- assert: no_table_privilege anon public.fleet_memory_audit DELETE
 -- assert: no_table_privilege anon public.fleet_memory_audit TRUNCATE
+-- assert: no_table_privilege anon public.fleet_memory_audit SELECT
 -- assert: no_table_privilege authenticated public.fleet_memory_audit UPDATE
 -- assert: no_table_privilege authenticated public.fleet_memory_audit DELETE
 -- assert: no_table_privilege authenticated public.fleet_memory_audit TRUNCATE
+-- assert: no_table_privilege authenticated public.fleet_memory_audit SELECT
 -- assert: no_table_privilege service_role public.fleet_memory_audit UPDATE
 -- assert: no_table_privilege service_role public.fleet_memory_audit DELETE
 -- assert: no_table_privilege service_role public.fleet_memory_audit TRUNCATE
+-- assert: no_table_privilege service_role public.fleet_memory_audit SELECT
 -- assert: search_path public.fleet_memory_insert(text,text,text,text,text,bigint)
 -- assert: no_execute anon public.fleet_memory_insert(text,text,text,text,text,bigint)
 -- assert: no_execute authenticated public.fleet_memory_insert(text,text,text,text,text,bigint)
+-- assert: no_execute service_role public.fleet_memory_insert(text,text,text,text,text,bigint)
 -- assert: search_path public.fleet_memory_supersede_trg()
 -- assert: no_execute anon public.fleet_memory_supersede_trg()
 -- assert: no_execute authenticated public.fleet_memory_supersede_trg()
+-- assert: no_execute service_role public.fleet_memory_supersede_trg()
 -- assert: search_path public.fleet_memory_immutable_trg()
 -- assert: no_execute anon public.fleet_memory_immutable_trg()
 -- assert: no_execute authenticated public.fleet_memory_immutable_trg()
+-- assert: no_execute service_role public.fleet_memory_immutable_trg()
 -- assert: search_path public.fleet_memory_audit_trg()
 -- assert: no_execute anon public.fleet_memory_audit_trg()
 -- assert: no_execute authenticated public.fleet_memory_audit_trg()
+-- assert: no_execute service_role public.fleet_memory_audit_trg()
 
 BEGIN;
 
@@ -215,7 +225,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION fleet_memory_immutable_trg() FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION fleet_memory_immutable_trg() FROM PUBLIC, anon, authenticated, service_role;
 
 DROP TRIGGER IF EXISTS fleet_memory_immutable_trg ON fleet_memory;
 CREATE TRIGGER fleet_memory_immutable_trg
@@ -241,7 +251,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION fleet_memory_supersede_trg() FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION fleet_memory_supersede_trg() FROM PUBLIC, anon, authenticated, service_role;
 
 DROP TRIGGER IF EXISTS fleet_memory_supersede_trg ON fleet_memory;
 CREATE TRIGGER fleet_memory_supersede_trg
@@ -273,7 +283,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION fleet_memory_audit_trg() FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION fleet_memory_audit_trg() FROM PUBLIC, anon, authenticated, service_role;
 
 DROP TRIGGER IF EXISTS fleet_memory_audit_trg ON fleet_memory;
 CREATE TRIGGER fleet_memory_audit_trg
@@ -311,7 +321,7 @@ END;
 $$;
 
 REVOKE EXECUTE ON FUNCTION fleet_memory_insert(text, text, text, text, text, bigint)
-    FROM PUBLIC, anon, authenticated;
+    FROM PUBLIC, anon, authenticated, service_role;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Unrelated second change riding in this migration file (plan section B:
