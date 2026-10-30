@@ -133,7 +133,14 @@ bash "$(dirname "${BASH_SOURCE[0]}")/console_deploy_quality_gate_shadow.sh" "$HA
 echo "== all gates passed -> kickstarting fleet-console =="
 launchctl kickstart -k "gui/$(id -u)/dev.wingmen.fleet-console" || fail "kickstart failed." 7
 sleep 3
-SERVED=$(curl -s -H "Authorization: Bearer ${CONSOLE_TOKEN:-}" http://100.83.21.34:8787/api/version 2>/dev/null)
-echo "  /api/version now: $SERVED"
-date -u +"%Y-%m-%dT%H:%M:%SZ content=$HASH ver=$SW served=$SERVED" >> "$ART/deploy-log.txt"
-echo "✅ deployed console $SW (content $HASH). Recorded in $ART/deploy-log.txt"
+# backlog#135 (orch-console 79249): hit the BOUND tailnet address with a short retry and
+# fail loud -- never log a blank line that looks like a passing health check.
+source "$(dirname "${BASH_SOURCE[0]}")/lib/console_deploy_probe.sh"
+if SERVED=$(console_deploy_probe "http://100.83.21.34:8787/api/version" "${CONSOLE_TOKEN:-}" 5 1); then
+  echo "  /api/version now: $SERVED"
+  date -u +"%Y-%m-%dT%H:%M:%SZ content=$HASH ver=$SW served=$SERVED" >> "$ART/deploy-log.txt"
+  echo "✅ deployed console $SW (content $HASH). Recorded in $ART/deploy-log.txt"
+else
+  date -u +"%Y-%m-%dT%H:%M:%SZ content=$HASH ver=$SW served=COULD_NOT_MEASURE" >> "$ART/deploy-log.txt"
+  fail "kickstarted but post-deploy probe COULD NOT MEASURE /api/version at the bound tailnet address after retries — verify the service manually before trusting this deploy." 8
+fi

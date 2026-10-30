@@ -134,9 +134,31 @@
   // Pure — returns { counts: {pool: total}, lanes: {pool: n}, singletons: {pool: n},
   // total, html } for the #keyRoll row.
   function poolKey(o) { return poolOf(o) || (o && o.auth_fp ? "?" : ""); }
+  // backlog#137 (orch-console 79252, fleet-health 79271 + correction 79396, 2026-10-28):
+  // "one level up" from the op#35074 tile-badge fix above -- that one only hid the dead
+  // TILE's key badge; the roll-up CHIP still counted it. A lane dead EVERYWHERE (no live
+  // local pane AND no fresh heartbeat on any host) must not inflate its key's chip. A
+  // lane dark on THIS host but alive via another host's heartbeat (live.running===true,
+  // the exact signal the fc-v63 test above protects) still counts -- only PROVABLE
+  // everywhere-dead drops. DEAD_HB_STALE_S mirrors app.py's _REMOTE_HB_FRESH_S (the
+  // threshold deciding live.running/via="heartbeat" for a cross-host lane) so this
+  // reading can never disagree with the backend's. heartbeat_age_s must be a NUMBER
+  // over that cutoff -- null/missing is NOT proof of death (same caution as app.py's
+  // _LANE_STALE_DROP_S drop, which also requires hb is not None) -- uncertain data
+  // counts the lane rather than hiding it; a lane with no `live` field at all (older
+  // payload shape) counts too, same as before this fix.
+  var DEAD_HB_STALE_S = 900;
+  function isDeadEverywhere(l) {
+    var live = l && l.live;
+    if (!live) return false;
+    if (live.running) return false;
+    var hb = l.heartbeat_age_s;
+    return typeof hb === "number" && hb > DEAD_HB_STALE_S;
+  }
   function poolRollup(lanes, coordinators, active) {
     var counts = {}, laneN = {}, singN = {}, total = 0;
     (lanes || []).forEach(function (l) {
+      if (isDeadEverywhere(l)) return;
       var p = poolKey(l); if (!p) return;
       counts[p] = (counts[p] || 0) + 1; laneN[p] = (laneN[p] || 0) + 1; total++;
     });
@@ -436,7 +458,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v93';
+  var APP_BUILD = 'fc-v94';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");

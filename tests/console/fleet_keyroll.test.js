@@ -279,4 +279,35 @@ ok("op#35074: an OFFLINE tile paints NO key badge; a live tile on the same key s
   assert(live.indexOf(">irsyad<") >= 0, "the control: a LIVE tile on the same key still paints the chip: " + live);
 });
 
+// backlog#137 (orch-console 79252, fleet-health 79271 + correction 79396, 2026-10-28):
+// "one level up" from op#35074 above -- that fix only hid the TILE's badge for a dead
+// lane; the roll-up CHIP still counted it. This is the chip-side fix: a lane that is
+// dead EVERYWHERE (no live local pane AND no fresh heartbeat on any host) drops out of
+// the count. A lane alive-via-heartbeat on another host (live.running===true, the SAME
+// signal op#20684/fc-v63 already protects above) still counts -- only provable
+// everywhere-dead drops. heartbeat_age_s must be a NUMBER and over the cutoff to call it
+// stale (mirrors app.py's _LANE_STALE_DROP_S gate: hb===null never counts as "stale") --
+// uncertain data counts the lane rather than hiding it.
+ok("backlog#137: dead-everywhere lane drops from the roll-up; dark-elsewhere (heartbeat-alive) still counts", function () {
+  const lanes = [
+    { bucket: "working", pool: "Musa" },
+    // dead-elsewhere AND dead-locally: no live pane, heartbeat long stale -> EXCLUDED
+    { bucket: "offline", pool: "irsyad", flagged: true, live: { running: false }, heartbeat_age_s: 21600 },
+    // dark on this host but alive via another host's heartbeat -> COUNTED
+    { bucket: "offline", pool: "irsyad", live: { running: true, via: "heartbeat" }, heartbeat_age_s: 120 },
+    // no live pane but heartbeat not yet past the staleness cutoff -> not PROVEN dead -> COUNTED
+    { bucket: "offline", pool: "Syed", live: { running: false }, heartbeat_age_s: 300 },
+    // no live pane, no heartbeat row at all (null) -> not PROVEN dead -> COUNTED
+    { bucket: "offline", pool: "Syed", live: { running: false }, heartbeat_age_s: null },
+    // legacy/no `live` field at all (pre-this-fix payload shape) -> COUNTED, same as fc-v63
+    { bucket: "offline", pool: "Musa" },
+  ];
+  const r = poolRollup(lanes, [], "");
+  assert.deepStrictEqual(Object.assign({}, r.counts), { Musa: 2, irsyad: 1, Syed: 2 });
+  assert.strictEqual(r.total, 5, "the one everywhere-dead lane must not inflate the total");
+  const order = (r.html.match(/data-pool="([^"]+)"/g) || []).map(function (s) { return s.slice(11, -1); });
+  assert.deepStrictEqual(order, ["Musa", "irsyad", "Syed"]);
+  assert(r.html.indexOf(">irsyad<b>1</b>") >= 0, "irsyad chip reflects only the dark-elsewhere lane, not the dead one: " + r.html);
+});
+
 console.log("fleet_keyroll: " + passed + " passed");
