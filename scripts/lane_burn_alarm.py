@@ -16,13 +16,16 @@ This is the same live-transcript-delta method cc-fleet-health used by hand
 this session to measure Musa/Syed pool pace — now it runs on a schedule and
 pages instead of requiring a human (or an agent) to go look.
 
-THRESHOLD (default 15,000,000 tokens/hour, LANE_BURN_ALARM_THRESHOLD_TPH):
-chosen from this session's own live readings — idle lanes measured 0
-tokens/60min; lanes doing genuine work measured 0.5M-3.65M tokens/60min; the
-false-wake episode PR#649 fixed had cc-fleet-health and orch-console at
-81-93M tokens/60min. 15M/hr sits ~4x above the highest observed legitimate
-rate (headroom for a big diff / heavy test run) while still catching a
-runaway-wake-loop class problem long before it needs to run for hours.
+THRESHOLD (default 40,000,000 tokens/hour, LANE_BURN_ALARM_THRESHOLD_TPH):
+raised from an initial 15M (orch-console #83643, after cc-fleet-health's
+op#35929 zero-waste 24h report #656 showed several genuinely busy lanes
+sustaining 18-33M tok/hr on AVERAGE across a full day -- 15M would have
+paged continuously on real work, not waste). 40M/hr sits above every
+legitimate 24h-average rate measured in that report (highest was
+cc-cosem-exams-1 at ~32.7M/hr; cc-fleet-health itself averaged ~48.7M/hr but
+that figure is itself under investigation as a waste source, not a baseline
+to clear) while still catching a repeat of the PR#649 false-wake episode
+(cc-fleet-health/orch-console at 81-93M tokens/60min).
 
 FAIL-VISIBLE, NEVER A GUESS (Musa's explicit instruction): a lane whose tmux
 pane can't be found, whose host is unreachable over ssh, or whose transcript
@@ -54,7 +57,7 @@ GZB_SSH_ALIAS = os.environ.get("LANE_BURN_ALARM_GZB_SSH", "gzb")
 REMOTE_HOSTS = {"gzbai", "gzb"}  # agent_status.host spellings seen for the gzb box
 
 WINDOW_MIN_DEFAULT = int(os.environ.get("LANE_BURN_ALARM_WINDOW_MIN", "60"))
-THRESHOLD_TPH_DEFAULT = int(os.environ.get("LANE_BURN_ALARM_THRESHOLD_TPH", "15000000"))
+THRESHOLD_TPH_DEFAULT = int(os.environ.get("LANE_BURN_ALARM_THRESHOLD_TPH", "40000000"))
 REPAGE_MIN = int(os.environ.get("LANE_BURN_ALARM_REPAGE_MIN", "60"))
 # If this fraction (or more) of expected lanes come back unmeasurable, page once
 # (dedup'd separately) -- that is a tooling-health problem, not a burn problem.
