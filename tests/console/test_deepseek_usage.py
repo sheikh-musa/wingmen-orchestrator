@@ -62,10 +62,14 @@ def _fake_http(calls, body=BALANCE_OK):
 # ---- key grouping -----------------------------------------------------------
 
 def test_distinct_key_rows_groups_families_sharing_a_key():
+    # Interim state (bus #84011, 2026-10-30): no per-client vault key exists
+    # yet, so every family maps explicitly to the shared DEEPSEEK_CODING_KEY
+    # -- one row, every family grouped onto it. Will split back into
+    # per-client rows once real keys are provisioned and the map updates.
     rows = {r["key_name"]: sorted(r["families"]) for r in ds.distinct_key_rows()}
-    assert rows["DEEPSEEK_KEY_COSEM"] == ["cosem", "cosem-tdu"]
-    assert rows["DEEPSEEK_KEY_INTERNAL"] == ["fleet", "hc95"]
-    assert rows["DEEPSEEK_KEY_BARIQ"] == ["bariq"]
+    assert rows["DEEPSEEK_CODING_KEY"] == sorted(
+        ["cosem", "cosem-tdu", "bariq", "oeh", "ffsfulfilment", "hc95", "fleet", "loop"]
+    )
     assert len(rows) == len(set(rows))   # one row per distinct key name, no dupes
 
 
@@ -166,7 +170,7 @@ def test_cache_reuses_good_read_for_the_ttl(fake_key, monkeypatch):
 def test_delta_is_none_on_the_first_ever_read(fake_key, monkeypatch):
     monkeypatch.setattr(ds, "http_get_json", _fake_http([]))
     out = ds.get_deepseek_usage(now=1000.0)
-    row = next(k for k in out["keys"] if k["key_name"] == "DEEPSEEK_KEY_BARIQ")
+    row = next(k for k in out["keys"] if k["key_name"] == "DEEPSEEK_CODING_KEY")
     assert row["delta_usd"] is None
 
 
@@ -177,7 +181,7 @@ def test_delta_reflects_change_since_the_last_good_read(fake_key, monkeypatch):
     lower["balance_infos"][1]["total_balance"] = "44.37"
     monkeypatch.setattr(ds, "http_get_json", _fake_http([], body=lower))
     out = ds.get_deepseek_usage(now=1000.0 + ds.CACHE_TTL_S + 1)
-    row = next(k for k in out["keys"] if k["key_name"] == "DEEPSEEK_KEY_BARIQ")
+    row = next(k for k in out["keys"] if k["key_name"] == "DEEPSEEK_CODING_KEY")
     assert row["balance_usd"] == 44.37
     assert round(row["delta_usd"], 2) == -2.50
 
@@ -190,7 +194,7 @@ def test_delta_baseline_survives_a_process_restart_via_persisted_state(fake_key,
     lower["balance_infos"][1]["total_balance"] = "45.00"
     monkeypatch.setattr(ds, "http_get_json", _fake_http([], body=lower))
     out = ds.get_deepseek_usage(now=2000.0)
-    row = next(k for k in out["keys"] if k["key_name"] == "DEEPSEEK_KEY_BARIQ")
+    row = next(k for k in out["keys"] if k["key_name"] == "DEEPSEEK_CODING_KEY")
     assert round(row["delta_usd"], 2) == -1.87
 
 
@@ -202,7 +206,7 @@ def test_a_failed_refresh_never_serves_the_old_balance_as_current(fake_key, monk
         raise ds.DeepseekUsageError("deepseek balance HTTP 500")
     monkeypatch.setattr(ds, "http_get_json", _boom)
     out = ds.get_deepseek_usage(now=1000.0 + ds.CACHE_TTL_S + 1)
-    row = next(k for k in out["keys"] if k["key_name"] == "DEEPSEEK_KEY_BARIQ")
+    row = next(k for k in out["keys"] if k["key_name"] == "DEEPSEEK_CODING_KEY")
     assert row["available"] is False and row["balance_usd"] is None
 
 
@@ -324,7 +328,10 @@ def test_api_fleet_carries_deepseek_shared_row_per_client_rows_lanes_never_a_key
     du = body["deepseek_usage"]
     assert du["shared"]["available"] is True and du["shared"]["balance_usd"] == 46.68
     assert du["shared"]["lanes"] == ["bariq"]
-    bariq = next(k for k in du["keys"] if k["key_name"] == "DEEPSEEK_KEY_BARIQ")
+    # Interim state (bus #84011, 2026-10-30): every family maps to the shared
+    # DEEPSEEK_CODING_KEY, so there is now ONE grouped per-client row, not a
+    # distinct DEEPSEEK_KEY_BARIQ row.
+    bariq = next(k for k in du["keys"] if k["key_name"] == "DEEPSEEK_CODING_KEY")
     assert bariq["available"] is True and bariq["balance_usd"] == 46.87
     assert bariq["lanes"] == ["bariq"]
     assert FAKE_KEY not in r.text
@@ -350,11 +357,15 @@ def test_api_fleet_deepseek_per_client_key_not_provisioned_is_distinct_from_shar
     r = httpx.get(base + "/api/fleet", headers=AUTH, timeout=10)
     du = r.json()["deepseek_usage"]
     assert du["shared"]["available"] is True and du["shared"]["balance_usd"] == 46.68
-    bariq = next(k for k in du["keys"] if k["key_name"] == "DEEPSEEK_KEY_BARIQ")
+    # Interim state (bus #84011, 2026-10-30): the grouped row's name/families
+    # reflect every family now explicitly mapped to the shared key.
+    bariq = next(k for k in du["keys"] if k["key_name"] == "DEEPSEEK_CODING_KEY")
     assert bariq == {"available": False, "balance_usd": None, "delta_usd": None,
                       "reason": "key not created yet", "fetched_at": bariq["fetched_at"],
-                      "key_name": "DEEPSEEK_KEY_BARIQ", "families": ["bariq"], "age_s": None,
-                      "lanes": ["bariq"]}
+                      "key_name": "DEEPSEEK_CODING_KEY",
+                      "families": sorted(["cosem", "cosem-tdu", "bariq", "oeh",
+                                           "ffsfulfilment", "hc95", "fleet", "loop"]),
+                      "age_s": None, "lanes": ["bariq"]}
 
 
 # ---- fleet.js card render (node vm sandbox, same idiom as fleet_glm.test.js) --

@@ -166,7 +166,7 @@ def test_map_round_trip_preserves_existing_entries(tmp_path):
 
     reread = mod._load_map()
     assert reread["zzz-test-only"] == "DEEPSEEK_KEY_ZZZ_TEST_ONLY"
-    assert reread["bariq"] == "DEEPSEEK_KEY_BARIQ"  # untouched original entry
+    assert reread["bariq"] == "DEEPSEEK_CODING_KEY"  # untouched original entry (interim state, bus #84011)
 
 
 def test_slug_regex_boundary_lengths():
