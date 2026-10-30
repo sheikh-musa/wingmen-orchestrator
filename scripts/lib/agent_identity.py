@@ -21,31 +21,69 @@ class IdentityError(RuntimeError):
     pass
 
 
+def _in_console_tmux_session(env: dict) -> bool:
+    """True iff THIS process is actually running inside the tmux session
+    named by ORCH_TMUX_SESSION in *env* (the real Nazim console session,
+    canonically tmux session 'nazim' per this repo's own topology doctrine
+    -- "Never name a non-hub session 'orch'"). Verified by querying tmux
+    directly, not by trusting any env var: an env flag is forgeable by any
+    shell that sets it (console bus #85145), but faking the actual live
+    tmux session name requires actually running inside a session with that
+    exact name -- a much higher bar, and one this repo already treats as
+    load-bearing identity elsewhere.
+    Fail-safe: not in tmux, no ORCH_TMUX_SESSION, tmux missing/erroring, or
+    a timeout all return False -- this can only ADD a correct console match,
+    never fabricate one on an error."""
+    if not env.get("TMUX"):
+        return False
+    target = env.get("ORCH_TMUX_SESSION")
+    if not target:
+        return False
+    try:
+        r = subprocess.run(
+            ["tmux", "display-message", "-p", "#S"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if r.returncode != 0:
+        return False
+    return r.stdout.strip() == target
+
+
 def resolve_agent_id(env: dict) -> str:
     """Resolve "who am I" for attribution. Fail closed, never guess.
 
     Order (matches bus_send.py's resolve_from_agent):
       1. CC_BASE_AGENT_ID — interactive fleet lane / this Claude Code session.
       2. AGENT_ID         — daemon/watchdog launchers.
-      3. ORCH_AGENT_ID, but ONLY when ORCH_BODY_ROLE=console AND
-         ORCH_CONSOLE_BOOT=1 (both required -- see below). ORCH_AGENT_ID is
-         otherwise fleet-wide-exported .env noise and must NEVER be trusted
-         blindly.
+      3. ORCH_AGENT_ID, but ONLY when ORCH_BODY_ROLE=console AND (running
+         inside the actual 'nazim' tmux session, per _in_console_tmux_session,
+         OR ORCH_CONSOLE_BOOT=1 -- see below). ORCH_AGENT_ID is otherwise
+         fleet-wide-exported .env noise and must NEVER be trusted blindly.
 
-    Why rule 3 needs BOTH, not just ORCH_BODY_ROLE=console (bus #85112/
-    #85131, 2026-10-30 -- a RECURRENCE of this same docstring's own bug
-    #47221): ORCH_BODY_ROLE=console is a STATIC DEFAULT baked into the
-    shared orchestrator .env, so EVERY process that sources that .env for
-    DB creds -- not just the real Nazim console session -- inherits it
-    ambiently, identically to the ORCH_AGENT_ID noise this rule already
-    claims to guard against. Verified live: cc-fleet-health sourcing the
-    shared .env in an ordinary ops shell (no CC_BASE_AGENT_ID set) resolved
-    as 'orch-console' and posted a real bus row under that identity (#85124)
-    -- a genuine identity leak, not a theoretical one.
-    ORCH_CONSOLE_BOOT=1 is a SEPARATE marker that boot_nazim.sh exports
-    directly in its own process, never sourced from the shared .env, so
-    nothing that merely inherits the .env's static defaults can also have
-    it. Deliberately NOT keyed on CC_BASE_AGENT_ID's absence (the signal
+    Why rule 3 needs more than ORCH_BODY_ROLE=console (bus #85112/#85131,
+    2026-10-30 -- a RECURRENCE of this same docstring's own bug #47221):
+    ORCH_BODY_ROLE=console is a STATIC DEFAULT baked into the shared
+    orchestrator .env, so EVERY process that sources that .env for DB creds
+    -- not just the real Nazim console session -- inherits it ambiently,
+    identically to the ORCH_AGENT_ID noise this rule already claims to
+    guard against. Verified live: cc-fleet-health sourcing the shared .env
+    in an ordinary ops shell (no CC_BASE_AGENT_ID set) resolved as
+    'orch-console' and posted a real bus row under that identity (#85124).
+
+    An EARLIER version of this fix required ORCH_CONSOLE_BOOT=1 alone (a
+    marker boot_nazim.sh exports directly, never sourced from .env).
+    Console caught two problems with that (bus #85145) before it merged:
+    (a) the LIVE console session predates the fix and has no such marker --
+    merging it as-is would have cut off every bus_send from the running
+    console until a restart, mid-session; (b) a bare env flag is still
+    forgeable by any shell that chooses to set it. The tmux-session check
+    covers the live session with zero restart (it's already running in
+    'nazim') and is a harder-to-fake signal; ORCH_CONSOLE_BOOT=1 is kept
+    as a second, simpler path so a *future* boot_nazim.sh run still works
+    even if its tmux session were ever renamed.
+    Deliberately NOT keyed on CC_BASE_AGENT_ID's absence (the signal
     scripts/hooks/console_irsyad_guard.py already uses to distinguish
     console from lanes) -- that signal stays exactly as-is, unchanged by
     this fix, specifically so that guard's behavior cannot regress.
@@ -58,7 +96,9 @@ def resolve_agent_id(env: dict) -> str:
     v = env.get("AGENT_ID")
     if v:
         return v
-    if env.get("ORCH_BODY_ROLE") == "console" and env.get("ORCH_CONSOLE_BOOT") == "1":
+    if env.get("ORCH_BODY_ROLE") == "console" and (
+        env.get("ORCH_CONSOLE_BOOT") == "1" or _in_console_tmux_session(env)
+    ):
         v = env.get("ORCH_AGENT_ID")
         if v:
             return v

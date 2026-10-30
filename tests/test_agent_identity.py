@@ -34,6 +34,60 @@ def test_resolve_agent_id_requires_console_boot_marker_not_just_role(monkeypatch
     assert ai.resolve_agent_id(env) == "orch-console"
 
 
+def test_resolve_agent_id_outside_tmux_with_env_sourced_refuses():
+    # console's own ask (bus #85145): an ordinary ops shell that merely
+    # sources the shared .env (ORCH_BODY_ROLE=console/ORCH_AGENT_ID=
+    # orch-console present, no TMUX at all) must refuse -- this is the exact
+    # live leak (#85124), reproduced with no tmux involved at all so the
+    # subprocess path in _in_console_tmux_session is never even reached.
+    env = {"ORCH_BODY_ROLE": "console", "ORCH_AGENT_ID": "orch-console"}
+    assert "TMUX" not in env
+    with pytest.raises(ai.IdentityError):
+        ai.resolve_agent_id(env)
+
+
+def test_resolve_agent_id_in_nazim_tmux_with_no_flag_resolves_orch_console(monkeypatch):
+    # console's own ask (bus #85145): the CURRENT live console session
+    # predates ORCH_CONSOLE_BOOT and will never have it set without a
+    # restart -- it must still resolve correctly via the actual tmux
+    # session name alone.
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="nazim\n", stderr="")
+
+    monkeypatch.setattr(ai.subprocess, "run", _fake_run)
+    env = {
+        "ORCH_BODY_ROLE": "console", "ORCH_AGENT_ID": "orch-console",
+        "TMUX": "/tmp/tmux-501/default,1234,0", "ORCH_TMUX_SESSION": "nazim",
+    }
+    assert ai.resolve_agent_id(env) == "orch-console"
+    assert calls and calls[0][:3] == ["tmux", "display-message", "-p"]
+
+
+def test_in_console_tmux_session_false_when_session_name_differs(monkeypatch):
+    monkeypatch.setattr(
+        ai.subprocess, "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="some-lane\n", stderr=""),
+    )
+    env = {"TMUX": "/tmp/tmux-501/default,1234,0", "ORCH_TMUX_SESSION": "nazim"}
+    assert ai._in_console_tmux_session(env) is False
+
+
+def test_in_console_tmux_session_false_when_not_in_tmux_at_all():
+    assert ai._in_console_tmux_session({"ORCH_TMUX_SESSION": "nazim"}) is False
+
+
+def test_in_console_tmux_session_false_on_tmux_error(monkeypatch):
+    monkeypatch.setattr(
+        ai.subprocess, "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no session"),
+    )
+    env = {"TMUX": "/tmp/tmux-501/default,1234,0", "ORCH_TMUX_SESSION": "nazim"}
+    assert ai._in_console_tmux_session(env) is False
+
+
 def test_bus_send_reexports_the_same_function():
     bs = importlib.import_module("scripts.bus_send")
     assert bs.resolve_from_agent is ai.resolve_agent_id
