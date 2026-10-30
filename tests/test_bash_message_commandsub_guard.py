@@ -197,12 +197,14 @@ def test_refuses_cc_quality_83877_delimiter_injection_bypass(monkeypatch):
     assert _run(cmd, monkeypatch) == 2
 
 
-def test_refuses_delimiter_line_with_trailing_space(monkeypatch):
-    # A line "EOF " (trailing space) is NOT an exact match for the delimiter
-    # in real bash -- it does not terminate the heredoc. No valid terminator
-    # line exists in this construction, so it must refuse.
+def test_allows_terminator_line_with_trailing_space_and_clean_tail(monkeypatch):
+    # Corrected premise (cc-quality bus #83914, grounded against real
+    # /bin/bash 3.2.57): a delimiter line with trailing whitespace DOES
+    # terminate the heredoc there -- bash is lenient on trailing whitespace,
+    # not strict. Since nothing but ")" follows that line, this is genuinely
+    # safe and must be allowed, not refused.
     cmd = "git commit " + "-m \"$(cat <<'EOF'\ndocs: fix\nEOF \n)\""
-    assert _run(cmd, monkeypatch) == 2
+    assert _run(cmd, monkeypatch) == 0
 
 
 def test_allows_dash_heredoc_with_tab_indented_terminator(monkeypatch):
@@ -217,6 +219,33 @@ def test_refuses_dash_heredoc_delimiter_injection_bypass(monkeypatch):
     # tab-indented "\tEOF" line still terminates the heredoc at its FIRST
     # occurrence, so trailing )$(id) + a second EOF + ) must still refuse.
     cmd = "git commit " + "-m \"$(cat <<-'EOF'\n\tEOF\n)" + "$(id)" + "\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+# --- cc-quality bus #83914 (2026-10-30): a SECOND round of the same
+# delimiter-injection class, reopened by one trailing space. Bash 3.2.57
+# (grounded, with an execution marker) terminates a heredoc at a delimiter
+# line even with trailing whitespace, but the first fix's exact `==` match
+# skipped that line and found a LATER clean delimiter instead, treating a
+# live trailing substitution as inert body. Fixed by stripping trailing
+# whitespace (and leading tabs for <<-) before comparing to the delimiter,
+# plus a defense-in-depth check (console bus #83924) refusing any value
+# where some OTHER line is delimiter-shaped under a looser full-strip.
+
+def test_refuses_trailing_space_delimiter_injection_bypass(monkeypatch):
+    # $(cat <<'EOF'\nEOF \n)$(echo PWNED)\nEOF\n) -- bash terminates at the
+    # FIRST line "EOF " (trailing space), so the trailing )$(echo PWNED) is
+    # live, separate substitution, not heredoc body. Must refuse.
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\nEOF \n)" + "$(echo PWNED)" + "\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_refuses_ambiguous_leading_whitespace_delimiter_elsewhere(monkeypatch):
+    # Defense in depth: a line " EOF" (leading space) does not match under
+    # the strict non-dash rule (which strips trailing only), so the real
+    # terminator is the later clean "EOF" -- but a DIFFERENT shell could
+    # plausibly treat " EOF" as a terminator too. That ambiguity refuses.
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\n docs\n EOF\nEOF\n)\""
     assert _run(cmd, monkeypatch) == 2
 
 

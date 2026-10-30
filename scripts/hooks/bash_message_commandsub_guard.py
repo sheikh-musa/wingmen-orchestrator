@@ -98,13 +98,23 @@ def _is_safe_heredoc_cat_substitution(text: str) -> bool:
     `$(cat <<[-]'DELIM' ... DELIM)` and nothing more, parsed the way bash
     itself terminates a heredoc:
 
-    - the body ends at the FIRST line equal to the delimiter (for the `<<-`
-      dash form, after stripping only LEADING TAB characters from that line
-      -- bash strips leading tabs for `<<-`, nothing else, and never strips
-      anything for plain `<<`);
+    - the body ends at the FIRST line that reads as the delimiter once
+      TRAILING whitespace is stripped (cc-quality bus #83914, grounded
+      against real /bin/bash 3.2.57: a delimiter line with a trailing space
+      still terminates the heredoc there, not at a later clean occurrence --
+      the exact-match version of this check let a guard-refused injection
+      through by one space). For the `<<-` dash form, LEADING tabs are also
+      stripped first -- bash strips leading tabs for `<<-`, nothing else for
+      plain `<<`, and never anything trailing-side beyond this.
     - nothing may follow that terminator line except optional whitespace and
       the closing `)`, then end of value -- any content in between (another
       line, a second delimiter, a trailing substitution) refuses.
+    - defense in depth across bash/shell versions (console bus #83924): if
+      any OTHER line, under a looser FULL (leading+trailing) whitespace
+      strip, also reads as the delimiter, a different shell could plausibly
+      terminate the heredoc there instead of at the chosen line -- that
+      ambiguity refuses rather than being interpreted, even when it is not a
+      hazard under the specific bash this fleet runs.
 
     An unquoted delimiter, extra args to `cat`, no terminator line at all, or
     any text inside the parens besides `cat <<'DELIM' ... DELIM` all fail to
@@ -114,14 +124,23 @@ def _is_safe_heredoc_cat_substitution(text: str) -> bool:
         return False
     dash, delim = m.group(1), m.group(2)
     lines = text[m.end():].split("\n")
+
+    def _terminator_candidate(line: str) -> str:
+        stripped = line.lstrip("\t") if dash else line
+        return stripped.rstrip(" \t")
+
     term_idx = None
     for i, line in enumerate(lines):
-        candidate = line.lstrip("\t") if dash else line
-        if candidate == delim:
+        if _terminator_candidate(line) == delim:
             term_idx = i
             break
     if term_idx is None:
         return False
+
+    for i, line in enumerate(lines):
+        if i != term_idx and line.strip(" \t") == delim:
+            return False
+
     tail = "\n".join(lines[term_idx + 1:])
     return bool(re.match(r"^\s*\)\s*$", tail))
 
