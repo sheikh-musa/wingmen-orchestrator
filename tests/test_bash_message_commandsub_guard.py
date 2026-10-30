@@ -249,6 +249,44 @@ def test_refuses_ambiguous_leading_whitespace_delimiter_elsewhere(monkeypatch):
     assert _run(cmd, monkeypatch) == 2
 
 
+# --- orch-console bus #84048: unquoted newline/;/&/| must end a shell word ---
+
+def test_allows_clean_body_then_separate_safe_heredoc_cat_on_next_line(monkeypatch):
+    # Exactly console's reported false positive: a clean double-quoted
+    # --body (plain prose), closing quote, newline, then an UNRELATED next
+    # command that happens to be the already-allowlisted safe heredoc-cat
+    # shape. Before the fix, the newline never ended the first word, so the
+    # scanner glued the second command's entire text onto the --body value
+    # and flagged its dollar-paren as if it belonged to --body.
+    cmd = (
+        'scripts/bus_send.py --to orch-console --type update --priority P2 '
+        '--body "ran the nightly sweep, no issues" --from cc-orchestrator\n'
+        'MSG="$(cat <<\'EOF\'\nhello\nEOF\n)"'
+    )
+    assert _run(cmd, monkeypatch) == 0
+
+
+def test_refuses_dollar_paren_second_command_not_the_safe_shape(monkeypatch):
+    # Defense in depth: the newline fix must only fix the WORD boundary, not
+    # weaken detection -- a genuinely dangerous unquoted $(...) in a second,
+    # separate command (not the safe heredoc-cat exemption) must still be
+    # caught, scanned on its own terms.
+    cmd = (
+        'scripts/bus_send.py --to orch-console --type update --priority P2 '
+        '--body "ran the nightly sweep, no issues" --from cc-orchestrator\n'
+        'git commit -m "$(whoami)"'
+    )
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_semicolon_ends_a_word_same_as_newline(monkeypatch):
+    cmd = (
+        'scripts/bus_send.py --to orch-console --type update --priority P2 '
+        '--body "ran the nightly sweep, no issues"; git commit -m "$(whoami)"'
+    )
+    assert _run(cmd, monkeypatch) == 2
+
+
 # --- cc-quality PR#657 review, Finding B: no outer catch-all = fail-open risk ---
 
 def test_unexpected_exception_in_main_fails_closed(monkeypatch):

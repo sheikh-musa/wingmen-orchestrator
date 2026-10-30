@@ -156,14 +156,23 @@ def _scan_word(cmd: str, pos: int):
     (kind, text_WITHOUT_surrounding_quote_chars) and kind is one of 'single'
     (quotes suppress all expansion -- always safe), 'double', or 'unquoted'
     (both expand backtick/$(...) -- checked by the caller). Raises ValueError
-    on an unbalanced quote -- caller fails closed."""
+    on an unbalanced quote -- caller fails closed.
+
+    An UNQUOTED newline, ';', '&' or '|' ends the shell word exactly like a
+    space does (bash control-operator/word-terminator semantics) -- without
+    this, a clean quoted flag value followed by a newline and an unquoted
+    NEXT command on the next line gets glued into one giant word, and that
+    next command's own content (e.g. a legitimate heredoc-cat) gets scanned
+    as if it were part of THIS flag's value (orch-console bus #84048, a
+    false-positive refusal of a valid two-command script)."""
+    _TERMINATORS = " \t\n;&|"
     n = len(cmd)
     while pos < n and cmd[pos] in " \t":
         pos += 1
     if pos >= n:
         raise ValueError("flag has no value")
     segments = []
-    while pos < n and cmd[pos] not in " \t":
+    while pos < n and cmd[pos] not in _TERMINATORS:
         ch = cmd[pos]
         if ch == "'":
             end = cmd.find("'", pos + 1)
@@ -187,7 +196,7 @@ def _scan_word(cmd: str, pos: int):
             pos = i + 1
         else:
             start = pos
-            while pos < n and cmd[pos] not in " \t'\"":
+            while pos < n and cmd[pos] not in _TERMINATORS and cmd[pos] not in "'\"":
                 pos += 1
             segments.append(("unquoted", cmd[start:pos]))
     return segments, pos
