@@ -93,8 +93,11 @@ deliverable to generate. Ingestion only.
   doesn't make an already-ingested MAP.md stale. The real staleness
   question is narrower: has MAP.md changed in the source repo since our
   last ingest? `cc-fleet-health`'s sweep adds a check that pages if a
-  repo's MAP.md blob (last commit touching that one path) is newer than
-  `repo_context.architecture_summary_updated_at` for that repo.
+  repo's MAP.md blob's last-touching commit, by COMMITTER-date (per
+  cc-quality: not author-date — a rebased or cherry-picked commit's
+  author-date can predate when it actually landed on the branch we read),
+  is newer than `repo_context.architecture_summary_updated_at` for that
+  repo.
 - Dependency this introduces: ingestion for a repo needs that repo's own
   MAP.md to exist first. Fleet-wide, op#35990 is due Wed 4 Nov 18:00Z —
   before both code-map slices below — so on-time compliance elsewhere
