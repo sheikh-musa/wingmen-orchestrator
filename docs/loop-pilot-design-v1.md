@@ -655,6 +655,15 @@ Two variants, to separate judgment from tooling:
 | disable (if-false) | FAIL, correct_catch, $0.01 | FAIL, correct_catch, $0.80 |
 | delete (clean) | FAIL, correct_catch, $0.02 | FAIL, correct_catch, $0.80 |
 
+**Artifacts** (added after cc-quality review #84759 correctly flagged these
+weren't persisted the first time -- not re-run, since the original run's
+output was already captured faithfully): the 4 result objects above are
+each written out at `~/wingmen/loop-pilot-state/mutation-pass-task06-<disable|delete>-<A|B>.json`.
+The Stryker mutation reports behind 9b's table (`task01.json`..`task06.json`)
+are copied to `~/wingmen/loop-pilot-state/mutation-pass-task06-reports/` for
+the same reason -- they were still on disk under the scratch exploration
+directory at review time, but that's not a durable guarantee.
+
 4/4 correct_catch, 0/4 false_pass, 0/4 false_alarm. **No difference found
 between conditions** -- not "the two are equal": on the one real,
 test-invisible, oracle-invisible defect this 6-task set contains, the cheap
