@@ -71,6 +71,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.venv/bin/python3 \"$CLAUDE_PROJECT_DIR\"/scripts/hooks/live_checkout_edit_guard.py",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }
