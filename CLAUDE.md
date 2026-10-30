@@ -17,7 +17,11 @@ Always-on Python orchestrator running on Mac Mini that manages builds, deploys, 
 - Claude Code (AI-powered build sessions)
 
 ## Key Files
-- `wingmen_orch.py` — main orchestrator entry point
+- `MAP.md` — repo map (op#35990): layout, main flows, data, shared code,
+  hazards, run/test/deploy. Read it before exploring the repo cold.
+- `scripts/boot_orch.sh` — boots the hub's tmux Claude Code session; this
+  is the real orchestrator entry point (`wingmen_orch.py` does not exist in
+  this repo — see MAP.md section 1)
 - `.env` — all secrets (never commit)
 - `REPOS.json` — repo registry with paths, URLs, priorities
 - `schema.sql` — Supabase table definitions
