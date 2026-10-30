@@ -87,6 +87,25 @@ def test_dangling_link_to_a_genuinely_missing_file_is_still_caught(tmp_path):
 # ── fix() -- console ruling bus #85239, after cc-quality's #85235 (--fix used to re-append
 # orphan lines straight into MEMORY.md, re-bloating an index an owner had just manually
 # compacted by folding those same files into clustered lines elsewhere) ─────────────────────
+def test_a_file_linked_only_in_the_tail_is_not_reported_as_an_orphan(tmp_path):
+    # Named regression lock for the exact fold/reappend loop break (cc-quality's #85254
+    # own-verdict PASS on PR#710, wet-proved the same scenario on a synthetic dir): a file
+    # linked ONLY in MEMORY-INDEX.md, one folded ONLY into a clustered MEMORY.md line, and
+    # one linked nowhere -- only the genuinely-unlinked file is an orphan.
+    (tmp_path / "foo.md").write_text("---\nname: foo\ndescription: in the tail\n---\nbody\n")
+    (tmp_path / "bar.md").write_text("---\nname: bar\ndescription: folded into the hot index\n---\nbody\n")
+    (tmp_path / "baz.md").write_text("---\nname: baz\ndescription: linked nowhere\n---\nbody\n")
+    (tmp_path / "MEMORY.md").write_text(
+        "# index\n"
+        "> See [MEMORY-INDEX.md](MEMORY-INDEX.md) for more.\n"
+        "- clustered: [bar](bar.md) and others, folded onto one line\n"
+    )
+    (tmp_path / "MEMORY-INDEX.md").write_text("# tail\n- [foo](foo.md) - in the tail\n")
+
+    r = mia.audit(tmp_path)
+    assert r["orphans"] == ["baz.md"]  # only the genuinely-unlinked file
+
+
 def test_fix_appends_orphans_to_tail_not_hot_index(tmp_path):
     (tmp_path / "some-fact.md").write_text("---\nname: some-fact\ndescription: a fact\n---\nbody\n")
     (tmp_path / "MEMORY.md").write_text("# index\nnothing here\n")
