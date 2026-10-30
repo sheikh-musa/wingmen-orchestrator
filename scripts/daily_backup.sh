@@ -1,7 +1,8 @@
 #!/bin/bash
 # Daily Supabase backup — orchestrator substrate (tscuymavysscrvoberrr) PLUS
 # client silos ihsanos-ceayj (IHSANOS_PROD_RO_DATABASE_URL) and irsyad-goumlyne
-# (GOUMLYNE_RO_DATABASE_URL). READ-ONLY DSNs only for client silos — a backup
+# (GOUMLYNE_BACKUP_RO_DATABASE_URL from ~/.config/wingmen/goumlyne_backup_ro.env, falling back to
+# GOUMLYNE_RO_DATABASE_URL). READ-ONLY DSNs only for client silos — a backup
 # is read-only by nature and must never even have the capability to write; the
 # write-capable DSN vars must never be referenced here. Substrate files land at
 # the top level of the day's dir (layout preserved); each client silo dumps
@@ -54,6 +55,11 @@ SUPABASE_URL="https://tscuymavysscrvoberrr.supabase.co"
 
 # shellcheck disable=SC1090
 source "$ENV_FILE"
+# Cross-org goumlyne backup DSN lives in its own 0600 file, sourced ONLY here, so it never rides the
+# lane-sourced bundle built from .env (console #83193 ruling B). Sourced after .env so it wins.
+BACKUP_RO_ENV_FILE="$HOME/.config/wingmen/goumlyne_backup_ro.env"
+# shellcheck disable=SC1090
+if [ -r "$BACKUP_RO_ENV_FILE" ]; then source "$BACKUP_RO_ENV_FILE"; fi
 KEY="$SUPABASE_SERVICE_KEY"
 DSN="${SUPABASE_DB_URL:-${DATABASE_URL:-}}"
 # Alert via the operator bot (@wingmennorchbot), same as scripts/tg_send.sh.
@@ -325,7 +331,10 @@ fi
 # week of missing-DSN skips went undetected.
 #   name              DSN env var                     subdir
 #   ihsanos-ceayj     IHSANOS_PROD_RO_DATABASE_URL    $TODAY_DIR/ihsanos-ceayj
-#   irsyad-goumlyne   GOUMLYNE_RO_DATABASE_URL        $TODAY_DIR/irsyad-goumlyne
+#   irsyad-goumlyne   GOUMLYNE_BACKUP_RO_DATABASE_URL $TODAY_DIR/irsyad-goumlyne
+#                     (falls back to GOUMLYNE_RO_DATABASE_URL; the backup must stay cross-org,
+#                     while GOUMLYNE_RO_DATABASE_URL moves to the irsyad-only irsyad_monitor_ro
+#                     role, console #81213 item 4 / #82789)
 # ---------------------------------------------------------------------------
 backup_client_silo() {
   local NAME="$1" SILO_DSN="$2"
@@ -343,7 +352,7 @@ backup_client_silo() {
 }
 
 backup_client_silo "ihsanos-ceayj"   "${IHSANOS_PROD_RO_DATABASE_URL:-}"
-backup_client_silo "irsyad-goumlyne" "${GOUMLYNE_RO_DATABASE_URL:-}"
+backup_client_silo "irsyad-goumlyne" "${GOUMLYNE_BACKUP_RO_DATABASE_URL:-${GOUMLYNE_RO_DATABASE_URL:-}}"
 
 # ---------------------------------------------------------------------------
 # OFF-SITE PUSH (Musa op#21244 "dump it in gzbai"; extended to substrate

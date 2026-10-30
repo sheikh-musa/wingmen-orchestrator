@@ -374,14 +374,69 @@
       // if that tradeoff is ever revisited.
       + '</div>';
   }
-  function renderPoolUsage(rows, glm) {
+  // ---- DeepSeek pool card (op#35897, orch-console #83397) ------------------
+  // A top SHARED-key row (today's REAL spend location -- every live lane
+  // still draws on DEEPSEEK_CODING_KEY, confirmed live 2026-10-29), then one
+  // row per distinct per-client vault key from deepseek_key_map.json, each
+  // showing a BALANCE (never "spend" -- the endpoint has no spend figure) +
+  // its delta since the last poll + the LIVE lanes mapped to it (never the
+  // pointer file -- app.py's _deepseek_card_payload(), family-matched from
+  // the live-proc scan). A key the vault has never heard of says "key not
+  // created yet" (distinct from "could not read", a key that exists but
+  // failed) -- neither ever shows 0 or $0.00. Backend: nervous_system/
+  // console/deepseek_usage.py (5-min server cache per key; a key never
+  // reaches this payload).
+  function fmtUsd(n) {
+    if (n == null) return "—";
+    return (n < 0 ? "-" : "") + "$" + Math.abs(n).toFixed(2);
+  }
+  function deepseekLaneChips(lanes) {
+    return (lanes && lanes.length)
+      ? '<span class="dslanes-inline">' + lanes.map(esc).join(", ") + '</span>' : "";
+  }
+  function deepseekRow(label, k) {
+    var laneChips = deepseekLaneChips(k.lanes);
+    if (!k.available) {
+      var reason = k.reason || "could not read";
+      return '<div class="poolwin stale" title="' + esc(label) + ': ' + esc(reason) + '">'
+        + '<span class="poolwl">' + esc(label) + '</span>'
+        + '<b>' + esc(reason) + '</b>' + (laneChips ? ' ' + laneChips : "")
+        + '</div>';
+    }
+    var delta = (k.delta_usd == null) ? "" :
+      ' <span class="dsdelta">(' + (k.delta_usd >= 0 ? "+" : "") + fmtUsd(k.delta_usd) + ' since last poll)</span>';
+    return '<div class="poolwin ok" title="' + esc(label) + ' balance'
+      + (k.age_s != null ? ", read " + fmtAge(k.age_s) + " ago" : "") + '">'
+      + '<span class="poolwl">' + esc(label) + '</span>'
+      + '<b>' + fmtUsd(k.balance_usd) + '</b> balance' + delta
+      + (laneChips ? ' ' + laneChips : "")
+      + '</div>';
+  }
+  function deepseekCard(du) {
+    if (!du) return "";
+    var shared = du.shared, keys = du.keys || [];
+    if (!shared && !keys.length) return "";
+    var anyAvailable = (shared && shared.available) || keys.some(function (k) { return k.available; });
+    var cls = anyAvailable ? "good" : "stale";
+    var rows = (shared ? deepseekRow("Shared key", shared) : "")
+      + keys.map(function (k) {
+        var label = (k.families && k.families.length) ? k.families.join(" / ") : k.key_name;
+        return deepseekRow(label, k);
+      }).join("");
+    return '<div class="poolrow poolcard deepseek ' + cls + '" title="DeepSeek balance">'
+      + '<div class="poolhead"><span class="poolchip ' + cls + '">DeepSeek</span></div>'
+      + rows
+      + '</div>';
+  }
+  function renderPoolUsage(rows, glm, deepseek) {
     var el = $("poolUsage");
     if (!el) return;
-    el.innerHTML = ((rows && rows.length) ? rows.map(poolChip).join("") : "") + glmCard(glm);
+    el.innerHTML = ((rows && rows.length) ? rows.map(poolChip).join("") : "")
+      + glmCard(glm) + deepseekCard(deepseek);
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v91';
+  var APP_BUILD = 'fc-v93';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -1458,7 +1513,7 @@
     renderStat(d.pulse || {}, bloatCount);
     renderTopbar(d.pulse || {});   // fc-v86: top-bar Asks badge (asks_waiting)
     renderTopBloat(glance);
-    renderPoolUsage(d.pool_usage || [], d.glm_usage);
+    renderPoolUsage(d.pool_usage || [], d.glm_usage, d.deepseek_usage);
     renderNeeds(d.needs_you || []);
     renderCoordinators(d.coordinators || []);
     buildEntries(lanes, d.coordinators || []);
@@ -1829,7 +1884,7 @@
 
   // Node-only: expose the pure helpers for the unit tests (inert in the browser).
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, glmCard: glmCard, glmPace: glmPace, paceAdvisory: paceAdvisory, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset, next5hBoundary: next5hBoundary,
+    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, glmCard: glmCard, glmPace: glmPace, deepseekCard: deepseekCard, paceAdvisory: paceAdvisory, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset, next5hBoundary: next5hBoundary,
       ctxDisplayFrom: ctxDisplayFrom, idleLabel: idleLabel,
       poolOf: poolOf, tokChip: tokChip, poolRollup: poolRollup,
       mdlChip: mdlChip, shortModel: shortModel, routineSummary: routineSummary, collapsedHtml: collapsedHtml,

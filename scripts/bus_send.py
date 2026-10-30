@@ -194,6 +194,48 @@ def _agent_status_row(agent_id: str, dsn: str | None = None) -> tuple | None:
     return row
 
 
+def _is_genuine_recipient_reply(sender: str, target_to: str, dsn: str | None = None) -> bool:
+    """True iff `sender` is a genuine answerer of a row addressed to
+    `target_to` -- exact match, or both resolve to the SAME registry
+    base_agent_id via agent_status (the same lookup
+    refuse_if_instance_stale_and_base_live already uses, not a fresh guess).
+    A name-shape relationship is NEVER by itself proof of same-family and is
+    not checked here -- the registry is the only non-exact test.
+
+    bus #83138 (held_commitments#898 regression, found same-day): the prior
+    version stripped a trailing -<digits> from BOTH sides with one regex,
+    breaking any lane whose BASE NAME itself ends in a digit (cc-cosem-exams-2,
+    cc-cosem-adcda-1, cc-cosem-platform-2/4).
+
+    bus #83150/#83152 (same-day re-regression, caught by cc-quality before
+    merge, spec correction owned by console): the FIRST fix for #83138 added
+    two dash-prefix fast paths (target_to.startswith(sender+"-") and the
+    reverse) to catch base<->instance without a DB round-trip. Those are
+    UNSOUND in this namespace: a base name can itself be a dash-prefix of a
+    totally DIFFERENT base (cc-irsyad < cc-irsyad-coord, cc-cosem-exams <
+    cc-cosem-exams-2, cc-console < cc-console-revamp, cc-storefront <
+    cc-storefront-c) -- 68 such cross-base pairs exist, 20 with live
+    traffic, cc-irsyad<->cc-irsyad-coord alone carrying 609 messages. The
+    prefix check short-circuited BEFORE the registry comparison that would
+    have correctly rejected those pairs, reintroducing the exact #640
+    false-stamp bug (a self-follow-up on cc-irsyad falsely stamping
+    cc-irsyad-coord's genuinely unanswered row) for every one of them.
+    Dropped entirely -- the registry is authoritative, full stop. A missed
+    stamp only over-alerts; a wrong stamp hides a message, so an unresolvable
+    name (no agent_status row on either side) falls back to the literal
+    string and so, correctly, does NOT stamp unless the strings are
+    identical."""
+    if not sender or not target_to:
+        return False
+    if sender == target_to:
+        return True
+    sender_row = _agent_status_row(sender, dsn=dsn)
+    target_row = _agent_status_row(target_to, dsn=dsn)
+    sender_base = sender_row[0] if sender_row and sender_row[0] else sender
+    target_base = target_row[0] if target_row and target_row[0] else target_to
+    return sender_base == target_base
+
+
 def refuse_if_instance_stale_and_base_live(to: str, dsn: str | None = None) -> None:
     """Mirror of refuse_if_base_has_live_instances, inverted (bus #58614 item 1).
     Motivating case: bus row #58568 (cc-irsyad-3 -> cc-quality-1, an urgent review
@@ -904,12 +946,36 @@ def send(
             )
 
     if reply_to:
-        cur.execute(
-            "UPDATE agent_messages SET read_at=coalesce(read_at,now()), "
-            "responded_at=coalesce(responded_at,now()), "
-            "response_ref=coalesce(response_ref,%s) WHERE id=%s",
-            (str(row_id), reply_to),
-        )
+        # orch-console #82607/#82608 (held_commitments#898): this used to stamp
+        # read_at/responded_at on the target row for ANY reply referencing it, including a
+        # SELF-follow-up (sender == the target row's own from_agent, answering nobody —
+        # just adding to its own earlier message). That silently marked genuine unread/
+        # unanswered P0/P1s as read+answered: 33 occurrences on orch-console's inbox in
+        # 12h, 15 of them P1. Only stamp when the sender of THIS reply is the target row's
+        # actual recipient (to_agent) -- i.e. a genuine answer. A self-follow-up's thread_id
+        # link is already handled upstream (reply_to backfills `thread` when the caller
+        # didn't pass one) -- nothing else to do here for that case.
+        #
+        # bus #83138 (same-day regression): the first version of this check used a blind
+        # -\d+$ strip on BOTH sides to detect base<->instance, which silently broke every
+        # numbered-NAME lane family (cc-cosem-exams-2, cc-cosem-adcda-1/2/3,
+        # cc-cosem-platform-2/4 -- the digit is the family name, not an instance suffix).
+        # bus #83150/#83152 (same-day re-regression): the prefix-matching fast path added
+        # for the above was itself unsound (cc-irsyad vs cc-irsyad-coord and 67 other
+        # cross-base dash-prefix pairs) and was dropped. _is_genuine_recipient_reply() is
+        # now registry-base_agent_id-only (plus the exact-match shortcut) -- never
+        # name-shape guessing.
+        cur.execute("SELECT from_agent, to_agent FROM agent_messages WHERE id=%s", (reply_to,))
+        target_row = cur.fetchone()
+        if target_row is not None:
+            target_from, target_to = target_row
+            if _is_genuine_recipient_reply(from_agent, target_to, dsn=dsn):
+                cur.execute(
+                    "UPDATE agent_messages SET read_at=coalesce(read_at,now()), "
+                    "responded_at=coalesce(responded_at,now()), "
+                    "response_ref=coalesce(response_ref,%s) WHERE id=%s",
+                    (str(row_id), reply_to),
+                )
 
     conn.commit()
     conn.close()

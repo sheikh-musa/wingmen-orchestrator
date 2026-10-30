@@ -64,11 +64,23 @@ def _unread_count(conn) -> int:
         return cur.fetchone()[0]
 
 
-def _nudge(unread: int) -> None:
+def _nudge(unread: int) -> bool:
     """Delegate to the sanctioned cai nudge tool (count-only, ghost-aware). It
     applies its own safety checks + cross-host resolution; we never touch the cai
     pane directly (R1). A missing/idle session inside the tool loses nothing —
-    the bus is durable and the wedge-watchdog is the reactive backstop."""
+    the bus is durable and the wedge-watchdog is the reactive backstop.
+
+    op#35929 (Musa zero-waste directive, bus #83575/#83579): returns False and
+    skips the delegate call entirely when `unread` is 0 -- a wake must carry an
+    unread item or it does not fire, fleet-wide, not just nazim_bus_notify (#649).
+    `unread` is ALREADY a live recount taken immediately before this call (see
+    main()), so this is the send-time check, not a stale snapshot; the gap this
+    closes is real rows that were read/auto-acked between `mx = _max_id(conn)`
+    detecting new arrivals and this call -- without this guard the delegate still
+    fired with a literal "0 new bus msg(s)" nudge."""
+    if unread == 0:
+        _log("recount at send-time: 0 still unread (already handled) — skip")
+        return False
     try:
         r = subprocess.run(["bash", NUDGE_CAI, str(unread)],
                            capture_output=True, text=True, timeout=45)
@@ -76,6 +88,8 @@ def _nudge(unread: int) -> None:
         _log(f"nudge_cai.sh({unread}) rc={r.returncode} :: {tail}")
     except Exception as e:  # never die on a nudge hiccup
         _log(f"nudge_cai.sh error ({type(e).__name__}): {e}")
+        return False
+    return True
 
 
 def main() -> int:

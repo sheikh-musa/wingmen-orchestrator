@@ -5,10 +5,13 @@ GLM key from the fleet VAULT (a live substrate connection) and calls z.ai. No
 console test may touch either, so by default the key reader and the HTTP call
 are replaced with fail-fast stubs and the module cache is cleared per test.
 Tests that exercise the GLM card install their own fake key / mocked HTTP.
+
+op#35897: /api/fleet also fans out to deepseek_usage.get_deepseek_usage() (one
+HTTP call per distinct vault key) -- same hermetic default, same reason.
 """
 import pytest
 
-from nervous_system.console import glm_usage
+from nervous_system.console import deepseek_usage, glm_usage
 
 
 def _no_vault():
@@ -26,3 +29,27 @@ def _hermetic_glm_usage(monkeypatch):
     glm_usage._reset_for_tests()
     yield
     glm_usage._reset_for_tests()
+
+
+def _no_deepseek_vault(name):
+    raise deepseek_usage.DeepseekUsageError("vault disabled in tests")
+
+
+def _no_deepseek_http(url, key):
+    raise deepseek_usage.DeepseekUsageError("network disabled in tests")
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_deepseek_usage(monkeypatch, tmp_path):
+    monkeypatch.setattr(deepseek_usage, "read_key", _no_deepseek_vault)
+    monkeypatch.setattr(deepseek_usage, "http_get_json", _no_deepseek_http)
+    monkeypatch.setattr(deepseek_usage, "_STATE_PATH", tmp_path / "deepseek_card_balance_history.json")
+    # op#35897/#83560: the shared row no longer calls read_key/http_get_json at
+    # all (DEEPSEEK_CODING_KEY is vault leak_flagged -- see deepseek_usage.py's
+    # module docstring) -- it reads the poller's own history file. Point that
+    # at a tmp path that doesn't exist by default, so a test gets "could not
+    # read" unless it deliberately writes one -- never this host's real file.
+    monkeypatch.setattr(deepseek_usage, "_SHARED_HISTORY_PATH", tmp_path / "deepseek_balance_history.jsonl")
+    deepseek_usage._reset_for_tests()
+    yield
+    deepseek_usage._reset_for_tests()

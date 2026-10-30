@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.gzb-monitor</string>
+  <!-- cc-fleet-health gzb (VPS hub + irsyad host) resource monitor (op#35975,
+       orch-console #83733). Every 5 min, one read-only ssh sample from the Mini
+       (CPU load, real memory used via /proc's available, not buff/cache, swap,
+       disk free, CPU package temp if a thermal zone exists, live claude session
+       count). One host_metrics row (host='gzb'), alert evaluation, deduped P1 rr
+       pages to orch-console (60 min/alert key), 30-day retention prune. Fail-LOUD:
+       an unreachable gzb is a row with ok=false, never a gap. NOT loaded yet;
+       scheduling is wired after review/merge. -->
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/run_gzb_monitor.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/gzb-monitor.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/gzb-monitor.err.log</string>
+</dict>
+</plist>

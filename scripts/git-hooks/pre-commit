@@ -17,7 +17,62 @@
 # (`git -c user.name=cc-fleet-health -c user.email=<sre>`), read here as the EFFECTIVE
 # user.name/user.email, which is immune to the ambient env bleed. A console build (default
 # identity orch-console, no cc-fleet-health env) matches NONE of the signals -> passes.
+#
+# SECOND, INDEPENDENT CHECK — a SHARED-config identity set from inside a LINKED WORKTREE
+# (orch-console #81957 -> GO #81978). Every worktree inherits <common>/.git/config, so
+# `git config user.name` run inside a linked worktree sets the identity for the WHOLE repo:
+# on 2026-10-29 one lane did exactly that and three other lanes' commits on
+# fable/substrate-safe-fixes were then authored as it (14c44f1, fecd908, 5e9c9bc — content
+# correct, author line false). A rule that lives only in docs does not survive a context
+# reset, so the commit is refused instead. Only the MAIN checkout is exempt: there the
+# shared config IS the checkout's own config, and refusing there would block legitimate
+# console commits for a leak that only bites other worktrees. `git -c user.name=...` is
+# never a config write, so per-command identity stays allowed; a worktree-scoped identity
+# (git config --worktree) overrides the shared one and also stays allowed.
 set -uo pipefail
+
+_git_dir="$(git rev-parse --git-dir 2>/dev/null || true)"
+_common_dir="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+if [ -n "$_git_dir" ] && [ -n "$_common_dir" ]; then
+  git_dir_abs="$(cd "$_git_dir" 2>/dev/null && pwd -P)"
+  common_dir_abs="$(cd "$_common_dir" 2>/dev/null && pwd -P)"
+  # Main checkout (git dir == common dir): the shared config is its own config. Nothing to guard.
+  if [ -n "$git_dir_abs" ] && [ -n "$common_dir_abs" ] && [ "$git_dir_abs" != "$common_dir_abs" ]; then
+    shared_config="$common_dir_abs/config"
+    leaked=""
+    for key in user.name user.email; do
+      line="$(git config --show-origin --get "$key" 2>/dev/null || true)"
+      [ -n "$line" ] || continue
+      # --show-origin prints "<origin><TAB><value>"; split on a NAMED tab rather than an
+      # invisible literal one, so a reformat cannot silently turn the separator into spaces.
+      IFS="$(printf '\t')" read -r origin value <<<"$line"
+      origin_path="${origin#file:}"
+      case "$origin_path" in
+        /*) ;;
+        *) origin_path="$(cd "$(dirname "$origin_path")" 2>/dev/null && pwd -P)/$(basename "$origin_path")" ;;
+      esac
+      [ "$origin_path" = "$shared_config" ] && leaked="$leaked
+     $key = $value"
+    done
+    if [ -n "$leaked" ]; then
+      echo "" >&2
+      echo "❌ pre-commit BLOCKED — this commit would be authored with a git identity stored in the" >&2
+      echo "   SHARED config of this repo:" >&2
+      echo "     $shared_config" >&2
+      echo "   Every worktree inherits that file, so setting it from inside a linked worktree" >&2
+      echo "   re-authors OTHER lanes' commits as you (2026-10-29: three lanes' commits were" >&2
+      echo "   misattributed that way). Found:$leaked" >&2
+      echo "" >&2
+      echo "   Fix (worktree-scoped only, this worktree alone):" >&2
+      echo "     git config extensions.worktreeConfig true" >&2
+      echo "     git config --worktree user.name \"<your lane>\" && git config --worktree user.email \"<your lane>@wingmen.dev\"" >&2
+      echo "   Or keep it per-command, writing no config file at all:" >&2
+      echo "     git -c user.name=\"<your lane>\" -c user.email=\"<your lane>@wingmen.dev\" commit ..." >&2
+      echo "   (Override only if you genuinely mean to set the fleet-wide identity: git commit --no-verify.)" >&2
+      exit 1
+    fi
+  fi
+fi
 
 CONSOLE_CHECKOUT="/Users/sheikhmusa/wingmen/orchestrator"
 SRE_ID="cc-fleet-health"

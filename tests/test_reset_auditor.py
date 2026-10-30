@@ -54,7 +54,26 @@ def _audit_stub(tmp_path: Path, log: Path, rc=0) -> Path:
     return s
 
 
-def _run(tmp_path, target, pane=IDLE_PANE, extra=None):
+def _arm_stub(tmp_path: Path, log: Path, check_rc=0, consume_rc=0) -> Path:
+    """Stub for RESET_AUDITOR_ARM_VERIFY_CMD -- logs each call (mode + args) to
+    the shared keys.log (so ordering vs the audit row / send-keys is assertable),
+    exits check_rc for --mode check, consume_rc for --mode consume."""
+    s = tmp_path / "arm_verify_stub.sh"
+    s.write_text(
+        '#!/usr/bin/env bash\n'
+        f'LOG="{log}"\n'
+        'mode=""; prev=""; for a in "$@"; do if [ "$prev" = "--mode" ]; then mode="$a"; fi; prev="$a"; done\n'
+        'mode_upper="$(printf "%s" "$mode" | tr "[:lower:]" "[:upper:]")"\n'  # bash 3.2 (macOS) has no ${var^^}
+        'printf "ARM_%s %s\\n" "$mode_upper" "$*" >> "$LOG"\n'
+        'if [ "$mode" = check ]; then echo "check stub says ok"; exit ' + str(check_rc) + '; fi\n'
+        'if [ "$mode" = consume ]; then echo "consume stub says ok"; exit ' + str(consume_rc) + '; fi\n'
+        'exit 9\n'
+    )
+    s.chmod(0o755)
+    return s
+
+
+def _run(tmp_path, target, pane=IDLE_PANE, extra=None, arm_row=None):
     log = tmp_path / "keys.log"
     log.touch()
     env = {
@@ -71,7 +90,10 @@ def _run(tmp_path, target, pane=IDLE_PANE, extra=None):
         "HOME": str(Path.home()),
     }
     env.update(extra or {})
-    r = subprocess.run(["bash", str(SCRIPT), *([target] if target else [])],
+    argv = [target] if target else []
+    if arm_row is not None:
+        argv += ["--arm-row", str(arm_row)]
+    r = subprocess.run(["bash", str(SCRIPT), *argv],
                        capture_output=True, text=True, cwd=str(REPO), env=env, timeout=50)
     return r, log.read_text()
 
@@ -138,7 +160,14 @@ def test_unresolvable_target_pane_fails_closed(tmp_path):
 def test_no_caller_override_knob_exists(tmp_path):
     """No --caller flag or env knob lets a caller ASSERT its own identity -- only the
     OS-level tty comparison decides (CAI-RESP-1442 'spoofing the target via an
-    argument -> refused': there must be no argument to spoof in the first place)."""
+    argument -> refused': there must be no argument to spoof in the first place).
+
+    --arm-row (added for cc-quality's self-arm path, #83292) is deliberately NOT
+    an exception to this rule: it never lets a caller assert its own identity by
+    argument -- the identity check is still independent OS-level env state
+    (ORCH_BODY_ROLE/CC_BASE_AGENT_ID), and the row's authenticity is itself
+    verified server-side (DB-checked, single-use, 30-min-windowed), never taken
+    on the caller's word. See test_arm_row_* above for that path's own coverage."""
     text = SCRIPT.read_text()
     assert "--caller" not in text
     assert "RESET_AUDITOR_CALLER" not in text
@@ -266,3 +295,172 @@ def test_force_on_an_idle_body_overrides_nothing(tmp_path):
     r, keys = _run(tmp_path, "storefront", extra={"RESET_FORCE": "1", "RESET_AUDITOR_ARMED": "1"})
     assert r.returncode == 0, r.stderr
     assert "--forced-gates none" in _audit_line(keys)
+
+
+# ── CC-QUALITY SELF-ARM PATH (--arm-row N; Musa op_msg 35891/ask 5849, #83292,
+#      ordering fix #83304, cc-quality's review points in #83301) ───────────
+CONSOLE_ENV = {"ORCH_BODY_ROLE": "console"}  # no CC_BASE_AGENT_ID set
+
+
+def _arm_env(tmp_path, log, check_rc=0, consume_rc=0, console=True, extra=None):
+    env = {"RESET_AUDITOR_ARM_VERIFY_CMD": str(_arm_stub(tmp_path, log, check_rc, consume_rc))}
+    if console:
+        env.update(CONSOLE_ENV)
+    env.update(extra or {})
+    return env
+
+
+def test_arm_row_scoped_to_quality_only_storefront_refused(tmp_path):
+    """console spec item 1: storefront/finance never reach the arm-row path,
+    even with a valid-looking row and the console env set."""
+    _handoff(tmp_path / "reports", "cc-storefront-HANDOFF-20261002.md")
+    log = tmp_path / "keys.log"
+    r, keys = _run(tmp_path, "storefront", arm_row=1,
+                   extra=_arm_env(tmp_path, log), pane=IDLE_PANE)
+    assert r.returncode == 2, r.stderr
+    assert "scoped to cc-quality" in r.stderr
+    assert "ARM_CHECK" not in keys, "the arm verifier must never even be called for storefront"
+
+
+def test_arm_row_scoped_to_quality_only_finance_refused(tmp_path):
+    _handoff(tmp_path / "reports", "finance-handoff-NOW.md")
+    log = tmp_path / "keys.log"
+    r, keys = _run(tmp_path, "finance", arm_row=1,
+                   extra=_arm_env(tmp_path, log), pane=IDLE_PANE)
+    assert r.returncode == 2, r.stderr
+    assert "ARM_CHECK" not in keys
+
+
+def test_arm_row_requires_console_caller_env_missing_role(tmp_path):
+    """console spec item 3 / cc-quality review (b): a row alone is NEVER
+    sufficient -- the caller must independently BE the console body."""
+    _handoff(tmp_path / "reports")
+    log = tmp_path / "keys.log"
+    r, keys = _run(tmp_path, "quality", arm_row=1,
+                   extra=_arm_env(tmp_path, log, console=False))
+    assert r.returncode == 5, r.stderr
+    assert "CALLER-IDENTITY REFUSED" in r.stderr
+    assert "ARM_CHECK" not in keys, "no row is consulted before the console-caller check passes"
+
+
+def test_arm_row_requires_console_caller_env_lane_id_set_is_refused(tmp_path):
+    """console spec item 5 of the 6 required test scenarios: a console caller
+    with a lane id (CC_BASE_AGENT_ID) set must still be refused."""
+    _handoff(tmp_path / "reports")
+    log = tmp_path / "keys.log"
+    r, keys = _run(tmp_path, "quality", arm_row=1,
+                   extra=_arm_env(tmp_path, log, extra={"CC_BASE_AGENT_ID": "cc-fleet-health"}))
+    assert r.returncode == 5, r.stderr
+    assert "CALLER-IDENTITY REFUSED" in r.stderr
+    assert "ARM_CHECK" not in keys
+
+
+def test_arm_row_check_failure_refuses_before_any_keystroke(tmp_path):
+    _handoff(tmp_path / "reports")
+    log = tmp_path / "keys.log"
+    r, keys = _run(tmp_path, "quality", arm_row=1,
+                   extra=_arm_env(tmp_path, log, check_rc=1))
+    assert r.returncode == 5, r.stderr
+    assert "did not check out" in r.stderr
+    assert "ARM_CHECK" in keys
+    assert "ARM_CONSUME" not in keys, "consume must never run if check already failed"
+    assert "send-keys" not in keys
+
+
+def test_arm_row_happy_path_fires_and_audit_cites_the_row_and_authority(tmp_path):
+    h = _handoff(tmp_path / "reports", "cc-quality-handoff-x.md")
+    log = tmp_path / "keys.log"
+    r, keys = _run(tmp_path, "quality", arm_row=42,
+                   extra=_arm_env(tmp_path, log))
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "ARM_CHECK" in keys and "ARM_CONSUME" in keys
+    check_i = next(i for i, l in enumerate(keys.splitlines()) if l.startswith("ARM_CHECK"))
+    consume_i = next(i for i, l in enumerate(keys.splitlines()) if l.startswith("ARM_CONSUME"))
+    audit_i = next(i for i, l in enumerate(keys.splitlines()) if l.startswith("AUDIT "))
+    first_key = next(i for i, l in enumerate(keys.splitlines()) if l.startswith("send-keys"))
+    assert check_i < consume_i < audit_i < first_key, "check -> consume -> audit -> keystrokes, strictly in order"
+    audit_line = _audit_line(keys)
+    assert "42" in audit_line and "35891" in audit_line, f"audit row must cite the arm-row id + Musa op_msg 35891: {audit_line}"
+    assert str(h.resolve()) in keys
+
+
+def test_arm_row_path_attributes_to_console_even_with_reset_by_env_set(tmp_path):
+    """orch-console #83363 (correction of record, after bus #83362's
+    misattribution): once gate 3b has PROVEN the caller is the console body,
+    every downstream mention (the audit row's --by, the boot message) must
+    name orch-console -- unconditionally, overriding any RESET_BY the caller's
+    env happens to carry (fleet_health_boundaries' whole point: the SRE must
+    never appear to have fired a singleton reset it has no authority to
+    fire)."""
+    h = _handoff(tmp_path / "reports", "cc-quality-handoff-x.md")
+    log = tmp_path / "keys.log"
+    r, keys = _run(tmp_path, "quality", arm_row=1,
+                   extra=_arm_env(tmp_path, log, extra={"RESET_BY": "cc-fleet-health"}))
+    assert r.returncode == 0, r.stderr + r.stdout
+    audit_line = _audit_line(keys)
+    assert "--by orch-console" in audit_line, f"audit row must cite orch-console, not cc-fleet-health: {audit_line}"
+    assert "cc-fleet-health" not in audit_line
+    assert "reset IN-PLACE by orch-console" in keys
+    assert str(h.resolve()) in keys
+
+
+def test_tty_path_reset_by_is_unchanged_still_env_or_default(tmp_path):
+    """Sanity: the attribution fix is scoped to the arm-row branch only --
+    the pre-existing tty self-fire path keeps its own env-or-default
+    RESET_BY (still cc-fleet-health in the normal/no-override case)."""
+    h = _handoff(tmp_path / "reports", "cc-storefront-HANDOFF-20261002.md")
+    r, keys = _run(tmp_path, "storefront", extra={"RESET_AUDITOR_ARMED": "1"})
+    assert r.returncode == 0, r.stderr + r.stdout
+    audit_line = _audit_line(keys)
+    assert "--by cc-fleet-health" in audit_line
+    assert str(h.resolve()) in keys
+
+
+def test_arm_row_busy_gate_refusal_leaves_row_unconsumed(tmp_path):
+    """console #83304's required test: a busy-gate refusal must leave the
+    arm-row UNCONSUMED (check already passed at gate 3, but consume never
+    runs because the busy gate aborts first)."""
+    _handoff(tmp_path / "reports")
+    log = tmp_path / "keys.log"
+    r, keys = _run(tmp_path, "quality", arm_row=1, pane=BUSY_PANE,
+                   extra=_arm_env(tmp_path, log))
+    assert r.returncode == 5 and "BUSY" in r.stderr
+    assert "ARM_CHECK" in keys, "gate 3's check still runs (it's what admits past caller-identity)"
+    assert "ARM_CONSUME" not in keys, "a later gate's refusal must never consume a genuine request"
+
+
+def test_arm_row_dryrun_leaves_row_unconsumed(tmp_path):
+    """console #83304's required test: RESET_DRYRUN must never consume the row."""
+    _handoff(tmp_path / "reports", "cc-quality-handoff-x.md")
+    log = tmp_path / "keys.log"
+    r, keys = _run(tmp_path, "quality", arm_row=1,
+                   extra=_arm_env(tmp_path, log, extra={"RESET_DRYRUN": "1"}))
+    assert r.returncode == 0, r.stderr
+    assert "ARM_CHECK" in keys
+    assert "ARM_CONSUME" not in keys, "RESET_DRYRUN must never write/consume"
+    assert keys.count("send-keys") == 0 or "send-keys" not in keys
+
+
+def test_arm_row_consume_failure_at_fire_time_aborts_before_audit_row(tmp_path):
+    """Closes the check-to-fire race: even if check passed, a failed consume
+    at fire time must abort before the audit row / any keystroke."""
+    _handoff(tmp_path / "reports", "cc-quality-handoff-x.md")
+    log = tmp_path / "keys.log"
+    r, keys = _run(tmp_path, "quality", arm_row=1,
+                   extra=_arm_env(tmp_path, log, consume_rc=1))
+    assert r.returncode == 5, r.stderr
+    assert "failed to consume" in r.stderr
+    assert "ARM_CONSUME" in keys
+    assert "AUDIT " not in keys, "no audit row once consume fails at fire time"
+    assert "send-keys" not in keys
+
+
+def test_arm_row_absent_tty_path_is_unaffected(tmp_path):
+    """Sanity: with no --arm-row, behavior is exactly the pre-existing tty path
+    (the console env being set changes nothing when --arm-row is absent --
+    only the presence of --arm-row switches gate 3's branch)."""
+    h = _handoff(tmp_path / "reports", "cc-storefront-HANDOFF-20261002.md")
+    r, keys = _run(tmp_path, "storefront", extra=dict(CONSOLE_ENV, **{"RESET_AUDITOR_ARMED": "1"}))
+    assert r.returncode == 0, r.stderr + r.stdout  # unchanged: default stub tty matches -> fires
+    assert any("/clear" in l for l in keys.splitlines())
+    assert str(h.resolve()) in keys

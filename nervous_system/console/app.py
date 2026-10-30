@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from nervous_system.console import auth, db, docs, governance, glm_usage, media, panes, pii, pools
+from nervous_system.console import auth, db, deepseek_usage, docs, governance, glm_usage, media, panes, pii, pools
 from nervous_system.console.feed import Broadcaster, feeder
 from nervous_system.protected_agents import console_protected_identities
 # GAP-B: the shared family helper — the SAME one the token resolver uses to decide
@@ -694,6 +694,9 @@ def _proc_ground_truth() -> dict:
                     "fp": r.get("fp") or None,
                     "mismatch": bool(r.get("mismatch")),
                     "expected": r.get("expected") or None,
+                    # op#35897: DeepSeek card lane truth (ANTHROPIC_BASE_URL on the
+                    # live proc, never the `.<lane>_model` pointer file).
+                    "on_deepseek": bool(r.get("on_deepseek")),
                 }
     except Exception as e:  # noqa: BLE001 — the fleet payload must never depend on ps
         logger.warning("proc ground-truth read failed: %s", e)
@@ -718,6 +721,42 @@ def _proc_accounts() -> dict:
     presented as equally fresh."""
     return {sess: {k: v for k, v in row.items() if k != "model"}
             for sess, row in _proc_ground_truth().items()}
+
+
+def _deepseek_lanes() -> "list[dict]":
+    """op#35897: lanes whose LIVE process is routed to DeepSeek right now
+    (_proc_ground_truth()'s on_deepseek flag -- never the pointer file), each
+    with its display model name (deepseek_usage.model_label; the raw model
+    string itself when unmapped, never a guess)."""
+    out = [
+        {"session": sess, "model": row.get("model"),
+         "model_label": deepseek_usage.model_label(row.get("model"))}
+        for sess, row in _proc_ground_truth().items()
+        if row.get("on_deepseek")
+    ]
+    out.sort(key=lambda r: r["session"])
+    return out
+
+
+def _deepseek_card_payload() -> dict:
+    """op#35897 (orch-console #83397): the full DeepSeek card -- the REAL
+    shared-key row (today's actual spend location: every live lane still
+    draws on DEEPSEEK_CODING_KEY, confirmed live 2026-10-29) plus the 5
+    per-client rows from deepseek_key_map.json, each carrying the LIVE lanes
+    whose family matches it (via the SAME family_of() the real per-client
+    routing resolves by -- scripts/lib/deepseek_key_for_family.py), so Musa
+    can see the split the moment a real per-client secret is provisioned,
+    with no further console change. A family-resolution failure for one lane
+    just drops it from every row (never guessed onto one)."""
+    lanes = _deepseek_lanes()
+    lane_family = {l["session"]: (_family_of(l["session"]) or None) for l in lanes}
+    usage = deepseek_usage.get_deepseek_usage()
+    for k in usage.get("keys", []):
+        families = set(k.get("families") or [])
+        k["lanes"] = sorted(sess for sess, fam in lane_family.items() if fam in families)
+    shared = deepseek_usage.get_shared_key_usage()
+    shared["lanes"] = sorted(lane_family)
+    return {"shared": shared, "keys": usage.get("keys", [])}
 
 
 def _boot_model(current_task) -> "str | None":
@@ -1636,6 +1675,7 @@ def _fleet_payload():
         f_pane = ex.submit(db.fetch_pane_context)        # op#13050-B: FRESH pane-truth bloat feed
         f_pool = ex.submit(db.fetch_pool_usage)          # Max weekly-% per pool (op#9770)
         f_glm = ex.submit(glm_usage.get_glm_usage)       # op#24597: GLM Coding Plan quota (5-min server cache)
+        f_deepseek = ex.submit(_deepseek_card_payload)   # op#35897: shared + per-client DeepSeek balance (5-min cache)
         f_queue = ex.submit(db.fetch_queue)              # per-lane worklist (lane_tasks — the drain view)
         f_inbox = ex.submit(db.fetch_inbox_backlog)      # fc-v52: unhandled bus inbox per body (drain board)
         f_asks = ex.submit(db.fetch_asks)                # fc-v55: operator's LIVE "Your asks" (status derived in SQL)
@@ -1693,6 +1733,15 @@ def _fleet_payload():
         except Exception as e:
             logger.warning("glm_usage failed: %s", type(e).__name__)
             glm = {"available": False, "level": None, "windows": []}
+        # op#35897: _deepseek_card_payload never raises and never carries a key;
+        # the guard is belt-and-braces so a bug here can't blank the aggregate.
+        try:
+            deepseek = f_deepseek.result()
+        except Exception as e:
+            logger.warning("deepseek_card_payload failed: %s", type(e).__name__)
+            deepseek = {"shared": {"available": False, "balance_usd": None,
+                                    "delta_usd": None, "reason": "could not read", "lanes": []},
+                        "keys": []}
         try:
             queue = f_queue.result()
         except Exception as e:
@@ -1861,6 +1910,10 @@ def _fleet_payload():
         "pool_usage": _jsonable(pool_usage),
         # op#24597: GLM Coding Plan (z.ai) quota card, rendered beside the Max pools.
         "glm_usage": _jsonable(glm),
+        # op#35897: DeepSeek pool card -- the shared key (today's real spend
+        # location) + per-client rows, each carrying the live lanes mapped to
+        # it (never the pointer file).
+        "deepseek_usage": _jsonable(deepseek),
         "queue": _jsonable(queue),
         # fc-v52: per-body live drain board (unhandled bus inbox + console-assigned
         # items), replacing the static "Your asks" backlog. `backlog` is retained

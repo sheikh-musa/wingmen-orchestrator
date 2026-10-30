@@ -76,7 +76,10 @@ _OVERRIDE_ENV_VARS = (
 )
 
 
-def _run(resolved_model, orch_dir, fetch_script, *, pre_env=None):
+_REAL_FAMILY_KEY_SCRIPT = os.path.join(_ROOT, "scripts", "lib", "deepseek_key_for_family.py")
+
+
+def _run(resolved_model, orch_dir, fetch_script, *, pre_env=None, agent_id="cc-bariq-1", family_key_script=None):
     """Source the lib, call apply_provider_routing, print rc + every
     tracked var (pipe-joined, in _TRACKED_VARS order) so the test can assert
     on the exact post-call shell state in one subprocess round-trip. Also
@@ -97,9 +100,10 @@ def _run(resolved_model, orch_dir, fetch_script, *, pre_env=None):
     for k, v in (pre_env or {}).items():
         env[k] = v
     var_dump = " ".join(f'"${{{v}:-}}"' for v in _TRACKED_VARS)
+    fam_script = family_key_script or _REAL_FAMILY_KEY_SCRIPT
     script = (
         f'source "{_LIB}"\n'
-        + f'apply_provider_routing "{resolved_model}" "{orch_dir}" "{sys.executable}" "test-agent" "{fetch_script}"\n'
+        + f'apply_provider_routing "{resolved_model}" "{orch_dir}" "{sys.executable}" "{agent_id}" "{fetch_script}" "{fam_script}"\n'
         + "echo \"RC=$?\"\n"
         + f'printf "%s\\x1f" {var_dump} "${{ANTHROPIC_API_KEY+SET}}"\n'
     )
@@ -253,6 +257,79 @@ def test_provider_small_model_override_env_honored_per_provider(tmp_path):
     rc, env, _ = _run("deepseek-v4-pro", str(tmp_path), fetch, pre_env={"DEEPSEEK_SMALL_MODEL": "deepseek-chat"})
     assert rc == 0
     assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "deepseek-chat"
+
+
+# ── per-client DeepSeek keys (Musa op#35814, bus #82358): deepseek-* resolves
+# its vault key by the AGENT's lane family, never the shared/leak-flagged
+# DEEPSEEK_CODING_KEY, and fails closed on an unmapped family ──────────────
+
+@pytest.mark.parametrize("agent_id,vault_key_name", [
+    ("cc-bariq-1", "DEEPSEEK_KEY_BARIQ"),
+    ("cc-oeh-1", "DEEPSEEK_KEY_OEH"),
+    ("cc-ffsfulfilment-1", "DEEPSEEK_KEY_FFSFULFILMENT"),
+    ("cc-cosem-exams-1", "DEEPSEEK_KEY_COSEM"),
+    ("cc-cosem-platform-author", "DEEPSEEK_KEY_COSEM"),
+    ("cc-cosem-tdu-coord", "DEEPSEEK_KEY_COSEM"),  # compound family "cosem-tdu" maps to the SAME client key as "cosem"
+    ("cc-hc95-broker-1", "DEEPSEEK_KEY_INTERNAL"),
+    ("cc-fleet-health", "DEEPSEEK_KEY_INTERNAL"),
+])
+def test_deepseek_resolves_vault_key_by_lane_family(agent_id, vault_key_name, tmp_path):
+    """The fetch stub only knows ONE key name — the one this family is
+    supposed to resolve to. If the routing code still asked for the old
+    shared DEEPSEEK_CODING_KEY (or any other family's key), the stub would
+    have nothing for it and the call would fail closed instead of rc==0."""
+    fetch = _write_fetch_stub(tmp_path, key_by_vault_key={vault_key_name: "per-client-secret"})
+    rc, env, stderr = _run("deepseek-v4-pro", str(tmp_path), fetch, agent_id=agent_id)
+    assert rc == 0, (agent_id, vault_key_name, stderr)
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "per-client-secret"
+
+
+def test_deepseek_never_falls_back_to_the_shared_leak_flagged_key(tmp_path):
+    """A stub that only knows the OLD shared key — any per-client-mapped
+    agent must still fail closed, never silently reuse it."""
+    fetch = _write_fetch_stub(tmp_path, key_by_vault_key={"DEEPSEEK_CODING_KEY": "old-shared-leaked-key"})
+    rc, env, _ = _run("deepseek-v4-pro", str(tmp_path), fetch, agent_id="cc-bariq-1")
+    assert rc == 1
+    assert env["ANTHROPIC_AUTH_TOKEN"] == ""
+
+
+def test_deepseek_unmapped_family_fails_closed(tmp_path):
+    """An agent whose family has no row in deepseek_key_map.json must fail
+    closed with a clear reason — never fall through to any vault key at
+    all, and never reach the (here-succeeding) fetch stub."""
+    fetch = _write_fetch_stub(tmp_path, always="should-never-be-used")
+    rc, env, stderr = _run("deepseek-v4-pro", str(tmp_path), fetch, agent_id="cc-some-brand-new-client-9")
+    assert rc == 1
+    assert env["ANTHROPIC_AUTH_TOKEN"] == ""
+    assert env["ANTHROPIC_BASE_URL"] == ""
+    assert "FATAL" in stderr
+    assert "DeepSeek" in stderr or "deepseek" in stderr.lower()
+
+
+def test_deepseek_family_resolver_itself_fails_closed_on_missing_map_file(tmp_path):
+    """If the map file is unreadable, the resolver must fail closed (exit 1,
+    nothing on stdout) rather than silently resolve to nothing / a guess."""
+    resolver = tmp_path / "broken_resolver.py"
+    resolver.write_text(
+        "import sys\nsys.stderr.write('map file missing (simulated)\\n')\nsys.exit(1)\n"
+    )
+    resolver.chmod(resolver.stat().st_mode | stat.S_IEXEC)
+    fetch = _write_fetch_stub(tmp_path, always="should-never-be-used")
+    rc, env, stderr = _run(
+        "deepseek-v4-pro", str(tmp_path), fetch, agent_id="cc-bariq-1", family_key_script=str(resolver),
+    )
+    assert rc == 1
+    assert env["ANTHROPIC_AUTH_TOKEN"] == ""
+    assert "FATAL" in stderr
+
+
+def test_deepseek_other_providers_unaffected_by_family_resolution(tmp_path):
+    """GLM/Kimi/Qwen/OpenRouter never consult the family map at all — an
+    agent_id with NO family mapping must still route them successfully."""
+    fetch = _write_fetch_stub(tmp_path, always="glm-secret-key")
+    rc, env, _ = _run("glm-5", str(tmp_path), fetch, agent_id="cc-some-brand-new-client-9")
+    assert rc == 0
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "glm-secret-key"
 
 
 # ── OpenRouter arm (bus #53278, Musa op#26140 re-scope): the active A/B TEST

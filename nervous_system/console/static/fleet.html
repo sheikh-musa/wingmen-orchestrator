@@ -173,6 +173,13 @@
   /* op#24597: GLM (z.ai) card — wider label ("5h"/"wk"), reset clock in operator TZ + UTC. */
   .poolcard.glm .poolwl { width: 18px; }
   .poolcard.glm .glmwarn { flex-basis: 100%; padding-left: 24px; color: var(--dim); white-space: normal; }
+  /* op#35897: DeepSeek card — per-client BALANCE label (not a bare %), so the
+     fixed poolwl/poolwin-b widths sized for "wk"/"95%" need to flex instead. */
+  .poolcard.deepseek .poolwl { width: auto; min-width: 70px; text-transform: none; }
+  .poolcard.deepseek .poolwin b { width: auto; text-align: left; color: var(--txt); }
+  .poolcard.deepseek .poolwin.stale b { color: var(--dim); }
+  .dsdelta { color: var(--faint); font-weight: 400; }
+  .ds-lane { font-size: 10px; opacity: .85; }
 
   /* top-bloat glance (op#18542) — worst offenders across the whole fleet. */
   .topbloat { display: none; align-items: center; flex-wrap: wrap; gap: 4px 7px; margin-top: 9px;

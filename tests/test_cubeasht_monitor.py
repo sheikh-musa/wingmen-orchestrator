@@ -209,6 +209,75 @@ def test_ram_15_min():
     assert kinds([_ok(m, ram_used_pct=90.0) for m in (15, 10, 5, 0)]) == []  # > not >=
 
 
+def test_ram_suppressed_when_wsl_used_is_below_floor():
+    # orch-console #83666: Windows ram_used_pct can be high purely from
+    # reclaimable vmmemWSL page cache. When the WSL-internal (free -m) used
+    # figure is POSITIVELY confirmed under the 50% floor, AND the rest of
+    # Windows (after subtracting vmmem's own working-set share) is itself
+    # below the page threshold, don't page. vmmem=13281MB of ram_total=31892MB
+    # mirrors the real live reading that prompted this fix (cc-fleet-health
+    # #83676) -- non_wsl_used_pct = 93 - 41.6 = 51.4%, well under 90.
+    samples = [_ok(m, ram_used_pct=93.0, wsl={"mem_used_pct": 30.0},
+                   vmmem_ws_mb=13281, ram_total_mb=31892) for m in (15, 10, 5, 0)]
+    assert kinds(samples) == []
+
+
+def test_ram_still_fires_when_wsl_used_is_above_floor():
+    samples = [_ok(m, ram_used_pct=93.0, wsl={"mem_used_pct": 70.0}) for m in (15, 10, 5, 0)]
+    assert kinds(samples) == ["ram"]
+
+
+def test_ram_still_fires_when_wsl_used_is_unknown():
+    # a missing/unparseable WSL probe must never silently suppress a real page.
+    samples = [_ok(m, ram_used_pct=93.0, wsl={"runner_service": "active"}) for m in (15, 10, 5, 0)]
+    assert kinds(samples) == ["ram"]
+
+
+def test_ram_still_fires_on_windows_side_hog_despite_low_wsl_usage():
+    # cc-quality PR#658 review, Finding (3) (confirmed gap, now fixed): low
+    # WSL-internal usage alone does NOT prove a high Windows reading is WSL's
+    # cache -- same shape as the review's "Win 94%, WSL 12%, vmmem 2GB of
+    # 32GB" example, but with vmmem small enough that non_wsl_used_pct
+    # algebraically clears the 90% threshold (the review's own 2GB/32GB
+    # figures were illustrative and don't quite clear 90 under its own
+    # formula -- non_wsl=87.75 -- so this uses a smaller vmmem to land
+    # unambiguously on the "must page" side of the same formula).
+    samples = [_ok(m, ram_used_pct=94.0, wsl={"mem_used_pct": 12.0},
+                   vmmem_ws_mb=200, ram_total_mb=32768) for m in (15, 10, 5, 0)]
+    assert kinds(samples) == ["ram"]
+
+
+def test_ram_suppressed_on_wsl_cache_distinguished_from_windows_hog():
+    # the review's paired "genuinely WSL cache" case: same Win%/WSL% as the
+    # hog case above, but vmmem is large enough that non_wsl_used_pct drops
+    # well under the 90% threshold -> suppress.
+    samples = [_ok(m, ram_used_pct=94.0, wsl={"mem_used_pct": 12.0},
+                   vmmem_ws_mb=22000, ram_total_mb=32768) for m in (15, 10, 5, 0)]
+    assert kinds(samples) == []
+
+
+def test_ram_still_fires_when_vmmem_or_ram_total_missing():
+    # low WSL usage but no vmmem/ram_total data to confirm it's cache ->
+    # don't suppress (fail loud, same rule as a missing WSL probe).
+    samples = [_ok(m, ram_used_pct=93.0, wsl={"mem_used_pct": 30.0}) for m in (15, 10, 5, 0)]
+    assert kinds(samples) == ["ram"]
+
+
+def test_ram_finding_carries_wsl_used_pct_for_the_alert_body():
+    findings = cm.evaluate_alerts([_ok(m, ram_used_pct=93.0, wsl={"mem_used_pct": 70.0})
+                                    for m in (15, 10, 5, 0)], T0)
+    ram = next(f for f in findings if f["kind"] == "ram")
+    assert ram["wsl_used_pct"] == 70.0
+
+
+def test_ram_finding_carries_non_wsl_used_pct_for_the_alert_body():
+    findings = cm.evaluate_alerts([_ok(m, ram_used_pct=94.0, wsl={"mem_used_pct": 12.0},
+                                        vmmem_ws_mb=200, ram_total_mb=32768)
+                                    for m in (15, 10, 5, 0)], T0)
+    ram = next(f for f in findings if f["kind"] == "ram")
+    assert ram["non_wsl_used_pct"] == pytest.approx(93.39, abs=0.01)
+
+
 def test_unreachable_30_min():
     assert kinds([_down(m) for m in (30, 25, 20, 15, 10, 5, 0)]) == ["unreachable"]
     assert kinds([_down(m) for m in (25, 20, 15, 10, 5, 0)]) == []  # 25 min only

@@ -55,7 +55,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.parse import quote_plus, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, quote_plus, urlencode, urlsplit, urlunsplit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
@@ -230,13 +230,20 @@ def step1_substrate_migration(*, apply: bool) -> None:
 def build_role_dsn(admin_dsn: str, role: str, password: str) -> str:
     """Swap the admin DSN's user for <role>.<tenant> (the pooler derives the
     tenant from the username's suffix, #77507) and the password. Host, port,
-    db and scheme stay exactly the admin connection's."""
+    db and scheme stay exactly the admin connection's.
+
+    sslmode is FORCED to require (cc-irsyad-coord #81597, ahead of the gated
+    ceayj SSL window): a minted credential must carry the pin itself, so a
+    re-mint can never silently fall back to libpq's default `prefer` when the
+    admin source DSN lacks the parameter. Other query params pass through."""
     parts = urlsplit(admin_dsn)
     tenant = _pooler_tenant_ref(admin_dsn, what="admin DSN")
     userinfo = f"{role}.{tenant}:{quote_plus(password)}"
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if k != "sslmode"] + [("sslmode", "require")]
     return urlunsplit((parts.scheme, f"{userinfo}@{parts.hostname}"
                        + (f":{parts.port}" if parts.port else ""),
-                       parts.path, parts.query, parts.fragment))
+                       parts.path, urlencode(query, quote_via=quote), parts.fragment))
 
 
 IHSANOS_STORE_ALIAS = "ihsanos multi-tenant DB"

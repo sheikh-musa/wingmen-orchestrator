@@ -4,6 +4,9 @@
 #
 # Usage:  scripts/reset_auditor.sh <quality|storefront|finance>      (cc- prefix accepted)
 #         RESET_DRYRUN=1 ...   evaluate every gate, clear nothing (no arm needed)
+#         scripts/reset_auditor.sh quality --arm-row N   console-executed cc-quality
+#           self-arm path (see CC-QUALITY SELF-ARM PATH below); storefront/finance
+#           reject --arm-row outright, tty self-fire only.
 #
 # WHY THIS EXISTS. The three auditors are CAI-500 singletons (fhb.SINGLETON_BODIES,
 # CAI-1392 A, commit b7fb97f), so the worker recycler (sre_lane_recycle.py) refuses them by
@@ -28,6 +31,27 @@
 # fire this on someone else's behalf. See gate 3 below for the mechanism.
 # then the reset_cai.sh fire sequence: fire-window hold, composer capture+preserve, sized
 # wipe with the ghost rule, /clear, LAYER-2 dead-man verify (8, escalates LOUD), boot.
+#
+# CC-QUALITY SELF-ARM PATH (Musa op_msg 35891, ask 5849; orch-console #83292/#83304;
+# CAI-RESP-1451): cc-quality is an agent process with no real controlling tty of its own
+# to share with a detached runner (CAI-RESP-1451's "unsatisfiable" finding), so the tty
+# path above can never pass for it. --arm-row N is a SECOND way through THIS SAME gate,
+# scoped to cc-quality ONLY (storefront/finance never reach this branch):
+#   1. the caller must BE the console body: ORCH_BODY_ROLE=console and NO CC_BASE_AGENT_ID
+#      set (checked here, in bash, independent of anything the row says -- CAI-RESP-1451's
+#      crux, per cc-quality's own review point (b) in #83301: a row is NECESSARY but NOT
+#      SUFFICIENT, so cc-quality can never self-fire even holding a genuine row).
+#   2. a READ-ONLY check (scripts/lib/reset_auditor_arm_verify.py --mode check) that the
+#      row id=N is: from_agent=cc-quality, to_agent=orch-console, message_type='decision',
+#      subject starting with the literal "SELF-RESET-REQUEST: cc-quality" marker, created
+#      within the last 30 minutes, and not already consumed. This is what decides THIS
+#      gate (pass/fail) -- it never writes, so it is safe under RESET_DRYRUN too.
+# The ACTUAL single-use consume (--mode consume, an atomic UPDATE...RETURNING) happens
+# separately, much later (section 7.5, right before the pre-clear audit row) -- never here
+# at gate 3 -- so a later gate failure (busy/stale handoff/queued/disarmed) or a dry run
+# never burns a genuine request (orch-console #83304's ordering correction). NOBODY may
+# reply-to or otherwise stamp responded_at on an arm row before THIS script consumes it,
+# orch-console included -- every accidental stamp just fails closed (re-post the request).
 #
 # STANDING ARMED (cai's arm-sign, 2026-10-02, bus #49648): CAI-RESP-1442's withheld
 # condition closed on PR #268 (caller-identity gate, cc-quality PASS + cai's own
@@ -57,15 +81,31 @@ MAX_AGE="${RESET_AUDITOR_HANDOFF_MAX_AGE:-900}"
 LOGDIR="${RESET_AUDITOR_LOGDIR:-$ORCH_DIR/logs}"
 RESET_BY="${RESET_BY:-cc-fleet-health}"
 FORCED_GATES=""; BUSY_REASON=""   # recorded in the audit row (orch-console #49369)
+ARM_VERIFY_CMD="${RESET_AUDITOR_ARM_VERIFY_CMD:-$PY $_LIB/reset_auditor_arm_verify.py}"
+ARM_ROW_ID=""; _TARGET_ARG=""
+
+# ── 0. ARG PARSE — pull --arm-row N out of argv, leaving the positional
+#        target untouched (any position; no other flags exist here) ────────
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --arm-row) ARM_ROW_ID="${2:-}"; shift 2 ;;
+    --arm-row=*) ARM_ROW_ID="${1#--arm-row=}"; shift ;;
+    *) _TARGET_ARG="$1"; shift ;;
+  esac
+done
 
 # ── 1. ALLOWLIST ─────────────────────────────────────────────────────────────
-case "${1:-}" in
+case "$_TARGET_ARG" in
   quality|cc-quality)       SHORT="quality" ;;
   storefront|cc-storefront) SHORT="storefront" ;;
   finance|cc-finance)       SHORT="finance" ;;
-  *) echo "ERROR: reset_auditor.sh recycles ONLY the auditor singletons (quality|storefront|finance); got '${1:-}'. Workers use sre_lane_recycle.py; other singletons their own reset_<name>.sh." >&2; exit 2 ;;
+  *) echo "ERROR: reset_auditor.sh recycles ONLY the auditor singletons (quality|storefront|finance); got '${_TARGET_ARG}'. Workers use sre_lane_recycle.py; other singletons their own reset_<name>.sh." >&2; exit 2 ;;
 esac
 BASE="cc-$SHORT"; SESS="$SHORT"; PANE="${SESS}:0.0"
+if [ -n "$ARM_ROW_ID" ] && [ "$SHORT" != "quality" ]; then
+  echo "ERROR: --arm-row is scoped to cc-quality ONLY; got target '$SHORT'. storefront/finance use the tty self-fire path." >&2
+  exit 2
+fi
 
 # ── 2. HAS-SESSION ───────────────────────────────────────────────────────────
 "$TM" has-session -t "=$SESS" 2>/dev/null || { echo "ERROR: tmux session '$SESS' not found on this host." >&2; exit 1; }
@@ -90,21 +130,74 @@ BASE="cc-$SHORT"; SESS="$SHORT"; PANE="${SESS}:0.0"
 # PPID does not. Each tmux pane owns a distinct pty, so an unrelated caller (e.g.
 # cc-fleet-health, in its own separate pane) has a categorically different tty it
 # cannot forge -- this is an OS fact read fresh, not a value passed in.
-_tty_of() {  # pid role -> tty ("??"/empty = unknown/no controlling terminal).
-             # Stubbable (RESET_AUDITOR_TTY_STUB) for tests, which have no real tty.
-  if [ -n "${RESET_AUDITOR_TTY_STUB:-}" ]; then "$RESET_AUDITOR_TTY_STUB" "$1" "$2"; return; fi
-  ps -o tty= -p "$1" 2>/dev/null | tr -d ' '
-}
-_target_pane_pid="$("$TM" list-panes -t "=$SESS:0.0" -F '#{pane_pid}' 2>/dev/null)"
-if [ -z "$_target_pane_pid" ]; then
-  echo "[reset_auditor] CALLER-IDENTITY REFUSED: cannot resolve $BASE's own pane pid -- refusing to verify caller identity (fail closed)." >&2
-  exit 5
-fi
-_target_tty="$(_tty_of "$_target_pane_pid" target)"
-_caller_tty="$(_tty_of "$$" caller)"
-if [ -z "$_target_tty" ] || [ "$_target_tty" = "??" ] || [ -z "$_caller_tty" ] || [ "$_caller_tty" = "??" ] || [ "$_target_tty" != "$_caller_tty" ]; then
-  echo "[reset_auditor] CALLER-IDENTITY REFUSED: this process's controlling tty ('${_caller_tty:-none}') is not $BASE's own pane tty ('${_target_tty:-unknown}') — only $BASE's own live process may fire its reset. Have $BASE spawn its own detached runner, e.g. from inside its own turn: nohup bash -c 'sleep N; exec $0 $SHORT' >/tmp/${SHORT}_reset_runner.log 2>&1 & disown" >&2
-  exit 5
+if [ -n "$ARM_ROW_ID" ]; then
+  # ── 3b. CC-QUALITY SELF-ARM PATH (skips the tty check entirely) ───────────
+  # (i) the caller must BE the console body -- checked here in bash, from real
+  # process env, independent of anything the row says (CAI-RESP-1451 crux:
+  # necessary but not sufficient -- cc-quality can never self-fire even with
+  # a genuine row, since IT is never the console body).
+  if [ "${ORCH_BODY_ROLE:-}" != "console" ] || [ -n "${CC_BASE_AGENT_ID:-}" ]; then
+    echo "[reset_auditor] CALLER-IDENTITY REFUSED: --arm-row requires the caller to BE the console body (ORCH_BODY_ROLE=console, no CC_BASE_AGENT_ID) -- got ORCH_BODY_ROLE='${ORCH_BODY_ROLE:-}' CC_BASE_AGENT_ID='${CC_BASE_AGENT_ID:-}'. A row alone, even a genuine one, never arms this (CAI-RESP-1451)." >&2
+    exit 5
+  fi
+  # ATTRIBUTION FIX (orch-console #83363, after bus #83362's misattribution):
+  # the caller is now PROVEN to be the console body -- attribute every
+  # downstream mention (the audit row's --by, its from_agent==to_agent self-
+  # addressed pair, the LAYER-2-fail escalation sender, the boot message's
+  # "reset IN-PLACE by ...") to orch-console, UNCONDITIONALLY -- not an
+  # env-overridable default like the tty path's RESET_BY, since fleet_health_
+  # boundaries.assert_no_sre_red_reset's whole point is that the SRE itself
+  # must never appear as having fired a singleton reset it has no authority
+  # to fire. This line must stay AFTER the console-caller check above, never
+  # before it (attribution follows proof, not the other way round).
+  RESET_BY="orch-console"
+  # (ii) read-only check (never writes -- safe under RESET_DRYRUN too). This
+  # is what decides gate 3; the actual single-use consume happens much later,
+  # right before the audit row (section 7.5), never here.
+  _arm_check_out="$($ARM_VERIFY_CMD --mode check --arm-row "$ARM_ROW_ID" --target "$SHORT" 2>&1)"
+  _arm_check_rc=$?
+  if [ "$_arm_check_rc" -ne 0 ]; then
+    echo "[reset_auditor] CALLER-IDENTITY REFUSED: arm-row $ARM_ROW_ID did not check out -- $_arm_check_out" >&2
+    exit 5
+  fi
+  echo "[reset_auditor] arm-row $ARM_ROW_ID checks out: $_arm_check_out"
+else
+  # ── 3a. TTY SELF-FIRE PATH (CAI-RESP-1442, supersedes the old session-based
+  #        self-fire guard) ─────────────────────────────────────────────────
+  # Only the TARGET's own live process may fire this -- enforced from real OS process
+  # state, never a passed-in flag or any value a non-target process could set (the
+  # exact property cai named: not whether an argument SAYS "the target asked," but
+  # whether the caller actually IS the target's own process).
+  #
+  # Why TTY, not PPID (ancestry does not work here): the only way for a target to
+  # actually DETACH (a synchronous call would just deadlock the busy gate below, since
+  # the live tool call itself would keep the pane showing "esc to interrupt" for the
+  # whole run) is to background a runner from inside a live Bash tool call. That tool
+  # call's own subprocess exits almost immediately once the backgrounding returns,
+  # orphaning the runner -- by the time it actually fires, `ps` reports its ppid as 1
+  # (reparented), so walking ppid upward finds nothing of the target. Verified directly
+  # (nohup a job from inside a real tmux pane, forced the spawning shell to exit before
+  # checking): ppid -> 1, but the runner's controlling TTY is unchanged -- nohup does
+  # not call setsid, so it never detaches from the pane's pty. TTY survives reparenting;
+  # PPID does not. Each tmux pane owns a distinct pty, so an unrelated caller (e.g.
+  # cc-fleet-health, in its own separate pane) has a categorically different tty it
+  # cannot forge -- this is an OS fact read fresh, not a value passed in.
+  _tty_of() {  # pid role -> tty ("??"/empty = unknown/no controlling terminal).
+               # Stubbable (RESET_AUDITOR_TTY_STUB) for tests, which have no real tty.
+    if [ -n "${RESET_AUDITOR_TTY_STUB:-}" ]; then "$RESET_AUDITOR_TTY_STUB" "$1" "$2"; return; fi
+    ps -o tty= -p "$1" 2>/dev/null | tr -d ' '
+  }
+  _target_pane_pid="$("$TM" list-panes -t "=$SESS:0.0" -F '#{pane_pid}' 2>/dev/null)"
+  if [ -z "$_target_pane_pid" ]; then
+    echo "[reset_auditor] CALLER-IDENTITY REFUSED: cannot resolve $BASE's own pane pid -- refusing to verify caller identity (fail closed)." >&2
+    exit 5
+  fi
+  _target_tty="$(_tty_of "$_target_pane_pid" target)"
+  _caller_tty="$(_tty_of "$$" caller)"
+  if [ -z "$_target_tty" ] || [ "$_target_tty" = "??" ] || [ -z "$_caller_tty" ] || [ "$_caller_tty" = "??" ] || [ "$_target_tty" != "$_caller_tty" ]; then
+    echo "[reset_auditor] CALLER-IDENTITY REFUSED: this process's controlling tty ('${_caller_tty:-none}') is not $BASE's own pane tty ('${_target_tty:-unknown}') — only $BASE's own live process may fire its reset. Have $BASE spawn its own detached runner, e.g. from inside its own turn: nohup bash -c 'sleep N; exec $0 $SHORT' >/tmp/${SHORT}_reset_runner.log 2>&1 & disown" >&2
+    exit 5
+  fi
 fi
 
 # ── 4. BUSY GATE (shared pane_busy — one definition across the reset family) ─
@@ -158,8 +251,25 @@ if [ "${RESET_AUDITOR_ARMED:-$ARMED_DEFAULT}" != 1 ]; then
   exit 4
 fi
 
+# ── 7.5. ARM-ROW CONSUME — the ACTUAL single-use write, only now (after every
+#        other gate incl. ARMED has passed), immediately before the audit row.
+#        Zero rows back here refuses even though gate 3's check already passed
+#        (closes the check-to-fire race; orch-console #83304's ordering fix).
+if [ -n "$ARM_ROW_ID" ]; then
+  _arm_consume_out="$($ARM_VERIFY_CMD --mode consume --arm-row "$ARM_ROW_ID" --target "$SHORT" 2>&1)"
+  if [ $? -ne 0 ]; then
+    echo "ERROR: arm-row $ARM_ROW_ID failed to consume at fire time -- $_arm_consume_out -- ABORTING. $BASE is untouched." >&2
+    exit 5
+  fi
+  echo "[reset_auditor] $_arm_consume_out"
+fi
+
 # ── 8. PRE-CLEAR AUDIT ROW — no row, no /clear (dead-man's switch) ───────────
-_reason="${RESET_REASON:-auditor recycle (bloat/idle seam)}"
+if [ -n "$ARM_ROW_ID" ]; then
+  _reason="${RESET_REASON:-cc-quality self-arm reset (arm-row $ARM_ROW_ID, authority: Musa op_msg 35891)}"
+else
+  _reason="${RESET_REASON:-auditor recycle (bloat/idle seam)}"
+fi
 _audit_args=(--by "$RESET_BY" --base "$BASE" --session "$SESS" --handoff "$HANDOFF" --reason "$_reason"
              --forced-gates "${FORCED_GATES:-none}" --busy-reason "$BUSY_REASON")
 if [ -n "${RESET_AUDITOR_AUDIT_CMD:-}" ]; then

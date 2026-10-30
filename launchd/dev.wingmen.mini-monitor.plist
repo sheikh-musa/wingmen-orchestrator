@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.mini-monitor</string>
+  <!-- cc-fleet-health Mac Mini resource monitor (op#35975, orch-console #83733).
+       Every 5 min, LOCAL collection (no ssh): CPU load, real memory used (vm_stat,
+       active+wired+compressed, not cache), swap, disk free, thermal throttling
+       (pmset -g therm, no sudo), live claude session count. One host_metrics row
+       (host='mini'), alert evaluation, deduped P1 rr pages to orch-console
+       (60 min/alert key), 30-day retention prune. Fail-LOUD: monitor errors exit
+       non-zero. NOT loaded yet; scheduling is wired after review/merge. -->
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/run_mini_monitor.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/mini-monitor.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/mini-monitor.err.log</string>
+</dict>
+</plist>
