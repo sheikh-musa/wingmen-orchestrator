@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.lane-burn-alarm</string>
+  <key>ProgramArguments</key><array><string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string><string>scripts/lane_burn_alarm.py</string></array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/sheikhmusa</string><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string><key>CC_BASE_AGENT_ID</key><string>cc-fleet-health</string></dict>
+  <!-- cc-fleet-health, op#35929/35930 (Musa zero-waste directive, bus #83575;
+       orch-console agreed ETA #83579). Per-lane tokens/hour burn alarm: every
+       ~30min, measures every live lane's trailing-60min token rate via its own
+       Claude Code transcript (local tmux + ~/.claude/projects, or over ssh gzb
+       for the gzb host), and pages orch-console P1 if any lane crosses the
+       15M-tok/hr threshold (set from this session's own readings -- idle=0,
+       normal work=0.5-3.65M/60min, the PR#649 false-wake episode=81-93M/60min).
+       A lane that can't be measured is reported as unmeasurable, never given a
+       guessed number; if too many lanes go unmeasurable in one run that is
+       itself paged once (tooling-health signal, separate dedup). NOT installed
+       automatically by the PR -- install after merge:
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.wingmen.lane-burn-alarm.plist -->
+  <key>StartInterval</key><integer>1800</integer>
+  <key>ThrottleInterval</key><integer>60</integer>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/lane_burn_alarm.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/lane_burn_alarm.log</string>
+</dict>
+</plist>
