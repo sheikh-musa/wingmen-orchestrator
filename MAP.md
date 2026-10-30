@@ -28,8 +28,10 @@ boots a tmux Claude Code session, not a standalone Python process.
   `post-checkout` pages on a live-checkout branch drift.
 - `nervous_system/` — long-running daemons: Telegram ingest/out, the
   operator ask ledger, bus-notify, repo-context writer, watchdogs.
-- `migrations/` — direct-psycopg-applied SQL, numbered 001–132 (125 files
-  at HEAD; some numbers retired/superseded), plus `drafts/` and `infra/`.
+- `migrations/` — direct-psycopg-applied SQL, numbered sequentially (some
+  numbers retired/superseded), plus `drafts/` and `infra/`. Exact counts
+  deliberately omitted here — they rot; run `ls migrations/*.sql | wc -l`
+  for the current count.
 - `launchd/` — secondary watchdog/audit daemon plists.
 - `ops/launchd/` — the core daemon plists: ingest, tg-out, the hub itself
   (`dev.wingmen.cc-orch.plist`), fleet-console, fleet-health, lane watchdog.
