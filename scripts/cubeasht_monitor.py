@@ -93,7 +93,7 @@ THRESHOLDS = {
     "gpu_temp_c": 85.0, "gpu_temp_window_min": 10,
     "nvme_temp_c": 70.0, "nvme_temp_window_min": 10,
     "disk_c_min_free_pct": 15.0,
-    "ram_used_pct": 90.0, "ram_window_min": 15,
+    "ram_used_pct": 90.0, "ram_window_min": 15, "ram_wsl_used_floor_pct": 50.0,
     "runner_offline_window_min": 30,
     "unreachable_window_min": 30,
 }
@@ -372,13 +372,50 @@ def evaluate_alerts(samples: list[dict], now: datetime, th: dict = THRESHOLDS) -
                         "free_pct": free, "free_gb": _m(last).get("disk_c_free_gb"),
                         "total_gb": _m(last).get("disk_c_total_gb")})
 
+    def non_wsl_used_pct(m: dict) -> Optional[float]:
+        """ram_used_pct with vmmemWSL's own working-set share subtracted --
+        Windows' own attribution of the whole WSL VM (cache included), the
+        best available proxy for "RAM attributable to WSL". None if either
+        input is missing -- caller must then NOT suppress (fail loud)."""
+        v, vmmem_mb, ram_total_mb = m.get("ram_used_pct"), m.get("vmmem_ws_mb"), m.get("ram_total_mb")
+        if v is None or vmmem_mb is None or not ram_total_mb:
+            return None
+        return v - (vmmem_mb / ram_total_mb * 100)
+
     def ram_hi(s: dict) -> bool:
-        v = _m(s).get("ram_used_pct")
-        return bool(s.get("ok")) and v is not None and v > th["ram_used_pct"]
+        m = _m(s)
+        v = m.get("ram_used_pct")
+        if not (bool(s.get("ok")) and v is not None and v > th["ram_used_pct"]):
+            return False
+        # orch-console #83666 (2026-10-30): Windows-level ram_used_pct counts
+        # reclaimable vmmemWSL page cache as "used" -- a sustained-high reading
+        # there is NOT a leak by itself. Only suppress the page when the
+        # WSL-internal figure (free -m; the real used total) POSITIVELY
+        # confirms it's cache, not a leak. If the WSL probe is missing/unknown
+        # for this sample, don't suppress -- a missing probe must never hide a
+        # real problem (fail loud, never silent).
+        wsl_pct = (m.get("wsl") or {}).get("mem_used_pct")
+        if wsl_pct is None or wsl_pct >= th["ram_wsl_used_floor_pct"]:
+            return True
+        # cc-quality PR#658 review, Finding (3) (confirmed gap): a low
+        # WSL-internal figure alone does NOT prove the high Windows reading is
+        # WSL's cache -- a genuine non-WSL Windows process hogging RAM while
+        # WSL itself sits idle would be silenced too, a real regression (it
+        # paged before this fix). Subtract vmmem's working-set share from
+        # ram_used_pct; only suppress if what's left is itself below the page
+        # threshold. Missing vmmem/ram_total -> don't suppress.
+        rest = non_wsl_used_pct(m)
+        if rest is None:
+            return True
+        return rest > th["ram_used_pct"]
     if sustained(samples, now, th["ram_window_min"], ram_hi):
         vals = _window_vals(samples, now, th["ram_window_min"], "ram_used_pct")
+        last_m = _m(ok_samples[-1]) if ok_samples else {}
+        wsl_pct_latest = (last_m.get("wsl") or {}).get("mem_used_pct")
         out.append({"kind": "ram", "key": f"{HOST}:ram", "threshold": th["ram_used_pct"],
-                    "window_min": th["ram_window_min"], "latest": vals[-1], "peak": max(vals)})
+                    "window_min": th["ram_window_min"], "latest": vals[-1], "peak": max(vals),
+                    "wsl_used_pct": wsl_pct_latest, "vmmem_ws_mb": last_m.get("vmmem_ws_mb"),
+                    "non_wsl_used_pct": non_wsl_used_pct(last_m)})
 
     def runner_down(s: dict) -> bool:
         r = _m(s).get("runner") or {}
@@ -481,14 +518,34 @@ def render_page(f: dict) -> tuple[str, str]:
             "or ask cc-fleet-health to look at what grew."
         )
     elif k == "ram":
+        wsl_pct, non_wsl_pct = f.get("wsl_used_pct"), f.get("non_wsl_used_pct")
+        if wsl_pct is None:
+            wsl_note = (" WSL-internal used figure was unavailable for the latest sample, so this "
+                        "could not be ruled out as cache -- paging to be safe.")
+        elif wsl_pct >= THRESHOLDS["ram_wsl_used_floor_pct"]:
+            wsl_note = (f" WSL-internal used is {wsl_pct:.0f}% (the real figure; Windows counts "
+                        f"vmmemWSL's reclaimable page cache as 'used' too), which is ABOVE the "
+                        f"{THRESHOLDS['ram_wsl_used_floor_pct']:.0f}% floor, so this is not just cache.")
+        elif non_wsl_pct is None:
+            wsl_note = (f" WSL-internal used is only {wsl_pct:.0f}%, but vmmem's working-set share "
+                        "was unavailable, so a non-WSL Windows process could not be ruled out -- "
+                        "paging to be safe.")
+        else:
+            wsl_note = (f" WSL-internal used is only {wsl_pct:.0f}%, and after subtracting vmmemWSL's "
+                        f"own working-set share the REST of Windows is still at {non_wsl_pct:.0f}% "
+                        f"(threshold {f['threshold']:.0f}%) -- this looks like a non-WSL Windows "
+                        "process, not WSL cache.")
         subj = f"cubeasht memory nearly full: {f['latest']:.0f}% used for {f['window_min']}+ min"
         body = (
             f"TL;DR: Musa's desktop (cubeasht) has used more than {f['threshold']:.0f}% of its RAM for "
-            f"{f['window_min']} minutes (now {f['latest']:.0f}%, peak {f['peak']:.0f}%).\n\n"
+            f"{f['window_min']} minutes (now {f['latest']:.0f}%, peak {f['peak']:.0f}%).{wsl_note}\n\n"
             "WHY IT MATTERS: when memory runs out, Windows swaps to disk and everything (including "
             "CI in WSL) crawls or crashes.\n\n"
             "WHAT TO DO: see what is using memory (Task Manager; WSL shows up as 'vmmem'). A stuck CI "
-            "job or a forgotten app is the usual cause."
+            "job or a forgotten app is the usual cause. (Per orch-console #83666: if this turns out to "
+            "be reclaimable WSL page cache rather than real pressure, the fix is autoMemoryReclaim=gradual "
+            "+ a memory cap in .wslconfig, applied via `wsl --shutdown` only when no CI job is running or "
+            "queued.)"
         )
     elif k == "runner_offline":
         subj = f"CI runner {f['runner']} offline for {f['window_min']}+ min while cubeasht is ON"
