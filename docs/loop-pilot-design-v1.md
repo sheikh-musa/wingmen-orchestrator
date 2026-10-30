@@ -276,6 +276,16 @@ reading what it was handed), not the adversarial one.
   transcript isn't found is reported as
   `"could not measure: no matching transcript found for role(s) [...]"`
   (with any partial known cost noted), never silently treated as free.
+- **cc-quality's two non-blocking notes on the PR#671 review (bus #84082,
+  logged per orch-console #84124), kept here as backlog, not re-fixed now:**
+  (1) `extract_claude_session_cost()` reads every recently-modified
+  transcript fully to grep the `cwd` needle -- bounded by the mtime
+  pre-filter, but cost scales with how many Claude sessions touched a
+  transcript in that same window; revisit if this harness ever runs
+  concurrent role launches. (2) The `cwd` needle assumes Claude Code never
+  escapes the worktree path inside the JSONL -- true for every path this
+  harness has produced so far, and a miss already fails safe to `None`
+  (unmeasured), never a cost mis-attribution to the wrong session.
 - DeepSeek cost: `GET /user/balance` immediately before and after each task
   run, delta = that task's spend. Key fetched via `provider_vault_fetch.py`
   (confirmed working end-to-end for `cc-loop-1`, 2026-10-29), never printed.
@@ -451,18 +461,80 @@ not a signal anything is wrong.
    AND every one of its own seeded-bug variants, in a scratch worktree,
    before being trusted) -- none run live yet except task-01.
    **PR#666 merged** (2026-10-30T09:25:45Z, confirmed CI green on the
-   merge commit). **Condition-A unblock in flight**: `deepseek_key_for_family.py`
-   fail-closed-refused `family='loop'` (no vault-key mapping) -- escalated
-   to orch-console/cc-fleet-health rather than self-editing the vault/map;
-   cc-fleet-health's PR#669 (adds an explicit `loop` row -> the shared
-   `DEEPSEEK_CODING_KEY`) is built and pushed, awaiting cc-quality then
-   orch-console merge. **Condition-B unblock DONE** (this section, 2026-10-30):
-   the Claude-auth gap is fixed and verified end-to-end in `run_pilot.py`.
-   Next: resume condition A once PR#669 merges, then run the full A-vs-B
-   measured pilot across all 6 tasks.
+   merge commit). **Both blockers now resolved (2026-10-30):** PR#669
+   (cc-fleet-health, `deepseek_key_for_family.py`'s `family='loop'` fail-closed
+   refusal -> explicit `loop` row mapped to the shared `DEEPSEEK_CODING_KEY`)
+   merged `509d4b6`; PR#671 (this harness's condition-B Claude-auth gap, see
+   section 5) merged `5f51b42`, cc-quality PASS. Next: run the full A-vs-B
+   measured pilot across all 6 tasks, live.
 2. Whether hifz already has a local-runner GH-status mechanism to reuse
    instead of `local_ci_runner.sh` -- asked cc-hifz-1, no answer yet.
 3. ~~`switch_lane_token`-for-one-shot-session and the builder-worktree isolation~~
    The builder-worktree isolation probe (section 4) is still open; the
    condition-B auth gap (originally miscategorized as a `switch_lane_token`
    question) is resolved -- see section 5.
+
+## 8. Measured pilot result (2026-10-30, op#35690)
+
+All 6 tasks ran live on both conditions (12/12 attempts, serially, zero
+concurrent DeepSeek spend). One infra bug found and fixed mid-run (reviewer
+worktree dirtied by its own build tooling broke the `loop-pilot/reviews`
+checkout -- PR#677, cc-quality PASS, e2e-confirmed on the task-01-B retry).
+Every attempt after that fix completed with `error: null`.
+
+**Result, all 12/12 attempts: `outcome: correct_pass`, `grader_any_bug_survived:
+false`, `reviewer_verdict: PASS`.** Zero `false_pass`, zero `correct_catch`,
+zero `false_alarm` in either condition.
+
+**This is a "could not measure" on the pilot's actual research question.**
+The brief asked whether condition B (Claude-reviewed) catches real bugs that
+condition A (all-DeepSeek) lets through. That requires a real bug to exist
+in at least one attempt for either reviewer to catch or miss. In this run,
+DeepSeek-as-builder did not introduce a defect that survived the
+spec-writer's own acceptance tests in ANY of the 12 attempts -- in condition
+A as much as condition B, even though condition A's tests were ALSO written
+by DeepSeek. With zero failures to review, both conditions trivially show a
+0% false-pass rate; the data cannot discriminate between them on the
+question the pilot exists to answer. Per the brief's own instruction, this
+is reported as "could not measure," not as "DeepSeek is safe."
+
+**Statistical caveat, stated plainly:** n=6 tasks, 1 attempt per task per
+condition, no injected/adversarial failures, zero observed defects. A
+zero-failures-in-6-trials result bounds the per-attempt true defect rate at
+roughly <=50% with ~95% confidence (rule-of-three on n=6) -- i.e. this
+sample is far too small to support a general "DeepSeek is reliable" claim.
+What it DOES support, narrowly: on tasks shaped like these 6 (small, pure,
+deterministic, narrowly-scoped TypeScript functions, built test-first
+against a comprehensive spec-writer-authored acceptance suite), DeepSeek
+produced a correct implementation on its first attempt in a 12/12 sample.
+It says nothing about larger, ambiguous, multi-file, or UI-touching tasks,
+which this pilot deliberately did not include.
+
+**What WAS measured, and is a real finding: cost.** Per-task LLM spend
+(DeepSeek balance-delta + Claude transcript cost, both ground-truth, never
+estimated):
+
+| | DeepSeek (builder, +spec/review in A) | Claude (spec+review, B only) | Total/task avg |
+|---|---|---|---|
+| Condition A (n=5 of 6 measured; task-01's pre-task balance read failed) | $0.38 total / $0.076 avg | n/a | ~$0.08 |
+| Condition B (n=6) | $0.38 total / $0.063 avg | $11.00 total / $1.83 avg | ~$1.90 |
+
+Condition B cost **~24x more per task** than condition A for identical
+measured correctness outcomes (6/6 correct_pass, both conditions). Wall-clock
+time was NOT meaningfully different between conditions -- each role
+(spec-writer/builder/reviewer) took ~310-340s regardless of model, so a full
+3-role attempt is ~15-18 minutes either way.
+
+**Recommendation:** do not generalize "DeepSeek is safe to trust" from this
+pilot -- the sample is too small and too easy (zero defects occurred to be
+caught). If the fleet wants a real answer to the brief's question, the next
+pilot needs either (a) deliberately harder/more ambiguous tasks likely to
+actually trip up a cheap builder, or (b) the seeded-bug-injection design this
+session's early oracle-verification work was built for but the live grader
+never actually exercises (grader.py runs one fixed oracle suite against the
+builder's real output; it does not inject seeded-bugs.json into working code
+and check survival -- that mutation-testing step never got wired into a live
+run). Absent either, the only defensible claim from this data is: on 6 small
+well-specified algorithmic tasks, DeepSeek-only cost ~24x less than
+Claude-reviewed for the same observed outcome -- useful as a cost data
+point, not as a safety verdict.
