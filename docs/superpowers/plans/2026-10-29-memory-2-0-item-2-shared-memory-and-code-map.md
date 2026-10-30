@@ -63,8 +63,13 @@ client silo).
 
 ## B. Per-repo code map
 
-Generated from code (not hand-maintained prose), refreshed on every merge,
-with a staleness alarm.
+REVISED 2026-10-30 per Musa's op#35990 (bus #83757): every repo now writes
+its OWN `MAP.md` at its root (7 fixed sections: what it is, top-level
+layout, main flows, data, shared code, hazards, run/test/deploy; 150-300
+lines; every path hand-verified; a CI test that fails if a listed path no
+longer exists). This REPLACES the bespoke AST-walking generator this
+section originally specced — there is no longer anything for this
+deliverable to generate. Ingestion only.
 
 - Populates the existing but-empty `repo_context.architecture_summary`
   column — no new TABLE needed here, unlike (A). There IS still a small
@@ -72,16 +77,36 @@ with a staleness alarm.
   `architecture_summary_updated_at timestamptz`, added in the same
   slice-1 console-gated, direct-psycopg migration as (A)'s `fleet_memory`
   tables (two changes, one migration file).
-- Generator: a script run post-merge (git hook or CI step on the repo, not a
-  human) that walks the repo's top-level structure + entry points and writes
-  a short structured summary (modules, owned tables/services, key entry
-  files) — scoped small on purpose, not a full AST dump.
-- Staleness alarm: `cc-fleet-health`'s existing sweep pattern (it already
-  runs a periodic self-heal sweep for sequence drift etc.) adds a check that
-  pages if a repo's `architecture_summary_updated_at` is older than its
-  latest merged commit.
+- Ingestor, not generator: a small script that, given a repo, reads that
+  repo's root `MAP.md` verbatim (or a lightly-trimmed version if it runs
+  over a size budget) and writes it into
+  `repo_context.architecture_summary` + stamps
+  `architecture_summary_updated_at = now()`. Triggered post-merge (the same
+  hook point originally specced), but with nothing left to walk the
+  codebase for — the repo's own MAP.md already did that work, written by
+  the people/agents who know that repo, checked by that repo's own CI
+  (op#35990 section 7's path-rot test). No per-repo-type parsing logic to
+  maintain here.
+- Staleness alarm, corrected: the original design compared
+  `architecture_summary_updated_at` against the repo's LATEST merged
+  commit — too noisy under ingestion, since an unrelated code change
+  doesn't make an already-ingested MAP.md stale. The real staleness
+  question is narrower: has MAP.md changed in the source repo since our
+  last ingest? `cc-fleet-health`'s sweep adds a check that pages if a
+  repo's MAP.md blob's last-touching commit, by COMMITTER-date (per
+  cc-quality: not author-date — a rebased or cherry-picked commit's
+  author-date can predate when it actually landed on the branch we read),
+  is newer than `repo_context.architecture_summary_updated_at` for that
+  repo.
+- Dependency this introduces: ingestion for a repo needs that repo's own
+  MAP.md to exist first. Fleet-wide, op#35990 is due Wed 4 Nov 18:00Z —
+  before both code-map slices below — so on-time compliance elsewhere
+  covers it; a repo that misses that date delays only ITS OWN slice, not
+  the others (see dates note in C).
 - Starting repos (smallest blast radius first): `cosem-adcda`,
-  `cosem-platform`, `ihsanos`.
+  `cosem-platform`, `ihsanos`. The orchestrator's own MAP.md (this repo)
+  ships ahead of this, in PR #662, as the worked example other repo
+  owners can copy the section shape from.
 
 ## C. Slices, with honest dates
 
@@ -98,10 +123,22 @@ with a staleness alarm.
 2. **2026-11-03** — boot-sequence read step wired in (one `SELECT` added to
    the existing boot_briefing-style flow); at least one lane (coord) reading
    `fleet_memory` instead of being re-asked.
-3. **2026-11-07** — code-map generator for ONE repo (`cosem-adcda`, smallest)
-   landed and `architecture_summary` populated; staleness check stubbed.
-4. **2026-11-14** — generator extended to `cosem-platform` + `ihsanos`;
+3. **2026-11-07** — MAP.md ingestor landed; `cosem-adcda`'s
+   `architecture_summary` populated FROM its own MAP.md (not generated);
+   staleness check stubbed.
+4. **2026-11-14** — ingestor extended to `cosem-platform` + `ihsanos`;
    staleness alarm live in cc-fleet-health's sweep.
+
+**Dates note for Musa (his question on the op#35990 reply):** these 4 dates
+stand unchanged. Swapping the generator for an ingestor is less work, not
+more — there is no AST-walking/parsing logic left to build, only a read +
+write + a staleness comparison. The one new risk is a dependency, not a
+delay: slices 3 and 4 now need `cosem-adcda` / `cosem-platform` / `ihsanos`
+to have published their OWN MAP.md first (op#35990, due fleet-wide Wed 4
+Nov 18:00Z — four days before slice 3, eleven before slice 4, so on-time
+compliance elsewhere costs this plan nothing). If a specific repo misses
+its own MAP.md, only THAT repo's slice slips; I'll flag it against the
+actual date if and when it happens, not guess now.
 
 No code or migrations are part of this deliverable — plan only, per handoff.
 Execution on irsyad-scoped rows routes through `cc-irsyad-coord`, never
