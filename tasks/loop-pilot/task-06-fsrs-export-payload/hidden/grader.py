@@ -104,6 +104,39 @@ describe("oracle: createFsrsExportPayload", () => {
     createFsrsExportPayload(state, [], [], new Date("2026-05-01T00:00:00Z"));
     expect(state).toEqual(copy);
   });
+
+  // Added 2026-10-30 (op#35690 mutation-pass, docs/loop-pilot-design-v1.md
+  // section 9): the original oracle's rows were all plain {id, value}
+  // objects, so a mutant that silently drops deepClone's Date/Map/Set
+  // special-casing (falls through to the generic own-keys clone, which
+  // turns any of these into {}) survived both the real acceptance suite
+  // AND this oracle -- a gap in ground truth itself, found via a Stryker
+  // mutation sweep. These three close it.
+  it("a Date value nested in a row round-trips as an actual Date, not {}", () => {
+    const lastReview = new Date("2026-04-15T08:00:00Z");
+    const r = createFsrsExportPayload(
+      [{ id: 1, lastReview }], [], [], new Date("2026-05-01T00:00:00Z"),
+    );
+    const cloned = r.state[0] as { lastReview: unknown };
+    expect(cloned.lastReview instanceof Date).toBe(true);
+    expect((cloned.lastReview as Date).getTime()).toBe(lastReview.getTime());
+  });
+
+  it("a Map value nested in a row round-trips as an actual Map, not {}", () => {
+    const tags = new Map([["a", 1]]);
+    const r = createFsrsExportPayload(
+      [{ id: 1, tags }], [], [], new Date("2026-05-01T00:00:00Z"),
+    );
+    expect((r.state[0] as { tags: unknown }).tags instanceof Map).toBe(true);
+  });
+
+  it("a Set value nested in a row round-trips as an actual Set, not {}", () => {
+    const flags = new Set(["x"]);
+    const r = createFsrsExportPayload(
+      [{ id: 1, flags }], [], [], new Date("2026-05-01T00:00:00Z"),
+    );
+    expect((r.state[0] as { flags: unknown }).flags instanceof Set).toBe(true);
+  });
 });
 """
 
