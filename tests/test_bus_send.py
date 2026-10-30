@@ -1260,6 +1260,98 @@ def test_refuse_if_instance_stale_and_base_live_noop_when_no_status_row(monkeypa
     bs.refuse_if_instance_stale_and_base_live("cc-ghost-1")  # must not raise
 
 
+# ── refuse_if_pr_verdict_misrouted (bus #85014: cc-quality PASSed cosem-adcda
+# PR#852/855/857 to -1/-3; the real author -2 idled ~10h unaware) ───────────
+
+def test_pr_number_from_subject_matches_common_shapes():
+    assert bs._pr_number_from_subject("cosem-adcda PR#852 at 35470a82 -- PASS") == "852"
+    assert bs._pr_number_from_subject("PR #611 at 35470a82 -- PASS (advisory)") == "611"
+    assert bs._pr_number_from_subject("pr#42 clear to merge") == "42"
+    assert bs._pr_number_from_subject("no pr number here") is None
+
+
+def test_refuse_if_pr_verdict_misrouted_raises_on_confirmed_mismatch(monkeypatch):
+    rows = [("cc-quality", True), ("cc-cosem-adcda", True), ("cc-cosem-adcda", True)]
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: rows.pop(0))
+    monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "cosem-adcda"))
+    monkeypatch.setattr(bs, "_pr_head_branch", lambda owner, repo, n: "feat/op35986-doha-area2-trainees")
+    monkeypatch.setattr(bs, "_resolve_pr_author_instance", lambda repo, branch, dsn=None: "cc-cosem-adcda-2")
+    monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "status=idle, heartbeat 0:02:00 ago")
+    with pytest.raises(SystemExit, match="Use --to cc-cosem-adcda-2"):
+        bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-1", "cosem-adcda PR#857 -- PASS")
+
+
+def test_refuse_if_pr_verdict_misrouted_noop_when_sender_is_not_cc_quality(monkeypatch):
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-cosem-adcda", True))
+
+    def _boom(*a, **k):
+        raise AssertionError("must not resolve a PR# for a non-cc-quality sender")
+
+    monkeypatch.setattr(bs, "_repo_from_cwd", _boom)
+    bs.refuse_if_pr_verdict_misrouted("cc-cosem-adcda-2", "cc-cosem-adcda-1", "PR#857 -- PASS")  # must not raise
+
+
+def test_refuse_if_pr_verdict_misrouted_noop_when_subject_has_no_pr_number(monkeypatch):
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
+
+    def _boom(*a, **k):
+        raise AssertionError("must not look up a repo with no PR# in the subject")
+
+    monkeypatch.setattr(bs, "_repo_from_cwd", _boom)
+    bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-1", "all green, ship it")  # must not raise
+
+
+def test_refuse_if_pr_verdict_misrouted_noop_when_repo_unresolvable(monkeypatch):
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
+    monkeypatch.setattr(bs, "_repo_from_cwd", lambda: None)
+    bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-1", "PR#857 -- PASS")  # must not raise
+
+
+def test_refuse_if_pr_verdict_misrouted_noop_when_branch_unresolvable(monkeypatch):
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
+    monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "cosem-adcda"))
+    monkeypatch.setattr(bs, "_pr_head_branch", lambda owner, repo, n: None)
+    bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-1", "PR#857 -- PASS")  # must not raise
+
+
+def test_refuse_if_pr_verdict_misrouted_noop_when_author_instance_unresolvable(monkeypatch):
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
+    monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "cosem-adcda"))
+    monkeypatch.setattr(bs, "_pr_head_branch", lambda owner, repo, n: "feat/op35986-doha-area2-trainees")
+    monkeypatch.setattr(bs, "_resolve_pr_author_instance", lambda repo, branch, dsn=None: None)
+    bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-1", "PR#857 -- PASS")  # must not raise
+
+
+def test_refuse_if_pr_verdict_misrouted_noop_when_to_already_correct(monkeypatch):
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
+    monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "cosem-adcda"))
+    monkeypatch.setattr(bs, "_pr_head_branch", lambda owner, repo, n: "feat/op35986-doha-area2-trainees")
+    monkeypatch.setattr(bs, "_resolve_pr_author_instance", lambda repo, branch, dsn=None: "cc-cosem-adcda-2")
+    bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-2", "PR#857 -- PASS")  # must not raise
+
+
+def test_refuse_if_pr_verdict_misrouted_noop_when_addressed_to_shared_base_itself(monkeypatch):
+    # cc-cosem-adcda (the base) is a legitimate address when its own live-instance
+    # routing is a separate guard's concern (refuse_if_base_has_live_instances) --
+    # this guard only refuses a confirmed WRONG numbered instance, not the base.
+    rows = [("cc-quality", True), ("cc-cosem-adcda", True), ("cc-cosem-adcda", True)]
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: rows.pop(0))
+    monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "cosem-adcda"))
+    monkeypatch.setattr(bs, "_pr_head_branch", lambda owner, repo, n: "feat/op35986-doha-area2-trainees")
+    monkeypatch.setattr(bs, "_resolve_pr_author_instance", lambda repo, branch, dsn=None: "cc-cosem-adcda-2")
+    bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda", "PR#857 -- PASS")  # must not raise
+
+
+def test_refuse_if_pr_verdict_misrouted_skip_flag_bypasses_everything(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("skip=True must short-circuit before any resolution")
+
+    monkeypatch.setattr(bs, "_agent_status_row", _boom)
+    bs.refuse_if_pr_verdict_misrouted(
+        "cc-quality", "cc-cosem-adcda-1", "PR#857 -- PASS", skip=True
+    )  # must not raise, must not query
+
+
 def test_cli_refuses_on_stale_instance_with_live_base_before_sending(monkeypatch):
     import io
 
