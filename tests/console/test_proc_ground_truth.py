@@ -30,15 +30,20 @@ def _fake_rows():
             {"session": "quality", "account": "irsyad", "fp": "e1dfa48eec85",
              "model": "claude-sonnet-5", "host": "Mini", "verified": True,
              "expected": "irsyad", "expected_fp": "e1dfa48eec85", "mismatch": False,
-             "metered": False},
+             "metered": False, "base_url": None, "on_deepseek": False},
             {"session": "cosem-adcda", "account": None, "fp": None,
              "model": None, "host": "Mini", "verified": False,
              "expected": "syed", "expected_fp": "582043088eae", "mismatch": False,
-             "metered": False},
+             "metered": False, "base_url": None, "on_deepseek": False},
             {"session": "irsyad-coord", "account": "irsyad", "fp": "e1dfa48eec85",
              "model": "claude-opus-5-5", "host": "gzb", "verified": True,
              "expected": "irsyad", "expected_fp": "e1dfa48eec85", "mismatch": False,
-             "metered": False},
+             "metered": False, "base_url": None, "on_deepseek": False},
+            {"session": "bariq", "account": None, "fp": None,
+             "model": "deepseek-flash", "host": "Mini", "verified": False,
+             "expected": None, "expected_fp": None, "mismatch": False,
+             "metered": False, "base_url": "https://api.deepseek.com/anthropic",
+             "on_deepseek": True},
         ],
     }
 
@@ -53,7 +58,7 @@ def test_proc_ground_truth_matches_the_real_row_shape(monkeypatch):
     gt = console_app._proc_ground_truth()
     assert gt["quality"] == {
         "model": "claude-sonnet-5", "account": "irsyad", "fp": "e1dfa48eec85",
-        "mismatch": False, "expected": "irsyad",
+        "mismatch": False, "expected": "irsyad", "on_deepseek": False,
     }
 
 
@@ -64,7 +69,7 @@ def test_proc_models_is_unchanged_and_host_scoped(monkeypatch):
     monkeypatch.setattr(console_app.panes, "token_ground_truth",
                          lambda include_remote=False: _fake_rows())
     models = console_app._proc_models()
-    assert models == {"quality": "claude-sonnet-5"}  # gzb excluded; no-model Mini session excluded
+    assert models == {"quality": "claude-sonnet-5", "bariq": "deepseek-flash"}  # gzb excluded; no-model Mini session excluded
 
 
 def test_proc_accounts_includes_every_mini_session_regardless_of_model(monkeypatch):
@@ -75,8 +80,9 @@ def test_proc_accounts_includes_every_mini_session_regardless_of_model(monkeypat
     monkeypatch.setattr(console_app.panes, "token_ground_truth",
                          lambda include_remote=False: _fake_rows())
     accounts = console_app._proc_accounts()
-    assert set(accounts) == {"quality", "cosem-adcda"}
-    assert accounts["cosem-adcda"] == {"account": None, "fp": None, "mismatch": False, "expected": "syed"}
+    assert set(accounts) == {"quality", "cosem-adcda", "bariq"}
+    assert accounts["cosem-adcda"] == {"account": None, "fp": None, "mismatch": False,
+                                        "expected": "syed", "on_deepseek": False}
 
 
 def test_auth_mismatch_fires_and_live_fp_wins_over_stale_snapshot(monkeypatch):
@@ -136,3 +142,49 @@ def test_proc_ground_truth_cache_survives_a_ps_failure(monkeypatch):
     with console_app._PROC_MODEL_LOCK:
         console_app._PROC_MODEL_CACHE["at"] = time.monotonic() - 999  # force past the TTL
     assert console_app._proc_accounts()["quality"]["fp"] == "e1dfa48eec85"  # last good, not an exception
+
+
+# ---- _deepseek_lanes() (op#35897): live lanes routed to DeepSeek -----------
+
+def test_deepseek_lanes_includes_only_on_deepseek_sessions_with_a_display_model(monkeypatch):
+    _reset_proc_cache()
+    monkeypatch.setattr(console_app.panes, "token_ground_truth",
+                         lambda include_remote=False: _fake_rows())
+    lanes = console_app._deepseek_lanes()
+    assert lanes == [{"session": "bariq", "model": "deepseek-flash",
+                       "model_label": "DeepSeek-V4.1-Flash-1017"}]
+
+
+def test_deepseek_lanes_is_empty_when_nothing_is_routed_there(monkeypatch):
+    _reset_proc_cache()
+    rows = _fake_rows()
+    rows["rows"] = [r for r in rows["rows"] if not r.get("on_deepseek")]
+    monkeypatch.setattr(console_app.panes, "token_ground_truth", lambda include_remote=False: rows)
+    assert console_app._deepseek_lanes() == []
+
+
+def test_deepseek_card_payload_maps_live_lanes_onto_their_key_row_by_family(monkeypatch):
+    """orch-console #83397: once a key-row's families match a live lane's
+    family (via the SAME family_of() the real per-client routing uses), that
+    lane's session must appear on the row -- so Musa can see the split the
+    moment a real per-client secret is provisioned, no console change needed."""
+    _reset_proc_cache()
+    monkeypatch.setattr(console_app.panes, "token_ground_truth",
+                         lambda include_remote=False: _fake_rows())
+    monkeypatch.setattr(console_app.deepseek_usage, "get_deepseek_usage", lambda: {"keys": [
+        {"key_name": "DEEPSEEK_KEY_BARIQ", "families": ["bariq"], "available": False,
+         "balance_usd": None, "delta_usd": None, "reason": "key not created yet", "age_s": None},
+        {"key_name": "DEEPSEEK_KEY_OEH", "families": ["oeh"], "available": False,
+         "balance_usd": None, "delta_usd": None, "reason": "key not created yet", "age_s": None},
+    ]})
+    monkeypatch.setattr(console_app.deepseek_usage, "get_shared_key_usage", lambda: {
+        "key_name": "DEEPSEEK_CODING_KEY", "available": True, "balance_usd": 46.87,
+        "delta_usd": None, "age_s": 1,
+    })
+    payload = console_app._deepseek_card_payload()
+    bariq_row = next(k for k in payload["keys"] if k["key_name"] == "DEEPSEEK_KEY_BARIQ")
+    oeh_row = next(k for k in payload["keys"] if k["key_name"] == "DEEPSEEK_KEY_OEH")
+    assert bariq_row["lanes"] == ["bariq"]
+    assert oeh_row["lanes"] == []                 # no live oeh lane in the fixture
+    assert payload["shared"]["lanes"] == ["bariq"]  # every live deepseek lane, regardless of family
+    assert payload["shared"]["balance_usd"] == 46.87

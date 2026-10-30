@@ -318,6 +318,49 @@ def test_self_reported_hub_account_db_error_is_safe(monkeypatch):
     assert panes._self_reported_hub_account("cc-orchestrator") == {"fp": None, "stale": False}
 
 
+def _dispatch_run(tmux_lines="", ppid_lines="", eww_lines=""):
+    """subprocess.run stub for token_ground_truth()'s THREE distinct local calls
+    (tmux list-panes, `ps -Ao pid=,ppid=`, `ps eww`), dispatched by argv so a test
+    can hand each call its own fixture lines instead of collapsing all three to
+    the one `_run(0, "")` every existing (remote-focused) test here uses."""
+    def _run_dispatch(args, **kwargs):
+        if args[0] == panes._TMUX and args[1] == "list-panes":
+            return _run(0, tmux_lines)
+        if args == ["ps", "-Ao", "pid=,ppid="]:
+            return _run(0, ppid_lines)
+        if args == ["ps", "eww", "-o", "pid=,command="]:
+            return _run(0, eww_lines)
+        return _run(0, "")
+    return _run_dispatch
+
+
+# ---- token_ground_truth(): local deepseek-routed lane classification (op#35897) ----
+def test_token_ground_truth_classifies_deepseek_routed_lane_by_base_url(monkeypatch):
+    eww = (
+        "501 ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic "
+        "ANTHROPIC_AUTH_TOKEN=fake-token-abc --model deepseek-flash "
+        "claude --dangerously-skip-permissions\n"
+    )
+    monkeypatch.setattr("subprocess.run", _dispatch_run(eww_lines=eww))
+    monkeypatch.setattr(panes, "_session_for", lambda pid, pane_pids, ppid: "bariq")
+    row = next(r for r in panes.token_ground_truth()["rows"] if r["session"] == "bariq")
+    assert row["on_deepseek"] is True
+    assert row["base_url"] == "https://api.deepseek.com/anthropic"
+    assert row["model"] == "deepseek-flash"
+
+
+def test_token_ground_truth_non_deepseek_lane_is_not_classified(monkeypatch):
+    eww = (
+        "502 CLAUDE_CODE_OAUTH_TOKEN=fake-oauth-token "
+        "claude --dangerously-skip-permissions\n"
+    )
+    monkeypatch.setattr("subprocess.run", _dispatch_run(eww_lines=eww))
+    monkeypatch.setattr(panes, "_session_for", lambda pid, pane_pids, ppid: "orch")
+    row = next(r for r in panes.token_ground_truth()["rows"] if r["session"] == "orch")
+    assert row["on_deepseek"] is False
+    assert row["base_url"] is None
+
+
 # ---- token_ground_truth(): remote-body self-report integration ----
 def test_token_ground_truth_falls_back_to_self_report_when_ssh_unreachable(monkeypatch):
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))

@@ -763,6 +763,14 @@ def token_ground_truth(include_remote: bool = False) -> dict:
         # on the CLI default (not pinned), reported as such, not guessed.
         mm = re.search(r"--model[= ](\S+)", ln)
         model = mm.group(1) if mm else None
+        # op#35897: DeepSeek-card lane truth -- a lane counts as "on DeepSeek"
+        # when its OWN live process is actually routed there (ANTHROPIC_BASE_URL,
+        # exported by provider_routing.sh -- non-secret, already allow-listed
+        # into every lane env), never the `.<lane>_model` pointer file (which can
+        # drift from what the running process actually booted with).
+        bu = re.search(r"ANTHROPIC_BASE_URL=(\S*)", ln)
+        base_url = bu.group(1) if bu and bu.group(1) else None
+        on_deepseek = bool(base_url and "api.deepseek.com" in base_url)
         if metered:
             account = "metered (API)"
         elif fp is not None:
@@ -785,6 +793,7 @@ def token_ground_truth(include_remote: bool = False) -> dict:
             "model": model, "host": "Mini", "verified": verified,
             "self_reported": False, "self_report_stale": False,
             "expected": exp_account, "expected_fp": exp_fp, "mismatch": mismatch,
+            "base_url": base_url, "on_deepseek": on_deepseek,
         })
 
     for sess, fallback_host in _REMOTE_BODIES.items():
@@ -824,6 +833,7 @@ def token_ground_truth(include_remote: bool = False) -> dict:
                 "verified": True, "self_reported": False, "self_report_stale": False,
                 "expected": exp_account, "expected_fp": exp_fp,
                 "mismatch": bool(exp_fp is not None and rfp != exp_fp),
+                "base_url": None, "on_deepseek": False,
             })
         else:
             sr = _self_reported_hub_account(sess) if include_remote else {"fp": None, "stale": False}
@@ -835,6 +845,7 @@ def token_ground_truth(include_remote: bool = False) -> dict:
                     "verified": False, "self_reported": True, "self_report_stale": False,
                     "expected": exp_account, "expected_fp": exp_fp,
                     "mismatch": bool(exp_fp is not None and sfp != exp_fp),
+                    "base_url": None, "on_deepseek": False,
                 })
             else:
                 rows.append({
@@ -842,6 +853,7 @@ def token_ground_truth(include_remote: bool = False) -> dict:
                     "model": None, "host": host, "verified": False,
                     "self_reported": False, "self_report_stale": bool(sr.get("stale")),
                     "expected": exp_account, "expected_fp": exp_fp, "mismatch": False,
+                    "base_url": None, "on_deepseek": False,
                 })
 
     # Loud first: mismatches, then metered, then unverified/stale, then self-reported +
