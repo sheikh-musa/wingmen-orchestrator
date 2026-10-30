@@ -49,17 +49,48 @@ def extract_pass_pr_mentions(text):
     the same line, skipping a line that also reads as a FAIL/BLOCK verdict for
     that PR (cc-quality's own message shape: 'PR#653 @ 58fa81a (...) — PASS.',
     'cosem-adcda PR#857 -- PASS'). -> list of (pr_number:str, repo_hint:str|None).
-    A single message can legitimately bundle several PRs, each its own line."""
+    A single message can legitimately bundle several PRs, each its own line.
+
+    Also skips a QUOTED-CITATION false positive (bus #85217, console): a
+    verdict message can quote a PASS-shaped string as a code example while
+    explaining an UNRELATED bug, e.g. cc-quality's own #85078 (a verdict on
+    orchestrator PR#692/693/694) illustrating PR#692's coverage gap with
+    `refuse_if_pr_verdict_misrouted('cc-quality','cc-cosem-adcda-1',
+    'cosem-adcda PR#857 PASS') -> no-op (did NOT fire)` -- which got
+    misread as a fresh PASS verdict on cosem-adcda PR#857, paging on a
+    9-day-stale citation instead of the real PR#857 verdict (#83927). A
+    genuine verdict announcement never closes PASS with a quote mark; a
+    quoted code citation does (the string literal's closing quote).
+    Checked at the match's own end, not line-wide, since the line can also
+    legitimately open quotes earlier (e.g. an apostrophe in prose) without
+    that affecting this specific match."""
     mentions = []
     for line in (text or "").splitlines():
         m = re.search(r"PR\s*#\s*(\d+)", line, re.IGNORECASE)
         if not m:
             continue
-        if not re.search(r"\bPASS\b", line, re.IGNORECASE):
+        pass_m = re.search(r"\bPASS\b", line, re.IGNORECASE)
+        if not pass_m:
             continue
-        if re.search(r"\bFAIL\b|\bBLOCK\b|\bNOT\s+PASS\b", line, re.IGNORECASE):
+        # (?!-) keeps a hyphen-compound ("fail-safe", "fail-closed", a
+        # block-list) from being misread as a FAIL/BLOCK verdict keyword --
+        # found as a byproduct of writing the quoted-citation test above:
+        # \bFAIL\b alone DOES match "fail" inside "fail-safe" (hyphen is a
+        # non-word boundary), which would wrongly SUPPRESS a real PASS
+        # verdict that happens to use the word "fail-safe" in its own text.
+        if re.search(r"\bFAIL(?!-)\b|\bBLOCK(?!-)\b|\bNOT\s+PASS\b", line, re.IGNORECASE):
             continue
-        hint_m = re.search(r"\b([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\s+PR\s*#", line, re.IGNORECASE)
+        if line[pass_m.end():pass_m.end() + 1] in ("'", '"'):
+            continue  # quoted-citation false positive, not a real verdict
+        # Anchored to END-of-string (right before THIS match's own "PR#"),
+        # not a line-wide search -- a line mentioning several PRs (bus
+        # #85217, real incident: "...Area 2 step 2a @ 07440aed — PASS
+        # (advisory; cosem-adcda...). Same shape as the Area-1 PR#855 I
+        # already passed...") must not borrow a hyphenated word adjacent to
+        # a DIFFERENT PR# mention elsewhere on the line as this PR#'s hint.
+        hint_m = re.search(
+            r"\b([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\s+$", line[:m.start()], re.IGNORECASE
+        )
         mentions.append((m.group(1), hint_m.group(1) if hint_m else None))
     return mentions
 
@@ -184,14 +215,21 @@ def _pr_view(owner: str, repo: str, pr_number: str) -> "dict | None":
 
 
 def _resolve_pr(owner_candidates, repo_hint, pr_number):
-    """Try repo_hint first (cheap, usually right per cc-quality's own message
-    shape), then every other known repo -- returns (owner, repo, pr_json) for
-    the first match, or None if the PR isn't found in any candidate repo."""
-    ordered = []
+    """When repo_hint is given, resolve ONLY against that repo -- never fall
+    through to a different one (bus #85217, console: the same cross-repo
+    collision class PR#697 fixed in bus_send.py -- a PR number is not unique
+    fleet-wide, e.g. orchestrator's real PR#636 vs cosem-platform's real
+    PR#636, so a hint that happens not to match must mean 'unresolved', not
+    license to go looking elsewhere and cite a different PR under the same
+    number). Only when NO hint was extracted does this try every known repo
+    (no hint to trust OR distrust) and return the first match. Either way:
+    None if the PR isn't found in any permitted candidate repo -- never
+    guessed."""
     if repo_hint:
-        ordered.extend([(o, r) for (o, r) in owner_candidates if r == repo_hint])
-    ordered.extend([(o, r) for (o, r) in owner_candidates if (o, r) not in ordered])
-    for owner, repo in ordered:
+        candidates = [(o, r) for (o, r) in owner_candidates if r == repo_hint]
+    else:
+        candidates = list(owner_candidates)
+    for owner, repo in candidates:
         pr = _pr_view(owner, repo, pr_number)
         if pr is not None:
             return owner, repo, pr

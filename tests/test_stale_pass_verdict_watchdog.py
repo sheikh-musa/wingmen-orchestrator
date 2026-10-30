@@ -47,6 +47,95 @@ def test_handles_empty_text():
     assert spw.extract_pass_pr_mentions(None) == []
 
 
+# bus #85217 (console): the real incident -- cc-quality's #85078 (a verdict
+# on orchestrator PR#692/693/694) quoted a hypothetical PASS-shaped string
+# while explaining PR#692's coverage gap, and it got misread as a fresh
+# cosem-adcda PR#857 verdict, paging on a 9-day-stale citation instead of
+# the real PR#857 verdict (#83927).
+def test_skips_a_quoted_citation_of_a_pass_shaped_string():
+    line = (
+        "  refuse_if_pr_verdict_misrouted('cc-quality','cc-cosem-adcda-1',"
+        "'cosem-adcda PR#857 PASS') -> no-op (did NOT fire)"
+    )
+    assert spw.extract_pass_pr_mentions(line) == []
+
+
+def test_quoted_citation_guard_does_not_eat_a_real_verdict_elsewhere_in_the_same_message():
+    text = (
+        "  refuse_if_pr_verdict_misrouted('cc-quality','cc-cosem-adcda-1',"
+        "'cosem-adcda PR#857 PASS') -> no-op (did NOT fire)\n"
+        "PR#692 (misroute guard): code CORRECT, ran 171/171 -- PASS.\n"
+    )
+    assert spw.extract_pass_pr_mentions(text) == [("692", None)]
+
+
+def test_fail_safe_hyphen_compound_does_not_suppress_a_real_pass_verdict():
+    # found writing the quoted-citation test above: \bFAIL\b alone matches
+    # "fail" inside "fail-safe" (hyphen is a non-word boundary), wrongly
+    # treating a real PASS verdict as a FAIL verdict.
+    assert spw.extract_pass_pr_mentions("PR#692: code CORRECT, fail-safe design -- PASS.") == \
+        [("692", None)]
+    assert spw.extract_pass_pr_mentions("PR#692: not on any block-list -- PASS.") == \
+        [("692", None)]
+
+
+def test_quoted_citation_guard_only_checks_right_after_the_pass_match():
+    # an apostrophe EARLIER in the line (ordinary prose) must not suppress a
+    # real verdict later in the same line -- only a quote immediately after
+    # the matched PASS word disqualifies it.
+    line = "cc-quality's review: cosem-adcda PR#857 -- PASS"
+    assert spw.extract_pass_pr_mentions(line) == [("857", "cosem-adcda")]
+
+
+# The exact real incident (bus #85078, the message console's #85217 was
+# about): a verdict on orchestrator PR#692/693/694 that illustrates PR#692's
+# own coverage gap by quoting a hypothetical call+return value verbatim.
+# The quoted line ALSO happens to mention a different, unrelated PR (#855)
+# right next to a hyphenated word ("Area-1"), which is the real-world case
+# that defeated plain repo-hint matching as a fix: the hint extracted would
+# have been syntactically valid (a real repo name) even though it was never
+# meant to describe PR#857 at all.
+REAL_85078_BODY = (
+    "PR#857 op#35986 Doha-move Area 2 step 2a @ 07440aed — PASS (advisory; "
+    "cosem-adcda, adult gov-ID PII lane). Same shape as the Area-1 PR#855 I "
+    "already passed: a behavior-preserving server-only extraction of three "
+    "read callables into functions-shared/lib + me-central1 twins, no "
+    "client call-site switch. Review it AFTER #855 merges (it's stacked on "
+    "it). ran on claude-opus-4-8.\n"
+    "I isolated PR#857's OWN delta (diffed vs PR#855's head, not vs main, "
+    "so #855's files don't muddy it) and verified the three Area-2 "
+    "callables each way.\n"
+)
+
+
+def test_real_85078_body_does_not_misattribute_857_to_the_wrong_hint():
+    # This message's own real PR#857 verdict line is itself genuine (not a
+    # quoted citation) -- it correctly extracts, but with NO hint borrowed
+    # from the unrelated "Area-1 PR#855" mention later in the same line.
+    mentions = spw.extract_pass_pr_mentions(REAL_85078_BODY)
+    assert ("857", None) in mentions
+    assert not any(hint == "Area-1" for _, hint in mentions)
+
+
+def test_real_85078_quoted_citation_variant_is_fully_suppressed():
+    # The ACTUAL #85078 bug report (console's #85217): the real message body
+    # also contains the quoted-citation line (reproduced verbatim) alongside
+    # genuine PR#692/693/694 verdicts for a DIFFERENT repo. The citation's
+    # PR#857 must not surface at all; the real PRs must still extract clean.
+    text = (
+        "PR#692 (misroute guard core): code CORRECT, 171/171 -- PASS.\n"
+        "PR#693 (misroute guard tests): coverage CORRECT -- PASS.\n"
+        "PR#694 (misroute guard docs): accurate -- PASS.\n"
+        "Gap I noticed while reviewing #692: it only tests same-repo "
+        "collisions. A cross-repo collision (hint resolves but to the wrong "
+        "repo) is untested, e.g.:\n"
+        "  refuse_if_pr_verdict_misrouted('cc-quality','cc-cosem-adcda-1',"
+        "'cosem-adcda PR#857 PASS') -> no-op (did NOT fire)\n"
+    )
+    mentions = spw.extract_pass_pr_mentions(text)
+    assert mentions == [("692", None), ("693", None), ("694", None)]
+
+
 # ── is_stale ──────────────────────────────────────────────────────────────────
 def test_merged_pr_is_never_stale():
     assert spw.is_stale("MERGED", "2026-10-30T18:00:00Z", None, 1000, 1000 + THRESHOLD + 10) is False
@@ -239,6 +328,46 @@ def test_run_dry_run_never_inserts_or_saves(monkeypatch):
     spw.run(conn, dry=True)
     assert cur.inserts == []
     assert saved == {}
+
+
+# ── _resolve_pr ──────────────────────────────────────────────────────────────
+# bus #85217 (console): a repo_hint that doesn't resolve must mean
+# "unresolved", never license to go looking in a DIFFERENT known repo and
+# cite whatever PR happens to share that number there -- the same cross-repo
+# collision class bus_send.py's refuse_if_pr_verdict_misrouted (PR#697) fixed.
+def test_resolve_pr_with_a_hint_never_falls_through_to_another_repo(monkeypatch):
+    calls = []
+
+    def _fake_pr_view(owner, repo, pr_number):
+        calls.append((owner, repo))
+        return {"state": "OPEN"} if repo == "cosem-adcda" else None
+
+    monkeypatch.setattr(spw, "_pr_view", _fake_pr_view)
+    known = [("sheikh-musa", "cosem-adcda"), ("sheikh-musa", "wingmen-orchestrator")]
+    # repo_hint="wingmen-orchestrator" has no PR#857 (fake _pr_view returns None for it);
+    # cosem-adcda DOES have a real PR#857 -- but it must NOT be tried, because the hint
+    # named a different repo.
+    result = spw._resolve_pr(known, "wingmen-orchestrator", "857")
+    assert result is None
+    assert calls == [("sheikh-musa", "wingmen-orchestrator")]  # cosem-adcda never even tried
+
+
+def test_resolve_pr_with_a_matching_hint_resolves_normally(monkeypatch):
+    known = [("sheikh-musa", "cosem-adcda"), ("sheikh-musa", "wingmen-orchestrator")]
+    monkeypatch.setattr(
+        spw, "_pr_view",
+        lambda owner, repo, n: {"state": "OPEN"} if repo == "cosem-adcda" else None,
+    )
+    assert spw._resolve_pr(known, "cosem-adcda", "857") == ("sheikh-musa", "cosem-adcda", {"state": "OPEN"})
+
+
+def test_resolve_pr_without_a_hint_still_tries_every_known_repo(monkeypatch):
+    known = [("sheikh-musa", "cosem-adcda"), ("sheikh-musa", "wingmen-orchestrator")]
+    monkeypatch.setattr(
+        spw, "_pr_view",
+        lambda owner, repo, n: {"state": "OPEN"} if repo == "wingmen-orchestrator" else None,
+    )
+    assert spw._resolve_pr(known, None, "692") == ("sheikh-musa", "wingmen-orchestrator", {"state": "OPEN"})
 
 
 # ── _latest_commit_epoch ──────────────────────────────────────────────────────
