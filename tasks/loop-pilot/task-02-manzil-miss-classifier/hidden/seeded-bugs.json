@@ -1,0 +1,30 @@
+{
+  "task_id": "task-02-manzil-miss-classifier",
+  "note": "Informational record of the bug CATEGORIES the hidden oracle (oracle_test.ts, written transiently by grader.py) checks for. The builder writes classifyManzilMiss() from scratch -- nothing is literally injected into its code. 'Seeded' here means 'plausible implementation mistakes a cheap builder model might make against this exact spec', which is what the oracle is designed to catch independent of whatever the spec-writer's own acceptance tests happened to cover.",
+  "bugs": [
+    {
+      "id": "boundary-off-by-one",
+      "description": "windowStartDate computed as newMissDate - 28 calendar days (making the window 29 days wide) or -26 (making it 27 days wide and wrongly excluding a miss exactly 27 days back) instead of the spec's -27."
+    },
+    {
+      "id": "forgot-plus-one-for-new-miss",
+      "description": "ordinalInWindow returned as just the count of in-window pastMissDates, without the +1 for newMissDate itself -- a first-ever miss with empty pastMissDates incorrectly returns ordinalInWindow 0 instead of 1."
+    },
+    {
+      "id": "ms-based-day-math",
+      "description": "Day-in-range comparison done via (newMissDate.getTime() - d.getTime()) / 86400000 <= 27 instead of comparing UTC calendar-day boundaries -- gives a wrong boundary result whenever the two Date objects carry different time-of-day components (e.g. one at 00:00:00Z, another at 23:00:00Z landing on what should be the same or an adjacent calendar day)."
+    },
+    {
+      "id": "wrong-status-thresholds",
+      "description": "Off-by-one on the ordinal->status mapping -- e.g. treats ordinalInWindow 3 as 'protocol-review-notification' (should be 'protocol-review-flagged', reserving flagged for 4+) or treats ordinalInWindow 2 as 'forgiven'."
+    },
+    {
+      "id": "includes-future-dated-misses",
+      "description": "Does not exclude pastMissDates entries whose calendar day is after newMissDate's calendar day, inflating the count/ordinal for a caller that (incorrectly, but plausibly) passed an unsorted or partially-future-dated array."
+    },
+    {
+      "id": "mutates-input-array",
+      "description": "Sorts pastMissDates in place (e.g. via .sort() before scanning) instead of leaving the caller's array untouched."
+    }
+  ]
+}

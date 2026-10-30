@@ -1,0 +1,30 @@
+{
+  "task_id": "task-05-ayah-status-classifier",
+  "note": "Informational record of the bug CATEGORIES the hidden oracle (oracle_test.ts, written transiently by grader.py) checks for. The builder writes classifyAyahStatus() from scratch -- nothing is literally injected into its code. 'Seeded' here means 'plausible implementation mistakes a cheap builder model might make against this exact spec', which is what the oracle is designed to catch independent of whatever the spec-writer's own acceptance tests happened to cover.",
+  "bugs": [
+    {
+      "id": "tajweed-grade-affects-hifz-fluent",
+      "description": "hifzFluent additionally requires tajweed.lastGrade >= 3 (or similar), collapsing the two H-8 dimensions by letting a low tajweed grade block a fluency determination that should be based on memorization alone."
+    },
+    {
+      "id": "hifz-state-affects-tajweed-weak",
+      "description": "tajweedWeak additionally requires retrievability < some threshold (or checks isLeech), collapsing the two dimensions the other direction."
+    },
+    {
+      "id": "wrong-retrievability-boundary",
+      "description": "Uses retrievability > 0.9 (strictly greater) instead of the spec's >= 0.9, wrongly classifying an ayah at exactly 0.9 as not fluent."
+    },
+    {
+      "id": "ignores-leech-flag",
+      "description": "hifzFluent computed as just retrievability >= 0.9, ignoring isLeech entirely -- a leeched ayah with high retrievability is wrongly classified as fluent."
+    },
+    {
+      "id": "wrong-grade-boundary",
+      "description": "Uses lastGrade < 3 (equivalent in practice to <=2, but implemented as lastGrade <= 3 by an off-by-one slip) instead of the spec's <= 2, wrongly classifying grade 3 as weak."
+    },
+    {
+      "id": "wrong-combined-label-mapping",
+      "description": "Swaps the fluent-tajweed-weak and weak-hifz-tajweed-ok cases in the combinedLabel mapping (a transposed if/else or switch-case ordering mistake)."
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "task_id": "task-06-fsrs-export-payload",
+  "note": "Informational record of the bug CATEGORIES the hidden oracle (oracle_test.ts, written transiently by grader.py) checks for. The builder writes createFsrsExportPayload() from scratch -- nothing is literally injected into its code. 'Seeded' here means 'plausible implementation mistakes a cheap builder model might make against this exact spec', which is what the oracle is designed to catch independent of whatever the spec-writer's own acceptance tests happened to cover.",
+  "bugs": [
+    {
+      "id": "uses-date-now-instead-of-param",
+      "description": "Calls Date.now() or new Date() internally for exportedAt instead of using the passed `now` parameter, making the output non-deterministic and untestable against an explicit timestamp."
+    },
+    {
+      "id": "wrong-row-counts",
+      "description": "Computes rowCounts from the wrong array (e.g. auditLog count copied from events.length) or after some transformation (e.g. after deduping), instead of the original input arrays' raw lengths."
+    },
+    {
+      "id": "shallow-reference-leak",
+      "description": "Returns the caller's original arrays/objects directly (payload.state === state, or payload.state[i] === state[i]) instead of a deep-enough copy -- mutating the original array or a row object after the call corrupts the already-returned 'export snapshot'."
+    },
+    {
+      "id": "mutates-input-arrays",
+      "description": "Sorts or otherwise mutates the original state/events/auditLog arrays in place while building the payload (e.g. state.sort(...) instead of [...state].sort(...))."
+    },
+    {
+      "id": "dedupes-rows",
+      "description": "Runs the rows through a Set/Map-based dedup step (e.g. by JSON.stringify-ing each row to a key), wrongly collapsing a legitimately-duplicated row object that appeared twice in the input into a single entry in the output."
+    },
+    {
+      "id": "wrong-schema-version-type",
+      "description": "Returns schemaVersion as the number 1 instead of the literal string \"1\" specified in the interface, or computes it dynamically instead of a fixed constant."
+    }
+  ]
+}

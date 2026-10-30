@@ -357,7 +357,62 @@ not a signal anything is wrong.
 
 1. Task selection: cc-hifz-1 didn't point at specific backlog items; drafting
    6-10 tasks + seeded bugs myself, sanity-checked by cc-hifz-1 before any
-   real run.
+   real run. **task-01-manzil-catchup** done, verified, and run live
+   (condition A, PASS, `correct_pass`). **task-02-manzil-miss-classifier**
+   drafted 2026-10-30 (H-7 2nd/3rd-miss ordinal classification, the
+   `reconciler.ts:241` gap) -- oracle verified clean against a correct
+   reference implementation and catches all 6 seeded-bug variants
+   individually (boundary-off-by-one, forgot-plus-one, ms-based-day-math,
+   wrong-status-thresholds, includes-future-dated-misses,
+   mutates-input-array); not yet run live. **task-03-oracle-audit-plan**
+   drafted 2026-10-30 (H-6's mastered-pool eligibility + pool-size-based
+   sample-size calc, the never-built `scripts/audits/fsrs_oracle_sweep.ts`
+   planning step) -- oracle verified clean against a correct reference and
+   catches all 6 seeded-bug variants (wrong-threshold-base,
+   off-by-one-threshold, wrong-eligibility-operator,
+   wrong-interval-boundary, no-cap-to-pool-size, mutates-input-array); the
+   first attempt at wrong-threshold-base wasn't caught (the pool-size cap
+   masked it when the eligible pool was tiny) -- fixed by adding a test
+   where the eligible pool is bigger than the correct base but smaller
+   than the wrong one, so the cap can't hide the difference; not yet run
+   live. **task-04-local-calendar-day** drafted 2026-10-30 (H-5's explicit
+   "user's timezone, not UTC" requirement -- `reconciler.ts:103-104`'s
+   existing `elapsedDays` is raw-ms-based, not timezone-aware at all; this
+   task is the missing primitive `localCalendarDayKey`/`isSameLocalDay`,
+   NOT a fix to `reconciler.ts` itself, which stays out of scope) -- oracle
+   verified clean against a correct `Intl.DateTimeFormat`-based reference
+   and catches all 6 seeded-bug variants (ignores-timezone-uses-utc,
+   ignores-timezone-uses-system-local, hardcoded-fixed-offset-ignoring-dst,
+   sign-flipped-offset-math, wrong-output-format,
+   isSameLocalDay-ignores-timezone-param); not yet run live.
+   **task-05-ayah-status-classifier** drafted 2026-10-30 (H-8's "an ayah
+   can be fluent in hifz and weak in tajweed simultaneously -- collapsing
+   them corrupts both signals") -- oracle verified clean against a
+   correct reference and catches all 6 seeded-bug variants
+   (tajweed-grade-affects-hifz-fluent, hifz-state-affects-tajweed-weak,
+   wrong-retrievability-boundary, ignores-leech-flag,
+   wrong-grade-boundary, wrong-combined-label-mapping); the
+   hifz-state-affects-tajweed-weak variant wasn't caught on the first
+   pass (my no-cross-contamination test only varied retrievability, never
+   isLeech, so a bug that leaked isLeech into tajweedWeak sailed through)
+   -- fixed by adding an isLeech-specific no-cross-contamination test; not
+   yet run live. **task-06-fsrs-export-payload** drafted 2026-10-30 (H-9's
+   full FSRS state + audit log export -- distinct from the existing,
+   already-shipped `backup/service.ts createBackupPayload()`, which
+   covers progress/sessions/downloads/settings but not FSRS scheduler
+   state or `fsrs_audit_events`; out of scope to touch that function) --
+   oracle verified clean against a correct reference and catches all 6
+   seeded-bug variants (uses-date-now-instead-of-param,
+   wrong-row-counts, shallow-reference-leak, mutates-input-arrays,
+   dedupes-rows, wrong-schema-version-type); not yet run live.
+
+   **6 of 6 minimum pilot tasks now drafted and individually
+   oracle-verified** (each against a correct reference implementation
+   AND every one of its own seeded-bug variants, in a scratch worktree,
+   before being trusted) -- none run live yet except task-01. Next: get
+   PR#666 merged (orch-console + cc-quality both waiting on green CI,
+   "no live runs until it lands" per #83851), then run the full A-vs-B
+   measured pilot across all 6 tasks.
 2. Whether hifz already has a local-runner GH-status mechanism to reuse
    instead of `local_ci_runner.sh` -- asked cc-hifz-1, no answer yet.
 3. `switch_lane_token`-for-one-shot-session and the builder-worktree isolation

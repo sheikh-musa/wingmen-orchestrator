@@ -1,0 +1,30 @@
+{
+  "task_id": "task-03-oracle-audit-plan",
+  "note": "Informational record of the bug CATEGORIES the hidden oracle (oracle_test.ts, written transiently by grader.py) checks for. The builder writes computeOracleAuditPlan() from scratch -- nothing is literally injected into its code. 'Seeded' here means 'plausible implementation mistakes a cheap builder model might make against this exact spec', which is what the oracle is designed to catch independent of whatever the spec-writer's own acceptance tests happened to cover.",
+  "bugs": [
+    {
+      "id": "wrong-threshold-base",
+      "description": "Uses allStates.length (the full, unfiltered input) instead of eligibleAyahIds.length (the filtered mastered-pool size) to decide between sample size 5 and 10 -- gives the wrong base whenever ineligible entries are present."
+    },
+    {
+      "id": "off-by-one-threshold",
+      "description": "Uses eligibleAyahIds.length > 50 (strictly greater) instead of >= 50 for the 5-vs-10 threshold, miscategorizing a pool of exactly 50 as sample size 5 instead of 10."
+    },
+    {
+      "id": "wrong-eligibility-operator",
+      "description": "Uses AND instead of OR between the retrievability and intervalDays conditions, wrongly excluding entries that satisfy only one of the two (e.g. interval_days=90 but retrievability=0.80)."
+    },
+    {
+      "id": "wrong-interval-boundary",
+      "description": "Uses intervalDays >= 60 (inclusive) instead of the spec's strict intervalDays > 60, wrongly including an entry at exactly 60 days as eligible via the interval condition."
+    },
+    {
+      "id": "no-cap-to-pool-size",
+      "description": "Returns the raw base sample size (5 or 10) even when eligibleAyahIds.length is smaller than that (e.g. 2 eligible entries, sampleSize should be 2 but returns 5)."
+    },
+    {
+      "id": "mutates-input-array",
+      "description": "Filters or sorts allStates via an in-place method (e.g. .sort() before scanning, or .splice() to remove ineligible entries) instead of leaving the caller's array untouched."
+    }
+  ]
+}
