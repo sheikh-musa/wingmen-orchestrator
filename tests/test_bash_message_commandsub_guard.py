@@ -132,6 +132,123 @@ def test_allows_single_quoted_segment_concatenated_with_safe_unquoted_text(monke
     assert _run(cmd, monkeypatch) == 0
 
 
+# --- orch-console bus #83846/#83852: narrow allow for the standard
+# quoted-heredoc commit/message pattern every lane's own commit
+# instructions use. Safe because a single-quoted heredoc delimiter
+# suppresses ALL expansion in the body (same as single quotes), and
+# `cat` with no other args only ever echoes stdin back.
+
+def test_allows_exact_quoted_heredoc_cat_substitution(monkeypatch):
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\ndocs: fix stale comment\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 0
+
+
+def test_refuses_same_shape_with_unquoted_delimiter(monkeypatch):
+    cmd = "git commit " + "-m \"$(cat <<EOF\ndocs: fix stale comment\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_refuses_backtick_elsewhere_alongside_the_safe_heredoc(monkeypatch):
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\ndocs: fix\nEOF\n)" + "`whoami`\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_refuses_dollar_paren_elsewhere_alongside_the_safe_heredoc(monkeypatch):
+    cmd = "git commit " + "-m \"$(whoami)$(cat <<'EOF'\ndocs: fix\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_refuses_cat_with_extra_arguments_inside_the_parens(monkeypatch):
+    cmd = "git commit " + "-m \"$(cat -v <<'EOF'\ndocs: fix\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_refuses_trailing_text_after_the_closing_paren(monkeypatch):
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\ndocs: fix\nEOF\n) extra\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_allows_the_heredoc_dash_variant_with_single_quoted_delimiter(monkeypatch):
+    cmd = "git commit " + "-m \"$(cat <<-'EOF'\ndocs: fix\n\tEOF\n)\""
+    assert _run(cmd, monkeypatch) == 0
+
+
+def test_heredoc_body_containing_its_own_backticks_stays_safe(monkeypatch):
+    # The whole point: a single-quoted delimiter means bash never expands the
+    # body, so a literal backtick/`$(` INSIDE it is inert, not a hazard.
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\nsee " + "`rm -rf /tmp/x`" + " for details\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 0
+
+
+# --- cc-quality bus #83877/#83878 (2026-10-30): confirmed delimiter-injection
+# bypass of the allow above, grounded against real bash (the embedded
+# substitution EXECUTED). A body line equal to the delimiter ends the
+# heredoc at that FIRST occurrence in real bash, but the old non-greedy
+# `.*?` + backref regex could match a LATER occurrence instead, treating a
+# live trailing substitution between the two as inert body text. Fixed by
+# parsing the heredoc the way bash does (line by line, first-match-wins)
+# instead of a single backtracking regex.
+
+def test_refuses_cc_quality_83877_delimiter_injection_bypass(monkeypatch):
+    # $(cat <<'EOF'\nEOF\n)$(id)\nEOF\n) -- bash ends the heredoc at the
+    # FIRST "EOF" (empty body), so the trailing )$(id) is a LIVE, separate
+    # substitution, not heredoc body. Must refuse.
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\nEOF\n)" + "$(id)" + "\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_allows_terminator_line_with_trailing_space_and_clean_tail(monkeypatch):
+    # Corrected premise (cc-quality bus #83914, grounded against real
+    # /bin/bash 3.2.57): a delimiter line with trailing whitespace DOES
+    # terminate the heredoc there -- bash is lenient on trailing whitespace,
+    # not strict. Since nothing but ")" follows that line, this is genuinely
+    # safe and must be allowed, not refused.
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\ndocs: fix\nEOF \n)\""
+    assert _run(cmd, monkeypatch) == 0
+
+
+def test_allows_dash_heredoc_with_tab_indented_terminator(monkeypatch):
+    # <<- strips only LEADING TABS from the terminator line before comparing
+    # -- a tab-indented "\tEOF" is a valid terminator for the dash form.
+    cmd = "git commit " + "-m \"$(cat <<-'EOF'\ndocs: fix\n\tEOF\n)\""
+    assert _run(cmd, monkeypatch) == 0
+
+
+def test_refuses_dash_heredoc_delimiter_injection_bypass(monkeypatch):
+    # Same bypass shape as 83877, but via the tab-stripping dash form: a
+    # tab-indented "\tEOF" line still terminates the heredoc at its FIRST
+    # occurrence, so trailing )$(id) + a second EOF + ) must still refuse.
+    cmd = "git commit " + "-m \"$(cat <<-'EOF'\n\tEOF\n)" + "$(id)" + "\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+# --- cc-quality bus #83914 (2026-10-30): a SECOND round of the same
+# delimiter-injection class, reopened by one trailing space. Bash 3.2.57
+# (grounded, with an execution marker) terminates a heredoc at a delimiter
+# line even with trailing whitespace, but the first fix's exact `==` match
+# skipped that line and found a LATER clean delimiter instead, treating a
+# live trailing substitution as inert body. Fixed by stripping trailing
+# whitespace (and leading tabs for <<-) before comparing to the delimiter,
+# plus a defense-in-depth check (console bus #83924) refusing any value
+# where some OTHER line is delimiter-shaped under a looser full-strip.
+
+def test_refuses_trailing_space_delimiter_injection_bypass(monkeypatch):
+    # $(cat <<'EOF'\nEOF \n)$(echo PWNED)\nEOF\n) -- bash terminates at the
+    # FIRST line "EOF " (trailing space), so the trailing )$(echo PWNED) is
+    # live, separate substitution, not heredoc body. Must refuse.
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\nEOF \n)" + "$(echo PWNED)" + "\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_refuses_ambiguous_leading_whitespace_delimiter_elsewhere(monkeypatch):
+    # Defense in depth: a line " EOF" (leading space) does not match under
+    # the strict non-dash rule (which strips trailing only), so the real
+    # terminator is the later clean "EOF" -- but a DIFFERENT shell could
+    # plausibly treat " EOF" as a terminator too. That ambiguity refuses.
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\n docs\n EOF\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
 # --- cc-quality PR#657 review, Finding B: no outer catch-all = fail-open risk ---
 
 def test_unexpected_exception_in_main_fails_closed(monkeypatch):
