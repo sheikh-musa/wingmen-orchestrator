@@ -43,6 +43,31 @@ HIFZ_WORKTREE_ROOT = Path.home() / "wingmen" / "projects"
 RESULTS_DIR = Path.home() / "wingmen" / "loop-pilot-state"
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 
+# op#35690 / orch-console bus #83797 (cc-quality MEDIUM on PR#661): role
+# sessions and the `tests`-check subprocess both run with DATABASE_URL (and
+# other KEEP-tier secrets) in their env (launch_dangerous_cc.sh's shared
+# allow-list, scripts/lib/lane_env_allowlist.sh -- not something this
+# harness can override per-base-id), so their captured stdout/stderr must
+# never be persisted or printed unredacted. Reuses the fleet's existing
+# secret-shape patterns (same module secrets_transcript_guard.py's Rule E and
+# secrets_output_scanner.py both use) rather than inventing new detection.
+sys.path.insert(0, str(ORCH_DIR / "scripts" / "hooks"))
+from secret_shape_patterns import SECRET_VALUE_PATTERNS, find_hits  # noqa: E402
+
+REDACTION = "[REDACTED by run_pilot.py -- pattern:{cls}]"
+
+
+def redact_text(text: str) -> str:
+    """Replaces every secret-shaped span in `text` with REDACTION, for every
+    pattern class that has at least one hit. Idempotent, safe to call on
+    clean text (no-op). Call this on ANY role or subprocess output before it
+    is stored on a result object or printed -- never persist/print raw."""
+    if not text:
+        return text
+    for cls, _match in find_hits(text, SECRET_VALUE_PATTERNS):
+        text = SECRET_VALUE_PATTERNS[cls].sub(REDACTION.format(cls=cls), text)
+    return text
+
 CONDITIONS = {
     "A": {"spec_writer": "deepseek-flash", "builder": "deepseek-flash", "reviewer": "deepseek-flash"},
     "B": {"spec_writer": "claude-opus-4-8", "builder": "deepseek-flash", "reviewer": "claude-opus-4-8"},
@@ -164,8 +189,13 @@ def launch_role(role: str, worktree: Path, model: str, max_turns: int,
     t0 = time.monotonic()
     r = subprocess.run(cmd, cwd=str(worktree), env=env, capture_output=True, text=True)
     duration = time.monotonic() - t0
+    # Redact at the source: the role session's own process carries DATABASE_URL
+    # (launch_dangerous_cc.sh's shared KEEP tier) -- its captured output must
+    # never be stored unredacted, even transiently, since callers embed
+    # rr.stdout/rr.stderr straight into error messages / the result object.
     return RoleResult(role=role, model=model, returncode=r.returncode,
-                       duration_s=duration, stdout=r.stdout, stderr=r.stderr)
+                       duration_s=duration, stdout=redact_text(r.stdout),
+                       stderr=redact_text(r.stderr))
 
 
 def extract_marker(text: str, prefix: str) -> str | None:
@@ -224,15 +254,35 @@ def deepseek_balance_usd() -> float:
 
 # ── checks ─────────────────────────────────────────────────────────────────
 
+# Secrets local_ci_runner.sh's subprocess (npm/vite/playwright/node build
+# tooling, none of which talks to the orchestrator substrate) has no
+# legitimate need for, but would inherit via plain env=None since it's
+# launched from run_pilot.py's own process. Least-privilege for the one
+# subprocess call this harness fully controls and that runs the most
+# third-party tooling (orch-console bus #83797, cc-quality MEDIUM on PR#661).
+_CI_UNNEEDED_SECRETS = {
+    "DATABASE_URL", "SUPABASE_DB_URL", "SUPABASE_SERVICE_KEY",
+    "ORCHESTRATOR_SUPABASE_URL", "ORCHESTRATOR_SUPABASE_SERVICE_KEY",
+    "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+}
+
+
+def _ci_subprocess_env() -> dict:
+    return {k: v for k, v in os.environ.items() if k not in _CI_UNNEEDED_SECRETS}
+
+
 def run_tests_check(worktree: Path, sha: str, owner: str, repo: str) -> tuple[str, str]:
     r = run([str(ORCH_DIR / "scripts" / "loop" / "local_ci_runner.sh"),
              "--repo-dir", str(worktree), "--sha", sha,
              "--post-status", "--owner", owner, "--repo", repo,
-             "--orch-dir", str(ORCH_DIR)], check=False, timeout=900)
+             "--orch-dir", str(ORCH_DIR)], env=_ci_subprocess_env(), check=False, timeout=900)
     status = "success" if r.returncode == 0 else "failure"
-    # Last ~2000 chars of combined output -- enough to tell a real CI failure
-    # from an infra break (e.g. a script missing +x) without flooding the result.
-    detail = (r.stdout + "\n" + r.stderr)[-2000:]
+    # Redact BEFORE slicing (defense in depth even with the env scrub above --
+    # GH_TOKEN/etc are still present and this subprocess runs third-party
+    # tooling this harness doesn't fully control). Last ~2000 chars of the
+    # redacted text: enough to tell a real CI failure from an infra break
+    # (e.g. a script missing +x) without flooding the result.
+    detail = redact_text(r.stdout + "\n" + r.stderr)[-2000:]
     return status, detail
 
 
@@ -241,9 +291,10 @@ def run_spec_tests_check(worktree: Path, task_id: str, spec_sha: str, head_sha: 
     r = run([sys.executable, str(ORCH_DIR / "scripts" / "loop" / "check_spec_tests_unchanged.py"),
              "--repo-dir", str(worktree), "--task-id", task_id,
              "--spec-commit-sha", spec_sha, "--head-sha", head_sha,
-             "--owner", owner, "--repo", repo, "--post-status"], check=False)
+             "--owner", owner, "--repo", repo, "--post-status"],
+            env=_ci_subprocess_env(), check=False)
     status = "success" if r.returncode == 0 else "failure"
-    detail = (r.stdout + "\n" + r.stderr).strip()[-2000:]
+    detail = redact_text(r.stdout + "\n" + r.stderr).strip()[-2000:]
     return status, detail
 
 
@@ -252,7 +303,7 @@ def run_grader(task_id: str, worktree: Path, head_sha: str) -> dict:
     if not grader_path.exists():
         raise PilotError(f"grader not found: {grader_path}")
     r = run([sys.executable, str(grader_path), "--repo-dir", str(worktree), "--head-sha", head_sha],
-            check=True)
+            env=_ci_subprocess_env(), check=True)
     return json.loads(r.stdout)
 
 
@@ -290,7 +341,8 @@ def do_spec_writer(task_id: str, worktree: Path, model: str, max_turns: int,
     run([sys.executable, str(ORCH_DIR / "scripts" / "loop" / "record_manifest.py"),
          "--task-id", task_id, "--repo-dir", str(worktree),
          "--spec-commit-sha", actual_sha, "--spec-writer-model", model,
-         *[arg for f in test_files for arg in ("--test-file", f)]])
+         *[arg for f in test_files for arg in ("--test-file", f)]],
+        env=_ci_subprocess_env())
 
     # Not committed yet, and nothing has consumed `actual_sha` as a pin point
     # yet (builder hasn't started) -- amending the role's own commit to fold
@@ -362,7 +414,8 @@ def do_reviewer(task_id: str, hifz_checkout: str, review_worktree: Path, head_sh
     run([sys.executable, str(ORCH_DIR / "scripts" / "loop" / "reviewer_verdict.py"),
          "--task-id", task_id, "--repo-dir", str(review_worktree),
          "--head-sha", head_sha, "--verdict", verdict, "--reason", reason,
-         "--reviewer-model", model, "--reviewer-identity", "cc-loop"])
+         "--reviewer-model", model, "--reviewer-identity", "cc-loop"],
+        env=_ci_subprocess_env())
 
     # loop-pilot/reviews is a SHARED branch other task-runs also push to --
     # fetch/checkout it fresh here (the review_worktree started detached at
@@ -383,7 +436,8 @@ def do_reviewer(task_id: str, hifz_checkout: str, review_worktree: Path, head_sh
     run([sys.executable, str(ORCH_DIR / "scripts" / "loop" / "gh_status.py"),
          "--owner", owner, "--repo", repo, "--sha", head_sha,
          "--state", "success" if verdict == "PASS" else "failure",
-         "--context", "reviewer-verdict", "--description", reason[:140]])
+         "--context", "reviewer-verdict", "--description", reason[:140]],
+        env=_ci_subprocess_env())
 
     return verdict, reason
 
