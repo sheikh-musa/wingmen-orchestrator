@@ -66,7 +66,7 @@ def _upd(update_id, chat_id=1111, text="hello", username=None):
 # ── A1: idempotent ingest ─────────────────────────────────────────────────────
 
 def test_redelivered_update_never_double_logs(db, monkeypatch):
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
     ch = _channel(db)
     assert ingest.process_update(db, ch, _upd(9001)) is True      # first delivery wins
     assert ingest.process_update(db, ch, _upd(9001)) is False     # replay loses
@@ -121,7 +121,7 @@ def test_gate_deny_by_default_and_allow_paths(db):
 
 def test_gated_update_is_logged_but_not_routed(db, monkeypatch):
     nudges = []
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: nudges.append(a))
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: nudges.append(a))
     ch = _channel(db)
     ingest.process_update(db, ch, _upd(9002, chat_id=5555, text="spam"))
     with db.cursor() as cur:
@@ -133,7 +133,7 @@ def test_gated_update_is_logged_but_not_routed(db, monkeypatch):
 def test_allowed_update_nudges_count_only(db, monkeypatch):
     nudges = []
     monkeypatch.setattr(ingest, "nudge_session",
-                        lambda target, key, n: nudges.append((target, key, n)) or True)
+                        lambda target, key, n, **kw: nudges.append((target, key, n)) or True)
     ch = _channel(db)
     ingest.process_update(db, ch, _upd(9003, text="payload NEVER injected"))
     assert len(nudges) == 1
@@ -219,7 +219,7 @@ def _upd_reply(update_id, chat_id=1111, text="yes go ahead", from_id=1111,
 
 
 def test_process_update_calls_maybe_track_ask_with_reply_id(db, monkeypatch):
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
     calls = []
     monkeypatch.setattr(
         ingest.operator_log, "maybe_track_ask",
@@ -235,7 +235,7 @@ def test_process_update_calls_maybe_track_ask_with_reply_id(db, monkeypatch):
 
 
 def test_process_update_passes_none_when_not_a_reply(db, monkeypatch):
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
     calls = []
     monkeypatch.setattr(
         ingest.operator_log, "maybe_track_ask",
@@ -252,7 +252,7 @@ def test_asks_ledger_exception_does_not_block_routing(db, monkeypatch):
     # returns True, exactly as if tracking had no opinion at all.
     nudges = []
     monkeypatch.setattr(ingest, "nudge_session",
-                        lambda target, key, n: nudges.append((target, key, n)) or True)
+                        lambda target, key, n, **kw: nudges.append((target, key, n)) or True)
     def _boom(*a, **k):
         raise RuntimeError("db down for asks ledger")
     monkeypatch.setattr(ingest.operator_log, "maybe_track_ask", _boom)

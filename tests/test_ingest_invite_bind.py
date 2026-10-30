@@ -143,7 +143,7 @@ def test_start_invite_binds_chat_replies_self_description(bind_dsn, monkeypatch,
 
     rec = _Recorder([_start_upd(1, 424242, "/start inv-token-1")])
     monkeypatch.setattr(ingest, "tg_call", rec)
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
     _run_cycle(bind_dsn, "SHARED_BOT_TOKEN")
 
     with psycopg.connect(bind_dsn) as conn, conn.cursor() as cur:
@@ -181,7 +181,7 @@ def test_full_cycle_bind_then_message_routes_in_same_batch(bind_dsn, monkeypatch
         _start_upd(2, 424242, "change the hero headline to 'Trusted care, every home.'"),
     ])
     monkeypatch.setattr(ingest, "tg_call", rec)
-    monkeypatch.setattr(ingest, "nudge_session", lambda tgt, key, n: nudged.append(key) or True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda tgt, key, n, **kw: nudged.append(key) or True)
     monkeypatch.setattr(ingest, "pane_working", lambda *a: False)
 
     channels = _load_group(bind_dsn, "SHARED_BOT_TOKEN")
@@ -225,7 +225,7 @@ def test_parallel_three_clients_bind_independently(bind_dsn, monkeypatch):
         _start_upd(3, 333, "/start inv-client-c"),
     ])
     monkeypatch.setattr(ingest, "tg_call", rec)
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
     _run_cycle(bind_dsn, "SHARED_BOT_TOKEN")
 
     with psycopg.connect(bind_dsn) as conn, conn.cursor() as cur:
@@ -256,7 +256,7 @@ def test_invalid_used_expired_token_generic_reply_nothing_bound(
     text = "/start totally-wrong-token" if label == "unknown-token" else "/start inv-token"
     rec = _Recorder([_start_upd(1, 424242, text)])
     monkeypatch.setattr(ingest, "tg_call", rec)
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
     _run_cycle(bind_dsn, "SHARED_BOT_TOKEN")
 
     assert len(rec.sent) == 1
@@ -279,7 +279,7 @@ def test_bare_start_during_live_invite_gets_generic_reply(bind_dsn, monkeypatch)
 
     rec = _Recorder([_start_upd(1, 424242, "/start")])
     monkeypatch.setattr(ingest, "tg_call", rec)
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
     _run_cycle(bind_dsn, "SHARED_BOT_TOKEN")
 
     assert rec.sent and rec.sent[0]["text"] == ingest.GENERIC_INVITE_REPLY
@@ -301,7 +301,7 @@ def test_start_without_outstanding_invite_keeps_today_behavior(bind_dsn, monkeyp
     rec = _Recorder([_start_upd(1, 424242, "/start inv-token"),
                      _start_upd(2, 424242, "/start")])
     monkeypatch.setattr(ingest, "tg_call", rec)
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
     _run_cycle(bind_dsn, "SHARED_BOT_TOKEN")
 
     # only the deep-link tap is answered — with the generic reply
@@ -332,7 +332,7 @@ def test_cross_bind_attempt_refused_and_invite_survives(bind_dsn, monkeypatch):
 
     rec = _Recorder([_start_upd(1, 111, "/start inv-for-b")])
     monkeypatch.setattr(ingest, "tg_call", rec)
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
     _run_cycle(bind_dsn, "SHARED_BOT_TOKEN")
 
     assert rec.sent and rec.sent[0]["text"] == ingest.GENERIC_INVITE_REPLY
@@ -365,7 +365,7 @@ def test_bind_reply_names_no_sibling(bind_dsn, monkeypatch):
 
     rec = _Recorder([_start_upd(1, 424242, "/start inv-token")])
     monkeypatch.setattr(ingest, "tg_call", rec)
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
     _run_cycle(bind_dsn, "SHARED_BOT_TOKEN")
 
     assert len(rec.sent) == 1
@@ -435,7 +435,7 @@ def test_pinned_channel_bind_does_not_flip_enabled(bind_dsn, monkeypatch):
 
     rec = _Recorder([_start_upd(1, 424242, "/start inv-token")])
     monkeypatch.setattr(ingest, "tg_call", rec)
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
     _run_cycle(bind_dsn, "SHARED_BOT_TOKEN")
 
     with psycopg.connect(bind_dsn) as conn, conn.cursor() as cur:
@@ -455,7 +455,7 @@ def test_unpinned_channel_self_activates_on_bind(bind_dsn, monkeypatch):
 
     rec = _Recorder([_start_upd(1, 424242, "/start inv-token")])
     monkeypatch.setattr(ingest, "tg_call", rec)
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
     _run_cycle(bind_dsn, "SHARED_BOT_TOKEN")
 
     with psycopg.connect(bind_dsn) as conn, conn.cursor() as cur:

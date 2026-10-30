@@ -239,7 +239,7 @@ def test_multi_row_same_token_routes_by_chat_id_single_getupdates_call(cycle_dsn
         ]
 
     monkeypatch.setattr(ingest, "tg_call", _fake_tg_call)
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
     monkeypatch.setattr(ingest, "pane_working", lambda *a: False)
 
     import asyncio
@@ -273,7 +273,7 @@ def test_unmatched_chat_logs_under_first_row_never_dropped(cycle_dsn, monkeypatc
         return [{"update_id": 9, "message": {"chat": {"id": 999}, "from": {}, "text": "stranger"}}]
 
     monkeypatch.setattr(ingest, "tg_call", _fake_tg_call)
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
 
     import asyncio
     asyncio.run(ingest._run_token_cycle("SHARED_BOT_TOKEN", channels, 0.0))
@@ -317,7 +317,7 @@ def test_empty_allowlist_in_shared_group_is_logged_loud_not_silent(cycle_dsn, mo
     channels = _load_group(cycle_dsn, "SHARED_BOT_TOKEN")
 
     monkeypatch.setattr(ingest, "tg_call", lambda *a, **k: [])
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
 
     import asyncio
     asyncio.run(ingest._run_token_cycle("SHARED_BOT_TOKEN", channels, 0.0))
@@ -435,7 +435,7 @@ def test_wingmendevbot_testbed_repoint_three_real_rows_share_token_no_409(cycle_
         ]
 
     monkeypatch.setattr(ingest, "tg_call", _fake_tg_call)
-    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a, **kw: True)
     monkeypatch.setattr(ingest, "pane_working", lambda *a: False)
 
     import asyncio

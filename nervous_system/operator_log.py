@@ -878,6 +878,11 @@ def recent(limit: int = 20) -> list:
 # must come from the same body that read.
 _LAST_READ_IDS: list = []
 
+# Musa op#36085/36098, 2026-10-30: two of his messages sent ~seconds apart were
+# treated as separate thoughts. 30s is deliberately short -- this only flags
+# genuinely back-to-back sends, not "replied a bit later."
+COALESCE_WINDOW_SEC = 30
+
 
 def _reset_read_cursor() -> None:
     _LAST_READ_IDS.clear()
@@ -891,11 +896,19 @@ def unprocessed(limit: int = 20, tag: str | None = None) -> list:
     mark_handled_through()'s bound.
 
     Return shape (BACKWARD-COMPATIBLE — first 4 positions unchanged, sender
-    fields then the passive triage suggestion APPENDED at the end):
+    fields then the passive triage suggestion, then coalesce_with_prev,
+    APPENDED at the end):
         (id, tag, text, created_at,                 # original 4
          from_user_id, from_username, from_name,    # raw message.from
          sender_label, source,                      # derived: 'Musa'/name, 'DM'/'group'
-         triage)                                    # passive CoS route suggestion (dict), read-only
+         triage,                                    # passive CoS route suggestion (dict), read-only
+         coalesce_with_prev)                         # True = same sender+chat as the row before
+                                                      # it in THIS result, <= COALESCE_WINDOW_SEC
+                                                      # apart -- likely one thought split across
+                                                      # messages (Musa op#36085/36098: two of his
+                                                      # messages sent seconds apart were treated as
+                                                      # separate). Advisory only -- callers that
+                                                      # reply per-id are unaffected if they ignore it.
     """
     scope_sql, scope_params = _channel_scope(tag)
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
@@ -908,12 +921,21 @@ def unprocessed(limit: int = 20, tag: str | None = None) -> list:
             " ORDER BY id ASC LIMIT %s", (*scope_params, limit))
         rows = cur.fetchall()
     _LAST_READ_IDS[:] = [r[0] for r in rows]
-    return [(rid, tag_, text, created_at, fuid, funame, fname,
-             _sender_label(fuid, fname, funame),
-             _source_hint(chat_id, fuid),
-             _triage_for(cos_triage, text, tag_))
-            for (rid, tag_, text, created_at, chat_id,
-                 fuid, funame, fname, cos_triage) in rows]
+    result = []
+    prev_created_at = prev_chat_id = prev_fuid = None
+    for (rid, tag_, text, created_at, chat_id, fuid, funame, fname, cos_triage) in rows:
+        coalesce_with_prev = bool(
+            prev_created_at is not None
+            and chat_id == prev_chat_id
+            and fuid == prev_fuid
+            and (created_at - prev_created_at).total_seconds() <= COALESCE_WINDOW_SEC)
+        result.append((rid, tag_, text, created_at, fuid, funame, fname,
+                       _sender_label(fuid, fname, funame),
+                       _source_hint(chat_id, fuid),
+                       _triage_for(cos_triage, text, tag_),
+                       coalesce_with_prev))
+        prev_created_at, prev_chat_id, prev_fuid = created_at, chat_id, fuid
+    return result
 
 
 def _stamp_scope(tag: str | None) -> "tuple[str, tuple]":

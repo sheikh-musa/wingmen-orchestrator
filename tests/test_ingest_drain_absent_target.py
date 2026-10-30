@@ -36,7 +36,7 @@ def env(monkeypatch):
     logs, nudges = [], []
     monkeypatch.setattr(ingest, "_log_line", logs.append)
     monkeypatch.setattr(ingest, "nudge_session",
-                        lambda t, k, n: nudges.append((t, k, n)) or True)
+                        lambda t, k, n, **kw: nudges.append((t, k, n, kw)) or True)
     monkeypatch.setattr(ingest, "_ABSENT_TARGET_LOGGED", set())
     return logs, nudges
 
@@ -56,14 +56,14 @@ def test_present_target_is_nudged_and_logged_as_forced(env, monkeypatch):
     logs, nudges = env
     monkeypatch.setattr(ingest, "_session_exists", lambda t: True)
     ingest.drain_stale_deferred(_Conn(), _Ch())
-    assert nudges == [("orch", "brandit-coffeemedia", 3)]
+    assert nudges == [("orch", "brandit-coffeemedia", 3, {"urgent": True})]
     assert "FORCED nudge (max-latency cap)" in logs[0]
 
 
 def test_failed_delivery_is_logged_as_not_delivered(env, monkeypatch):
     logs, _ = env
     monkeypatch.setattr(ingest, "_session_exists", lambda t: True)
-    monkeypatch.setattr(ingest, "nudge_session", lambda t, k, n: False)
+    monkeypatch.setattr(ingest, "nudge_session", lambda t, k, n, **kw: False)
     ingest.drain_stale_deferred(_Conn(), _Ch())
     assert "NOT delivered" in logs[0]
 
