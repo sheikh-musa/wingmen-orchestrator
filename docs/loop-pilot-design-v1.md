@@ -538,3 +538,111 @@ run). Absent either, the only defensible claim from this data is: on 6 small
 well-specified algorithmic tasks, DeepSeek-only cost ~24x less than
 Claude-reviewed for the same observed outcome -- useful as a cost data
 point, not as a safety verdict.
+
+## 9. Mutation pass (2026-10-30, op#35690, orch-console bus #84668)
+
+Section 8's pilot never measured a real bug because none occurred. orch-
+console asked for a follow-up: use a mechanical mutation tool (not Claude
+spend) to find real surviving mutants, then run reviewer-only (condition A
+vs B) on the survivors, with the acceptance tests in context as in
+production, spend capped at $10 Claude. This section is that follow-up.
+
+### 9a. Mechanical sweep, all 6 tasks (Stryker, compute-only, $0 spend)
+
+Instead of the 2 tasks asked for, ran `@stryker-mutator/core` against all 6
+tasks' real impl files (each scoped to one file, run against that task's
+real committed acceptance suite) since it costs compute, not Claude, and the
+full picture is more useful than a partial one:
+
+| task | mutants | survived | note |
+|---|---|---|---|
+| task-01 manzilCatchUp.ts | 24 | 0 | 100% score |
+| task-02 manzilMissClassifier.ts | 29 | 0 | 100% score |
+| task-03 oracleAuditPlan.ts | 19 | 0 | 100% score |
+| task-04 localCalendarDay.ts | 37 | 8 | all 8 verified equivalent (below) |
+| task-05 ayahStatusClassifier.ts | 21 | 0 | 100% score |
+| task-06 fsrsExportPayload.ts | 31 | 4 (+7 no-coverage) | 1 real defect found (below) |
+
+**task-04's 8 survivors are all equivalent mutants**, verified by hand: two
+defeat `formatterFor`'s cache (always rebuild instead of reusing -- no
+observable output difference, since a freshly-built `Intl.DateTimeFormat`
+with the same args formats identically), three blank the year/month/day
+loop-local initializers (dead stores -- always overwritten before being
+read), and three blank the `padStart` pad character on values Intl's
+`"2-digit"`/`"numeric"` options already return pre-padded for any real
+calendar date/month/day. None change behavior for a realistic input. Not a
+discriminating case.
+
+**task-06 (`fsrsExportPayload.ts`, `deepClone()`) has a real one.**
+`deepClone` special-cases `Date`/`Map`/`Set` before falling through to a
+generic own-keys object clone. Stryker's `if (false)` mutants on all three
+`instanceof` checks survived, and 7 lines inside those branches showed
+**no coverage at all** -- neither the real acceptance suite (17/17 tests,
+none construct a row containing a `Date`, `Map`, or `Set` field) nor, it
+turns out, **the task's own hidden grader oracle** (`grader.py`'s rows are
+plain `{id, status/value}` objects, same gap) ever exercises these branches.
+Confirmed non-equivalent with a throwaway oracle test (not part of any
+task's real suite): disabling the `Date` branch makes a `Date` field nested
+in an exported row silently become `{}` (a plain object's `Object.keys()` on
+a `Date`/`Map`/`Set` instance is `[]`, since their state lives off
+`Object.keys`) -- a real, silent, data-losing defect that contradicts the
+module's own docstring ("Supports arrays, plain objects, Date, Map, and
+Set") and the spec's "contents preserved exactly" line, invisible to both
+grading mechanisms the pilot otherwise trusts as ground truth.
+
+### 9b. Reviewer-only comparison on the task-06 defect
+
+Built a minimal one-off runner (not landed as permanent tooling -- a side
+analysis reusing `run_pilot.py`'s own `launch_role()`/`make_worktree()`,
+never pushing anything to `loop-pilot/reviews` or posting a GitHub status,
+since the base commit is synthetic) that: takes task-06's real condition-A
+build commit (`2954e092...`, confirmed bug-free), applies one mutation to
+`fsrsExportPayload.ts` on top, commits it locally only, then launches ONLY
+the reviewer role (condition A's `deepseek-flash` and condition B's
+`claude-opus-4-8` in turn) against that commit, with the real spec and
+acceptance tests in context exactly as production `do_reviewer()` gives
+them.
+
+Two variants, to separate judgment from tooling:
+- **"disable"** -- Stryker's own `if (false)` form. Both reviewers correctly
+  FAILed it, but their stated reasons leaned heavily on `npm run typecheck`
+  (TS2339, now-dead code) and `npm run lint` (`no-constant-condition`) --
+  i.e. this form is a giveaway to static analysis regardless of reviewer
+  judgment, which both roles run as a matter of course.
+- **"delete"** -- a clean removal of the same 3-line branch (no dead code;
+  confirmed empirically clean under both `tsc --noEmit` and `eslint`), to
+  take the tooling crutch away and isolate actual spec-reading judgment.
+  Both reviewers still correctly FAILed it, explicitly citing the spec's
+  "contents preserved exactly" line and noting the acceptance suite has no
+  Date-bearing test case.
+
+| variant | condition A (deepseek-flash) | condition B (claude-opus-4-8) |
+|---|---|---|
+| disable (if-false) | FAIL, correct_catch, $0.01 | FAIL, correct_catch, $0.80 |
+| delete (clean) | FAIL, correct_catch, $0.02 | FAIL, correct_catch, $0.80 |
+
+4/4 correct_catch, 0/4 false_pass, 0/4 false_alarm. **No discriminating
+result between conditions:** on the one real, test-invisible, oracle-
+invisible defect this 6-task set contains, the cheap reviewer caught it as
+reliably as the expensive one, in both its tooling-visible and
+tooling-invisible forms. Total spend: $1.63 (Claude $1.60, DeepSeek $0.03)
+against the $10 cap.
+
+### 9c. Honest framing
+
+Per orch-console's own stated acceptance criterion, "could not measure, the
+test suites are too strong" with the mutation scores as evidence was an
+acceptable outcome going in -- a survivor did turn up (task-06), so this is
+a real measurement, not that fallback. But it is **one defect, two phrasings
+of it, four trials** -- nowhere near enough to generalize "DeepSeek review
+matches Claude review." What it narrowly supports: on the single genuine
+gap this task set exposed, a cheap reviewer model performed identically to
+an expensive one, including after removing the lint/typecheck signal that
+made the first phrasing easy. Combined with 9a: **all 36 cataloged
+seeded-bugs.json variants across all 6 tasks are mechanically caught by
+each task's own acceptance tests** (now confirmed by Stryker's 100% scores
+on 4/6 files plus the equivalent-mutant-only result on a 5th, on top of the
+direct test-assertion matching done for all 6 before this sweep) -- this
+task set's spec-writer-authored tests are comprehensive enough that finding
+*any* real survivor required a mechanical search past the known catalog,
+and even then only one file in six had one.
