@@ -1,0 +1,30 @@
+{
+  "task_id": "task-01-manzil-catchup",
+  "note": "Informational record of the bug CATEGORIES the hidden oracle (oracle_test.ts, written transiently by grader.py) checks for. The builder writes distributeCatchUpFlush() from scratch -- nothing is literally injected into its code. 'Seeded' here means 'plausible implementation mistakes a cheap builder model might make against this exact spec', which is what the oracle is designed to catch independent of whatever the spec-writer's own acceptance tests happened to cover.",
+  "bugs": [
+    {
+      "id": "offset-by-one-day",
+      "description": "day1Date computed as missDate + 0 days (i.e. missDate itself) instead of +1, shifting all three dates one day early."
+    },
+    {
+      "id": "24h-multiply-instead-of-calendar-day",
+      "description": "Date math done via missDate.getTime() + N * 86400000 instead of calendar-day arithmetic -- breaks across a DST transition (not exercised by the oracle, which uses UTC dates deliberately to make this specific bug class moot in THIS task) but more importantly often silently breaks month/year rollover handling if implemented via raw millisecond math on a local-time Date without normalizing to UTC first."
+    },
+    {
+      "id": "chunked-not-round-robin",
+      "description": "Splits ayahIds into three contiguous thirds (first third -> day1, etc.) instead of round-robin on index % 3 -- satisfies the 'even distribution' property but violates the exact assignment the spec requires, and differs observably from round-robin for any input where order matters to the caller."
+    },
+    {
+      "id": "off-by-one-modulo-direction",
+      "description": "Uses (i % 3) but assigns 0->day3, 1->day1, 2->day2 (or some other rotation) instead of 0->day1, 1->day2, 2->day3."
+    },
+    {
+      "id": "duplicate-or-dropped-ayah",
+      "description": "An off-by-one in a loop bound drops the last ayah, or an incorrect push/concat duplicates one ayah into two days."
+    },
+    {
+      "id": "mutates-input-array",
+      "description": "Implementation sorts or splices the input ayahIds array in place instead of leaving it untouched (a correctness smell even when output happens to be right)."
+    }
+  ]
+}
