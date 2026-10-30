@@ -50,12 +50,12 @@ def test_sum_usage_lines_includes_only_within_window():
         _usage_line((now - timedelta(minutes=5)).isoformat(), input_t=0, output_t=500),  # inside
     ]
     result = a.sum_usage_lines(lines, cutoff)
-    assert result == {"total": 1500, "nmsg": 2}
+    assert result == {"total": 1500, "nmsg": 2, "cache_read": 0}
 
 
 def test_sum_usage_lines_empty_transcript_is_a_real_zero():
     result = a.sum_usage_lines([], datetime.now(timezone.utc) - timedelta(minutes=60))
-    assert result == {"total": 0, "nmsg": 0}
+    assert result == {"total": 0, "nmsg": 0, "cache_read": 0}
 
 
 def test_sum_usage_lines_skips_malformed_and_usageless_lines():
@@ -68,7 +68,15 @@ def test_sum_usage_lines_skips_malformed_and_usageless_lines():
         _usage_line(now.isoformat(), input_t=42, output_t=0),
     ]
     result = a.sum_usage_lines(lines, cutoff)
-    assert result == {"total": 42, "nmsg": 1}
+    assert result == {"total": 42, "nmsg": 1, "cache_read": 0}
+
+
+def test_sum_usage_lines_tracks_cache_read_separately_from_total():
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=60)
+    lines = [_usage_line(now.isoformat(), input_t=100, output_t=0, cache_c=0, cache_r=900)]
+    result = a.sum_usage_lines(lines, cutoff)
+    assert result == {"total": 1000, "nmsg": 1, "cache_read": 900}
 
 
 def test_tokens_per_hour_scales_by_window():
@@ -170,3 +178,102 @@ def test_should_page_true_after_backoff_window_elapses():
 def test_should_page_true_on_corrupt_state_value():
     state = {"breach:cc-x": "not-a-timestamp"}
     assert a._should_page(state, "breach:cc-x", NOW, repage_min=60) is True
+
+
+# --------------------------------------------------------------------------
+# should_repage_breach (console #85152/#85266): 4h suppression, with escapes
+# for a rate rise or a context-fill crossing -- not just a flat timer.
+# --------------------------------------------------------------------------
+
+def _kw(**over):
+    kw = dict(suppress_min=240, rate_rise_frac=0.5, pct_escape=90)
+    kw.update(over)
+    return kw
+
+
+def test_repage_true_when_never_paged_before():
+    assert a.should_repage_breach(None, NOW, 50_000_000, 40, **_kw()) is True
+
+
+def test_repage_true_on_legacy_bare_string_state():
+    # state written before this field existed (a bare iso string, old _should_page shape)
+    assert a.should_repage_breach(NOW.isoformat(), NOW, 50_000_000, 40, **_kw()) is True
+
+
+def test_repage_false_within_suppress_window_same_rate_low_fill():
+    prior = {"ts": (NOW - timedelta(hours=1)).isoformat(), "tph": 50_000_000}
+    assert a.should_repage_breach(prior, NOW, 50_000_000, 40, **_kw()) is False
+
+
+def test_repage_true_after_suppress_window_elapses():
+    prior = {"ts": (NOW - timedelta(hours=5)).isoformat(), "tph": 50_000_000}
+    assert a.should_repage_breach(prior, NOW, 50_000_000, 40, **_kw()) is True
+
+
+def test_repage_true_on_rate_rise_escape_even_inside_suppress_window():
+    prior = {"ts": (NOW - timedelta(minutes=30)).isoformat(), "tph": 50_000_000}
+    # +50% or more vs the last PAGED rate -- escapes immediately
+    assert a.should_repage_breach(prior, NOW, 75_000_000, 40, **_kw()) is True
+
+
+def test_repage_false_on_small_rate_rise_under_the_escape_threshold():
+    prior = {"ts": (NOW - timedelta(minutes=30)).isoformat(), "tph": 50_000_000}
+    assert a.should_repage_breach(prior, NOW, 60_000_000, 40, **_kw()) is False  # +20%, not +50%
+
+
+def test_repage_true_on_context_fill_escape_even_inside_suppress_window():
+    prior = {"ts": (NOW - timedelta(minutes=30)).isoformat(), "tph": 50_000_000}
+    assert a.should_repage_breach(prior, NOW, 50_000_000, 95, **_kw()) is True
+
+
+def test_repage_false_when_context_pct_is_none_never_escapes():
+    # gauge unavailable -- absence of data is not evidence of a crossed threshold
+    prior = {"ts": (NOW - timedelta(minutes=30)).isoformat(), "tph": 50_000_000}
+    assert a.should_repage_breach(prior, NOW, 50_000_000, None, **_kw()) is False
+
+
+# --------------------------------------------------------------------------
+# breach_alert_body (console #85266: add context fill % + cache-read share)
+# --------------------------------------------------------------------------
+
+def test_breach_alert_body_includes_context_fill_and_cache_read_share():
+    b = {"agent_id": "cc-fleet-health", "total": 50_000_000, "nmsg": 12, "tph": 50_000_000.0,
+         "cache_read_share": 0.82}
+    body = a.breach_alert_body(b, window_min=60, threshold_tph=40_000_000, context_pct=67)
+    assert "67%" in body
+    assert "82%" in body
+    assert "cc-fleet-health" in body
+
+
+def test_breach_alert_body_reports_unknown_when_context_pct_missing():
+    b = {"agent_id": "cc-x", "total": 1, "nmsg": 1, "tph": 50_000_000.0, "cache_read_share": None}
+    body = a.breach_alert_body(b, window_min=60, threshold_tph=40_000_000, context_pct=None)
+    assert "unknown" in body
+
+
+# --------------------------------------------------------------------------
+# _context_fill_map (enrichment only -- must never crash the alarm). Patches
+# read_context_gauge on the REAL module object (not a sys.modules swap --
+# `from scripts import context_health_watchdog` resolves via the `scripts`
+# package's existing attribute, which a sys.modules-only swap would miss).
+# --------------------------------------------------------------------------
+import scripts.context_health_watchdog as _chw  # noqa: E402
+
+
+def test_context_fill_map_builds_agent_to_pct_dict(monkeypatch):
+    class _Row:
+        def __init__(self, agent, pct):
+            self.agent = agent
+            self.pct = pct
+
+    monkeypatch.setattr(_chw, "read_context_gauge",
+                         lambda: [_Row("orch-console", 67), _Row("cc-fleet-health", 45)])
+    assert a._context_fill_map() == {"orch-console": 67, "cc-fleet-health": 45}
+
+
+def test_context_fill_map_never_raises_on_failure(monkeypatch):
+    def boom():
+        raise RuntimeError("gauge unreachable")
+
+    monkeypatch.setattr(_chw, "read_context_gauge", boom)
+    assert a._context_fill_map() == {}
