@@ -285,6 +285,12 @@ def launch_role(role: str, worktree: Path, model: str, max_turns: int,
            "--scheduled-prompt", prompt_rel,
            "--", "--max-turns", str(max_turns)]
     env = dict(os.environ)
+    # PR#661 residual LOW: a role process must never carry this checkout's
+    # absolute path in its env (ORCH_DIR/ORCH_ROOT are on the shared lane
+    # allow-list's SAFE tier), even though nothing exploits it today -- the
+    # isolation invariant says a role can only see its own worktree.
+    env.pop("ORCH_DIR", None)
+    env.pop("ORCH_ROOT", None)
     env["MODEL"] = model
     env["CC_BASE_OVERRIDE"] = "cc-loop"
     if model.startswith("claude-"):
