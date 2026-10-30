@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- stale cc-quality PASS-verdict watchdog (bus #85014, half 2). Pages orch-console
+       ONCE (ever, per verdict+PR pair) when an open PR that cc-quality PASSed has had
+       no merge and no new commit for over STALE_PASS_THRESHOLD_S (default 3600s).
+       DETECT plus operator-alert ONLY, no self-healing action -- nothing lease-gated
+       (charter section 3: detection and degrade-alert stay ungated). StartInterval 900s
+       (15min) gives several scans before the 60min threshold elapses. Installed +
+       first-run-verified by cc-fleet-health after PR merge, per the lesson learned
+       installing PR#655's lane-burn-alarm plist the same day (bus #85029): a plist
+       checked into the repo is NOT the same as a plist loaded by launchd. -->
+  <key>Label</key>
+  <string>dev.wingmen.stale-pass-verdict-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/stale_pass_verdict_watchdog.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/sheikhmusa</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>CC_BASE_AGENT_ID</key>
+    <string>cc-fleet-health</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/stale_pass_verdict_watchdog.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/stale_pass_verdict_watchdog.log</string>
+</dict>
+</plist>
