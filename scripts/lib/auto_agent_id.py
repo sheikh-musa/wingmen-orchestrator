@@ -482,7 +482,7 @@ def allocate_sub_tag_and_register(
                 # Diagnostic: who holds our key?
                 cur.execute(
                     """
-                    SELECT pid, granted, query_start, state
+                    SELECT l.pid, granted, query_start, state
                       FROM pg_locks l
                       JOIN pg_stat_activity a ON a.pid = l.pid
                      WHERE locktype = 'advisory'
