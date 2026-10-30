@@ -95,16 +95,33 @@ def extract_pass_pr_mentions(text):
     return mentions
 
 
-def is_stale(pr_state, merged_at, latest_commit_epoch, verdict_epoch, now, threshold_s=THRESHOLD_S):
+def _stale_baseline(verdict_epoch, latest_checkrun_completed_epoch):
+    """PURE. The later of the verdict time and CI's last completion -- a PR
+    that PASSed before its CI run finished is not idle until CI actually
+    completes (bus #85381: PR#864 false-paged while the e2e job was still
+    running after the PASS verdict landed; console's own suggested fix)."""
+    if latest_checkrun_completed_epoch is not None and latest_checkrun_completed_epoch > verdict_epoch:
+        return latest_checkrun_completed_epoch
+    return verdict_epoch
+
+
+def is_stale(pr_state, merged_at, latest_commit_epoch, verdict_epoch, now, threshold_s=THRESHOLD_S,
+             ci_pending=False, latest_checkrun_completed_epoch=None):
     """PURE. True iff the PR is still OPEN, no new commit landed after the
-    verdict, and the verdict is older than threshold_s. `latest_commit_epoch`
-    may be None (couldn't resolve) -- treated as "no commit after the verdict"
-    since there's nothing to compare, never guessed as recent."""
+    verdict, CI is not still running, and the later of {verdict, CI
+    completion} is older than threshold_s. `latest_commit_epoch` may be None
+    (couldn't resolve) -- treated as "no commit after the verdict" since
+    there's nothing to compare, never guessed as recent. `ci_pending` and
+    `latest_checkrun_completed_epoch` default to the pre-#85381 behavior
+    (ignore CI) so every existing caller is unaffected."""
     if pr_state != "OPEN" or merged_at:
         return False
     if latest_commit_epoch is not None and latest_commit_epoch > verdict_epoch:
         return False  # a new commit after the verdict is an active response, not a stall
-    return (now - verdict_epoch) >= threshold_s
+    if ci_pending:
+        return False  # CI still running is active, not a stall (bus #85381)
+    baseline = _stale_baseline(verdict_epoch, latest_checkrun_completed_epoch)
+    return (now - baseline) >= threshold_s
 
 
 def alert_message(repo, pr_number, verdict_id, to_agent, age_s, resolved_author=None):
@@ -213,19 +230,63 @@ def _known_repos(cur, state: dict, now: int) -> "list[tuple[str, str]]":
 
 
 def _pr_view(owner: str, repo: str, pr_number: str) -> "dict | None":
-    """gh pr view's state/mergedAt/commits/headRefName for one PR, or None on
-    any failure (wrong repo guess, unknown PR, network hiccup) -- never blocks
-    the scan. headRefName feeds _resolve_author (bus #85202, console) -- same
-    call, no extra `gh` round trip."""
+    """gh pr view's state/mergedAt/commits/headRefName/headRefOid for one PR,
+    or None on any failure (wrong repo guess, unknown PR, network hiccup) --
+    never blocks the scan. headRefName feeds _resolve_author (bus #85202,
+    console); headRefOid feeds _checkrun_status (bus #85381) -- same call, no
+    extra `gh` round trip."""
     try:
         out = subprocess.run(
             ["gh", "pr", "view", pr_number, "-R", f"{owner}/{repo}",
-             "--json", "state,mergedAt,commits,headRefName"],
+             "--json", "state,mergedAt,commits,headRefName,headRefOid"],
             capture_output=True, text=True, timeout=15, check=True,
         ).stdout
         return json.loads(out)
     except Exception:
         return None
+
+
+def _checkrun_status(owner: str, repo: str, sha: "str | None") -> "tuple[bool, int | None]":
+    """(ci_pending, latest_completed_epoch) for a commit's check-runs via the
+    check-runs API (never the commit /status endpoint -- status never
+    reflects GitHub Actions, memory ci-watcher-must-poll-checkruns-not-status-
+    api). ci_pending=True iff at least one check-run has not reached
+    'completed' -- a PR correctly waiting on CI is active, not stalled (bus
+    #85381: PR#864 false-paged while its e2e job was still finishing after
+    the PASS verdict). Never blocks the scan: any failure or no-sha returns
+    (False, None), i.e. "ignore CI, fall back to verdict-only timing" --
+    the pre-#85381 behavior, never a false 'still running'."""
+    if not sha:
+        return False, None
+    try:
+        out = subprocess.run(
+            ["gh", "api", f"repos/{owner}/{repo}/commits/{sha}/check-runs",
+             "--jq", ".check_runs[] | [.status, (.completed_at // \"\")] | @tsv"],
+            capture_output=True, text=True, timeout=15, check=True,
+        ).stdout
+    except Exception:
+        return False, None
+    pending = False
+    completed_epochs = []
+    import datetime
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 2:
+            continue
+        status, completed_at = parts
+        if status != "completed":
+            pending = True
+            continue
+        if not completed_at:
+            continue
+        try:
+            completed_epochs.append(
+                int(datetime.datetime.fromisoformat(completed_at.replace("Z", "+00:00")).timestamp())
+            )
+        except Exception:
+            pass
+    latest = max(completed_epochs) if completed_epochs else None
+    return pending, latest
 
 
 def _resolve_author(repo: str, pr_json: dict) -> "str | None":
@@ -369,8 +430,18 @@ def run(conn, dry: bool = False) -> int:
                 latest_commit = _latest_commit_epoch(pr_json)
                 if not is_stale(pr_json.get("state"), pr_json.get("mergedAt"),
                                  latest_commit, verdict_epoch, now):
+                    continue  # not stale by verdict-only timing -- CI check not worth the call
+                # Verdict-only timing says stale -- before paging, confirm the PR
+                # isn't just still waiting on CI (bus #85381: PR#864 false-paged
+                # while its e2e job was still finishing after the PASS landed).
+                # Only fetched here, not for every verdict, to keep the extra
+                # `gh api` round trip off the common (not-yet-old-enough) path.
+                ci_pending, latest_ci_completed = _checkrun_status(owner, repo, pr_json.get("headRefOid"))
+                if not is_stale(pr_json.get("state"), pr_json.get("mergedAt"), latest_commit,
+                                 verdict_epoch, now, ci_pending=ci_pending,
+                                 latest_checkrun_completed_epoch=latest_ci_completed):
                     continue
-                age = now - verdict_epoch
+                age = now - _stale_baseline(verdict_epoch, latest_ci_completed)
                 resolved_author = _resolve_author(repo, pr_json)
                 result = _alert(cur, conn, repo, pr_number, verdict_id, to_agent, age, dry,
                                  resolved_author=resolved_author)

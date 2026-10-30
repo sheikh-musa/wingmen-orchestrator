@@ -167,6 +167,50 @@ def test_boundary_at_exactly_threshold_is_stale():
     assert spw.is_stale("OPEN", None, None, 1000, 1000 + THRESHOLD) is True
 
 
+# bus #85381: PR#864 false-paged while its e2e job was still finishing after the
+# PASS verdict landed -- CI still running must never be reported as a stall.
+def test_ci_pending_is_never_stale_even_well_past_threshold():
+    assert spw.is_stale("OPEN", None, None, 1000, 1000 + THRESHOLD + 999999, ci_pending=True) is False
+
+
+def test_ci_completed_after_verdict_but_still_within_threshold_is_not_stale():
+    # verdict at t=1000, CI finished at t=1500, now is only 1500+THRESHOLD-1 --
+    # idle time measured from CI completion (1500), not the earlier verdict (1000).
+    assert spw.is_stale(
+        "OPEN", None, None, 1000, 1500 + THRESHOLD - 1,
+        latest_checkrun_completed_epoch=1500,
+    ) is False
+
+
+def test_ci_completed_after_verdict_and_past_threshold_from_ci_completion_is_stale():
+    assert spw.is_stale(
+        "OPEN", None, None, 1000, 1500 + THRESHOLD + 1,
+        latest_checkrun_completed_epoch=1500,
+    ) is True
+
+
+def test_ci_completed_before_verdict_does_not_push_the_baseline_later():
+    # CI finished BEFORE the verdict (the normal case) -- baseline stays the verdict time.
+    assert spw.is_stale(
+        "OPEN", None, None, 1000, 1000 + THRESHOLD - 1,
+        latest_checkrun_completed_epoch=500,
+    ) is False
+    assert spw.is_stale(
+        "OPEN", None, None, 1000, 1000 + THRESHOLD + 1,
+        latest_checkrun_completed_epoch=500,
+    ) is True
+
+
+# ── _stale_baseline ──────────────────────────────────────────────────────────
+def test_stale_baseline_is_verdict_time_when_ci_completed_first_or_unknown():
+    assert spw._stale_baseline(1000, 500) == 1000
+    assert spw._stale_baseline(1000, None) == 1000
+
+
+def test_stale_baseline_is_ci_completion_when_it_lands_after_the_verdict():
+    assert spw._stale_baseline(1000, 1500) == 1500
+
+
 # ── alert_message ────────────────────────────────────────────────────────────
 def test_alert_message_shape():
     subj, body = spw.alert_message("cosem-adcda", "857", 84217, "cc-cosem-adcda-1", 3700)
@@ -505,3 +549,115 @@ def test_repo_from_remote_url_handles_https_and_ssh():
     assert spw._repo_from_remote_url("git@github.com:sheikh-musa/wingmen-orchestrator.git") == \
         ("sheikh-musa", "wingmen-orchestrator")
     assert spw._repo_from_remote_url("not a url") is None
+
+
+# ── _checkrun_status (bus #85381) ───────────────────────────────────────────
+class _FakeCompleted:
+    def __init__(self, stdout="", returncode=0):
+        self.stdout = stdout
+        self.returncode = returncode
+
+
+def test_checkrun_status_no_sha_returns_false_none(monkeypatch):
+    called = []
+    monkeypatch.setattr(spw.subprocess, "run", lambda *a, **k: called.append(1) or _FakeCompleted())
+    assert spw._checkrun_status("o", "r", None) == (False, None)
+    assert called == []  # never even shells out without a sha
+
+
+def test_checkrun_status_all_completed_returns_latest_epoch(monkeypatch):
+    out = "completed\t2026-10-30T22:00:00Z\ncompleted\t2026-10-30T22:05:00Z\n"
+    monkeypatch.setattr(spw.subprocess, "run", lambda *a, **k: _FakeCompleted(out))
+    import datetime
+    expected = int(datetime.datetime(2026, 10, 30, 22, 5, tzinfo=datetime.timezone.utc).timestamp())
+    assert spw._checkrun_status("o", "r", "deadbeef") == (False, expected)
+
+
+def test_checkrun_status_any_in_progress_flags_pending(monkeypatch):
+    out = "completed\t2026-10-30T22:00:00Z\nin_progress\t\n"
+    monkeypatch.setattr(spw.subprocess, "run", lambda *a, **k: _FakeCompleted(out))
+    pending, latest = spw._checkrun_status("o", "r", "deadbeef")
+    assert pending is True
+
+
+def test_checkrun_status_on_any_failure_never_blocks(monkeypatch):
+    def _boom(*a, **k):
+        raise Exception("network hiccup")
+    monkeypatch.setattr(spw.subprocess, "run", _boom)
+    assert spw._checkrun_status("o", "r", "deadbeef") == (False, None)
+
+
+def test_checkrun_status_uses_check_runs_endpoint_not_commit_status():
+    # memory ci-watcher-must-poll-checkruns-not-status-api: the commit /status
+    # endpoint never reflects GitHub Actions results -- guard the actual URL
+    # literal built for the `gh api` call, not prose in the docstring.
+    import inspect
+    src = inspect.getsource(spw._checkrun_status)
+    assert "/check-runs" in src
+    assert '/status"' not in src and "/status'" not in src
+
+
+# ── run(): CI-pending integration (bus #85381) ──────────────────────────────
+def test_run_ci_still_running_does_not_alert_even_past_threshold(monkeypatch):
+    saved = {}
+    now_epoch = 10_000
+    verdicts = [(1, "cc-cosem-adcda-2", "cosem-adcda PR#864 -- PASS", now_epoch - THRESHOLD - 10)]
+    resolved = {"864": ("sheikh-musa", "cosem-adcda",
+                         {"state": "OPEN", "mergedAt": None, "commits": [],
+                          "headRefOid": "deadbeef"})}
+    cur, conn = _wire(monkeypatch, verdicts, resolved_by_pr=resolved, saved=saved)
+    monkeypatch.setattr(spw.time, "time", lambda: now_epoch)
+    monkeypatch.setattr(spw, "_checkrun_status", lambda o, r, sha: (True, None))  # e2e still running
+    spw.run(conn, dry=False)
+    assert cur.inserts == []
+    assert saved.get("alerted", []) == []
+
+
+def test_run_ci_completed_after_verdict_but_recently_does_not_alert(monkeypatch):
+    saved = {}
+    now_epoch = 10_000
+    verdict_epoch = now_epoch - THRESHOLD - 10
+    ci_completed = now_epoch - 5  # CI only just finished, 5s ago
+    verdicts = [(1, "cc-cosem-adcda-2", "cosem-adcda PR#864 -- PASS", verdict_epoch)]
+    resolved = {"864": ("sheikh-musa", "cosem-adcda",
+                         {"state": "OPEN", "mergedAt": None, "commits": [],
+                          "headRefOid": "deadbeef"})}
+    cur, conn = _wire(monkeypatch, verdicts, resolved_by_pr=resolved, saved=saved)
+    monkeypatch.setattr(spw.time, "time", lambda: now_epoch)
+    monkeypatch.setattr(spw, "_checkrun_status", lambda o, r, sha: (False, ci_completed))
+    spw.run(conn, dry=False)
+    assert cur.inserts == []
+    assert saved.get("alerted", []) == []
+
+
+def test_run_ci_completed_long_ago_still_alerts_with_age_from_ci_completion(monkeypatch):
+    saved = {}
+    now_epoch = 10_000
+    verdict_epoch = now_epoch - THRESHOLD - 500  # old enough by verdict-only timing too
+    ci_completed = now_epoch - THRESHOLD - 50     # CI finished after the verdict, also past threshold
+    verdicts = [(1, "cc-cosem-adcda-2", "cosem-adcda PR#864 -- PASS", verdict_epoch)]
+    resolved = {"864": ("sheikh-musa", "cosem-adcda",
+                         {"state": "OPEN", "mergedAt": None, "commits": [],
+                          "headRefOid": "deadbeef"})}
+    cur, conn = _wire(monkeypatch, verdicts, resolved_by_pr=resolved, saved=saved)
+    monkeypatch.setattr(spw.time, "time", lambda: now_epoch)
+    monkeypatch.setattr(spw, "_checkrun_status", lambda o, r, sha: (False, ci_completed))
+    spw.run(conn, dry=False)
+    assert len(cur.inserts) == 1
+    assert saved.get("alerted") == ["1:864"]
+
+
+def test_run_only_calls_checkrun_status_when_otherwise_stale(monkeypatch):
+    # keeps the extra `gh api` round trip off the common not-yet-old-enough path
+    saved = {}
+    now_epoch = 10_000
+    verdicts = [(1, "cc-cosem-adcda-1", "cosem-adcda PR#857 -- PASS", now_epoch - THRESHOLD + 10)]
+    resolved = {"857": ("sheikh-musa", "cosem-adcda",
+                        {"state": "OPEN", "mergedAt": None, "commits": [], "headRefOid": "deadbeef"})}
+    cur, conn = _wire(monkeypatch, verdicts, resolved_by_pr=resolved, saved=saved)
+    monkeypatch.setattr(spw.time, "time", lambda: now_epoch)
+    calls = []
+    monkeypatch.setattr(spw, "_checkrun_status", lambda o, r, sha: (calls.append(1), (False, None))[1])
+    spw.run(conn, dry=False)
+    assert calls == []
+    assert cur.inserts == []
