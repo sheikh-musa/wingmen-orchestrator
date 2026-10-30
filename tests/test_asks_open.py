@@ -133,6 +133,7 @@ def test_open_ask_console_body_defaults_delegated_to_orch_console(operator_ledge
     monkeypatch.delenv("CC_BASE_AGENT_ID", raising=False)
     monkeypatch.setenv("ORCH_BODY_ROLE", "console")
     monkeypatch.setenv("ORCH_AGENT_ID", "orch-console")
+    monkeypatch.setenv("ORCH_CONSOLE_BOOT", "1")
     rid = ao.open_ask("[__test__] console default delegated_to")
     with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
         cur.execute("SELECT delegated_to FROM operator_asks WHERE id=%s", (rid,))
