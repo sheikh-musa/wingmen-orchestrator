@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Minimal `gh` STUB for tests/test_safe_merge_allow_skipped.py — lets the REAL
+# scripts/safe_merge.sh run end-to-end with NO network and NO real GitHub PR.
+# It ONLY answers the exact `gh` subcommands safe_merge.sh issues:
+#   gh pr view  <PR> --repo <REPO> --json state,mergeable,headRefOid   -> full JSON
+#   gh pr view  <PR> --repo <REPO> --json headRefOid -q .headRefOid    -> raw SHA
+#   gh pr checks <PR> --repo <REPO> --json name,state                  -> checks JSON
+# Canned responses come from env (set by the test):
+#   STUB_STATE / STUB_MERGEABLE / STUB_HEAD   the `gh pr view` fields
+#   STUB_CHECKS_JSON                          the `gh pr checks` JSON array
+# `gh pr merge` is REFUSED loudly — a test must never perform a real merge.
+set -u
+
+sub1="${1:-}"; sub2="${2:-}"
+
+if [ "$sub1" = "pr" ] && [ "$sub2" = "view" ]; then
+  case " $* " in
+    *" -q .headRefOid "*|*" --jq .headRefOid "*)
+      # step-3 re-read: safe_merge.sh asks for the bare SHA
+      printf '%s' "${STUB_HEAD:?STUB_HEAD unset}";;
+    *)
+      printf '{"state":"%s","mergeable":"%s","headRefOid":"%s"}' \
+        "${STUB_STATE:?STUB_STATE unset}" \
+        "${STUB_MERGEABLE:?STUB_MERGEABLE unset}" \
+        "${STUB_HEAD:?STUB_HEAD unset}";;
+  esac
+  exit 0
+fi
+
+if [ "$sub1" = "pr" ] && [ "$sub2" = "checks" ]; then
+  printf '%s' "${STUB_CHECKS_JSON:?STUB_CHECKS_JSON unset}"
+  exit 0
+fi
+
+if [ "$sub1" = "pr" ] && [ "$sub2" = "merge" ]; then
+  echo "fake gh: REFUSING real 'gh pr merge' in a test (args: $*)" >&2
+  exit 99
+fi
+
+echo "fake gh: unexpected invocation: $*" >&2
+exit 1
