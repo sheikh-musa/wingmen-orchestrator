@@ -1150,7 +1150,13 @@ def _live_status_suffix(conn, target: str) -> str:
     (verified boot-time-static fleet-wide 2026-10-30 — every body reads
     'session-launch model=...'/'hub — always-on...' regardless of what it's
     actually doing, so it would show stale boot info here). Empty string on
-    any miss or staleness — never fabricate activity."""
+    any miss or staleness — never fabricate activity.
+
+    INVARIANT (cc-quality, PR #675): SUBJECT ONLY, never body/text. This
+    reaches the operator's own phone via a tg_out ack, and the only two
+    from_agent ids ever looked up are TARGET_TO_AGENT_ID's two brain agents
+    (cc-orchestrator, orch-console) — never a client-facing or lane agent_id.
+    Do not widen this to pull `body` or to resolve arbitrary agent_ids."""
     agent_id = TARGET_TO_AGENT_ID.get(target)
     if not agent_id:
         return ""
@@ -1163,7 +1169,7 @@ def _live_status_suffix(conn, target: str) -> str:
             row = cur.fetchone()
     except Exception:
         return ""   # best-effort; never let this block an ack
-    if not row or row[1] is None or row[1] > 1800:   # >30 min isn't "live"
+    if not row or not row[0] or row[1] is None or row[1] > 1800:   # >30 min isn't "live"
         return ""
     return f" Last update: {row[0]}"
 
