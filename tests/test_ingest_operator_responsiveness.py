@@ -181,3 +181,10 @@ def test_live_status_suffix_db_error_is_swallowed():
         def cursor(self):
             raise RuntimeError("db down")
     assert ingest._live_status_suffix(_Boom(), "orch") == ""
+
+
+def test_live_status_suffix_null_subject_is_empty(monkeypatch):
+    """cc-quality, PR #675: a fresh row with no subject must not render
+    'Last update: None'."""
+    conn = _StatusConn((None, 1))
+    assert ingest._live_status_suffix(conn, "orch") == ""
