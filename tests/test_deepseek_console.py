@@ -66,6 +66,42 @@ def test_no_screenshot_or_trace_cli_flags_exist():
         assert "--trace" not in out
 
 
+# --- real Chrome, not bundled Chromium (orch-console bus #84081: DeepSeek's
+#     human check flagged the bundled Chromium's automation fingerprint) ---
+
+def test_context_launches_real_chrome_and_strips_automation_tells(tmp_path):
+    """Direct call into _context() with a fake playwright.chromium, so this
+    asserts the actual kwargs passed to launch_persistent_context -- not a
+    source grep, which could pass on a comment alone. _PROFILE_DIR is
+    redirected to tmp_path first: _context() does a real os.makedirs/chmod
+    on it, and the real path holds Musa's actual persisted DeepSeek login."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("deepseek_console_ctxtest", _SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod._PROFILE_DIR = str(tmp_path / "profile")
+
+    captured = {}
+
+    class _FakeChromium:
+        def launch_persistent_context(self, user_data_dir, **kwargs):
+            captured["user_data_dir"] = user_data_dir
+            captured.update(kwargs)
+            return "fake-context"
+
+    class _FakePlaywright:
+        chromium = _FakeChromium()
+
+    result = mod._context(_FakePlaywright(), headed=True)
+
+    assert result == "fake-context"
+    assert captured["channel"] == "chrome"
+    assert "--enable-automation" in captured["ignore_default_args"]
+    assert "--disable-blink-features=AutomationControlled" in captured["args"]
+    assert captured["headless"] is False
+
+
 # --- CLI wiring --------------------------------------------------------
 
 def test_help_lists_all_four_subcommands():
