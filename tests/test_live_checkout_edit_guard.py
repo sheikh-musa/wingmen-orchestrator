@@ -19,8 +19,14 @@ guard = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(guard)
 
 
-def _run(monkeypatch, tmp_path, *, tool_name, file_path, root=None):
+def _run(monkeypatch, tmp_path, *, tool_name, file_path, root=None, console=False):
     monkeypatch.setattr(guard, "LIVE_ORCH_DIR", (root or tmp_path / "orchestrator").resolve())
+    if console:
+        monkeypatch.setenv("ORCH_BODY_ROLE", "console")
+        monkeypatch.delenv("CC_BASE_AGENT_ID", raising=False)
+    else:
+        monkeypatch.delenv("ORCH_BODY_ROLE", raising=False)
+        monkeypatch.delenv("CC_BASE_AGENT_ID", raising=False)
     payload = json.dumps({"tool_name": tool_name, "tool_input": {"file_path": file_path}})
     monkeypatch.setattr(guard.sys, "stdin", io.StringIO(payload))
     return guard.main()
@@ -102,6 +108,57 @@ def test_a_brand_new_untracked_file_path_is_still_blocked(monkeypatch, tmp_path)
     assert not never_created.exists()
     rc = _run(monkeypatch, tmp_path, tool_name="Write", file_path=str(never_created), root=root)
     assert rc == 2
+
+
+def test_console_editing_status_md_is_allowed(monkeypatch, tmp_path):
+    root = tmp_path / "orchestrator"
+    rc = _run(monkeypatch, tmp_path, tool_name="Edit", file_path=str(root / "STATUS.md"), root=root, console=True)
+    assert rc == 0
+
+
+def test_console_editing_nazim_handoff_is_allowed(monkeypatch, tmp_path):
+    root = tmp_path / "orchestrator"
+    rc = _run(monkeypatch, tmp_path, tool_name="Write",
+              file_path=str(root / "reports" / "nazim-handoff-NOW.md"), root=root, console=True)
+    assert rc == 0
+
+
+def test_console_editing_any_other_live_checkout_file_is_still_blocked(monkeypatch, tmp_path):
+    root = tmp_path / "orchestrator"
+    rc = _run(monkeypatch, tmp_path, tool_name="Edit",
+              file_path=str(root / "scripts" / "lane_burn_alarm.py"), root=root, console=True)
+    assert rc == 2
+
+
+def test_a_lane_editing_status_md_is_still_blocked(monkeypatch, tmp_path):
+    # The allowlist is console-only -- a lane (even with ORCH_BODY_ROLE unset, or a lane that
+    # happens to carry CC_BASE_AGENT_ID) gets no exception for STATUS.md.
+    root = tmp_path / "orchestrator"
+    rc = _run(monkeypatch, tmp_path, tool_name="Edit", file_path=str(root / "STATUS.md"), root=root, console=False)
+    assert rc == 2
+
+
+def test_console_role_with_cc_base_agent_id_is_not_console_and_stays_blocked(monkeypatch, tmp_path):
+    # Same discriminator as console_irsyad_guard.is_console(): ORCH_BODY_ROLE=console alone is
+    # not enough -- a body carrying CC_BASE_AGENT_ID (lanes, coord, the hub) is never this body.
+    root = tmp_path / "orchestrator"
+    monkeypatch.setattr(guard, "LIVE_ORCH_DIR", root.resolve())
+    monkeypatch.setenv("ORCH_BODY_ROLE", "console")
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-irsyad-coord")
+    payload = json.dumps({"tool_name": "Edit", "tool_input": {"file_path": str(root / "STATUS.md")}})
+    monkeypatch.setattr(guard.sys, "stdin", io.StringIO(payload))
+    assert guard.main() == 2
+
+
+def test_is_console_pure_helper(monkeypatch):
+    monkeypatch.setenv("ORCH_BODY_ROLE", "console")
+    monkeypatch.delenv("CC_BASE_AGENT_ID", raising=False)
+    assert guard.is_console() is True
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-irsyad-coord")
+    assert guard.is_console() is False
+    monkeypatch.delenv("ORCH_BODY_ROLE", raising=False)
+    monkeypatch.delenv("CC_BASE_AGENT_ID", raising=False)
+    assert guard.is_console() is False
 
 
 def test_is_inside_live_checkout_pure_helper(monkeypatch, tmp_path):
