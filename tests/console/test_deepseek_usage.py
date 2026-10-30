@@ -17,6 +17,7 @@ import logging
 import threading
 import time
 import types
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -205,32 +206,71 @@ def test_a_failed_refresh_never_serves_the_old_balance_as_current(fake_key, monk
     assert row["available"] is False and row["balance_usd"] is None
 
 
-# ---- shared key (op#35897/orch-console #83397): today's REAL spend location --
+# ---- shared key (op#35897/orch-console #83397, revised #83560 2026-10-30): --
+# DEEPSEEK_CODING_KEY is vault leak_flagged (confirmed live 2026-10-29) --
+# _read_key_from_vault's own leak-flag refusal (tested above) means the
+# shared row can never read it directly without the console server either
+# holding a flagged key or unilaterally bypassing the refusal. Instead the
+# shared row reads scripts/deepseek_balance_poll.py's own hourly-polled
+# history file (cc-fleet-health, already reads this key successfully every
+# hour) -- never the vault, never an HTTP call, no secret in this process.
 
-def test_shared_key_usage_reads_the_legacy_shared_key_by_name(fake_key, monkeypatch):
-    calls = []
-    monkeypatch.setattr(ds, "http_get_json", _fake_http(calls))
-    out = ds.get_shared_key_usage(now=1000.0)
-    assert calls == [(ds.BALANCE_URL, FAKE_KEY)]
-    assert fake_key == [ds.SHARED_KEY_NAME]
+def _write_history(path, *rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+
+def test_shared_key_usage_reads_the_pollers_history_file(monkeypatch):
+    def _boom(name):
+        raise AssertionError("shared row must never call read_key")
+    monkeypatch.setattr(ds, "read_key", _boom)
+    monkeypatch.setattr(ds, "http_get_json", lambda *a: (_ for _ in ()).throw(AssertionError("no HTTP")))
+    _write_history(ds._SHARED_HISTORY_PATH,
+                    {"ts": "2026-10-30T04:05:07+00:00", "balance_usd": 50.00},
+                    {"ts": "2026-10-30T05:05:03+00:00", "balance_usd": 46.68})
+    now = datetime.fromisoformat("2026-10-30T05:10:00+00:00").timestamp()
+    out = ds.get_shared_key_usage(now=now)
     assert out["key_name"] == ds.SHARED_KEY_NAME
-    assert out["available"] is True and out["balance_usd"] == 46.87
+    assert out["available"] is True
+    assert out["balance_usd"] == 46.68
+    assert out["delta_usd"] == pytest.approx(46.68 - 50.00)
+    assert out["fetched_at"] == "2026-10-30T05:05:03+00:00"
+    assert out["age_s"] is not None
 
 
-def test_shared_key_usage_is_cached_independently_of_the_per_client_keys(fake_key, monkeypatch):
-    calls = []
-    monkeypatch.setattr(ds, "http_get_json", _fake_http(calls))
-    ds.get_deepseek_usage(now=1000.0)             # warms the 5 per-client keys
-    ds.get_shared_key_usage(now=1000.0)            # must be its OWN HTTP call
-    assert len(calls) == len(ds.distinct_key_rows()) + 1
+def test_shared_key_usage_first_ever_poll_omits_delta(monkeypatch):
+    _write_history(ds._SHARED_HISTORY_PATH, {"ts": "2026-10-30T05:05:03+00:00", "balance_usd": 46.68})
+    now = datetime.fromisoformat("2026-10-30T05:10:00+00:00").timestamp()
+    out = ds.get_shared_key_usage(now=now)
+    assert out["available"] is True and out["balance_usd"] == 46.68
+    assert out["delta_usd"] is None
 
 
-def test_shared_key_failure_is_could_not_read(monkeypatch):
-    def _missing(name):
-        raise ds.DeepseekKeyNotProvisioned("should never happen for the shared key")
-    monkeypatch.setattr(ds, "read_key", _missing)
-    out = ds.get_shared_key_usage(now=1.0)
-    assert out["available"] is False and out["reason"] == "key not created yet"
+def test_shared_key_usage_missing_history_file_is_could_not_read(monkeypatch):
+    # _SHARED_HISTORY_PATH points at a tmp path that was never written (conftest default).
+    out = ds.get_shared_key_usage(now=1000.0)
+    assert out["available"] is False
+    assert out["reason"] == "could not read"
+    assert out["balance_usd"] is None and out["delta_usd"] is None
+    assert out["age_s"] is None
+
+
+def test_shared_key_usage_stale_entry_is_could_not_read(monkeypatch):
+    # poller runs hourly; a reading hours old (job stalled/dead) must never be
+    # shown as current -- same "never serve stale as current" rule as a
+    # failed vault/HTTP read.
+    _write_history(ds._SHARED_HISTORY_PATH, {"ts": "2026-10-30T00:00:00+00:00", "balance_usd": 46.68})
+    now = datetime.fromisoformat("2026-10-30T05:10:00+00:00").timestamp()
+    out = ds.get_shared_key_usage(now=now)
+    assert out["available"] is False and out["reason"] == "could not read"
+    assert out["balance_usd"] is None
+
+
+def test_shared_key_usage_malformed_last_line_is_could_not_read(monkeypatch):
+    ds._SHARED_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ds._SHARED_HISTORY_PATH.write_text("not valid json\n", encoding="utf-8")
+    out = ds.get_shared_key_usage(now=1000.0)
+    assert out["available"] is False and out["reason"] == "could not read"
 
 
 # ---- /api/fleet end to end: numbers present, key absent from body + logs -----
@@ -275,12 +315,14 @@ def test_api_fleet_carries_deepseek_shared_row_per_client_rows_lanes_never_a_key
         fleet_server, fake_key, monkeypatch, caplog):
     base, tmp = fleet_server
     monkeypatch.setattr(ds, "http_get_json", _fake_http([]))
+    recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    _write_history(ds._SHARED_HISTORY_PATH, {"ts": recent, "balance_usd": 46.68})
     with caplog.at_level(logging.DEBUG):
         r = httpx.get(base + "/api/fleet", headers=AUTH, timeout=10)
     assert r.status_code == 200
     body = r.json()
     du = body["deepseek_usage"]
-    assert du["shared"]["available"] is True and du["shared"]["balance_usd"] == 46.87
+    assert du["shared"]["available"] is True and du["shared"]["balance_usd"] == 46.68
     assert du["shared"]["lanes"] == ["bariq"]
     bariq = next(k for k in du["keys"] if k["key_name"] == "DEEPSEEK_KEY_BARIQ")
     assert bariq["available"] is True and bariq["balance_usd"] == 46.87
@@ -292,21 +334,22 @@ def test_api_fleet_carries_deepseek_shared_row_per_client_rows_lanes_never_a_key
 
 
 def test_api_fleet_deepseek_per_client_key_not_provisioned_is_distinct_from_shared_read(
-        fleet_server, fake_key, monkeypatch):
-    """orch-console #83397: tonight's REAL state -- the shared key reads fine
-    while every per-client key says 'key not created yet', not 'could not read'."""
+        fleet_server, monkeypatch):
+    """orch-console #83397/#83560: tonight's REAL state -- the shared row
+    reads fine (from the poller's history file, never the vault -- its vault
+    key is leak_flagged) while every per-client key says 'key not created
+    yet', not 'could not read'."""
     base, _ = fleet_server
-    real_read = ds.read_key
 
     def _per_client_missing(name):
-        if name == ds.SHARED_KEY_NAME:
-            return real_read(name)
         raise ds.DeepseekKeyNotProvisioned(f"vault has no secret named {name}")
     monkeypatch.setattr(ds, "read_key", _per_client_missing)
     monkeypatch.setattr(ds, "http_get_json", _fake_http([]))
+    recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    _write_history(ds._SHARED_HISTORY_PATH, {"ts": recent, "balance_usd": 46.68})
     r = httpx.get(base + "/api/fleet", headers=AUTH, timeout=10)
     du = r.json()["deepseek_usage"]
-    assert du["shared"]["available"] is True and du["shared"]["balance_usd"] == 46.87
+    assert du["shared"]["available"] is True and du["shared"]["balance_usd"] == 46.68
     bariq = next(k for k in du["keys"] if k["key_name"] == "DEEPSEEK_KEY_BARIQ")
     assert bariq == {"available": False, "balance_usd": None, "delta_usd": None,
                       "reason": "key not created yet", "fetched_at": bariq["fetched_at"],
