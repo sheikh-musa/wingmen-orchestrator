@@ -357,7 +357,15 @@ not a signal anything is wrong.
 
 1. Task selection: cc-hifz-1 didn't point at specific backlog items; drafting
    6-10 tasks + seeded bugs myself, sanity-checked by cc-hifz-1 before any
-   real run.
+   real run. **task-01-manzil-catchup** done, verified, and run live
+   (condition A, PASS, `correct_pass`). **task-02-manzil-miss-classifier**
+   drafted 2026-10-30 (H-7 2nd/3rd-miss ordinal classification, the
+   `reconciler.ts:241` gap) -- oracle verified clean against a correct
+   reference implementation and catches all 6 seeded-bug variants
+   individually (boundary-off-by-one, forgot-plus-one, ms-based-day-math,
+   wrong-status-thresholds, includes-future-dated-misses,
+   mutates-input-array); not yet run live. 4 more tasks still needed to
+   hit the 6-task floor.
 2. Whether hifz already has a local-runner GH-status mechanism to reuse
    instead of `local_ci_runner.sh` -- asked cc-hifz-1, no answer yet.
 3. `switch_lane_token`-for-one-shot-session and the builder-worktree isolation
