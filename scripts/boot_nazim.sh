@@ -17,6 +17,16 @@ set -a
 # shellcheck disable=SC1091
 source "$ORCH_DIR/.env"
 set +a
+# ORCH_CONSOLE_BOOT=1 (bus #85112/#85131, 2026-10-30): a marker set HERE, directly
+# in this script's own process -- never sourced from the shared .env -- so
+# agent_identity.resolve_agent_id's console fallback can tell "this really is the
+# Nazim console boot" apart from "some other process merely inherited .env's
+# baked-in ORCH_BODY_ROLE=console default" (the exact leak that misattributed
+# cc-fleet-health's bus row #85124 as orch-console). Deliberately independent of
+# CC_BASE_AGENT_ID, which stays unset here on purpose -- console_irsyad_guard.py
+# keys its own console-vs-lane distinction on CC_BASE_AGENT_ID's absence and must
+# not regress.
+export ORCH_CONSOLE_BOOT=1
 # GAC ISOLATION (op#29348 prod-wall gap, 2026-10-26): .env also carries
 # GOOGLE_APPLICATION_CREDENTIALS for cosem-adcda-specific tooling -- the
 # source above auto-exports it straight into this process's env too. Console

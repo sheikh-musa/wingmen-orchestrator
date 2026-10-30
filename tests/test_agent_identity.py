@@ -23,6 +23,17 @@ def test_resolve_agent_id_refuses_rather_than_guesses():
         ai.resolve_agent_id({})
 
 
+def test_resolve_agent_id_requires_console_boot_marker_not_just_role(monkeypatch):
+    # bus #85112/#85131: ORCH_BODY_ROLE=console/ORCH_AGENT_ID=orch-console are
+    # static .env defaults any process inherits by sourcing it -- must not
+    # resolve without boot_nazim.sh's own ORCH_CONSOLE_BOOT=1 marker.
+    env = {"ORCH_BODY_ROLE": "console", "ORCH_AGENT_ID": "orch-console"}
+    with pytest.raises(ai.IdentityError):
+        ai.resolve_agent_id(env)
+    env["ORCH_CONSOLE_BOOT"] = "1"
+    assert ai.resolve_agent_id(env) == "orch-console"
+
+
 def test_bus_send_reexports_the_same_function():
     bs = importlib.import_module("scripts.bus_send")
     assert bs.resolve_from_agent is ai.resolve_agent_id

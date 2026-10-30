@@ -27,11 +27,28 @@ def resolve_agent_id(env: dict) -> str:
     Order (matches bus_send.py's resolve_from_agent):
       1. CC_BASE_AGENT_ID — interactive fleet lane / this Claude Code session.
       2. AGENT_ID         — daemon/watchdog launchers.
-      3. ORCH_AGENT_ID, but ONLY when ORCH_BODY_ROLE=console (the one
-         documented case where the console's own identity is a correct
-         fallback — see reference_agent_id_not_orch_agent_id_for_identity).
-         ORCH_AGENT_ID is otherwise fleet-wide-exported .env noise and must
-         NEVER be trusted blindly.
+      3. ORCH_AGENT_ID, but ONLY when ORCH_BODY_ROLE=console AND
+         ORCH_CONSOLE_BOOT=1 (both required -- see below). ORCH_AGENT_ID is
+         otherwise fleet-wide-exported .env noise and must NEVER be trusted
+         blindly.
+
+    Why rule 3 needs BOTH, not just ORCH_BODY_ROLE=console (bus #85112/
+    #85131, 2026-10-30 -- a RECURRENCE of this same docstring's own bug
+    #47221): ORCH_BODY_ROLE=console is a STATIC DEFAULT baked into the
+    shared orchestrator .env, so EVERY process that sources that .env for
+    DB creds -- not just the real Nazim console session -- inherits it
+    ambiently, identically to the ORCH_AGENT_ID noise this rule already
+    claims to guard against. Verified live: cc-fleet-health sourcing the
+    shared .env in an ordinary ops shell (no CC_BASE_AGENT_ID set) resolved
+    as 'orch-console' and posted a real bus row under that identity (#85124)
+    -- a genuine identity leak, not a theoretical one.
+    ORCH_CONSOLE_BOOT=1 is a SEPARATE marker that boot_nazim.sh exports
+    directly in its own process, never sourced from the shared .env, so
+    nothing that merely inherits the .env's static defaults can also have
+    it. Deliberately NOT keyed on CC_BASE_AGENT_ID's absence (the signal
+    scripts/hooks/console_irsyad_guard.py already uses to distinguish
+    console from lanes) -- that signal stays exactly as-is, unchanged by
+    this fix, specifically so that guard's behavior cannot regress.
     Raises IdentityError (never guesses / never defaults to 'orch-console')
     if none of these resolve.
     """
@@ -41,7 +58,7 @@ def resolve_agent_id(env: dict) -> str:
     v = env.get("AGENT_ID")
     if v:
         return v
-    if env.get("ORCH_BODY_ROLE") == "console":
+    if env.get("ORCH_BODY_ROLE") == "console" and env.get("ORCH_CONSOLE_BOOT") == "1":
         v = env.get("ORCH_AGENT_ID")
         if v:
             return v

@@ -87,8 +87,9 @@ def test_identity_falls_back_to_agent_id():
     assert bs.resolve_from_agent(env) == "cc-fleet-health"
 
 
-def test_identity_uses_orch_agent_id_only_when_console_role():
-    env = {"ORCH_BODY_ROLE": "console", "ORCH_AGENT_ID": "orch-console"}
+def test_identity_uses_orch_agent_id_only_when_console_role_and_booted():
+    env = {"ORCH_BODY_ROLE": "console", "ORCH_AGENT_ID": "orch-console",
+           "ORCH_CONSOLE_BOOT": "1"}
     assert bs.resolve_from_agent(env) == "orch-console"
 
 
@@ -96,6 +97,20 @@ def test_identity_ignores_orch_agent_id_when_role_is_not_console():
     # ORCH_AGENT_ID is fleet-wide .env noise (every launcher sources .env) —
     # must never be trusted outside the one documented console-fallback case.
     env = {"ORCH_AGENT_ID": "orch-console"}
+    with pytest.raises(bs.IdentityError):
+        bs.resolve_from_agent(env)
+
+
+def test_identity_refuses_console_role_without_the_boot_marker(monkeypatch):
+    # bus #85112/#85131 (2026-10-30): ORCH_BODY_ROLE=console AND ORCH_AGENT_ID=
+    # orch-console are BOTH baked into the shared orchestrator .env as static
+    # defaults -- any process that sources that .env (cc-fleet-health's own ops
+    # shell, no CC_BASE_AGENT_ID set) inherits them identically to the real
+    # Nazim console session and must NOT resolve as orch-console just because
+    # of that. This is the exact live leak that misattributed bus row #85124.
+    # Only boot_nazim.sh itself sets ORCH_CONSOLE_BOOT=1, directly, never via
+    # .env -- its absence here must fail closed.
+    env = {"ORCH_BODY_ROLE": "console", "ORCH_AGENT_ID": "orch-console"}
     with pytest.raises(bs.IdentityError):
         bs.resolve_from_agent(env)
 

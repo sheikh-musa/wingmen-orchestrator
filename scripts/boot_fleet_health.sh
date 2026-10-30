@@ -39,6 +39,15 @@ IFS=$'\t' read -r MODEL MODEL_SRC < <(resolve_singleton_model "$ORCH_DIR/.fleet-
 [ -n "${MODEL:-}" ] || { echo "FATAL: model resolved empty — refusing to boot" >&2; exit 1; }
 echo "[boot_fleet_health] model=$MODEL (source: $MODEL_SRC)" >&2
 AGENT_ID="cc-fleet-health"   # exact — singleton SRE node, never a sub-tag
+# EXPORTED (bus #85112/#85131, 2026-10-30): this was a plain shell var before --
+# never inherited by the claude process this script launches or anything it
+# spawns. Every bus_send.py call from the real SRE session therefore had NEITHER
+# CC_BASE_AGENT_ID NOR AGENT_ID set, fell through to agent_identity.resolve_
+# agent_id's console fallback (which this .env ALSO sets ambiently: ORCH_BODY_
+# ROLE=console/ORCH_AGENT_ID=orch-console, shared with the Mini's Nazim console
+# session), and silently misattributed as orch-console -- caught live when it
+# posted bus row #85124 under that identity instead of cc-fleet-health's own.
+export AGENT_ID
 
 # .env (DSN, OAuth token) lives in the orchestrator; the SRE shares the substrate.
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a

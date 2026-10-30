@@ -207,6 +207,7 @@ def test_triage_console_body_stamps_triaged_by_orch_console(operator_ledger_db, 
     monkeypatch.delenv("CC_BASE_AGENT_ID", raising=False)
     monkeypatch.setenv("ORCH_BODY_ROLE", "console")
     monkeypatch.setenv("ORCH_AGENT_ID", "orch-console")
+    monkeypatch.setenv("ORCH_CONSOLE_BOOT", "1")
     with psycopg.connect(operator_ledger_db) as c:
         rid = _insert_captured(c)
     at.triage(rid, "not")
