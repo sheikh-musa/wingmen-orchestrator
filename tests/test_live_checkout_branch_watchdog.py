@@ -100,10 +100,19 @@ class _Conn:
         self.commits += 1
 
 
-def _wire(monkeypatch, branch, *, state=None, saved=None):
+def _wire(monkeypatch, branch, *, state=None, saved=None, staged=()):
     monkeypatch.setattr(lcw, "_read_branch", lambda: branch)
+    monkeypatch.setattr(lcw, "_read_staged_files", lambda: list(staged) if staged is not None else None)
     monkeypatch.setattr(lcw, "_load_state", lambda: dict(state or {}))
-    monkeypatch.setattr(lcw, "_save_state", lambda st: (saved.update(st) if saved is not None else None))
+    # real _save_state atomically rewrites the WHOLE file each call -- clear+update
+    # (not a plain merge) so a later call's pops are reflected, not masked by an
+    # earlier call's now-stale keys.
+    def _save(st):
+        if saved is not None:
+            saved.clear()
+            saved.update(st)
+
+    monkeypatch.setattr(lcw, "_save_state", _save)
     cur = _Cur()
     return cur, _Conn(cur)
 
@@ -174,3 +183,83 @@ def test_run_back_on_branch_clears_episode(monkeypatch):
     assert cur.inserts == []
     assert "off_branch_since" not in saved
     assert "last_alert_at" not in saved
+
+
+# ── staged-index check (bus #85029: branch was fine, 2 files were staged) ──────
+def test_staged_alert_message_shape():
+    subj, body = lcw.staged_alert_message(["a.py", "b.py"], 300)
+    assert subj.startswith(lcw.STAGED_SUBJECT_PREFIX)
+    assert "2" in subj and "300s" in subj
+    assert "a.py" in body and "b.py" in body
+    low = body.lower()
+    assert "commitment sweeper" in low
+    assert "did not touch" in low  # detect-only framing
+
+
+def test_run_clean_index_alerts_nothing(monkeypatch):
+    saved = {}
+    cur, conn = _wire(monkeypatch, EXPECTED, staged=[], saved=saved)
+    lcw.run(conn, dry=False)
+    assert cur.inserts == []
+    assert "staged_since" not in saved
+
+
+def test_run_first_staged_scan_is_grace_not_alert(monkeypatch):
+    saved = {}
+    cur, conn = _wire(monkeypatch, EXPECTED, staged=["a.py"], saved=saved)
+    lcw.run(conn, dry=False)
+    assert cur.inserts == []
+    assert "staged_since" in saved  # tracking started
+
+
+def test_run_sustained_staged_alerts(monkeypatch):
+    saved = {}
+    old_since = int(__import__("time").time()) - GRACE - 10
+    cur, conn = _wire(monkeypatch, EXPECTED, staged=["a.py", "b.py"],
+                       state={"staged_since": old_since}, saved=saved)
+    lcw.run(conn, dry=False)
+    assert len(cur.inserts) == 1
+    subject = cur.inserts[0][0]
+    assert subject.startswith(lcw.STAGED_SUBJECT_PREFIX)
+    assert saved.get("last_staged_alert_at")
+
+
+def test_run_staged_repage_cooldown_suppresses_duplicate_alert(monkeypatch):
+    now = int(__import__("time").time())
+    saved = {}
+    cur, conn = _wire(monkeypatch, EXPECTED, staged=["a.py"],
+                       state={"staged_since": now - GRACE - 10, "last_staged_alert_at": now - 60},
+                       saved=saved)
+    lcw.run(conn, dry=False)
+    assert cur.inserts == []  # just alerted a minute ago, well under REPAGE_S
+
+
+def test_run_staged_read_miss_never_asserts_a_verdict(monkeypatch):
+    saved = {}
+    cur, conn = _wire(monkeypatch, EXPECTED, staged=None, state={"staged_since": 1}, saved=saved)
+    lcw.run(conn, dry=False)
+    assert cur.inserts == []
+    assert "staged_since" not in saved or saved.get("staged_since") == 1
+
+
+def test_run_back_to_clean_index_clears_episode(monkeypatch):
+    saved = {}
+    cur, conn = _wire(monkeypatch, EXPECTED, staged=[],
+                       state={"staged_since": 1, "last_staged_alert_at": 2}, saved=saved)
+    lcw.run(conn, dry=False)
+    assert cur.inserts == []
+    assert "staged_since" not in saved
+    assert "last_staged_alert_at" not in saved
+
+
+def test_run_branch_drift_and_staged_both_alert_independently(monkeypatch):
+    # the two checks are independent episodes -- both sustained -> both page, as 2 rows
+    saved = {}
+    old = int(__import__("time").time()) - GRACE - 10
+    cur, conn = _wire(monkeypatch, "some-other-branch", staged=["a.py"],
+                       state={"off_branch_since": old, "staged_since": old}, saved=saved)
+    lcw.run(conn, dry=False)
+    assert len(cur.inserts) == 2
+    subjects = {row[0] for row in cur.inserts}
+    assert any(s.startswith(lcw.SUBJECT_PREFIX) for s in subjects)
+    assert any(s.startswith(lcw.STAGED_SUBJECT_PREFIX) for s in subjects)
