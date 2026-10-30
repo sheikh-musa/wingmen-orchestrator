@@ -1,0 +1,26 @@
+#!/bin/sh
+# Minimal `gh` STUB for tests that invoke scripts/safe_merge.sh as a real
+# subprocess — no network, no real GitHub PR, no real merge. Put this directory
+# first on PATH and pass the canned payloads via env:
+#   FAKE_GH_VIEW_JSON    `gh pr view --json state,mergeable,headRefOid` output
+#   FAKE_GH_HEAD_SHA     `gh pr view -q .headRefOid` output (plain SHA)
+#   FAKE_GH_CHECKS_JSON  `gh pr checks --json name,state` output
+# Only the invocations safe_merge.sh actually makes are handled; anything else
+# (including `pr merge`) fails loudly so a test can never reach a real write.
+case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *" -q "*) printf '%s\n' "${FAKE_GH_HEAD_SHA:?FAKE_GH_HEAD_SHA not set}";;
+      *)        printf '%s\n' "${FAKE_GH_VIEW_JSON:?FAKE_GH_VIEW_JSON not set}";;
+    esac
+    exit 0 ;;
+  "pr checks")
+    printf '%s\n' "${FAKE_GH_CHECKS_JSON:?FAKE_GH_CHECKS_JSON not set}"
+    exit 0 ;;
+  "pr merge")
+    echo "fake gh: pr merge is forbidden in tests (no real GitHub writes)" >&2
+    exit 1 ;;
+  *)
+    echo "fake gh: unexpected invocation: $*" >&2
+    exit 1 ;;
+esac
