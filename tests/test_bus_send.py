@@ -1274,6 +1274,7 @@ def test_refuse_if_pr_verdict_misrouted_raises_on_confirmed_mismatch(monkeypatch
     rows = [("cc-quality", True), ("cc-cosem-adcda", True), ("cc-cosem-adcda", True)]
     monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: rows.pop(0))
     monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "cosem-adcda"))
+    monkeypatch.setattr(bs, "_known_repos", lambda dsn=None: [("sheikh-musa", "cosem-adcda")])
     monkeypatch.setattr(bs, "_pr_head_branch", lambda owner, repo, n: "feat/op35986-doha-area2-trainees")
     monkeypatch.setattr(bs, "_resolve_pr_author_instance", lambda repo, branch, dsn=None: "cc-cosem-adcda-2")
     monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "status=idle, heartbeat 0:02:00 ago")
@@ -1304,6 +1305,7 @@ def test_refuse_if_pr_verdict_misrouted_noop_when_subject_has_no_pr_number(monke
 def test_refuse_if_pr_verdict_misrouted_noop_when_repo_unresolvable(monkeypatch):
     monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
     monkeypatch.setattr(bs, "_repo_from_cwd", lambda: None)
+    monkeypatch.setattr(bs, "_known_repos", lambda dsn=None: [])
     bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-1", "PR#857 -- PASS")  # must not raise
 
 
@@ -1311,12 +1313,14 @@ def test_refuse_if_pr_verdict_misrouted_noop_when_branch_unresolvable(monkeypatc
     monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
     monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "cosem-adcda"))
     monkeypatch.setattr(bs, "_pr_head_branch", lambda owner, repo, n: None)
+    monkeypatch.setattr(bs, "_known_repos", lambda dsn=None: [("sheikh-musa", "cosem-adcda")])
     bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-1", "PR#857 -- PASS")  # must not raise
 
 
 def test_refuse_if_pr_verdict_misrouted_noop_when_author_instance_unresolvable(monkeypatch):
     monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
     monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "cosem-adcda"))
+    monkeypatch.setattr(bs, "_known_repos", lambda dsn=None: [("sheikh-musa", "cosem-adcda")])
     monkeypatch.setattr(bs, "_pr_head_branch", lambda owner, repo, n: "feat/op35986-doha-area2-trainees")
     monkeypatch.setattr(bs, "_resolve_pr_author_instance", lambda repo, branch, dsn=None: None)
     bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-1", "PR#857 -- PASS")  # must not raise
@@ -1325,6 +1329,7 @@ def test_refuse_if_pr_verdict_misrouted_noop_when_author_instance_unresolvable(m
 def test_refuse_if_pr_verdict_misrouted_noop_when_to_already_correct(monkeypatch):
     monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
     monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "cosem-adcda"))
+    monkeypatch.setattr(bs, "_known_repos", lambda dsn=None: [("sheikh-musa", "cosem-adcda")])
     monkeypatch.setattr(bs, "_pr_head_branch", lambda owner, repo, n: "feat/op35986-doha-area2-trainees")
     monkeypatch.setattr(bs, "_resolve_pr_author_instance", lambda repo, branch, dsn=None: "cc-cosem-adcda-2")
     bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-2", "PR#857 -- PASS")  # must not raise
@@ -1337,6 +1342,7 @@ def test_refuse_if_pr_verdict_misrouted_noop_when_addressed_to_shared_base_itsel
     rows = [("cc-quality", True), ("cc-cosem-adcda", True), ("cc-cosem-adcda", True)]
     monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: rows.pop(0))
     monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "cosem-adcda"))
+    monkeypatch.setattr(bs, "_known_repos", lambda dsn=None: [("sheikh-musa", "cosem-adcda")])
     monkeypatch.setattr(bs, "_pr_head_branch", lambda owner, repo, n: "feat/op35986-doha-area2-trainees")
     monkeypatch.setattr(bs, "_resolve_pr_author_instance", lambda repo, branch, dsn=None: "cc-cosem-adcda-2")
     bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda", "PR#857 -- PASS")  # must not raise
@@ -1350,6 +1356,144 @@ def test_refuse_if_pr_verdict_misrouted_skip_flag_bypasses_everything(monkeypatc
     bs.refuse_if_pr_verdict_misrouted(
         "cc-quality", "cc-cosem-adcda-1", "PR#857 -- PASS", skip=True
     )  # must not raise, must not query
+
+
+# ── cross-repo resolution (bus #85014 cc-quality review: cwd alone silently
+# no-op'd whenever cc-quality sends from ~/wingmen/orchestrator about a
+# DIFFERENT repo -- its actual habitual practice) ──────────────────────────
+def test_refuse_if_pr_verdict_misrouted_falls_back_to_subject_hint_repo(monkeypatch):
+    # cwd is wingmen-orchestrator (no PR#857 there); subject names cosem-adcda
+    rows = [("cc-quality", True), ("cc-cosem-adcda", True), ("cc-cosem-adcda", True)]
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: rows.pop(0))
+    monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "wingmen-orchestrator"))
+    monkeypatch.setattr(bs, "_known_repos", lambda dsn=None: [
+        ("sheikh-musa", "wingmen-orchestrator"), ("sheikh-musa", "cosem-adcda"),
+    ])
+
+    def _head_branch(owner, repo, n):
+        return "feat/op35986-doha-area2-trainees" if repo == "cosem-adcda" else None
+
+    monkeypatch.setattr(bs, "_pr_head_branch", _head_branch)
+    monkeypatch.setattr(bs, "_resolve_pr_author_instance", lambda repo, branch, dsn=None: "cc-cosem-adcda-2")
+    monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "status=idle, heartbeat 0:02:00 ago")
+    with pytest.raises(SystemExit, match="Use --to cc-cosem-adcda-2"):
+        bs.refuse_if_pr_verdict_misrouted(
+            "cc-quality", "cc-cosem-adcda-1", "cosem-adcda PR#857 -- PASS")
+
+
+def test_refuse_if_pr_verdict_misrouted_falls_back_to_brute_force_without_a_hint(monkeypatch):
+    # no repo-name token in the subject at all -- must still find it via known_repos
+    rows = [("cc-quality", True), ("cc-cosem-adcda", True), ("cc-cosem-adcda", True)]
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: rows.pop(0))
+    monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "wingmen-orchestrator"))
+    monkeypatch.setattr(bs, "_known_repos", lambda dsn=None: [
+        ("sheikh-musa", "wingmen-orchestrator"), ("sheikh-musa", "cosem-adcda"),
+    ])
+
+    def _head_branch(owner, repo, n):
+        return "feat/op35986-doha-area2-trainees" if repo == "cosem-adcda" else None
+
+    monkeypatch.setattr(bs, "_pr_head_branch", _head_branch)
+    monkeypatch.setattr(bs, "_resolve_pr_author_instance", lambda repo, branch, dsn=None: "cc-cosem-adcda-2")
+    monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "status=idle, heartbeat 0:02:00 ago")
+    with pytest.raises(SystemExit, match="Use --to cc-cosem-adcda-2"):
+        bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-1", "PR#857 -- PASS")
+
+
+# ── discriminate by LIVE AUTHOR, not merely "PR# exists" (cc-quality's 2nd-pass
+# review of #697, bus #85112: orchestrator's own PR#636 and cosem-platform's
+# PR#636 are unrelated PRs that happen to share a number; stopping at the first
+# repo where `gh pr view` found SOME PR silently resolved the WRONG repo
+# whenever cc-quality's send-cwd -- always ~/wingmen/orchestrator in practice --
+# had an unrelated same-numbered PR, reproducing the exact #692 no-op) ────────
+def test_refuse_if_pr_verdict_misrouted_skips_a_same_numbered_pr_in_an_unrelated_repo(monkeypatch):
+    # cwd resolves orchestrator's OWN PR#636 (branch exists, but no live author --
+    # nothing has that branch checked out) while cosem-platform's PR#636 (found
+    # via the subject hint) DOES have a live author -- must fire on the latter,
+    # not silently stop at the cwd repo just because a same-numbered PR exists there.
+    rows = [("cc-quality", True), ("cc-cosem-platform", True), ("cc-cosem-platform", True)]
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: rows.pop(0))
+    monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "wingmen-orchestrator"))
+    monkeypatch.setattr(bs, "_known_repos", lambda dsn=None: [
+        ("sheikh-musa", "wingmen-orchestrator"), ("sheikh-musa", "cosem-platform"),
+    ])
+
+    def _head_branch(owner, repo, n):
+        if repo == "wingmen-orchestrator":
+            return "fleet-health/op35814-deepseek-per-client-keys"  # a REAL, unrelated PR#636
+        if repo == "cosem-platform":
+            return "fix/op36273-coverage-panel-counts-position"
+        return None
+
+    def _author(repo, branch, dsn=None):
+        # the orchestrator's own #636 branch has no live worktree on it at all
+        if repo == "wingmen-orchestrator":
+            return None
+        if repo == "cosem-platform":
+            return "cc-cosem-platform-1"
+        return None
+
+    monkeypatch.setattr(bs, "_pr_head_branch", _head_branch)
+    monkeypatch.setattr(bs, "_resolve_pr_author_instance", _author)
+    monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "status=idle, heartbeat 0:02:00 ago")
+    with pytest.raises(SystemExit, match="Use --to cc-cosem-platform-1"):
+        bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-platform-2", "PR#636 @ 5a27eed -- PASS")
+
+
+def test_refuse_if_pr_verdict_misrouted_noop_on_a_genuine_live_crossrepo_collision(monkeypatch):
+    # if TWO different repos' PR# both resolve to a LIVE author, that's a genuine
+    # ambiguity -- never guess between them, even though each one alone would
+    # have fired cleanly.
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
+    monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "repo-a"))
+    monkeypatch.setattr(bs, "_known_repos", lambda dsn=None: [
+        ("sheikh-musa", "repo-a"), ("sheikh-musa", "repo-b"),
+    ])
+    monkeypatch.setattr(bs, "_pr_head_branch", lambda owner, repo, n: f"branch-{repo}")
+    monkeypatch.setattr(bs, "_resolve_pr_author_instance", lambda repo, branch, dsn=None: f"cc-{repo}-1")
+    bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-repo-a-9", "PR#636 -- PASS")  # must not raise
+
+
+def test_resolve_pr_author_instance_basename_pre_filter_is_bidirectional(monkeypatch):
+    # orchestrator's GitHub repo name is "wingmen-orchestrator" but its worktree
+    # dirs are named "orchestrator" -- a plain startswith(repo) missed this
+    # entirely (cc-quality review of #697, bus #85112, verified live).
+    import psycopg2
+
+    class _Cur:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params=None):
+            self.calls.append((sql, params))
+
+        def fetchall(self):
+            return [("fleet-health-lane", "/Users/sheikhmusa/wingmen/orchestrator")]
+
+        def fetchone(self):
+            return ("cc-fleet-health",)
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def close(self):
+            pass
+
+    import subprocess as real_subprocess
+
+    monkeypatch.setattr(psycopg2, "connect", lambda *a, **k: _Conn())
+    monkeypatch.setattr(real_subprocess, "run", lambda *a, **k: type(
+        "R", (), {"stdout": "fable/substrate-safe-fixes"})())
+    result = bs._resolve_pr_author_instance(
+        "wingmen-orchestrator", "fable/substrate-safe-fixes", dsn="postgresql://unused")
+    assert result == "cc-fleet-health"
+
+
+def test_repo_hint_from_subject_matches_common_shapes():
+    assert bs._repo_hint_from_subject("cosem-adcda PR#852 at 35470a82 -- PASS") == "cosem-adcda"
+    assert bs._repo_hint_from_subject("PR #611 at 35470a82 -- PASS") is None
+    assert bs._repo_hint_from_subject("no pr number here") is None
 
 
 def test_cli_refuses_on_stale_instance_with_live_base_before_sending(monkeypatch):

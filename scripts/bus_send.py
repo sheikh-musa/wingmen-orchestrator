@@ -307,6 +307,48 @@ def _repo_from_cwd() -> tuple[str, str] | None:
     return (m.group(1), m.group(2)) if m else None
 
 
+def _repo_hint_from_subject(subject: str) -> str | None:
+    """A repo-name token immediately before 'PR#' in the subject ('cosem-adcda
+    PR#852 ...') -- cc-quality's own established message shape. None if absent."""
+    m = re.search(r"\b([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\s+PR\s*#", subject or "", re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _known_repos(dsn: str | None = None) -> list[tuple[str, str]]:
+    """Distinct (owner, repo) pairs across registered lanes' worktrees, plus this
+    checkout's own repo. bus #85014 cc-quality review: _repo_from_cwd() alone
+    silently no-ops whenever cc-quality sends from ~/wingmen/orchestrator about a
+    DIFFERENT repo (its actual habitual practice) -- this is the cwd-independent
+    fallback. One `git remote get-url` per distinct worktree, paid once per send
+    that reaches here (already behind the cc-quality + PR# cheap pre-checks), not
+    amortized across a long-running loop, so the cost is acceptable here."""
+    import subprocess
+
+    import psycopg2
+
+    repos = set()
+    self_repo = _repo_from_cwd()
+    if self_repo:
+        repos.add(self_repo)
+    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT worktree_path FROM fleet_lanes WHERE worktree_path IS NOT NULL")
+    rows = cur.fetchall()
+    conn.close()
+    for (path,) in rows:
+        try:
+            out = subprocess.run(
+                ["git", "-C", path, "remote", "get-url", "origin"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+        except Exception:
+            continue
+        m = re.search(r"github\.com[:/]([^/]+)/([^/.]+?)(?:\.git)?$", out)
+        if m:
+            repos.add((m.group(1), m.group(2)))
+    return sorted(repos)
+
+
 def _pr_head_branch(owner: str, repo: str, pr_number: str) -> str | None:
     """The PR's current head branch via `gh`, or None on any failure (unknown
     PR, gh not authenticated, network hiccup) -- never blocks a send over an
@@ -328,10 +370,15 @@ def _resolve_pr_author_instance(repo: str, branch: str, dsn: str | None = None) 
     """The agent_id of the LIVE instance whose worktree currently has `branch`
     checked out, among registered lanes for `repo` -- or None if zero or more
     than one match (ambiguous resolution never blocks a send; it only refuses
-    on a CONFIRMED mismatch). Scoped by worktree basename starting with the
-    repo name (every observed lane dir for a repo follows this convention:
-    cosem-adcda, cosem-adcda-hotfix, cosem-adcda.wt-urgent, ...) rather than
-    the stale, hand-maintained REPOS.json (missing cosem-exams entirely)."""
+    on a CONFIRMED mismatch). Pre-filtered by worktree basename containing (or
+    contained by) the repo name -- cheap, deliberately over-inclusive, never
+    the real discriminator (the exact branch match below is). A plain
+    startswith(repo) previously missed the orchestrator repo entirely: its
+    GitHub name is "wingmen-orchestrator" but its worktree dirs are named
+    "orchestrator" (cc-quality review of #697, bus #85112 -- verified live:
+    orchestrator's own PR#636 silently failed to resolve for exactly this
+    reason). Bidirectional containment catches both directions; REPOS.json
+    (missing cosem-exams entirely) is not used at all."""
     import subprocess
 
     import psycopg2
@@ -342,7 +389,10 @@ def _resolve_pr_author_instance(repo: str, branch: str, dsn: str | None = None) 
     rows = cur.fetchall()
     candidates = []
     for lane, worktree_path in rows:
-        if not worktree_path or not os.path.basename(worktree_path.rstrip("/")).startswith(repo):
+        if not worktree_path:
+            continue
+        base = os.path.basename(worktree_path.rstrip("/"))
+        if not (base.startswith(repo) or repo.startswith(base) or base in repo or repo in base):
             continue
         try:
             current = subprocess.run(
@@ -372,10 +422,31 @@ def refuse_if_pr_verdict_misrouted(
     head branch, not whichever instance happened to be addressed by hand.
 
     Resolution-failure-safe: any inconclusive step (not a cc-quality sender, no
-    PR# in the subject, cwd has no GitHub origin, `gh` lookup fails, zero/
+    PR# in the subject, no repo resolves the PR#, `gh` lookup fails, zero/
     multiple live worktrees hold the branch) is a silent no-op -- this guard
     only ever fires on a POSITIVELY CONFIRMED mismatch, never on an inability
     to verify, so it can't become a new way to strand a legitimate send.
+
+    Repo resolution is cwd-independent (bus #85014 cc-quality review of this
+    guard's own first cut): cc-quality's REAL habitual practice is to send
+    every verdict from ~/wingmen/orchestrator regardless of which repo it
+    reviewed, so trusting _repo_from_cwd() alone silently no-op'd for exactly
+    the cross-repo incident class this guard targets (verified live: a
+    cosem-adcda PR#857 verdict sent from the orchestrator checkout did not
+    fire). Tries cwd's own repo first (cheap), then the subject's own
+    repo-name hint ('cosem-adcda PR#852'), then every other known repo.
+
+    Discriminates by "resolves to a LIVE lane author", not merely "the PR#
+    exists in this repo" (cc-quality's second-pass review of #697, bus
+    #85112): PR NUMBERS COLLIDE ACROSS REPOS (orchestrator's own #636 and
+    cosem-platform's #636 are unrelated PRs) -- stopping at the first repo
+    where `gh pr view` merely finds a matching number resolved the WRONG
+    repo whenever cc-quality's send-cwd repo happened to have an unrelated
+    same-numbered PR, silently reproducing the exact no-op #692/#697 were
+    built to close. Collects every candidate repo where the PR# resolves to
+    SOME live worktree author, and fires only when that set has EXACTLY ONE
+    entry overall -- zero (unresolvable anywhere) or more than one
+    (a genuine, vanishingly rare live cross-repo collision) is never guessed.
 
     Cheap pre-checks first (sender shape, subject regex) before any DB round-
     trip or subprocess call, same shape as refuse_if_instance_stale_and_base_
@@ -393,15 +464,28 @@ def refuse_if_pr_verdict_misrouted(
     from_base = from_row[0] if from_row and from_row[0] else from_agent
     if from_base != "cc-quality":
         return
+    hint = _repo_hint_from_subject(subject)
+    known = _known_repos(dsn=dsn)
+    candidates = []
     repo_info = _repo_from_cwd()
-    if not repo_info:
-        return
-    owner, repo = repo_info
-    branch = _pr_head_branch(owner, repo, pr_number)
-    if not branch:
-        return
-    correct = _resolve_pr_author_instance(repo, branch, dsn=dsn)
-    if not correct or correct == to:
+    if repo_info:
+        candidates.append(repo_info)
+    if hint:
+        candidates += [(o, r) for (o, r) in known if r == hint and (o, r) not in candidates]
+    candidates += [(o, r) for (o, r) in known if (o, r) not in candidates]
+
+    matches = []  # (repo, branch, correct_instance) for every candidate with a LIVE author
+    for owner, r in candidates:
+        b = _pr_head_branch(owner, r, pr_number)
+        if not b:
+            continue
+        c = _resolve_pr_author_instance(r, b, dsn=dsn)
+        if c:
+            matches.append((r, b, c))
+    if len(matches) != 1:
+        return  # unresolvable anywhere, or a genuine live cross-repo collision -- never guess
+    repo, branch, correct = matches[0]
+    if correct == to:
         return
     to_row = _agent_status_row(to, dsn=dsn)
     to_base = to_row[0] if to_row and to_row[0] else to
