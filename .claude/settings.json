@@ -61,6 +61,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.venv/bin/python3 \"$CLAUDE_PROJECT_DIR\"/scripts/hooks/bash_message_commandsub_guard.py",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }
