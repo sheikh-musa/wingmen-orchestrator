@@ -190,10 +190,19 @@ def gh_pr_view(worktree: Path) -> dict | None:
 #    for why a per-task delta is only valid if nothing else spends concurrently) ──
 
 def deepseek_fetch_key() -> str:
+    # provider_vault_fetch.py needs psycopg (via nervous_system.vault), which
+    # only the orchestrator's venv has -- sys.executable is whatever
+    # interpreter happened to launch run_pilot.py itself (e.g. the system
+    # python3 on PATH if invoked via its own shebang), not necessarily that
+    # venv. Use the venv explicitly so this works regardless of how
+    # run_pilot.py was invoked (caught live: the first real dry run hit
+    # exactly this, system python3.15 lacking psycopg).
+    venv_py = ORCH_DIR / ".venv" / "bin" / "python3"
+    python = str(venv_py) if venv_py.exists() else sys.executable
     env = dict(os.environ)
     env.setdefault("AGENT_ID", "cc-loop-1")
     env.setdefault("CC_BASE_AGENT_ID", "cc-loop")
-    out = run([sys.executable, str(ORCH_DIR / "scripts" / "lib" / "provider_vault_fetch.py"),
+    out = run([python, str(ORCH_DIR / "scripts" / "lib" / "provider_vault_fetch.py"),
                "DEEPSEEK_CODING_KEY", "cc-loop pilot cost tracking"],
               cwd=str(ORCH_DIR), env=env)
     return out.stdout.strip()
