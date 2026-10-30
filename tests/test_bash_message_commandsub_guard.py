@@ -132,6 +132,54 @@ def test_allows_single_quoted_segment_concatenated_with_safe_unquoted_text(monke
     assert _run(cmd, monkeypatch) == 0
 
 
+# --- orch-console bus #83846/#83852: narrow allow for the standard
+# quoted-heredoc commit/message pattern every lane's own commit
+# instructions use. Safe because a single-quoted heredoc delimiter
+# suppresses ALL expansion in the body (same as single quotes), and
+# `cat` with no other args only ever echoes stdin back.
+
+def test_allows_exact_quoted_heredoc_cat_substitution(monkeypatch):
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\ndocs: fix stale comment\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 0
+
+
+def test_refuses_same_shape_with_unquoted_delimiter(monkeypatch):
+    cmd = "git commit " + "-m \"$(cat <<EOF\ndocs: fix stale comment\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_refuses_backtick_elsewhere_alongside_the_safe_heredoc(monkeypatch):
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\ndocs: fix\nEOF\n)" + "`whoami`\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_refuses_dollar_paren_elsewhere_alongside_the_safe_heredoc(monkeypatch):
+    cmd = "git commit " + "-m \"$(whoami)$(cat <<'EOF'\ndocs: fix\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_refuses_cat_with_extra_arguments_inside_the_parens(monkeypatch):
+    cmd = "git commit " + "-m \"$(cat -v <<'EOF'\ndocs: fix\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_refuses_trailing_text_after_the_closing_paren(monkeypatch):
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\ndocs: fix\nEOF\n) extra\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_allows_the_heredoc_dash_variant_with_single_quoted_delimiter(monkeypatch):
+    cmd = "git commit " + "-m \"$(cat <<-'EOF'\ndocs: fix\n\tEOF\n)\""
+    assert _run(cmd, monkeypatch) == 0
+
+
+def test_heredoc_body_containing_its_own_backticks_stays_safe(monkeypatch):
+    # The whole point: a single-quoted delimiter means bash never expands the
+    # body, so a literal backtick/`$(` INSIDE it is inert, not a hazard.
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\nsee " + "`rm -rf /tmp/x`" + " for details\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 0
+
+
 # --- cc-quality PR#657 review, Finding B: no outer catch-all = fail-open risk ---
 
 def test_unexpected_exception_in_main_fails_closed(monkeypatch):

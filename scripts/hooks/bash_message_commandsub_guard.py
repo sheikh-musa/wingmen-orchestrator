@@ -24,6 +24,18 @@ Scope, deliberately narrow per console's own instruction (do not break legitimat
     unquoted is just as exploitable as double-quoted (the shell expands both), and
     scoping the refusal to the ONLY exploitable quoting styles is what keeps this
     narrow instead of a blanket backtick/`$(` ban across the whole command.
+  - ONE narrow exception (orch-console bus #83846/#83852, 2026-10-30): a value
+    that is EXACTLY `$(cat <<'DELIM' ... DELIM)` -- a single-quoted heredoc
+    delimiter, `cat` with no other arguments, nothing else inside the parens --
+    is allowed even though it contains `$(`. This is the standard fleet-wide
+    pattern for a multi-line git commit / bus_send message (every lane's own
+    commit instructions use it). It is safe because a SINGLE-QUOTED heredoc
+    delimiter suppresses ALL expansion inside the body, exactly like single
+    quotes -- so no backtick/$(...) the body contains can ever run, and `cat`
+    alone can only ever echo its stdin back verbatim. An UNQUOTED delimiter
+    (`<<EOF` instead of `<<'EOF'`), or any extra text inside the parens
+    besides `cat <<'DELIM' ... DELIM`, does NOT match this exception and
+    stays refused.
 
 Fleet-wide (every body that has this repo as its project, per the request this
 guard answers), registered in .claude/settings.json alongside console_irsyad_guard.py
@@ -54,6 +66,29 @@ _FLAG_RE = re.compile(r"(?<!\S)(--body|--subject|--title|-m)(?:(=)|(?=\s|$))")
 
 def _has_command_substitution(value: str) -> bool:
     return "`" in value or "$(" in value
+
+
+# The one narrow allow (bus #83846/#83852): the ENTIRE segment is exactly
+# `$(cat <<'DELIM' ... DELIM)` (or `<<-'DELIM'`) -- single-quoted delimiter,
+# `cat` with no other args, nothing else inside the parens. re.DOTALL so the
+# heredoc body may contain anything, including newlines, backticks, or
+# `$(...)` of its own -- none of it can expand, because the single-quoted
+# delimiter suppresses expansion for the whole body (same as single quotes).
+_HEREDOC_CAT_RE = re.compile(
+    r"^\s*\$\(\s*cat\s+<<-?\s*'([^'\n]+)'\s*\n"
+    r".*?\n"
+    r"[ \t]*\1[ \t]*\n?"
+    r"\s*\)\s*$",
+    re.DOTALL,
+)
+
+
+def _is_safe_heredoc_cat_substitution(text: str) -> bool:
+    """True iff `text` (one full shell-word segment) is EXACTLY the one
+    allowed shape above and nothing more -- an unquoted delimiter, extra
+    text inside the parens, or a different command all fail to match and
+    fall through to the normal backtick/$(...) refusal."""
+    return bool(_HEREDOC_CAT_RE.match(text))
 
 
 def _scan_word(cmd: str, pos: int):
@@ -121,7 +156,9 @@ def _find_dangerous_flag_values(cmd: str):
             value_start += 1
         segments, end = _scan_word(cmd, start)
         dangerous = any(
-            kind != "single" and _has_command_substitution(text)
+            kind != "single"
+            and _has_command_substitution(text)
+            and not _is_safe_heredoc_cat_substitution(text)
             for kind, text in segments
         )
         if dangerous:
