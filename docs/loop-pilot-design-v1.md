@@ -364,8 +364,18 @@ not a signal anything is wrong.
    reference implementation and catches all 6 seeded-bug variants
    individually (boundary-off-by-one, forgot-plus-one, ms-based-day-math,
    wrong-status-thresholds, includes-future-dated-misses,
-   mutates-input-array); not yet run live. 4 more tasks still needed to
-   hit the 6-task floor.
+   mutates-input-array); not yet run live. **task-03-oracle-audit-plan**
+   drafted 2026-10-30 (H-6's mastered-pool eligibility + pool-size-based
+   sample-size calc, the never-built `scripts/audits/fsrs_oracle_sweep.ts`
+   planning step) -- oracle verified clean against a correct reference and
+   catches all 6 seeded-bug variants (wrong-threshold-base,
+   off-by-one-threshold, wrong-eligibility-operator,
+   wrong-interval-boundary, no-cap-to-pool-size, mutates-input-array); the
+   first attempt at wrong-threshold-base wasn't caught (the pool-size cap
+   masked it when the eligible pool was tiny) -- fixed by adding a test
+   where the eligible pool is bigger than the correct base but smaller
+   than the wrong one, so the cap can't hide the difference; not yet run
+   live. 3 more tasks still needed to hit the 6-task floor.
 2. Whether hifz already has a local-runner GH-status mechanism to reuse
    instead of `local_ci_runner.sh` -- asked cc-hifz-1, no answer yet.
 3. `switch_lane_token`-for-one-shot-session and the builder-worktree isolation
