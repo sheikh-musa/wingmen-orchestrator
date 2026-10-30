@@ -533,6 +533,18 @@ def do_reviewer(task_id: str, hifz_checkout: str, review_worktree: Path, head_sh
         raise PilotError(f"reviewer exited but {verdict_file} is missing")
     verdict, reason = parse_verdict_file(verdict_file)
 
+    # The reviewer role may legitimately run build/test tooling to inform its
+    # verdict (e.g. hifz's `update-version` prebuild step stamps a fresh
+    # build timestamp into web/public/version.json + web/src/version.js),
+    # which leaves review_worktree's tracked files locally modified -- that
+    # already broke the loop-pilot/reviews checkout below once (op#35690,
+    # task-01 condition B: "Your local changes ... would be overwritten by
+    # checkout"). Nothing past this point needs review_worktree's checked-out
+    # tree state (verdict/reason are already captured above as plain Python
+    # values), so discard it now, before either checkout attempt.
+    git(str(review_worktree), "reset", "--hard", "HEAD", check=False)
+    git(str(review_worktree), "clean", "-fd", check=False)
+
     verdict_rel = f".loop/{task_id}/reviews/{head_sha}.json"
     run([sys.executable, str(ORCH_DIR / "scripts" / "loop" / "reviewer_verdict.py"),
          "--task-id", task_id, "--repo-dir", str(review_worktree),
