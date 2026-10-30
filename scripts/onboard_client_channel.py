@@ -102,19 +102,19 @@ def parse_args(argv=None):
     p.add_argument("--channel-key", required=True)
     p.add_argument("--chat-id", type=int, action="append", default=None, dest="chat_ids",
                    help="allowed chat id (repeatable; positive = DM, negative = group); OMIT with --invite — the first /start on the deep link binds the chat")
-    p.add_argument("--token-env-key", required=True)
+    p.add_argument("--token-env-key", required=False)
     p.add_argument("--tag", help="channel_tag; defaults to --channel-key")
-    p.add_argument("--mode", choices=["log-and-route", "agent-session"], required=True)
+    p.add_argument("--mode", choices=["log-and-route", "agent-session"], required=False)
     p.add_argument("--phase", choices=["drill", "supervised", "direct"], default=None,
                     help="group_routing.agent_phase; defaults to supervised for client, direct for internal")
-    p.add_argument("--audience", choices=["client", "internal"], required=True)
+    p.add_argument("--audience", choices=["client", "internal"], required=False)
     p.add_argument("--owner-lane", default=None)
-    p.add_argument("--store", required=True, help="exact store name + project ref, or literal 'none'")
+    p.add_argument("--store", required=False, help="exact store name + project ref, or literal 'none'")
     p.add_argument("--powers", default="reply_text", help="comma list, default least-privilege reply_text")
     p.add_argument("--self-description", default=None,
                     help="per-channel responder self-description (Refinement #4); refused if it names any sibling channel")
     p.add_argument("--agent-reviewer", default=None)
-    p.add_argument("--host", choices=["mini", "hub"], required=True)
+    p.add_argument("--host", choices=["mini", "hub"], required=False)
     p.add_argument("--override-to-direct", action="store_true")
     p.add_argument("--override-gate-citation", default=None, help="bus id of the SEPARATE gate granting the override")
     p.add_argument("--inject-target", default=None)
@@ -128,10 +128,28 @@ def parse_args(argv=None):
                         "on the bot binds the chat to")
     p.add_argument("--invite-ttl-hours", type=int, default=72,
                    help="invite expiry in hours from APPLY time (default 72)")
+    p.add_argument("--reinvite", action="store_true",
+                   help="mint a FRESH single-use invite for an EXISTING channel and change nothing "
+                        "else: no migration, no channel-row write, no boot-script edit. Only "
+                        "--channel-key (and optionally --invite-ttl-hours / --owner-lane / "
+                        "--bot-username) are read; every other onboarding flag is ignored")
     p.add_argument("--bot-username", default=None,
                    help="bot's public t.me username for the invite deep link; required for "
                         "token env keys not in the known map")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.reinvite and args.invite:
+        p.error("--reinvite and --invite are mutually exclusive: --invite onboards a NEW channel, "
+                "--reinvite mints another link for an EXISTING one")
+    if not args.reinvite:
+        # the onboarding flags stay mandatory for every other mode; argparse
+        # cannot express "required unless --reinvite", so validate here and
+        # keep the same loud refusal a missing flag has always produced
+        missing = [f"--{name.replace('_', '-')}"
+                   for name in ("token_env_key", "mode", "audience", "store", "host")
+                   if getattr(args, name) in (None, "")]
+        if missing:
+            p.error("the following arguments are required: " + ", ".join(missing))
+    return args
 
 
 def connect():
@@ -300,6 +318,63 @@ def write_invite_link(path: Path, username: str, token: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"https://t.me/{username}?start={token}\n")
     path.chmod(0o600)
+
+
+def reinvite(args) -> int:
+    """Mint a FRESH single-use invite for a channel that already exists
+    (orch-console #84015, after the bariq re-mint had to be hand-rolled at
+    bus #83995/#84008).
+
+    check_channel_key_free makes onboarding one-shot on purpose; a channel that
+    is already bound keeps needing fresh links (the client lets one expire, the
+    bot is re-onboarded to a new phone). This is the narrow second path: it
+    mints + records an invite and returns. It does NOT render a migration,
+    touch the channel row's allowlist/enabled/group_routing, edit the
+    INGEST_CHANNELS pin, or apply anything -- a re-mint must be unable to
+    change how the channel behaves, only what key opens it.
+    """
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT token_env_key FROM bot_channels WHERE channel_key=%s",
+                    (args.channel_key,))
+        row = cur.fetchone()
+        if not row:
+            fail(f"channel_key {args.channel_key!r} does not exist -- --reinvite is for an "
+                 f"EXISTING channel; onboard a new one with --invite")
+        token_env_key = row[0]
+
+        token = mint_invite()
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        ttl = args.invite_ttl_hours or 72
+        created_by = args.owner_lane or "onboard_client_channel --reinvite"
+        cur.execute(
+            "INSERT INTO public.bot_channel_invites\n"
+            "  (channel_key, token_hash, expires_at, created_by)\n"
+            "VALUES (%s, %s, now() + make_interval(hours => %s), %s)\n"
+            "ON CONFLICT (token_hash) DO NOTHING\n"
+            "RETURNING id, expires_at",
+            (args.channel_key, token_hash, ttl, created_by))
+        inserted = cur.fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+
+    if not inserted:
+        fail("invite insert hit a token_hash collision and wrote nothing -- re-run")
+    invite_id, expires_at = inserted
+    username = bot_username_for(token_env_key, args.bot_username)
+    link_path = ORCH_DIR / ".secrets" / f"invite_{slugify(args.channel_key)}.link"
+    write_invite_link(link_path, username, token)
+
+    print(f"\n# Reinvited {args.channel_key}: invite id {invite_id}, "
+          f"expires {expires_at.isoformat()} (+{ttl}h from now)")
+    print(f"# token_hash sha256 prefix: {token_hash[:12]}")
+    print(f"# Link written 0600 to {link_path} (gitignored) -- deliberately NOT printed "
+          f"here: read it from the file and relay it out-of-band.")
+    print(f"# Earlier invites for this channel were left untouched; they stay valid until "
+          f"their own expiry.")
+    return 0
 
 
 def next_migration_number() -> int:
@@ -520,6 +595,8 @@ def render_polled_tags_diff(tag: str) -> tuple[str, str] | None:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    if args.reinvite:
+        return reinvite(args)
     if args.chat_ids is None:            # --chat-id omitted (--invite flow)
         args.chat_ids = []
 
