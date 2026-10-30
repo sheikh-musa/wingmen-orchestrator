@@ -41,11 +41,13 @@ Usage:
 Identity: --from is resolved automatically if omitted, in this order:
     1. CC_BASE_AGENT_ID   (interactive fleet lane / this Claude Code session)
     2. AGENT_ID           (daemon/watchdog launchers)
-    3. ORCH_AGENT_ID, but ONLY when ORCH_BODY_ROLE=console (the one
-       documented case where the console's own identity is the right
-       fallback — see reference_agent_id_not_orch_agent_id_for_identity;
-       ORCH_AGENT_ID is otherwise fleet-wide-exported .env noise and must
-       NEVER be trusted blindly)
+    3. ORCH_AGENT_ID, but ONLY when ORCH_BODY_ROLE=console AND (the live
+       tmux session is actually 'nazim', verified via `tmux display-message`,
+       OR ORCH_CONSOLE_BOOT=1 was exported directly by boot_nazim.sh) — see
+       agent_identity.resolve_agent_id's own docstring for the full story
+       (bus #85112/#85131/#85145). ORCH_BODY_ROLE/ORCH_AGENT_ID are
+       otherwise fleet-wide-exported .env noise and must NEVER be trusted
+       blindly on their own.
     Refuses (does not guess) if none of these resolve.
 """
 from __future__ import annotations
