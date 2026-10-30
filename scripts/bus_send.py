@@ -307,6 +307,48 @@ def _repo_from_cwd() -> tuple[str, str] | None:
     return (m.group(1), m.group(2)) if m else None
 
 
+def _repo_hint_from_subject(subject: str) -> str | None:
+    """A repo-name token immediately before 'PR#' in the subject ('cosem-adcda
+    PR#852 ...') -- cc-quality's own established message shape. None if absent."""
+    m = re.search(r"\b([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\s+PR\s*#", subject or "", re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _known_repos(dsn: str | None = None) -> list[tuple[str, str]]:
+    """Distinct (owner, repo) pairs across registered lanes' worktrees, plus this
+    checkout's own repo. bus #85014 cc-quality review: _repo_from_cwd() alone
+    silently no-ops whenever cc-quality sends from ~/wingmen/orchestrator about a
+    DIFFERENT repo (its actual habitual practice) -- this is the cwd-independent
+    fallback. One `git remote get-url` per distinct worktree, paid once per send
+    that reaches here (already behind the cc-quality + PR# cheap pre-checks), not
+    amortized across a long-running loop, so the cost is acceptable here."""
+    import subprocess
+
+    import psycopg2
+
+    repos = set()
+    self_repo = _repo_from_cwd()
+    if self_repo:
+        repos.add(self_repo)
+    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT worktree_path FROM fleet_lanes WHERE worktree_path IS NOT NULL")
+    rows = cur.fetchall()
+    conn.close()
+    for (path,) in rows:
+        try:
+            out = subprocess.run(
+                ["git", "-C", path, "remote", "get-url", "origin"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+        except Exception:
+            continue
+        m = re.search(r"github\.com[:/]([^/]+)/([^/.]+?)(?:\.git)?$", out)
+        if m:
+            repos.add((m.group(1), m.group(2)))
+    return sorted(repos)
+
+
 def _pr_head_branch(owner: str, repo: str, pr_number: str) -> str | None:
     """The PR's current head branch via `gh`, or None on any failure (unknown
     PR, gh not authenticated, network hiccup) -- never blocks a send over an
@@ -372,10 +414,21 @@ def refuse_if_pr_verdict_misrouted(
     head branch, not whichever instance happened to be addressed by hand.
 
     Resolution-failure-safe: any inconclusive step (not a cc-quality sender, no
-    PR# in the subject, cwd has no GitHub origin, `gh` lookup fails, zero/
+    PR# in the subject, no repo resolves the PR#, `gh` lookup fails, zero/
     multiple live worktrees hold the branch) is a silent no-op -- this guard
     only ever fires on a POSITIVELY CONFIRMED mismatch, never on an inability
     to verify, so it can't become a new way to strand a legitimate send.
+
+    Repo resolution is cwd-independent (bus #85014 cc-quality review of this
+    guard's own first cut): cc-quality's REAL habitual practice is to send
+    every verdict from ~/wingmen/orchestrator regardless of which repo it
+    reviewed, so trusting _repo_from_cwd() alone silently no-op'd for exactly
+    the cross-repo incident class this guard targets (verified live: a
+    cosem-adcda PR#857 verdict sent from the orchestrator checkout did not
+    fire). Tries cwd's own repo first (cheap, correct whenever it happens to
+    hold the PR), then the subject's own repo-name hint ('cosem-adcda PR#852'),
+    then every other known repo -- stops at the first repo where the PR# is
+    found at all.
 
     Cheap pre-checks first (sender shape, subject regex) before any DB round-
     trip or subprocess call, same shape as refuse_if_instance_stale_and_base_
@@ -393,11 +446,23 @@ def refuse_if_pr_verdict_misrouted(
     from_base = from_row[0] if from_row and from_row[0] else from_agent
     if from_base != "cc-quality":
         return
+    repo = branch = None
     repo_info = _repo_from_cwd()
-    if not repo_info:
-        return
-    owner, repo = repo_info
-    branch = _pr_head_branch(owner, repo, pr_number)
+    if repo_info:
+        owner, r = repo_info
+        b = _pr_head_branch(owner, r, pr_number)
+        if b:
+            repo, branch = r, b
+    if not branch:
+        hint = _repo_hint_from_subject(subject)
+        known = _known_repos(dsn=dsn)
+        candidates = [(o, r) for (o, r) in known if hint and r == hint]
+        candidates += [(o, r) for (o, r) in known if (o, r) not in candidates]
+        for owner, r in candidates:
+            b = _pr_head_branch(owner, r, pr_number)
+            if b:
+                repo, branch = r, b
+                break
     if not branch:
         return
     correct = _resolve_pr_author_instance(repo, branch, dsn=dsn)

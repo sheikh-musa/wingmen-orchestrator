@@ -1304,6 +1304,7 @@ def test_refuse_if_pr_verdict_misrouted_noop_when_subject_has_no_pr_number(monke
 def test_refuse_if_pr_verdict_misrouted_noop_when_repo_unresolvable(monkeypatch):
     monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
     monkeypatch.setattr(bs, "_repo_from_cwd", lambda: None)
+    monkeypatch.setattr(bs, "_known_repos", lambda dsn=None: [])
     bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-1", "PR#857 -- PASS")  # must not raise
 
 
@@ -1311,6 +1312,7 @@ def test_refuse_if_pr_verdict_misrouted_noop_when_branch_unresolvable(monkeypatc
     monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
     monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "cosem-adcda"))
     monkeypatch.setattr(bs, "_pr_head_branch", lambda owner, repo, n: None)
+    monkeypatch.setattr(bs, "_known_repos", lambda dsn=None: [("sheikh-musa", "cosem-adcda")])
     bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-1", "PR#857 -- PASS")  # must not raise
 
 
@@ -1350,6 +1352,71 @@ def test_refuse_if_pr_verdict_misrouted_skip_flag_bypasses_everything(monkeypatc
     bs.refuse_if_pr_verdict_misrouted(
         "cc-quality", "cc-cosem-adcda-1", "PR#857 -- PASS", skip=True
     )  # must not raise, must not query
+
+
+# ── cross-repo resolution (bus #85014 cc-quality review: cwd alone silently
+# no-op'd whenever cc-quality sends from ~/wingmen/orchestrator about a
+# DIFFERENT repo -- its actual habitual practice) ──────────────────────────
+def test_refuse_if_pr_verdict_misrouted_falls_back_to_subject_hint_repo(monkeypatch):
+    # cwd is wingmen-orchestrator (no PR#857 there); subject names cosem-adcda
+    rows = [("cc-quality", True), ("cc-cosem-adcda", True), ("cc-cosem-adcda", True)]
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: rows.pop(0))
+    monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "wingmen-orchestrator"))
+    monkeypatch.setattr(bs, "_known_repos", lambda dsn=None: [
+        ("sheikh-musa", "wingmen-orchestrator"), ("sheikh-musa", "cosem-adcda"),
+    ])
+
+    def _head_branch(owner, repo, n):
+        return "feat/op35986-doha-area2-trainees" if repo == "cosem-adcda" else None
+
+    monkeypatch.setattr(bs, "_pr_head_branch", _head_branch)
+    monkeypatch.setattr(bs, "_resolve_pr_author_instance", lambda repo, branch, dsn=None: "cc-cosem-adcda-2")
+    monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "status=idle, heartbeat 0:02:00 ago")
+    with pytest.raises(SystemExit, match="Use --to cc-cosem-adcda-2"):
+        bs.refuse_if_pr_verdict_misrouted(
+            "cc-quality", "cc-cosem-adcda-1", "cosem-adcda PR#857 -- PASS")
+
+
+def test_refuse_if_pr_verdict_misrouted_falls_back_to_brute_force_without_a_hint(monkeypatch):
+    # no repo-name token in the subject at all -- must still find it via known_repos
+    rows = [("cc-quality", True), ("cc-cosem-adcda", True), ("cc-cosem-adcda", True)]
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: rows.pop(0))
+    monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "wingmen-orchestrator"))
+    monkeypatch.setattr(bs, "_known_repos", lambda dsn=None: [
+        ("sheikh-musa", "wingmen-orchestrator"), ("sheikh-musa", "cosem-adcda"),
+    ])
+
+    def _head_branch(owner, repo, n):
+        return "feat/op35986-doha-area2-trainees" if repo == "cosem-adcda" else None
+
+    monkeypatch.setattr(bs, "_pr_head_branch", _head_branch)
+    monkeypatch.setattr(bs, "_resolve_pr_author_instance", lambda repo, branch, dsn=None: "cc-cosem-adcda-2")
+    monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "status=idle, heartbeat 0:02:00 ago")
+    with pytest.raises(SystemExit, match="Use --to cc-cosem-adcda-2"):
+        bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-1", "PR#857 -- PASS")
+
+
+def test_refuse_if_pr_verdict_misrouted_prefers_cwd_repo_without_touching_known_repos(monkeypatch):
+    # cheap path: cwd already has the PR -- must not even call _known_repos
+    rows = [("cc-quality", True), ("cc-cosem-adcda", True), ("cc-cosem-adcda", True)]
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: rows.pop(0))
+    monkeypatch.setattr(bs, "_repo_from_cwd", lambda: ("sheikh-musa", "cosem-adcda"))
+    monkeypatch.setattr(bs, "_pr_head_branch", lambda owner, repo, n: "feat/op35986-doha-area2-trainees")
+
+    def _boom(dsn=None):
+        raise AssertionError("must not fall back to _known_repos when cwd already resolved the PR")
+
+    monkeypatch.setattr(bs, "_known_repos", _boom)
+    monkeypatch.setattr(bs, "_resolve_pr_author_instance", lambda repo, branch, dsn=None: "cc-cosem-adcda-2")
+    monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "status=idle, heartbeat 0:02:00 ago")
+    with pytest.raises(SystemExit, match="Use --to cc-cosem-adcda-2"):
+        bs.refuse_if_pr_verdict_misrouted("cc-quality", "cc-cosem-adcda-1", "PR#857 -- PASS")
+
+
+def test_repo_hint_from_subject_matches_common_shapes():
+    assert bs._repo_hint_from_subject("cosem-adcda PR#852 at 35470a82 -- PASS") == "cosem-adcda"
+    assert bs._repo_hint_from_subject("PR #611 at 35470a82 -- PASS") is None
+    assert bs._repo_hint_from_subject("no pr number here") is None
 
 
 def test_cli_refuses_on_stale_instance_with_live_base_before_sending(monkeypatch):
