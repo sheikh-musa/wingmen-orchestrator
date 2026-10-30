@@ -20,28 +20,32 @@ def _run(agent_id):
 
 def test_the_real_map_file_has_every_client_console_named():
     """Guard against a silent typo/drift in the shipped map vs. console's
-    explicit 5-key plan (bus #82358): COSEM, BARIQ, OEH, FFSFULFILMENT, INTERNAL."""
+    expected family set (bus #82358, interim bus #84011): COSEM, BARIQ, OEH,
+    FFSFULFILMENT, HC95, FLEET, LOOP. Interim state (2026-10-30, bus #84011):
+    none of the per-client vault keys exist yet, so every family points
+    EXPLICITLY at the shared DEEPSEEK_CODING_KEY -- an explicit mapping, not
+    a silent fallback, so the fail-closed rule for a genuinely UNMAPPED
+    family stays intact. This assertion will need updating again once real
+    per-client keys are provisioned and families start pointing at their
+    own dedicated vault key names."""
     with open(_MAP_FILE) as f:
         mapping = json.load(f)
-    key_names = set(mapping.values())
-    assert key_names == {
-        "DEEPSEEK_KEY_COSEM",
-        "DEEPSEEK_KEY_BARIQ",
-        "DEEPSEEK_KEY_OEH",
-        "DEEPSEEK_KEY_FFSFULFILMENT",
-        "DEEPSEEK_KEY_INTERNAL",
+    assert set(mapping) == {
+        "cosem", "cosem-tdu", "bariq", "oeh", "ffsfulfilment", "hc95", "fleet", "loop",
     }
+    assert set(mapping.values()) == {"DEEPSEEK_CODING_KEY"}
 
 
 def test_resolves_known_families():
     for agent_id, expected in [
-        ("cc-bariq-1", "DEEPSEEK_KEY_BARIQ"),
-        ("cc-oeh-1", "DEEPSEEK_KEY_OEH"),
-        ("cc-ffsfulfilment-1", "DEEPSEEK_KEY_FFSFULFILMENT"),
-        ("cc-cosem-exams-1", "DEEPSEEK_KEY_COSEM"),
-        ("cc-cosem-platform-author", "DEEPSEEK_KEY_COSEM"),
-        ("cc-hc95-broker-1", "DEEPSEEK_KEY_INTERNAL"),
-        ("cc-fleet-health", "DEEPSEEK_KEY_INTERNAL"),
+        ("cc-bariq-1", "DEEPSEEK_CODING_KEY"),
+        ("cc-oeh-1", "DEEPSEEK_CODING_KEY"),
+        ("cc-ffsfulfilment-1", "DEEPSEEK_CODING_KEY"),
+        ("cc-cosem-exams-1", "DEEPSEEK_CODING_KEY"),
+        ("cc-cosem-platform-author", "DEEPSEEK_CODING_KEY"),
+        ("cc-hc95-broker-1", "DEEPSEEK_CODING_KEY"),
+        ("cc-fleet-health", "DEEPSEEK_CODING_KEY"),
+        ("cc-loop-1", "DEEPSEEK_CODING_KEY"),
     ]:
         rc, stdout, stderr = _run(agent_id)
         assert rc == 0, (agent_id, stderr)
@@ -56,7 +60,7 @@ def test_compound_family_cosem_tdu_shares_the_cosem_key():
     rc1, out1, _ = _run("cc-cosem-tdu-coord")
     rc2, out2, _ = _run("cc-cosem-exams-1")
     assert rc1 == 0 and rc2 == 0
-    assert out1 == out2 == "DEEPSEEK_KEY_COSEM"
+    assert out1 == out2 == "DEEPSEEK_CODING_KEY"
 
 
 def test_unmapped_family_fails_closed_nothing_on_stdout():

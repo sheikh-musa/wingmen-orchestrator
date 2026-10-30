@@ -264,30 +264,37 @@ def test_provider_small_model_override_env_honored_per_provider(tmp_path):
 # DEEPSEEK_CODING_KEY, and fails closed on an unmapped family ──────────────
 
 @pytest.mark.parametrize("agent_id,vault_key_name", [
-    ("cc-bariq-1", "DEEPSEEK_KEY_BARIQ"),
-    ("cc-oeh-1", "DEEPSEEK_KEY_OEH"),
-    ("cc-ffsfulfilment-1", "DEEPSEEK_KEY_FFSFULFILMENT"),
-    ("cc-cosem-exams-1", "DEEPSEEK_KEY_COSEM"),
-    ("cc-cosem-platform-author", "DEEPSEEK_KEY_COSEM"),
-    ("cc-cosem-tdu-coord", "DEEPSEEK_KEY_COSEM"),  # compound family "cosem-tdu" maps to the SAME client key as "cosem"
-    ("cc-hc95-broker-1", "DEEPSEEK_KEY_INTERNAL"),
-    ("cc-fleet-health", "DEEPSEEK_KEY_INTERNAL"),
+    ("cc-bariq-1", "DEEPSEEK_CODING_KEY"),
+    ("cc-oeh-1", "DEEPSEEK_CODING_KEY"),
+    ("cc-ffsfulfilment-1", "DEEPSEEK_CODING_KEY"),
+    ("cc-cosem-exams-1", "DEEPSEEK_CODING_KEY"),
+    ("cc-cosem-platform-author", "DEEPSEEK_CODING_KEY"),
+    ("cc-cosem-tdu-coord", "DEEPSEEK_CODING_KEY"),  # compound family "cosem-tdu" maps to the SAME client key as "cosem"
+    ("cc-hc95-broker-1", "DEEPSEEK_CODING_KEY"),
+    ("cc-fleet-health", "DEEPSEEK_CODING_KEY"),
+    ("cc-loop-1", "DEEPSEEK_CODING_KEY"),
 ])
 def test_deepseek_resolves_vault_key_by_lane_family(agent_id, vault_key_name, tmp_path):
     """The fetch stub only knows ONE key name — the one this family is
-    supposed to resolve to. If the routing code still asked for the old
-    shared DEEPSEEK_CODING_KEY (or any other family's key), the stub would
-    have nothing for it and the call would fail closed instead of rc==0."""
+    supposed to resolve to. If the routing code still asked for a DIFFERENT
+    key than the map names, the stub would have nothing for it and the call
+    would fail closed instead of rc==0. Interim state (bus #84011, 2026-10-30):
+    every family explicitly maps to the shared DEEPSEEK_CODING_KEY until
+    real per-client keys are provisioned -- an explicit mapping, not a
+    silent fallback, so this is the map naming the shared key on purpose,
+    not the resolver guessing it."""
     fetch = _write_fetch_stub(tmp_path, key_by_vault_key={vault_key_name: "per-client-secret"})
     rc, env, stderr = _run("deepseek-v4-pro", str(tmp_path), fetch, agent_id=agent_id)
     assert rc == 0, (agent_id, vault_key_name, stderr)
     assert env["ANTHROPIC_AUTH_TOKEN"] == "per-client-secret"
 
 
-def test_deepseek_never_falls_back_to_the_shared_leak_flagged_key(tmp_path):
-    """A stub that only knows the OLD shared key — any per-client-mapped
-    agent must still fail closed, never silently reuse it."""
-    fetch = _write_fetch_stub(tmp_path, key_by_vault_key={"DEEPSEEK_CODING_KEY": "old-shared-leaked-key"})
+def test_deepseek_mapped_family_never_falls_back_to_an_unnamed_key(tmp_path):
+    """A stub that only knows a key the map does NOT name for this family —
+    a mapped agent must still fail closed, never silently reuse whatever the
+    stub happens to have (this is what distinguishes the map's EXPLICIT
+    DEEPSEEK_CODING_KEY entries, bus #84011, from a resolver-side guess)."""
+    fetch = _write_fetch_stub(tmp_path, key_by_vault_key={"DEEPSEEK_KEY_SOME_OTHER_FAMILY": "not-for-bariq"})
     rc, env, _ = _run("deepseek-v4-pro", str(tmp_path), fetch, agent_id="cc-bariq-1")
     assert rc == 1
     assert env["ANTHROPIC_AUTH_TOKEN"] == ""
