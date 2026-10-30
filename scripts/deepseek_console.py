@@ -99,6 +99,17 @@ def _context(playwright, headed: bool):
     return playwright.chromium.launch_persistent_context(
         _PROFILE_DIR,
         headless=not headed,
+        # Real Google Chrome (installed on the Mini), not the bundled
+        # Playwright Chromium -- DeepSeek's human check was flagging the
+        # bundled Chromium's automation fingerprint (orch-console bus
+        # #84081: Musa's one-time headed login kept failing the check).
+        # The two args below strip the two most common automation tells
+        # (the "Chrome is being controlled by automated software" infobar /
+        # navigator.webdriver); verified locally that navigator.webdriver
+        # reads False under this config before relying on it here.
+        channel="chrome",
+        ignore_default_args=["--enable-automation"],
+        args=["--disable-blink-features=AutomationControlled"],
         # Deliberately no record_video_dir / no tracing.start() anywhere in
         # this module -- see the no-capture constraint in the module docstring.
     )
