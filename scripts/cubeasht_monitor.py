@@ -772,7 +772,7 @@ def collect() -> tuple[bool, dict, Optional[str], list[str]]:
     probe_errors: dict = {}
     wsl = None
     try:
-        wcp = _ssh(f"wsl -d {WSL_DISTRO} -u root -- bash -s", WSL_SCRIPT, WSL_TIMEOUT_S)
+        wcp = _ssh(f"wsl -d {WSL_DISTRO} -- bash -s", WSL_SCRIPT, WSL_TIMEOUT_S)
         wsl = parse_wsl_output(wcp.stdout)
     except subprocess.TimeoutExpired:
         probe_errors["wsl"] = f"wsl probe timed out after {WSL_TIMEOUT_S}s"

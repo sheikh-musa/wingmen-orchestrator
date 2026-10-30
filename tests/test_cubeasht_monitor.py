@@ -116,6 +116,27 @@ def test_nvidia_smi_variants():
         cm.parse_nvidia_smi("No devices were found, x")
 
 
+def test_wsl_probe_runs_as_normal_user_not_root(monkeypatch):
+    # Least-privilege regression lock: the WSL probe is read-only
+    # (systemctl is-active / cat /proc / free -m), so it must NOT be launched
+    # as root. A future edit reintroducing `-u root` must fail here.
+    import subprocess as sp
+    seen: list[str] = []
+
+    def fake_ssh(remote_cmd, stdin_path, timeout):
+        seen.append(remote_cmd)
+        out = PS_REAL if "powershell" in remote_cmd else WSL_REAL
+        return sp.CompletedProcess(["ssh"], 0, out, "")
+
+    monkeypatch.setattr(cm, "_ssh", fake_ssh)
+    monkeypatch.setattr(cm, "fetch_runner", lambda: dict(RUNNER))
+    cm.collect()
+
+    wsl_cmds = [c for c in seen if c.startswith("wsl ")]
+    assert wsl_cmds == [f"wsl -d {cm.WSL_DISTRO} -- bash -s"]
+    assert "-u root" not in wsl_cmds[0]
+
+
 def test_wsl_parse_and_failure():
     w = cm.parse_wsl_output(WSL_REAL)
     assert w["mem_total_mb"] == 15558 and w["mem_used_pct"] == pytest.approx(8.6, abs=0.1)
