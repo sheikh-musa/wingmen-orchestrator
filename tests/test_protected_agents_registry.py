@@ -178,6 +178,16 @@ _KNOWN_NON_PROTECTION_FILES = {
     # widen the ground-truth check to every registry member instead of these
     # 3 specific move targets, changing the condition it checks.
     "scripts/glm_overflow_switch.py",
+    # TARGET_TO_AGENT_ID (op#36085/36098, PR #675/#676): tmux-target ->
+    # its OWN agent_id, used only to read that same target's most recent
+    # agent_messages row for a best-effort live-status ack fragment -- not
+    # a protection/destructive-ops membership set. There is no reverse
+    # (tmux-session -> agent_id) accessor on nervous_system.protected_agents
+    # today (only tmux_session_for(agent_id), the other direction); adding a
+    # DB round-trip here would also work against this feature's own
+    # best-effort/never-block design. Verified by reading the call site
+    # (_live_status_suffix): 2 entries, 2026-10-30.
+    "nervous_system/ingest.py",
 }
 
 # Deliberately surgical, not broad: a QUOTED-literal token (so prose like
