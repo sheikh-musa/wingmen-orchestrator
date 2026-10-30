@@ -123,6 +123,16 @@ def test_console_editing_nazim_handoff_is_allowed(monkeypatch, tmp_path):
     assert rc == 0
 
 
+def test_console_writing_a_nested_path_under_the_handoff_prefix_is_still_blocked(monkeypatch, tmp_path):
+    # cc-quality bus #85297: a bare fnmatch "reports/nazim-handoff*.md" lets `*` cross `/`,
+    # over-admitting e.g. reports/nazim-handoff-sub/evil.md. The allowlist covers specific
+    # files directly under the live checkout, never a whole subtree.
+    root = tmp_path / "orchestrator"
+    rc = _run(monkeypatch, tmp_path, tool_name="Write",
+              file_path=str(root / "reports" / "nazim-handoff-sub" / "evil.md"), root=root, console=True)
+    assert rc == 2
+
+
 def test_console_editing_any_other_live_checkout_file_is_still_blocked(monkeypatch, tmp_path):
     root = tmp_path / "orchestrator"
     rc = _run(monkeypatch, tmp_path, tool_name="Edit",

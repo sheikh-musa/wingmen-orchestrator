@@ -41,20 +41,26 @@ the console body ONLY (same discriminator as console_irsyad_guard.is_console():
 ORCH_BODY_ROLE=console and no CC_BASE_AGENT_ID -- lanes, coord and the hub all carry
 CC_BASE_AGENT_ID and are never this body), STATUS.md and reports/nazim-handoff*.md are allowlisted
 by relative path; every other path in the live checkout, and every other body including the
-console editing anything else there, is still blocked.
+console editing anything else there, is still blocked. The allowlist matches with `[^/]*`, not a
+glob `*` (cc-quality bus #85297): a plain fnmatch `*` crosses `/`, which would wrongly allow a
+console write to a NESTED path like reports/nazim-handoff-sub/evil.md -- the allowlist is meant
+to cover specific files directly under the live checkout, never a whole subtree.
 
 Exit 2 + stderr = the tool call is refused and the reason is shown to the model.
 """
-import fnmatch
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 LIVE_ORCH_DIR = Path(os.environ.get("LIVE_CHECKOUT_EDIT_GUARD_ROOT",
                                      os.path.expanduser("~/wingmen/orchestrator"))).resolve()
 
-_CONSOLE_ALLOWLIST = ("STATUS.md", "reports/nazim-handoff*.md")
+_CONSOLE_ALLOWLIST = (
+    re.compile(r"^STATUS\.md$"),
+    re.compile(r"^reports/nazim-handoff[^/]*\.md$"),
+)
 
 _PATH_KEYS = ("file_path", "notebook_path", "path")
 
@@ -68,7 +74,7 @@ def _console_allowlisted(target: Path) -> bool:
         rel = target.relative_to(LIVE_ORCH_DIR).as_posix()
     except ValueError:
         return False
-    return any(fnmatch.fnmatch(rel, pattern) for pattern in _CONSOLE_ALLOWLIST)
+    return any(pattern.match(rel) for pattern in _CONSOLE_ALLOWLIST)
 
 
 def _target_path(tool_input: dict) -> "Path | None":
