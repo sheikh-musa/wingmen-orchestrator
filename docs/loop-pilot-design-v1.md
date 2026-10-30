@@ -16,7 +16,7 @@ Each role is one bounded, non-interactive Claude Code session, launched the
 same way `scheduled_cc_sweep.sh` already launches bounded sessions -- reusing
 the mechanism rather than inventing a new one:
 
-    MODEL=<model-id> scripts/launch_dangerous_cc.sh \
+    MODEL=<model-id> CC_BASE_OVERRIDE=cc-loop scripts/launch_dangerous_cc.sh \
         --repo hifz-companion \
         --scheduled-prompt scripts/loop/prompts/<role>.md \
         -- --max-turns <N>
@@ -28,6 +28,27 @@ launch_dangerous_cc.sh) does the Claude-vs-DeepSeek switch from `MODEL` alone --
 no new gateway, no custom subprocess/API wrapper. REPO_NAME is just the cwd's
 git toplevel basename and is not looked up in REPOS.json, so pointing it at a
 worktree that isn't registered there is fine.
+
+**Second addendum (found while reading `scripts/lib/auto_agent_id.py`,
+2026-10-30): `CC_BASE_OVERRIDE=cc-loop` is not optional.** Identity allocation
+resolves `CC_BASE_AGENT_ID` from the launch `pwd`'s git toplevel (after
+stripping a `.wt-*` worktree suffix) against a family map built from
+`agents.repo_scope` -- so a role launched from inside a hifz worktree would,
+by default, resolve to `cc-hifz`'s family (`cc-hifz-N`), not `cc-loop`'s. That
+would misattribute every role session's heartbeat/activity/exit-row to
+cc-hifz-1 (a peer who did not spawn it and does not own this pilot's
+sessions). `CC_BASE_OVERRIDE` is the sanctioned escape hatch for exactly this
+shape of problem (`spawn_reviewer.sh` uses it the same way) -- it skips pwd
+resolution entirely and is validated against a whitelist (CAI-RESP-258:
+refuses authority/system ids outright, default-denies anything not already a
+registered `cc-*` row). Confirmed `cc-loop` is registered
+(`SELECT id, repo_scope FROM agents WHERE id = 'cc-loop'` -> one row, empty
+`repo_scope`, which is correct -- this pilot spawns across whatever repo a
+task targets, it isn't pinned to one). `run_pilot.py` sets
+`CC_BASE_OVERRIDE=cc-loop` on every role launch, unconditionally; task
+worktree naming does not need to follow any `.wt-*` convention for identity
+purposes as a result (the override branch never calls
+`resolve_base_agent_id` at all).
 
 **Addendum (found while reading the launcher, 2026-10-29):** `launch_dangerous_cc.sh`
 runs claude under `env -i` plus a strict allow-list
@@ -158,7 +179,102 @@ different trees, but confirming with an actual probe, not assuming).
   (hourly cadence, PR#630) -- too coarse for a per-task delta; reusing their
   balance-GET call shape, not their poller.
 
-## 6. Open items
+## 6a. Grader contract (`tasks/loop-pilot/<task-id>/hidden/grader.py`)
+
+Ground truth, separate from the reviewer's own verdict -- this is what the
+reviewer's verdict is measured AGAINST, so it must never be computed by
+anything a role session can see or influence. `run_pilot.py` (never a role)
+invokes it directly from the orchestrator checkout, pointed at the builder's
+worktree:
+
+    tasks/loop-pilot/<task-id>/hidden/grader.py --repo-dir <path> --head-sha <sha>
+
+`seeded-bugs.json` lives alongside `grader.py` in the same `hidden/` dir and
+is loaded by path relative to the script's own location, not passed as a
+CLI arg -- grader.py owns knowing its own fixture. Prints one JSON object to
+stdout:
+
+    {"task_id": "...", "head_sha": "...",
+     "bugs": [{"id": "bug-1", "survived": true, "detail": "..."}],
+     "any_bug_survived": true}
+
+Exit code 0 means the grader ran successfully (grading is informational, not
+a merge gate) -- "bugs survived" is a field in the JSON, not the exit code.
+Nonzero exit = the grader itself broke (missing fixture, crashed), which
+`run_pilot.py` must report as "could not measure" for that task, never as
+a clean PASS/FAIL.
+
+`run_pilot.py` crosses the reviewer's verdict against `any_bug_survived` per
+task:
+
+| reviewer verdict | any_bug_survived | outcome |
+|---|---|---|
+| FAIL | true | correct catch |
+| PASS | true | **false PASS** (the dangerous case the whole pilot exists to measure) |
+| PASS | false | correct |
+| FAIL | false | false alarm (noted, not the headline metric) |
+
+## 6b. DeepSeek balance-delta caveat (found while reading `scripts/deepseek_balance_poll.py`, PR#630)
+
+`GET https://api.deepseek.com/user/balance` is **account-level only, no
+per-lane breakdown** (that script's own comment: "no per-lane split -- the
+DeepSeek balance endpoint is account-level only"). A before/after delta
+around one task run is only attributable to that task if nothing else on the
+fleet spends DeepSeek tokens in the same window -- the hourly poller itself
+is a GET, costs nothing, safe to run concurrently; any OTHER concurrent
+DeepSeek-routed session is not. `run_pilot.py` runs condition-A task
+attempts serially (never two DeepSeek-routed role sessions in flight at
+once) for exactly this reason. If contamination is ever suspected (balance
+moved by more than this task's own calls would plausibly cost), the report
+says "could not measure" for that task's DeepSeek cost rather than
+attributing a possibly-wrong number to it.
+
+## 6c. Condition -> model mapping (`run_pilot.py` `CONDITIONS` table)
+
+| condition | spec-writer | builder | reviewer |
+|---|---|---|---|
+| A (all-DeepSeek) | `deepseek-flash` | `deepseek-flash` | `deepseek-flash` |
+| B (DeepSeek builder + Claude spec/review) | `claude-opus-4-8` | `deepseek-flash` | `claude-opus-4-8` |
+
+`claude-opus-4-8` chosen because it's `launch_dangerous_cc.sh`'s own default
+(see its header comment) -- made explicit here rather than left as an
+implicit "whatever MODEL defaults to today" dependency.
+
+## 6d. Identity: `CC_BASE_OVERRIDE=cc-loop` on every role launch
+
+See the second addendum in section 1 -- without it, identity allocation
+would resolve every role session's pwd (a hifz worktree) to `cc-hifz`'s
+family instead of `cc-loop`'s. `run_pilot.py` sets it unconditionally.
+
+## 6e. Harness smoke test (2026-10-30, before any real role session ran)
+
+`scripts/loop/run_pilot.py` was exercised end to end against the real
+`sheikh-musa/hifz` repo with the three role SESSIONS faked (no model
+inference at all -- `launch_role` monkeypatched to perform the git actions a
+real role would, nothing else) so every other step ran for real: worktree
+creation off `loop-pilot/base`, `record_manifest.py`'s patch+amend, a real PR
+against `loop-pilot/base`, the `tests` and `spec-tests-unchanged` GitHub
+status checks under live branch protection, a detached reviewer worktree,
+the shared `loop-pilot/reviews` push, and `reviewer_verdict.py`'s patch. Caught
+one real bug this way, before it could hit a live (costly) role session:
+**`check_spec_tests_unchanged.py`, `gh_status.py`, `record_manifest.py`, and
+`reviewer_verdict.py` were not executable** (`chmod +x` never applied when
+they were written). `local_ci_runner.sh` invokes `gh_status.py` by direct
+path (no `python3` prefix), so under its `set -euo pipefail` a `Permission
+denied` on that line aborted the whole script -- the CI steps themselves
+(lint/typecheck/build/smoke:audit) had all genuinely passed; `local_ci_runner.sh`
+only *reported* failure because of the permission bug. The same four scripts
+are invoked the same direct-by-path way from inside `spec_writer.md` and
+`reviewer.md` -- a real role session would have hit the identical wall.
+Fixed: `chmod +x` on all four, re-verified `run_tests_check()` reports
+`success` on the same worktree/sha afterward. `run_tests_check()` /
+`run_spec_tests_check()` also previously discarded the underlying script's
+stdout/stderr entirely -- fixed to keep the last ~2000 chars in
+`tests_check_detail` / `spec_tests_unchanged_detail`, since an opaque
+"failure" with no trace is exactly the kind of thing this bug would have
+hidden from a real pilot run.
+
+## 7. Open items
 
 1. Task selection: cc-hifz-1 didn't point at specific backlog items; drafting
    6-10 tasks + seeded bugs myself, sanity-checked by cc-hifz-1 before any
