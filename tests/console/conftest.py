@@ -44,6 +44,12 @@ def _hermetic_deepseek_usage(monkeypatch, tmp_path):
     monkeypatch.setattr(deepseek_usage, "read_key", _no_deepseek_vault)
     monkeypatch.setattr(deepseek_usage, "http_get_json", _no_deepseek_http)
     monkeypatch.setattr(deepseek_usage, "_STATE_PATH", tmp_path / "deepseek_card_balance_history.json")
+    # op#35897/#83560: the shared row no longer calls read_key/http_get_json at
+    # all (DEEPSEEK_CODING_KEY is vault leak_flagged -- see deepseek_usage.py's
+    # module docstring) -- it reads the poller's own history file. Point that
+    # at a tmp path that doesn't exist by default, so a test gets "could not
+    # read" unless it deliberately writes one -- never this host's real file.
+    monkeypatch.setattr(deepseek_usage, "_SHARED_HISTORY_PATH", tmp_path / "deepseek_balance_history.jsonl")
     deepseek_usage._reset_for_tests()
     yield
     deepseek_usage._reset_for_tests()

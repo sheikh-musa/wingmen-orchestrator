@@ -24,11 +24,20 @@ history log -- the card needs "what changed since last time", not a trend), so
 a console restart (routine after every deploy_console.sh run) doesn't lose the
 baseline and show a misleading "first ever read" on every redeploy.
 
-SECRET HANDLING -- mirrors glm_usage.py: each key is read from the fleet vault
-once per process (file-first DSN pin, same op#24342 pattern), held only in this
-module's memory for the one HTTP call, never logged, never put in argv, never
-returned in any payload, and never interpolated into an error message (failure
-paths log the exception CLASS name / HTTP status only).
+SECRET HANDLING -- mirrors glm_usage.py: each PER-CLIENT key is read from the
+fleet vault once per process (file-first DSN pin, same op#24342 pattern), held
+only in this module's memory for the one HTTP call, never logged, never put in
+argv, never returned in any payload, and never interpolated into an error
+message (failure paths log the exception CLASS name / HTTP status only).
+
+SHARED KEY (revised 2026-10-30, orch-console #83560): DEEPSEEK_CODING_KEY is
+vault leak_flagged (set 2026-10-29). vault.py's own contract is that the
+caller decides whether to proceed on a leak-flagged key; this module decided:
+refuse (_read_key_from_vault below). Rather than hold/call a leak-flagged key
+from the console server, the shared row reads scripts/deepseek_balance_poll.py's
+own hourly history file instead -- that poller (cc-fleet-health) already reads
+this key successfully every hour. No vault call, no HTTP call, no secret in
+this process for the shared row -- see get_shared_key_usage().
 """
 from __future__ import annotations
 
@@ -268,13 +277,64 @@ def get_deepseek_usage(now: Optional[float] = None) -> Dict[str, Any]:
     return {"keys": keys_out}
 
 
+# ---- shared key (revised 2026-10-30, orch-console #83560): -----------------
+# DEEPSEEK_CODING_KEY is vault leak_flagged (set 2026-10-29 04:45 UTC).
+# vault.py's own documented contract is that get() surfaces leak_flagged and
+# the CALLER decides whether to proceed -- _read_key_from_vault (above)
+# decided: refuse. Rather than have the console server hold or call a
+# leak-flagged key to get a number, the shared row instead reads
+# scripts/deepseek_balance_poll.py's own hourly-polled history file directly
+# -- that poller (cc-fleet-health, launchd dev.wingmen.deepseek-balance-poll)
+# already reads this same key successfully every hour; the console doesn't
+# need its own read of it. This removes DEEPSEEK_CODING_KEY from the console
+# server process entirely for the shared row (per-client rows are unaffected
+# -- still vault-based per key, and none of those 5 is leak-flagged).
+_SHARED_HISTORY_PATH = (
+    Path.home() / "wingmen" / "fleet-health" / "state" / "deepseek_balance_history.jsonl"
+)
+_SHARED_STALE_AFTER_S = 3 * 3600  # poller runs hourly; 3 misses is worth flagging, not silently shown
+
+
+def _read_shared_history() -> List[Dict[str, Any]]:
+    try:
+        text = _SHARED_HISTORY_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    rows: List[Dict[str, Any]] = []
+    for line in text.strip().splitlines():
+        try:
+            row = json.loads(line)
+            rows.append({"ts": row["ts"], "balance_usd": float(row["balance_usd"])})
+        except (ValueError, KeyError, TypeError):
+            continue
+    return rows
+
+
 def get_shared_key_usage(now: Optional[float] = None) -> Dict[str, Any]:
-    """The cached card payload for DEEPSEEK_CODING_KEY -- today's REAL spend
-    location (orch-console #83397), cached independently of the per-client
-    keys. Never raises."""
+    """The shared row's payload, read from deepseek_balance_poll.py's own
+    hourly history file -- never the vault, never an HTTP call, so the
+    console server never holds DEEPSEEK_CODING_KEY. Never raises."""
     now = time.time() if now is None else now
-    with _lock:
-        out = _cached_fetch(SHARED_KEY_NAME, now)
+    now_iso = datetime.fromtimestamp(now, tz=timezone.utc).isoformat()
+    rows = _read_shared_history()
+    if not rows:
+        out = _unavailable(now_iso)
+        out["age_s"] = None
+    else:
+        last = rows[-1]
+        try:
+            last_ts = datetime.fromisoformat(last["ts"]).timestamp()
+        except ValueError:
+            last_ts = now
+        age_s = now - last_ts
+        if age_s > _SHARED_STALE_AFTER_S:
+            out = _unavailable(now_iso)
+            out["age_s"] = None
+        else:
+            prev = rows[-2] if len(rows) >= 2 else None
+            delta = (last["balance_usd"] - prev["balance_usd"]) if prev else None
+            out = {"available": True, "balance_usd": last["balance_usd"], "delta_usd": delta,
+                   "fetched_at": last["ts"], "age_s": int(age_s)}
     out["key_name"] = SHARED_KEY_NAME
     return out
 
