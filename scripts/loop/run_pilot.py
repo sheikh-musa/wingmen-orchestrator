@@ -285,6 +285,15 @@ def launch_role(role: str, worktree: Path, model: str, max_turns: int,
            "--scheduled-prompt", prompt_rel,
            "--", "--max-turns", str(max_turns)]
     env = dict(os.environ)
+    # Isolation invariant (PR#661 residual LOW, orch-console bus #83795): a role
+    # process must never carry the orchestrator checkout's absolute path in its
+    # env -- that is the one thread that could lead to the hidden task-data tree
+    # (tasks/loop-pilot/<id>/hidden/). ORCH_DIR/ORCH_ROOT ride in on dict(os.environ)
+    # and survive launch_dangerous_cc.sh's SAFE-tier allow-list, so scrub them here
+    # (nothing in a role's job needs them, and nothing exploits them today -- but
+    # stop the leak at the one place that controls what this harness's roles see).
+    env.pop("ORCH_DIR", None)
+    env.pop("ORCH_ROOT", None)
     env["MODEL"] = model
     env["CC_BASE_OVERRIDE"] = "cc-loop"
     if model.startswith("claude-"):
