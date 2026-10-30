@@ -209,6 +209,32 @@ def test_ram_15_min():
     assert kinds([_ok(m, ram_used_pct=90.0) for m in (15, 10, 5, 0)]) == []  # > not >=
 
 
+def test_ram_suppressed_when_wsl_used_is_below_floor():
+    # orch-console #83666: Windows ram_used_pct can be high purely from
+    # reclaimable vmmemWSL page cache. When the WSL-internal (free -m) used
+    # figure is POSITIVELY confirmed under the 50% floor, don't page.
+    samples = [_ok(m, ram_used_pct=93.0, wsl={"mem_used_pct": 30.0}) for m in (15, 10, 5, 0)]
+    assert kinds(samples) == []
+
+
+def test_ram_still_fires_when_wsl_used_is_above_floor():
+    samples = [_ok(m, ram_used_pct=93.0, wsl={"mem_used_pct": 70.0}) for m in (15, 10, 5, 0)]
+    assert kinds(samples) == ["ram"]
+
+
+def test_ram_still_fires_when_wsl_used_is_unknown():
+    # a missing/unparseable WSL probe must never silently suppress a real page.
+    samples = [_ok(m, ram_used_pct=93.0, wsl={"runner_service": "active"}) for m in (15, 10, 5, 0)]
+    assert kinds(samples) == ["ram"]
+
+
+def test_ram_finding_carries_wsl_used_pct_for_the_alert_body():
+    findings = cm.evaluate_alerts([_ok(m, ram_used_pct=93.0, wsl={"mem_used_pct": 70.0})
+                                    for m in (15, 10, 5, 0)], T0)
+    ram = next(f for f in findings if f["kind"] == "ram")
+    assert ram["wsl_used_pct"] == 70.0
+
+
 def test_unreachable_30_min():
     assert kinds([_down(m) for m in (30, 25, 20, 15, 10, 5, 0)]) == ["unreachable"]
     assert kinds([_down(m) for m in (25, 20, 15, 10, 5, 0)]) == []  # 25 min only

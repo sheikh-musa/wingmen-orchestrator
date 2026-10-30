@@ -93,7 +93,7 @@ THRESHOLDS = {
     "gpu_temp_c": 85.0, "gpu_temp_window_min": 10,
     "nvme_temp_c": 70.0, "nvme_temp_window_min": 10,
     "disk_c_min_free_pct": 15.0,
-    "ram_used_pct": 90.0, "ram_window_min": 15,
+    "ram_used_pct": 90.0, "ram_window_min": 15, "ram_wsl_used_floor_pct": 50.0,
     "runner_offline_window_min": 30,
     "unreachable_window_min": 30,
 }
@@ -373,12 +373,27 @@ def evaluate_alerts(samples: list[dict], now: datetime, th: dict = THRESHOLDS) -
                         "total_gb": _m(last).get("disk_c_total_gb")})
 
     def ram_hi(s: dict) -> bool:
-        v = _m(s).get("ram_used_pct")
-        return bool(s.get("ok")) and v is not None and v > th["ram_used_pct"]
+        m = _m(s)
+        v = m.get("ram_used_pct")
+        if not (bool(s.get("ok")) and v is not None and v > th["ram_used_pct"]):
+            return False
+        # orch-console #83666 (2026-10-30): Windows-level ram_used_pct counts
+        # reclaimable vmmemWSL page cache as "used" -- a sustained-high reading
+        # there is NOT a leak by itself. Only suppress the page when the
+        # WSL-internal figure (free -m; the real used total) POSITIVELY
+        # confirms it's cache, not a leak. If the WSL probe is missing/unknown
+        # for this sample, don't suppress -- a missing probe must never hide a
+        # real problem (fail loud, never silent).
+        wsl_pct = (m.get("wsl") or {}).get("mem_used_pct")
+        if wsl_pct is not None and wsl_pct < th["ram_wsl_used_floor_pct"]:
+            return False
+        return True
     if sustained(samples, now, th["ram_window_min"], ram_hi):
         vals = _window_vals(samples, now, th["ram_window_min"], "ram_used_pct")
+        wsl_pct_latest = (_m(ok_samples[-1]).get("wsl") or {}).get("mem_used_pct") if ok_samples else None
         out.append({"kind": "ram", "key": f"{HOST}:ram", "threshold": th["ram_used_pct"],
-                    "window_min": th["ram_window_min"], "latest": vals[-1], "peak": max(vals)})
+                    "window_min": th["ram_window_min"], "latest": vals[-1], "peak": max(vals),
+                    "wsl_used_pct": wsl_pct_latest})
 
     def runner_down(s: dict) -> bool:
         r = _m(s).get("runner") or {}
@@ -481,14 +496,23 @@ def render_page(f: dict) -> tuple[str, str]:
             "or ask cc-fleet-health to look at what grew."
         )
     elif k == "ram":
+        wsl_note = (f" WSL-internal used is {f['wsl_used_pct']:.0f}% (the real figure; Windows counts "
+                    f"vmmemWSL's reclaimable page cache as 'used' too), which is ABOVE the "
+                    f"{THRESHOLDS['ram_wsl_used_floor_pct']:.0f}% floor, so this is not just cache."
+                    if f.get("wsl_used_pct") is not None else
+                    " WSL-internal used figure was unavailable for the latest sample, so this could "
+                    "not be ruled out as cache -- paging to be safe.")
         subj = f"cubeasht memory nearly full: {f['latest']:.0f}% used for {f['window_min']}+ min"
         body = (
             f"TL;DR: Musa's desktop (cubeasht) has used more than {f['threshold']:.0f}% of its RAM for "
-            f"{f['window_min']} minutes (now {f['latest']:.0f}%, peak {f['peak']:.0f}%).\n\n"
+            f"{f['window_min']} minutes (now {f['latest']:.0f}%, peak {f['peak']:.0f}%).{wsl_note}\n\n"
             "WHY IT MATTERS: when memory runs out, Windows swaps to disk and everything (including "
             "CI in WSL) crawls or crashes.\n\n"
             "WHAT TO DO: see what is using memory (Task Manager; WSL shows up as 'vmmem'). A stuck CI "
-            "job or a forgotten app is the usual cause."
+            "job or a forgotten app is the usual cause. (Per orch-console #83666: if this turns out to "
+            "be reclaimable WSL page cache rather than real pressure, the fix is autoMemoryReclaim=gradual "
+            "+ a memory cap in .wslconfig, applied via `wsl --shutdown` only when no CI job is running or "
+            "queued.)"
         )
     elif k == "runner_offline":
         subj = f"CI runner {f['runner']} offline for {f['window_min']}+ min while cubeasht is ON"
