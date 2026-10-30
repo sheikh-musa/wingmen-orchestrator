@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
-"""cubeasht_daily_digest.py — a once-daily roll-up of the cubeasht Windows
-desktop's health for the prior complete UTC day (operator ask#2207, Nazim
-bus #64620/#64628). The existing scripts/cubeasht_monitor.py samples the box
-every 5 min and PAGES only on threshold breaches; this digest is the opposite
-end — a calm daily "here's how the CI box was yesterday" so nothing quietly
-drifts (temps creeping, RAM pressure, CI contention) between pages.
+"""cubeasht_daily_digest.py — a once-daily roll-up of all 3 fleet machines'
+health for the prior complete UTC day (originally cubeasht-only, operator
+ask#2207, Nazim bus #64620/#64628; extended to mini + gzb per op#35975,
+orch-console #83733 -- Musa wants the new-Mac-mini sizing decision to rest
+on a week of real data across all 3 boxes, not cubeasht alone). The 5-min
+monitors (cubeasht_monitor.py, mini_monitor.py, gzb_monitor.py) PAGE only on
+threshold breaches; this digest is the opposite end — a calm daily "here's
+how the fleet's machines were yesterday" so nothing quietly drifts (temps
+creeping, memory pressure, CI contention) between pages. The filename stays
+as-is (cubeasht_daily_digest.py) to avoid unnecessary launchd label/plist
+churn on an already-scheduled job -- its scope has simply grown.
 
 Design mirrors scripts/asks_daily_digest.py (the fleet's proven daily-digest
 pattern), deliberately SIMPLE — NOT cubeasht_monitor's dedup/backoff/paging
 machinery:
 
-  * Reuses cubeasht_monitor's fetch_samples()/summarize() — the digest and the
-    monitor compute the exact same numbers from the exact same host_metrics
+  * Reuses each monitor's fetch_samples()/summarize() — the digest and the
+    monitors compute the exact same numbers from the exact same host_metrics
     rows; no re-derivation (memory ddl-detect-vendored-shared-module).
+    build_summary_all_hosts() fetches all 3 independently: one host's failure
+    (e.g. gzb ssh down) does not block the other two's section, it just shows
+    "could not measure" inline for that host -- unless ALL 3 fail (a real
+    outage, not a one-host blip), which stays loud (raises, nothing sent).
   * Summarizes the PRIOR complete UTC day by default (so a morning fire has a
     full day of data), overridable with --date YYYY-MM-DD.
   * Sends AT MOST ONE digest per summarized date — a persisted date-stamp in
@@ -147,6 +156,115 @@ def render_digest(summary: dict) -> tuple[str, str]:
     return subject, "\n".join(lines)
 
 
+def _fmt_stat_line(label: str, s: "dict | None", unit: str = "") -> str:
+    return f"{label}: {_fmt_stat(s, unit)}"
+
+
+def render_generic_section(summary: dict) -> str:
+    """A short, host-agnostic section for mini_monitor/gzb_monitor summaries
+    (op#35975, orch-console #83733) -- deliberately plainer than cubeasht's
+    temp-heavy render_digest(), since neither host has GPU/NVMe temps and
+    cubeasht's own render stays untouched (existing tests keep passing)."""
+    host, n = summary["host"], summary.get("samples", 0)
+    if n == 0:
+        return (f"### {host}\nZERO samples logged for this day -- the 5-min monitor recorded "
+                f"nothing (box down, or the monitor wasn't running).")
+    lines = [f"### {host} ({summary.get('reachable_samples', n)}/{n} samples reached the box)"]
+    if summary.get("unreachable_samples"):
+        lines.append(f"- unreachable samples: {summary['unreachable_samples']}")
+    lines.append("- " + _fmt_stat_line("real memory used", summary.get("mem_real_used_pct"), "%"))
+    lines.append("- " + _fmt_stat_line("disk free", summary.get("disk_free_pct"), "%"))
+    lines.append("- " + _fmt_stat_line("CPU load", summary.get("cpu_load_pct"), "%"))
+    if summary.get("cpu_temp_c"):
+        lines.append("- " + _fmt_stat_line("CPU temp", summary.get("cpu_temp_c"), "°C"))
+    if summary.get("swap_used_pct"):
+        lines.append("- " + _fmt_stat_line("swap used", summary.get("swap_used_pct"), "%"))
+    lines.append("- " + _fmt_stat_line("claude sessions", summary.get("claude_sessions")))
+    return "\n".join(lines)
+
+
+def build_summary_mini(day: date, tz: str) -> dict:
+    import mini_monitor as mm  # local import: needs env (DATABASE_URL) ready
+
+    lo, hi = mm.cm.day_bounds(day, tz)
+    conn = mm.cm.connect()
+    try:
+        samples = mm.cm.fetch_samples(conn, mm.HOST, lo, hi)
+    finally:
+        conn.close()
+    return mm.summarize(samples, day, tz)
+
+
+def build_summary_gzb(day: date, tz: str) -> dict:
+    import gzb_monitor as gzm  # local import: needs env (DATABASE_URL) ready
+
+    lo, hi = gzm.cm.day_bounds(day, tz)
+    conn = gzm.cm.connect()
+    try:
+        samples = gzm.cm.fetch_samples(conn, gzm.HOST, lo, hi)
+    finally:
+        conn.close()
+    return gzm.summarize(samples, day, tz)
+
+
+def build_summary_all_hosts(day: date, tz: str) -> dict:
+    """{"cubeasht": <build_summary() dict>, "mini": {...}, "gzb": {...}} --
+    one host's fetch failing does not stop the others; its slot holds a
+    "could not measure" string instead (fail loud per-host, not all-or-nothing
+    for the whole digest)."""
+    out: dict = {}
+    for host, fn in (("cubeasht", lambda: build_summary(day, tz)),
+                      ("mini", lambda: build_summary_mini(day, tz)),
+                      ("gzb", lambda: build_summary_gzb(day, tz))):
+        try:
+            out[host] = fn()
+        except (Exception, SystemExit) as e:  # noqa: BLE001
+            # bus_send.dburl() deliberately raises SystemExit (not Exception) as
+            # a CLI-style sentinel when no DATABASE_URL resolves -- a known
+            # pattern in this codebase, not a real process-exit request here.
+            out[host] = f"could not measure -- {type(e).__name__}: {e}"
+    if all(isinstance(v, str) for v in out.values()):
+        # every host failed -- a real outage (e.g. the DB itself is down), not
+        # a one-host blip. Stay loud: raise rather than silently send (and
+        # dedup-stamp!) an all-"could not measure" digest as if it were a
+        # normal day.
+        raise DigestError(f"ALL 3 hosts failed to summarize: {out}")
+    return out
+
+
+def render_digest_all_hosts(summaries: dict, day: date, tz: str) -> tuple[str, str]:
+    """(subject, body) for the 3-host digest -- cubeasht's section reuses the
+    existing render_digest() body verbatim (byte-identical to its own
+    standalone digest); mini/gzb get render_generic_section()."""
+    date_str = day.isoformat()
+    subject = f"fleet 3-host daily health digest — {date_str} ({tz})"
+    lines = [f"🖥️ fleet 3-host daily health digest — {date_str} ({tz})", ""]
+
+    tl: list[str] = []
+    for host in ("cubeasht", "mini", "gzb"):
+        s = summaries.get(host)
+        if isinstance(s, str):
+            tl.append(f"{host}: {s}")
+        else:
+            tl.append(f"{host}: {s.get('reachable_samples', 0)}/{s.get('samples', 0)} samples")
+    lines.append("TL;DR: " + "; ".join(tl) + ".")
+    lines.append("")
+
+    for host in ("cubeasht", "mini", "gzb"):
+        s = summaries.get(host)
+        lines.append(f"## {host}")
+        if isinstance(s, str):
+            lines.append(s)
+        elif host == "cubeasht":
+            _, cubeasht_body = render_digest(s)
+            lines.append(cubeasht_body)
+        else:
+            lines.append(render_generic_section(s))
+        lines.append("")
+
+    return subject, "\n".join(lines)
+
+
 def build_summary(day: date, tz: str) -> dict:
     """Fetch the day's host_metrics and summarize — reusing cubeasht_monitor so
     the digest's numbers are byte-identical to the monitor's own --summary."""
@@ -212,8 +330,8 @@ def main(argv=None) -> int:
         return 0
 
     try:
-        summary = build_summary(day, args.tz)
-        subject, body = render_digest(summary)
+        summaries = build_summary_all_hosts(day, args.tz)
+        subject, body = render_digest_all_hosts(summaries, day, args.tz)
     except Exception as e:
         print(f"cubeasht_daily_digest: FAIL LOUD — {type(e).__name__}: {e}",
               file=sys.stderr)
