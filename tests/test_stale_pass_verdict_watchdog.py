@@ -87,6 +87,55 @@ def test_alert_message_shape():
     assert "did not touch" in body.lower()  # detect-only framing
 
 
+# bus #85202 (console): the page must name the PR's resolved live author
+# instance as the one to act, not just the verdict's (possibly stale/
+# misrouted) addressee -- #857 was exactly this case, pre-PR#692.
+def test_alert_message_names_resolved_author_when_known():
+    subj, body = spw.alert_message(
+        "cosem-adcda", "857", 84217, "cc-cosem-adcda-1", 3700,
+        resolved_author="cc-cosem-adcda-2",
+    )
+    assert "cc-cosem-adcda-2" in body
+    # the WHAT TO DO line must point at the resolved author, not the stale addressee
+    what_to_do = body.split("WHAT TO DO:", 1)[1]
+    assert "cc-cosem-adcda-2" in what_to_do
+    # the original addressee stays visible (audit trail) but isn't the actor
+    assert "cc-cosem-adcda-1" in body
+
+
+def test_alert_message_falls_back_to_to_agent_when_unresolved():
+    subj, body = spw.alert_message("cosem-adcda", "857", 84217, "cc-cosem-adcda-1", 3700)
+    assert "could not resolve a live pr author instance" in body.lower()
+    what_to_do = body.split("WHAT TO DO:", 1)[1]
+    assert "cc-cosem-adcda-1" in what_to_do
+
+
+# ── _resolve_author ────────────────────────────────────────────────────────
+def test_resolve_author_returns_none_without_head_ref():
+    assert spw._resolve_author("cosem-adcda", {"state": "OPEN"}) is None
+
+
+def test_resolve_author_delegates_to_bus_send_resolver(monkeypatch):
+    calls = []
+
+    def _stub(repo, branch, dsn=None):
+        calls.append((repo, branch))
+        return "cc-cosem-adcda-2"
+
+    monkeypatch.setattr("scripts.bus_send._resolve_pr_author_instance", _stub)
+    result = spw._resolve_author("cosem-adcda", {"headRefName": "fix/wedge"})
+    assert result == "cc-cosem-adcda-2"
+    assert calls == [("cosem-adcda", "fix/wedge")]
+
+
+def test_resolve_author_swallows_errors(monkeypatch):
+    def _boom(repo, branch, dsn=None):
+        raise RuntimeError("DB unreachable")
+
+    monkeypatch.setattr("scripts.bus_send._resolve_pr_author_instance", _boom)
+    assert spw._resolve_author("cosem-adcda", {"headRefName": "fix/wedge"}) is None
+
+
 # ── run() wiring ──────────────────────────────────────────────────────────────
 class _Cur:
     def __init__(self, verdicts, pr_lookup):
@@ -176,6 +225,24 @@ def test_run_stale_open_pr_alerts_once(monkeypatch):
     subject = cur.inserts[0][0]
     assert subject.startswith(spw.SUBJECT_PREFIX)
     assert saved.get("alerted") == ["1:857"]
+
+
+def test_run_wires_resolved_author_into_the_alert_body(monkeypatch):
+    """bus #85202: run() must look up the resolved author and pass it all the
+    way into the posted alert, not just leave the raw verdict addressee."""
+    saved = {}
+    now_epoch = 10_000
+    verdicts = [(1, "cc-cosem-adcda-1", "cosem-adcda PR#857 -- PASS", now_epoch - THRESHOLD - 10)]
+    resolved = {"857": ("sheikh-musa", "cosem-adcda",
+                         {"state": "OPEN", "mergedAt": None, "commits": [],
+                          "headRefName": "fix/wedge"})}
+    cur, conn = _wire(monkeypatch, verdicts, resolved_by_pr=resolved, saved=saved)
+    monkeypatch.setattr(spw.time, "time", lambda: now_epoch)
+    monkeypatch.setattr(spw, "_resolve_author", lambda repo, pr_json: "cc-cosem-adcda-2")
+    spw.run(conn, dry=False)
+    assert len(cur.inserts) == 1
+    body = cur.inserts[0][1]
+    assert "cc-cosem-adcda-2" in body
 
 
 def test_run_does_not_repage_an_already_alerted_pair(monkeypatch):

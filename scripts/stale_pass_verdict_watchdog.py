@@ -76,16 +76,28 @@ def is_stale(pr_state, merged_at, latest_commit_epoch, verdict_epoch, now, thres
     return (now - verdict_epoch) >= threshold_s
 
 
-def alert_message(repo, pr_number, verdict_id, to_agent, age_s):
-    """PURE (subject, body) for the operator alert."""
+def alert_message(repo, pr_number, verdict_id, to_agent, age_s, resolved_author=None):
+    """PURE (subject, body) for the operator alert. `resolved_author` (bus
+    #85202, console) -- when known -- is the PR's CURRENT live author
+    instance (from the head branch's checked-out worktree), which can differ
+    from `to_agent` (the verdict's original addressee, possibly stale/
+    misrouted, e.g. pre-PR#692). The page tells WHO TO ACT ON regardless of
+    whether that's the same agent."""
     subject = f"{SUBJECT_PREFIX} {repo} PR#{pr_number} PASSed but idle {age_s}s, no merge/commit"
+    actor = resolved_author or to_agent
+    actor_note = (
+        f"Resolved live PR author instance: {resolved_author}."
+        if resolved_author
+        else f"Could not resolve a live PR author instance -- falling back to the verdict's "
+             f"addressee {to_agent}."
+    )
     body = (
         f"TL;DR: cc-quality PASSed {repo} PR#{pr_number} (verdict bus #{verdict_id}, addressed to "
         f"{to_agent}) {age_s}s ago and nothing has happened since -- still open, no merge, no new "
-        f"commit.\n\n"
-        f"IMPACT: either {to_agent} never saw the verdict, or saw it and stalled -- either way the "
+        f"commit. {actor_note}\n\n"
+        f"IMPACT: either {actor} never saw the verdict, or saw it and stalled -- either way the "
         f"PR is sitting ready-to-merge with no one acting on it.\n"
-        f"WHAT TO DO: check {to_agent} is alive and has seen bus #{verdict_id}; if the lane is wedged, "
+        f"WHAT TO DO: check {actor} is alive and has seen bus #{verdict_id}; if the lane is wedged, "
         f"re-nudge or recycle it; if the verdict itself was misrouted, bus_send.py's "
         f"refuse_if_pr_verdict_misrouted (PR#692) should prevent a fresh instance of this going "
         f"forward, but this PR already shipped before that landed. Detect-only: I did not touch "
@@ -170,15 +182,36 @@ def _known_repos(cur, state: dict, now: int) -> "list[tuple[str, str]]":
 
 
 def _pr_view(owner: str, repo: str, pr_number: str) -> "dict | None":
-    """gh pr view's state/mergedAt/commits for one PR, or None on any failure
-    (wrong repo guess, unknown PR, network hiccup) -- never blocks the scan."""
+    """gh pr view's state/mergedAt/commits/headRefName for one PR, or None on
+    any failure (wrong repo guess, unknown PR, network hiccup) -- never blocks
+    the scan. headRefName feeds _resolve_author (bus #85202, console) -- same
+    call, no extra `gh` round trip."""
     try:
         out = subprocess.run(
             ["gh", "pr", "view", pr_number, "-R", f"{owner}/{repo}",
-             "--json", "state,mergedAt,commits"],
+             "--json", "state,mergedAt,commits,headRefName"],
             capture_output=True, text=True, timeout=15, check=True,
         ).stdout
         return json.loads(out)
+    except Exception:
+        return None
+
+
+def _resolve_author(repo: str, pr_json: dict) -> "str | None":
+    """The live agent_id whose worktree currently has this PR's head branch
+    checked out, or None if it can't be resolved (ambiguous, no live match,
+    any error) -- never blocks the scan, never guessed. Reuses bus_send.py's
+    own PR-author resolver (PR#692/#697) rather than reimplementing it, so
+    this stays in sync with the exact logic that routes a fresh cc-quality
+    verdict (bus #85202, console: 'make the page name the PR's resolved
+    author instance as the one to act, not the verdict's addressee' -- #857
+    was a case where the original to_agent was stale, pre-dating PR#692)."""
+    branch = pr_json.get("headRefName")
+    if not branch:
+        return None
+    try:
+        from scripts.bus_send import _resolve_pr_author_instance
+        return _resolve_pr_author_instance(repo, branch)
     except Exception:
         return None
 
@@ -213,8 +246,9 @@ def _latest_commit_epoch(pr_json: dict) -> "int | None":
         return None
 
 
-def _alert(cur, conn, repo, pr_number, verdict_id, to_agent, age_s, dry: bool) -> str:
-    subject, body = alert_message(repo, pr_number, verdict_id, to_agent, age_s)
+def _alert(cur, conn, repo, pr_number, verdict_id, to_agent, age_s, dry: bool,
+           resolved_author=None) -> str:
+    subject, body = alert_message(repo, pr_number, verdict_id, to_agent, age_s, resolved_author)
     if dry:
         print(f"    WOULD-ALERT orch-console: {subject}")
         return "would-alert"
@@ -265,7 +299,9 @@ def run(conn, dry: bool = False) -> int:
                                  latest_commit, verdict_epoch, now):
                     continue
                 age = now - verdict_epoch
-                result = _alert(cur, conn, repo, pr_number, verdict_id, to_agent, age, dry)
+                resolved_author = _resolve_author(repo, pr_json)
+                result = _alert(cur, conn, repo, pr_number, verdict_id, to_agent, age, dry,
+                                 resolved_author=resolved_author)
                 if result == "alerted":
                     alerted_keys.add(key)
                     n_alerted += 1
