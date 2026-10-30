@@ -20,7 +20,7 @@ breached host(s). Below threshold: log per-host rates, no action. Fail LOUD if i
 measure (never silently green). Detect + page only — it does NOT auto-relaunch
 (destructive mass action stays with the woken SRE, per charter).
 """
-import os, sys, json, subprocess, urllib.parse, urllib.request, datetime
+import os, sys, json, subprocess, urllib.error, urllib.parse, urllib.request, datetime
 
 # Per-host egress IPs at the Supabase pooler. Confirm on each host with
 # `curl -s https://api.ipify.org` (Mini confirmed 121.6.154.64 2026-10-02; gzb
@@ -81,11 +81,22 @@ def _fetch_authfail_rows():
     req = urllib.request.Request(url, headers={"Authorization": "Bearer %s" % token})
     # logflare intermittently returns {"error":"Table ... does not exist"} (wrong table) for a valid query
     # (transient backend/rate issue — the same query succeeds on retry). Retry before failing.
+    # A bare HTTP 5xx from the Mgmt API is the SAME class of transient backend hiccup (bus #84280:
+    # an unretried "HTTP Error 500" paged a could-not-measure P1 that cleared on the very next manual
+    # attempt) — retry it too. A 4xx (bad token, bad query) is a real config problem, never transient:
+    # re-raise immediately rather than burning all 3 attempts on something a retry can't fix.
     import time
     last = None
     for attempt in range(3):
-        with urllib.request.urlopen(req, timeout=30) as r:
-            rows = json.load(r)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                rows = json.load(r)
+        except urllib.error.HTTPError as e:
+            if 500 <= e.code < 600:
+                last = {"error": "HTTP %d" % e.code}
+                time.sleep(2)
+                continue
+            raise
         if isinstance(rows, dict) and isinstance(rows.get("result"), list):
             return rows["result"]
         if isinstance(rows, list):

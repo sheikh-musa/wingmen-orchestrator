@@ -74,6 +74,54 @@ def test_missing_token_raises_not_silent_green(monkeypatch):
         t._fetch_authfail_rows()
 
 
+def test_transient_http_500_is_retried_not_an_immediate_could_not_measure(monkeypatch):
+    """bus #84280: a bare Mgmt-API HTTP 500 paged a could-not-measure P1 and cleared on the
+    very next manual attempt — the SAME transient-backend class the wrong-shape retry already
+    handles, but 500 skipped the retry loop entirely (no try/except around urlopen)."""
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", "dummy")
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def flaky_urlopen(req, timeout=30):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise t.urllib.error.HTTPError(req.full_url, 500, "Internal Server Error", {}, None)
+        return _mgmt_response([_row(t.HOST_IPS["mini"])])
+
+    monkeypatch.setattr(t.urllib.request, "urlopen", flaky_urlopen)
+    rows = t._fetch_authfail_rows()
+    assert len(rows) == 1
+    assert calls["n"] == 2
+
+
+def test_persistent_http_500_raises_after_retries_exhausted(monkeypatch):
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", "dummy")
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    def always_500(req, timeout=30):
+        raise t.urllib.error.HTTPError(req.full_url, 500, "Internal Server Error", {}, None)
+
+    monkeypatch.setattr(t.urllib.request, "urlopen", always_500)
+    with pytest.raises(RuntimeError):
+        t._fetch_authfail_rows()
+
+
+def test_http_4xx_is_not_retried_fails_fast(monkeypatch):
+    """A 4xx (bad token, bad query) is a real config problem, not a transient backend
+    hiccup — re-raise immediately rather than burning all 3 retries on it."""
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", "dummy")
+    calls = {"n": 0}
+
+    def always_401(req, timeout=30):
+        calls["n"] += 1
+        raise t.urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr(t.urllib.request, "urlopen", always_401)
+    with pytest.raises(t.urllib.error.HTTPError):
+        t._fetch_authfail_rows()
+    assert calls["n"] == 1
+
+
 # ── threshold / breach, per host ─────────────────────────────────────────────
 def test_gzb_only_burst_breaches_the_regression_that_went_dark():
     # gzb over threshold, Mini quiet -> the Mini-only version would have missed this.
