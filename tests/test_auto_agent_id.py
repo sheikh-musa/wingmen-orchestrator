@@ -414,6 +414,46 @@ class TestAllocateSubTagAndRegister:
                 assert "prefix" in str(exc.value).lower() or "check" in str(exc.value).lower()
             setup_conn.rollback()
 
+    def test_lock_timeout_diagnostic_query_survives_real_contention(self):
+        """bus #85138 (cc-loop, found live under genuine 8-way launch contention):
+        the diagnostic query fired when the advisory lock is NOT acquired within
+        the retry budget selected a bare `pid` against a two-table join (pg_locks
+        AS l JOIN pg_stat_activity AS a ON a.pid = l.pid) -- ambiguous between
+        l.pid and a.pid, so psycopg raised UndefinedColumn/AmbiguousColumn instead
+        of the intended LockTimeoutError, killing identity allocation outright
+        under real contention. Reproduced here with GENUINE lock contention (a
+        second connection actually holding the advisory lock across the whole
+        5s retry ceiling), not a mock -- a mocked cursor can't exercise the SQL
+        parser at all, which is exactly how this shipped unnoticed."""
+        import threading
+        import psycopg
+
+        holder_ready = threading.Event()
+        release_holder = threading.Event()
+
+        def _hold_lock():
+            with psycopg.connect(DSN, autocommit=False) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_xact_lock(%s)", (auto_agent_id._ALLOC_LOCK_ID,))
+                holder_ready.set()
+                release_holder.wait(timeout=30)
+                conn.rollback()  # releases the advisory lock
+
+        t = threading.Thread(target=_hold_lock, daemon=True)
+        t.start()
+        try:
+            assert holder_ready.wait(timeout=5), "lock-holder thread never acquired the lock"
+            with pytest.raises(auto_agent_id.LockTimeoutError) as exc:
+                auto_agent_id.allocate_sub_tag_and_register(
+                    base="cc-test-family", dsn=DSN, repo="orchestrator",
+                )
+            # proves the diagnostic SELECT ran to completion (not an UndefinedColumn/
+            # AmbiguousColumn instead) and found the real contending holder's pid.
+            assert "Holders: [(" in str(exc.value), str(exc.value)
+        finally:
+            release_holder.set()
+            t.join(timeout=5)
+
 
 @pytestmark_integration
 class TestScanOverlapSiblings:
