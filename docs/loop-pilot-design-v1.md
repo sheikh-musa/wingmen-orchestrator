@@ -66,34 +66,58 @@ certain), not guessed by the role session. See `record_manifest.py`'s
 
 1. **Spec-writer**: `--scheduled-prompt prompts/spec_writer.md`. Reads the
    task brief from `.loop-task/brief.md` (written into the worktree by
-   `run_pilot.py` before launch). Writes the spec + acceptance tests, calls
-   `scripts/loop/record_manifest.py` to snapshot the test files, commits
-   spec + tests + manifest in one commit on the task branch. `run_pilot.py`
-   then reads the resulting HEAD sha and makes a second `record_manifest.py`
-   call (`--spec-commit-sha --spec-writer-model`) to patch both fields in
-   with authoritative values.
+   `run_pilot.py` before launch). Writes the spec + acceptance tests, commits
+   spec + tests in one commit on the task branch, and writes a plain
+   `.loop-task/test_files.txt` (one test path per line, never committed) so
+   the harness knows which files it wrote. **The role never calls
+   `record_manifest.py` itself** (2026-10-30 isolation fix, see section 4) --
+   `run_pilot.py` reads `test_files.txt` back after the role exits, computes
+   `actual_sha = git rev-parse HEAD`, and makes the ENTIRE `record_manifest.py`
+   call itself (test paths + spec-commit-sha + authoritative model, all in one
+   harness-side call), then `git commit --amend` to fold `manifest.json` into
+   the role's own commit.
 2. **Builder**: `--scheduled-prompt prompts/builder.md`. Prompt explicitly
    lists the manifest's test paths as off-limits. Builder commits
-   implementation only, opens the PR against `loop-pilot/base`.
+   implementation only, opens the PR against `loop-pilot/base` itself (`gh`
+   is on the env allow-list already -- builder never needed an orch_dir path).
 3. **Reviewer**: a *different* session from the builder (own worktree, own
    `--scheduled-prompt prompts/reviewer.md`), reading spec + diff + running
-   tests. `scripts/loop/reviewer_verdict.py` writes the verdict file (on the
-   shared `loop-pilot/reviews` branch, not the PR branch -- see section 3);
-   `scripts/loop/gh_status.py` posts the actual GitHub status.
+   tests. The role writes only a plain `.loop-task/verdict.txt`
+   (`VERDICT=.../REASON=...`, two lines, never committed). **The role never
+   calls `reviewer_verdict.py`, `gh_status.py`, or touches
+   `loop-pilot/reviews` itself** (same 2026-10-30 fix) -- `run_pilot.py` reads
+   `verdict.txt` back after the role exits and does the entire verdict-file
+   write, the `loop-pilot/reviews` checkout/commit/push, and the GitHub
+   status post, all itself. See section 3 for exactly what the harness does
+   there and why.
 
 ### `.loop-task/` harness contract
 
 Before launching ANY role, `run_pilot.py` writes these into that role's
 worktree (never via env -- section 1's addendum on why):
 
-| file | content |
-|---|---|
-| `.loop-task/task_id.txt` | the task id, first line |
-| `.loop-task/brief.md` | the task brief (spec-writer only needs this one) |
-| `.loop-task/orch_dir.txt` | absolute path to the orchestrator checkout, so a role can invoke `record_manifest.py` / `reviewer_verdict.py` / `gh_status.py` by that path (they live in the orchestrator repo, not in hifz) |
+| file | content | written by |
+|---|---|---|
+| `.loop-task/task_id.txt` | the task id, first line | harness, before launch |
+| `.loop-task/brief.md` | the task brief (spec-writer only needs this one) | harness, before launch |
+| `.loop-task/test_files.txt` | one acceptance-test path per line | spec-writer role, read by harness after it exits |
+| `.loop-task/verdict.txt` | `VERDICT=.../REASON=...`, two lines | reviewer role, read by harness after it exits |
 
-`tasks/loop-pilot/<task-id>/hidden/{seeded-bugs.json,grader.py}` is
-deliberately NOT in this list -- see section 4.
+None of these are ever committed -- `.loop-task/` is harness scratch, not
+part of the audit record (the manifest/verdict files under `.loop/` are).
+
+**No `orch_dir.txt` and never will be again (2026-10-30 fix).** The original
+design had the role invoke `record_manifest.py` / `reviewer_verdict.py` /
+`gh_status.py` itself, which meant handing it the orchestrator checkout's
+absolute path -- and that path is also the direct route to
+`tasks/loop-pilot/<task-id>/hidden/`, the exact thing orch-console's guard #1
+says no role may reach. Caught during the harness smoke test (section 6e),
+before any real role session ran: every role-side script call was removed in
+favor of the role writing a plain local file and the harness doing 100% of
+the manifest/verdict/git-branch/status-posting work itself, in its own
+process, after the role exits. No role now has, or needs, any path into the
+orchestrator checkout at all -- see section 4 for what this does and does
+not guarantee.
 
 ## 2. Manifest schema (`.loop/<task_id>/manifest.json`, committed in the spec commit)
 
@@ -110,8 +134,12 @@ deliberately NOT in this list -- see section 4.
 ```
 
 `scripts/loop/record_manifest.py` computes the hashes and writes this file;
-it does not commit (the role's own commit includes it alongside the spec +
-tests, so the manifest and the hashes it claims land in the same commit).
+it does not commit. As of the 2026-10-30 isolation fix, the harness is the
+ONLY caller of this script (never the role -- see the `.loop-task/` contract
+note above); it amends the manifest into the role's own spec+tests commit
+right after computing it, so the manifest and the hashes it claims still
+land in the same commit as before, just via `commit --amend` from the
+harness rather than being included in the role's original commit.
 
 ## 3. Checks (GitHub commit statuses, posted by a local runner -- hifz's
    Actions budget is exhausted, per the brief; scoped to `loop-pilot/base`
@@ -138,15 +166,27 @@ this is what "any new commit voids the verdict" means in code, not a promise.
 The verdict file is committed on a separate, shared **`loop-pilot/reviews`**
 branch, never on the PR branch itself -- committing it onto the PR branch
 would produce a new head sha, making the verdict describe a commit other
-than the one it's filed under. The reviewer role: captures `HEAD_SHA` the
-moment its worktree starts (before anything else), reviews/tests the PR at
-that sha, writes the verdict file there, THEN `git checkout`s
-`loop-pilot/reviews` in the same worktree to commit+push just that one file,
-and finally posts the GitHub status for the ORIGINAL `HEAD_SHA` (captured in
-step 1) -- not whatever commit switching branches produced. `GH_TOKEN` is on
-launch_dangerous_cc.sh's env allow-list (scripts/lib/lane_env_allowlist.sh,
-KEEP tier), so the reviewer session can call `gh api` directly; no separate
-credential plumbing needed.
+than the one it's filed under. As of the 2026-10-30 isolation fix, this
+entire sequence is harness-side, not the reviewer role's:
+
+1. The reviewer role captures `HEAD_SHA` the moment its worktree starts
+   (before anything else), reviews/tests the PR at that sha, and writes
+   `.loop-task/verdict.txt` (plain, local, never committed) -- then exits.
+   It never runs `reviewer_verdict.py`, never touches `loop-pilot/reviews`,
+   never calls `gh_status.py`.
+2. `run_pilot.py` reads `verdict.txt` back, runs `reviewer_verdict.py` itself
+   to write `.loop/<task>/reviews/<HEAD_SHA>.json`, `git fetch` + `checkout -B
+   loop-pilot/reviews` in that same (still-detached-at-HEAD_SHA) worktree,
+   commits+pushes just that one file, and finally posts the GitHub status
+   for the ORIGINAL `HEAD_SHA` (captured before the branch switch) --  not
+   whatever commit the `loop-pilot/reviews` checkout produced.
+
+`GH_TOKEN` was on launch_dangerous_cc.sh's env allow-list
+(scripts/lib/lane_env_allowlist.sh, KEEP tier) for the reviewer *role* to
+call `gh api` directly under the original design; the role no longer needs
+it at all now that none of this is role-side, but `run_pilot.py` (the
+harness process, launched by the operator/fleet, not under the lane
+allow-list scrub) still needs `gh` on its own PATH, which it already has.
 
 No HMAC/signature beyond "the status was posted by the fleet's gh-authenticated
 token and the JSON is the audit trail" -- flagged to orch-console as a design
@@ -161,10 +201,34 @@ only `scripts/loop/run_pilot.py` (the harness, never a role session) reads.
 Same for `prompts/reviewer.md` relative to the builder's worktree: the builder
 session's `--scheduled-prompt` points only at `prompts/builder.md`, and its
 worktree never has the reviewer prompt file checked out or copied in.
-Before the first real run: verify a builder session's filesystem reach can't
-walk up to the hidden dir (worktrees are separate checkouts under
-`~/wingmen/projects/`, task hidden data lives under the orchestrator checkout --
-different trees, but confirming with an actual probe, not assuming).
+
+**Real gap found and fixed, 2026-10-29/30, before any real role session ran:**
+the first version of this design handed every role `.loop-task/orch_dir.txt`
+-- the orchestrator checkout's absolute path -- so it could invoke
+`record_manifest.py`/`reviewer_verdict.py`/`gh_status.py` itself. That same
+path is also the direct route to the hidden dir this section exists to
+protect: `<orch_dir>/tasks/loop-pilot/<task_id>/hidden/seeded-bugs.json` is
+one `cat` away from anything holding `orch_dir.txt` plus its own
+`task_id.txt` -- both of which every role already had. Caught during the
+harness smoke test (section 6e) while verifying the pipeline end to end, not
+by a dedicated filesystem probe. Fixed by removing the role's need for
+`orch_dir` entirely (section 1, `.loop-task/` contract) -- no role, in
+either condition, is ever handed any path into the orchestrator checkout now.
+
+**What this does and does not guarantee.** This closes the one guaranteed,
+trivial discovery path (a role being handed the exact address). It is *not*
+a sandboxing guarantee against a role session that goes looking: every role
+runs under `--dangerously-skip-permissions` with full shell access, as the
+same OS user as the harness itself (no container, no separate user, no
+filesystem ACL) -- a session that actively ran e.g. `find ~ -iname
+"seeded-bugs*"` would still, in principle, be able to find and read it,
+because nothing at the OS level prevents it. That class of defense (real
+sandboxing / a separate user or container per role) is out of scope for a
+pilot built by Monday; it is a real limitation of "safe to trust a cheap
+builder model" that any report to orch-console/Musa should state plainly,
+not paper over. What this fix buys is removing the ONE guaranteed, nothing-
+has-to-go-looking path -- which is the realistic risk (a role incidentally
+reading what it was handed), not the adversarial one.
 
 ## 5. Cost tracking (orch-console guard #2, bus #81749)
 
@@ -273,6 +337,21 @@ stdout/stderr entirely -- fixed to keep the last ~2000 chars in
 `tests_check_detail` / `spec_tests_unchanged_detail`, since an opaque
 "failure" with no trace is exactly the kind of thing this bug would have
 hidden from a real pilot run.
+
+## 6f. Expect `mergeStateStatus: UNSTABLE` on every pilot PR, harmlessly
+
+hifz's `ci.yml` triggers on `pull_request:` regardless of base branch, so
+every builder PR against `loop-pilot/base` also fires hifz's real GitHub
+Actions `quality-gates` run -- and it fails in ~3s every time:
+"The job was not started because an Actions budget is preventing further
+use." Zero cost, not a new problem, exactly the budget-exhausted state the
+brief already described. It is NOT one of the 3 required contexts, so branch
+protection still allows the merge once `tests`/`spec-tests-unchanged`/
+`reviewer-verdict` are green -- GitHub just shows the PR as
+`mergeStateStatus: UNSTABLE` (one non-required check red) rather than
+`CLEAN`. Confirmed via the smoke test's PR #10: all 3 required contexts
+SUCCESS, `mergeable: MERGEABLE`, `mergeStateStatus: UNSTABLE` -- expected,
+not a signal anything is wrong.
 
 ## 7. Open items
 

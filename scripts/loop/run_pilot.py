@@ -124,13 +124,22 @@ def remove_worktree(hifz_checkout: str, path: Path) -> None:
 
 
 # ── .loop-task/ harness contract (docs/loop-pilot-design-v1.md section 1) ──
+#
+# Deliberately contains NO path to the orchestrator checkout (no orch_dir.txt
+# -- see the 2026-10-30 isolation fix in section 4/6e): every role writes
+# only plain, local files here, and 100% of the record_manifest.py /
+# reviewer_verdict.py / gh_status.py / loop-pilot/reviews-branch work is done
+# by the harness, in its own process, after the role exits. A role that never
+# learns where the orchestrator lives cannot construct a path to
+# tasks/loop-pilot/<task_id>/hidden/ under it -- it had no way to find that
+# tree before this fix either, except by being handed the one path that led
+# straight there.
 
 def write_task_files(worktree: Path, task_id: str, brief_text: str) -> None:
     task_dir = worktree / ".loop-task"
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "task_id.txt").write_text(task_id + "\n")
     (task_dir / "brief.md").write_text(brief_text)
-    (task_dir / "orch_dir.txt").write_text(str(ORCH_DIR) + "\n")
 
 
 # ── role launch ──────────────────────────────────────────────────────────
@@ -257,14 +266,26 @@ def do_spec_writer(task_id: str, worktree: Path, model: str, max_turns: int,
         print(f"WARNING: spec_writer printed SPEC_COMMIT_SHA={reported} but HEAD is "
               f"{actual_sha} -- trusting git, not the self-report.")
 
-    # Harness patch: fill spec_commit_sha + spec_writer_model with authoritative
-    # values (the role session cannot know its own backing model -- see
-    # record_manifest.py's docstring). Not committed yet since nothing has
-    # consumed `actual_sha` as a pin point yet -- amend below is safe here.
+    # The role declared its acceptance test paths in a plain local file (it
+    # has no orch_dir and so cannot run record_manifest.py itself -- see the
+    # .loop-task/ contract note above). The harness does the ENTIRE manifest
+    # write itself, in one call, now that it has everything: the test paths,
+    # the real commit sha, and the authoritative model id.
+    test_files_path = worktree / ".loop-task" / "test_files.txt"
+    if not test_files_path.exists():
+        raise PilotError(f"spec_writer exited but {test_files_path} is missing")
+    test_files = [ln.strip() for ln in test_files_path.read_text().splitlines() if ln.strip()]
+    if not test_files:
+        raise PilotError(f"{test_files_path} is empty -- spec_writer declared no test files")
+
     run([sys.executable, str(ORCH_DIR / "scripts" / "loop" / "record_manifest.py"),
          "--task-id", task_id, "--repo-dir", str(worktree),
-         "--spec-commit-sha", actual_sha, "--spec-writer-model", model])
+         "--spec-commit-sha", actual_sha, "--spec-writer-model", model,
+         *[arg for f in test_files for arg in ("--test-file", f)]])
 
+    # Not committed yet, and nothing has consumed `actual_sha` as a pin point
+    # yet (builder hasn't started) -- amending the role's own commit to fold
+    # manifest.json in is safe here, unlike the shared reviews-branch case.
     git(str(worktree), "add", f".loop/{task_id}/manifest.json")
     git(str(worktree), "commit", "--amend", "--no-edit")
     amended_sha = git(str(worktree), "rev-parse", "HEAD").stdout.strip()
@@ -290,6 +311,25 @@ def do_builder(task_id: str, worktree: Path, model: str, max_turns: int,
     return head_sha, pr_url
 
 
+VALID_VERDICTS = {"PASS", "FAIL"}
+
+
+def parse_verdict_file(path: Path) -> tuple[str, str]:
+    """Parses the role's plain `VERDICT=.../REASON=...` file (two lines,
+    that order). No orch_dir, no JSON, no script invocation needed from the
+    role's side -- see the .loop-task/ contract note on write_task_files."""
+    lines = [ln for ln in path.read_text().splitlines() if ln.strip()]
+    verdict = reason = None
+    for ln in lines:
+        if ln.startswith("VERDICT="):
+            verdict = ln[len("VERDICT="):].strip()
+        elif ln.startswith("REASON="):
+            reason = ln[len("REASON="):].strip()
+    if verdict not in VALID_VERDICTS or not reason:
+        raise PilotError(f"{path} did not parse to a valid VERDICT=/REASON= pair: {lines!r}")
+    return verdict, reason
+
+
 def do_reviewer(task_id: str, hifz_checkout: str, review_worktree: Path, head_sha: str,
                  model: str, max_turns: int, dry_run: bool, owner: str, repo: str,
                  result: TaskRunResult) -> tuple[str | None, str | None]:
@@ -301,35 +341,42 @@ def do_reviewer(task_id: str, hifz_checkout: str, review_worktree: Path, head_sh
     if rr.returncode != 0:
         raise PilotError(f"reviewer session exited {rr.returncode}:\n{rr.stderr[-2000:]}")
 
-    verdict_rel = f".loop/{task_id}/reviews/{head_sha}.json"
-    # The reviewer role already committed+pushed this file on loop-pilot/reviews
-    # (reviewer.md step 6) before exiting -- read it back for the role's own
-    # verdict/reason, which the harness's patch call below must preserve.
-    verdict_path = review_worktree / verdict_rel
-    if not verdict_path.exists():
-        raise PilotError(f"reviewer exited but {verdict_rel} is missing in its worktree")
-    role_doc = json.loads(verdict_path.read_text())
+    # The role wrote only a plain local verdict file (it has no orch_dir and
+    # so cannot run reviewer_verdict.py, post the GitHub status, or switch to
+    # loop-pilot/reviews itself -- ALL of that is now 100% harness-side).
+    verdict_file = review_worktree / ".loop-task" / "verdict.txt"
+    if not verdict_file.exists():
+        raise PilotError(f"reviewer exited but {verdict_file} is missing")
+    verdict, reason = parse_verdict_file(verdict_file)
 
-    # Harness patch: fill reviewer_model with the authoritative value.
-    # --verdict/--reason are required args but IGNORED in patch mode (the
-    # script keeps the existing file's values) -- see reviewer_verdict.py.
+    verdict_rel = f".loop/{task_id}/reviews/{head_sha}.json"
     run([sys.executable, str(ORCH_DIR / "scripts" / "loop" / "reviewer_verdict.py"),
          "--task-id", task_id, "--repo-dir", str(review_worktree),
-         "--head-sha", head_sha, "--verdict", role_doc["verdict"],
-         "--reason", role_doc["reason"], "--reviewer-model", model,
-         "--reviewer-identity", "cc-loop"])
+         "--head-sha", head_sha, "--verdict", verdict, "--reason", reason,
+         "--reviewer-model", model, "--reviewer-identity", "cc-loop"])
 
-    # loop-pilot/reviews is a SHARED branch other task-runs also push to, and
-    # the role's own commit is already on origin -- append, never amend+force
-    # (docs/loop-pilot-design-v1.md section 3's reasoning extended to the
-    # harness's own follow-up write).
+    # loop-pilot/reviews is a SHARED branch other task-runs also push to --
+    # fetch/checkout it fresh here (the review_worktree started detached at
+    # head_sha, not on this branch at all), commit, push. Append-only, never
+    # amend+force on a branch other runs are concurrently writing to.
+    git(str(review_worktree), "fetch", "origin", "loop-pilot/reviews", check=False)
+    r = git(str(review_worktree), "checkout", "-B", "loop-pilot/reviews",
+             "origin/loop-pilot/reviews", check=False)
+    if r.returncode != 0:
+        git(str(review_worktree), "checkout", "-B", "loop-pilot/reviews", "loop-pilot/base")
     git(str(review_worktree), "add", verdict_rel)
-    git(str(review_worktree), "commit", "-m",
-        f"review(harness-patch:{task_id}): fill reviewer_model for {head_sha[:12]}")
+    git(str(review_worktree), "commit", "-m", f"review({task_id}): {verdict} for {head_sha[:12]}")
     git(str(review_worktree), "push", "origin", "loop-pilot/reviews")
 
-    patched = json.loads(verdict_path.read_text())
-    return patched["verdict"], patched["reason"]
+    # Post the `reviewer-verdict` GitHub status for the ORIGINAL head_sha
+    # (captured by the caller before this worktree ever existed) -- not
+    # whatever commit the loop-pilot/reviews checkout just produced.
+    run([sys.executable, str(ORCH_DIR / "scripts" / "loop" / "gh_status.py"),
+         "--owner", owner, "--repo", repo, "--sha", head_sha,
+         "--state", "success" if verdict == "PASS" else "failure",
+         "--context", "reviewer-verdict", "--description", reason[:140]])
+
+    return verdict, reason
 
 
 # ── main task-run driver ────────────────────────────────────────────────────
