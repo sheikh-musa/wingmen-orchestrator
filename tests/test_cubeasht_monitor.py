@@ -6,6 +6,7 @@ ephemeral local pg17 `pg_dsn` fixture (never prod).
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -124,6 +125,26 @@ def test_wsl_parse_and_failure():
     assert cm.parse_wsl_output(inactive)["runner_service"] == "inactive"
     with pytest.raises(cm.ProbeParseError):
         cm.parse_wsl_output("There is no distribution with the supplied name.")
+
+
+def test_wsl_probe_does_not_escalate_to_root(monkeypatch):
+    # Least privilege: the WSL probe only reads unit state (`systemctl is-active`),
+    # /proc and `free -m`, none of which needs root. Lock the exact remote command
+    # so a future edit can't silently reintroduce the `-u root` escalation.
+    cmds = []
+
+    def fake_ssh(remote_cmd, stdin_path, timeout):
+        cmds.append(remote_cmd)
+        out = WSL_REAL if remote_cmd.startswith("wsl ") else PS_REAL
+        return subprocess.CompletedProcess([], 0, out, "")
+
+    monkeypatch.setattr(cm, "fetch_runner", lambda: dict(RUNNER))
+    monkeypatch.setattr(cm, "_ssh", fake_ssh)
+    ok, _metrics, err, _loud = cm.collect()
+    assert ok is True and err is None
+    wsl_cmds = [c for c in cmds if c.startswith("wsl ")]
+    assert wsl_cmds == [f"wsl -d {cm.WSL_DISTRO} -- bash -s"]
+    assert "-u root" not in wsl_cmds[0]
 
 
 def test_runner_from_api():
