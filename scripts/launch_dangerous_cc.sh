@@ -41,8 +41,37 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORCH_DIR="$(dirname "$SCRIPT_DIR")"
-VENV_PY="$ORCH_DIR/.venv/bin/python3"
 CALLER_DIR="$(pwd)"
+
+# LIVE_ORCH_DIR / ENV_DIR (bus #85137, cc-loop): ORCH_DIR self-locates from
+# this script's own invoked path, which is WORKTREE-RELATIVE when this
+# script runs via a worktree's own copy (e.g. a pilot/loop-role launch from
+# an orchestrator worktree under test). .env and .venv are both gitignored
+# and NEVER exist per-worktree (singleton, live-checkout-only resources), so
+# a worktree-relative ORCH_DIR silently drops both: `. "$ORCH_DIR/.env"`
+# no-ops (redirected + `|| true`), and the lane_token_resolver CLI call
+# resolves its OWN pointer-file default against the same wrong root.
+# Confirmed failure mode (scripts/loop/run_pilot.py's own probe, which works
+# around this at its call site): a launched session's transcript showing
+# literal "Not logged in · Please run /login", every message type
+# "<synthetic>" -- no real model turn ever happened.
+#
+# Fix: fall back to the live checkout for exactly the things that are
+# singleton/live-only (.env, the token-pointer directory, the venv
+# interpreter) -- NEVER for which copy of the orchestrator PYTHON MODULES
+# get imported/run (that stays ORCH_DIR, preserving a worktree lane's
+# ability to dogfood its own in-flight script/module changes).
+LIVE_ORCH_DIR="$HOME/wingmen/orchestrator"
+if [ -f "$ORCH_DIR/.env" ]; then
+    ENV_DIR="$ORCH_DIR"
+else
+    ENV_DIR="$LIVE_ORCH_DIR"
+fi
+if [ -x "$ORCH_DIR/.venv/bin/python3" ]; then
+    VENV_PY="$ORCH_DIR/.venv/bin/python3"
+else
+    VENV_PY="$LIVE_ORCH_DIR/.venv/bin/python3"
+fi
 
 # ── CLI arg parse (Step 3: --repo override, -- passthrough to claude) ────────
 # Single-pass parser — respects `--` boundary (plan's two-pass parser had a
@@ -110,7 +139,7 @@ HEARTBEAT_PID=""
 # intentional for the orchestrator-managed launcher (canonical config lives
 # in .env, not the operator's shell).
 # shellcheck disable=SC1091
-set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+set -a; . "$ENV_DIR/.env" 2>/dev/null || true; set +a
 
 # CAI-RESP-1308: fail-loud, DETECT-ONLY lane-DB residency guard. The line above exported
 # the orchestrator/BUS DATABASE_URL into this lane's env; if this lane's OWN repo declares a
@@ -134,7 +163,7 @@ set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
 if [ -n "${GOUMLYNE_DATABASE_URL:-}" ] || [ -n "${IHSANOS_PROD_DATABASE_URL:-}" ]; then
     echo -e "\033[31mSECURITY[CAI-1225 L2]: a live-WRITE client DSN (GOUMLYNE_DATABASE_URL and/or IHSANOS_PROD_DATABASE_URL) is present in this lane/auditor env — REFUSING to boot.\033[0m" >&2
     echo "  Never-present invariant: the write-DSN must NOT reach a lane/auditor — it lives ONLY in the console/cai restricted store (~/.wingmen/private/write_dsn.env)." >&2
-    echo "  Likely cause: a regression re-added a write line to $ORCH_DIR/.env. Remove it (the RO vars GOUMLYNE_RO_DATABASE_URL / IHSANOS_PROD_RO_DATABASE_URL stay)." >&2
+    echo "  Likely cause: a regression re-added a write line to $ENV_DIR/.env. Remove it (the RO vars GOUMLYNE_RO_DATABASE_URL / IHSANOS_PROD_RO_DATABASE_URL stay)." >&2
     exit 1
 fi
 
@@ -161,7 +190,7 @@ fi
 # pre-GAP-B behaviour.
 if [ -z "${CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE:-}" ]; then
     _LANE_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
-    _LANE_DEFAULT_TOKFILE="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.lib.lane_token_resolver --session "$_LANE_SESSION" 2>/dev/null || true)"
+    _LANE_DEFAULT_TOKFILE="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.lib.lane_token_resolver --session "$_LANE_SESSION" --orch-dir "$ENV_DIR" 2>/dev/null || true)"
     if [ -n "$_LANE_DEFAULT_TOKFILE" ] && [ -r "$_LANE_DEFAULT_TOKFILE" ]; then
         # name<->fp check (#49107): refuse a mislabelled key file rather than boot on the wrong account
         . "$ORCH_DIR/scripts/lib/token_file_guard.sh" || { echo "FATAL: token_file_guard.sh missing" >&2; exit 1; }
@@ -196,7 +225,7 @@ unset ORCH_AGENT_ID ORCH_BODY_ROLE ORCH_TMUX_SESSION
 DSN="${DATABASE_URL:-${SUPABASE_DB_URL:-}}"
 if [ -z "$DSN" ]; then
     echo -e "\033[31mERROR: DATABASE_URL not set — cannot allocate agent identity\033[0m" >&2
-    echo "       Add DATABASE_URL=postgres://... to $ORCH_DIR/.env" >&2
+    echo "       Add DATABASE_URL=postgres://... to $ENV_DIR/.env" >&2
     exit 1
 fi
 
@@ -331,7 +360,7 @@ _py() {
 import os, sys
 sys.path.insert(0, '$ORCH_DIR')
 from dotenv import load_dotenv
-load_dotenv('$ORCH_DIR/.env')
+load_dotenv('$ENV_DIR/.env')
 $1
 " 2>/dev/null || true
 }
@@ -428,7 +457,7 @@ _heartbeat_loop() {
 import os, sys
 sys.path.insert(0, '$ORCH_DIR')
 from dotenv import load_dotenv
-load_dotenv('$ORCH_DIR/.env')
+load_dotenv('$ENV_DIR/.env')
 from supabase import create_client
 from datetime import datetime, timezone
 sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
@@ -469,8 +498,8 @@ _verify_vercel_deploy() {
 
     # Load Vercel creds from orchestrator .env
     local token team_id project_id
-    token="$(grep -E '^VERCEL_TOKEN=' "$ORCH_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' | sed 's/#.*//')"
-    team_id="$(grep -E '^VERCEL_TEAM_ID=' "$ORCH_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' | sed 's/#.*//')"
+    token="$(grep -E '^VERCEL_TOKEN=' "$ENV_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' | sed 's/#.*//')"
+    team_id="$(grep -E '^VERCEL_TEAM_ID=' "$ENV_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' | sed 's/#.*//')"
 
     # Try to get project ID from caller repo's .vercel/project.json
     local project_json="$repo_dir/.vercel/project.json"
@@ -644,7 +673,7 @@ _handle_exit() {
 import os, sys
 sys.path.insert(0, '$ORCH_DIR')
 from dotenv import load_dotenv
-load_dotenv('$ORCH_DIR/.env')
+load_dotenv('$ENV_DIR/.env')
 from supabase import create_client
 sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
 sb.table('cc_work_sessions').insert({
@@ -666,7 +695,7 @@ sb.table('cc_work_sessions').insert({
 import os, sys
 sys.path.insert(0, '$ORCH_DIR')
 from dotenv import load_dotenv
-load_dotenv('$ORCH_DIR/.env')
+load_dotenv('$ENV_DIR/.env')
 try:
     import psycopg
 except ImportError:
@@ -718,7 +747,7 @@ except Exception as e:
 import os, sys
 sys.path.insert(0, '$ORCH_DIR')
 from dotenv import load_dotenv
-load_dotenv('$ORCH_DIR/.env')
+load_dotenv('$ENV_DIR/.env')
 from supabase import create_client
 sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
 sb.table('agents').update({'status': 'idle', 'current_task': None}).eq('id', '$BASE_AGENT_ID').execute()
