@@ -312,7 +312,9 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     import psycopg2  # local import: keeps the pure helpers importable test-side without a DB driver
+    from dotenv import load_dotenv
 
+    load_dotenv(ORCH_DIR / ".env")  # launchd gives this process no shell-sourced env (#85029)
     dsn = _dsn()
     if not dsn:
         print("lane_burn_alarm: no DATABASE_URL/SUPABASE_DB_URL in env", file=sys.stderr)
