@@ -436,6 +436,12 @@ def run(conn, dry: bool = False) -> int:
                 # while its e2e job was still finishing after the PASS landed).
                 # Only fetched here, not for every verdict, to keep the extra
                 # `gh api` round trip off the common (not-yet-old-enough) path.
+                # headRefOid is pr_json's CURRENT live head (this run's fresh
+                # `gh pr view`, same call that fed latest_commit above) -- never
+                # a sha parsed out of the verdict's own text (console review
+                # #85388; extract_pass_pr_mentions never extracts one anyway).
+                # If the head had moved past the verdict, the latest_commit_epoch
+                # > verdict_epoch gate a few lines up already returned False.
                 ci_pending, latest_ci_completed = _checkrun_status(owner, repo, pr_json.get("headRefOid"))
                 if not is_stale(pr_json.get("state"), pr_json.get("mergedAt"), latest_commit,
                                  verdict_epoch, now, ci_pending=ci_pending,

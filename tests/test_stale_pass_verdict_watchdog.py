@@ -173,6 +173,20 @@ def test_ci_pending_is_never_stale_even_well_past_threshold():
     assert spw.is_stale("OPEN", None, None, 1000, 1000 + THRESHOLD + 999999, ci_pending=True) is False
 
 
+# console review (#85388) on PR#715: a check suite commonly has ONE job that
+# completed a while ago and ANOTHER still queued/in_progress on the SAME head
+# (e.g. a slow e2e job) -- the later-of-{verdict,CI-completion} rule alone
+# would still page off that older completed job's timestamp. ci_pending MUST
+# be checked BEFORE the later-of baseline is even computed, so a still-
+# pending run suppresses the page regardless of what any already-completed
+# sibling run says -- this pins that ordering, not just the all-pending case.
+def test_ci_pending_overrides_the_later_of_rule_even_with_an_old_completed_sibling_run():
+    assert spw.is_stale(
+        "OPEN", None, None, 1000, 1000 + THRESHOLD + 999999,
+        ci_pending=True, latest_checkrun_completed_epoch=1000 + 1,  # old, already-"stale"-looking
+    ) is False
+
+
 def test_ci_completed_after_verdict_but_still_within_threshold_is_not_stale():
     # verdict at t=1000, CI finished at t=1500, now is only 1500+THRESHOLD-1 --
     # idle time measured from CI completion (1500), not the earlier verdict (1000).
@@ -611,6 +625,57 @@ def test_run_ci_still_running_does_not_alert_even_past_threshold(monkeypatch):
     spw.run(conn, dry=False)
     assert cur.inserts == []
     assert saved.get("alerted", []) == []
+
+
+def test_run_mixed_old_completed_and_pending_sibling_checkrun_does_not_alert(monkeypatch):
+    # end-to-end through the REAL _checkrun_status (subprocess.run mocked, not
+    # _checkrun_status itself): one job completed long ago, a sibling job on
+    # the same head is still in_progress. Proves the pending gate wins over
+    # the already-past-threshold completed timestamp all the way through run().
+    saved = {}
+    now_epoch = 10_000
+    verdict_epoch = now_epoch - THRESHOLD - 500
+    old_completed = now_epoch - THRESHOLD - 400  # itself past threshold if it were the only signal
+    verdicts = [(1, "cc-cosem-adcda-2", "cosem-adcda PR#864 -- PASS", verdict_epoch)]
+    resolved = {"864": ("sheikh-musa", "cosem-adcda",
+                         {"state": "OPEN", "mergedAt": None, "commits": [],
+                          "headRefOid": "deadbeef"})}
+    cur, conn = _wire(monkeypatch, verdicts, resolved_by_pr=resolved, saved=saved)
+    monkeypatch.setattr(spw.time, "time", lambda: now_epoch)
+    import datetime
+    old_iso = datetime.datetime.fromtimestamp(old_completed, tz=datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    checkrun_out = f"completed\t{old_iso}\nin_progress\t\n"
+    monkeypatch.setattr(spw.subprocess, "run", lambda *a, **k: _FakeCompleted(checkrun_out))
+    spw.run(conn, dry=False)
+    assert cur.inserts == []
+    assert saved.get("alerted", []) == []
+
+
+def test_run_checkrun_status_called_with_the_live_head_sha_not_any_text_in_the_verdict(monkeypatch):
+    # console review #85388: check-runs must be read for the CURRENT head sha
+    # (from the live `gh pr view` result), never a sha mentioned in the
+    # verdict's own text. extract_pass_pr_mentions never even parses a sha out
+    # of the body -- this pins that the sha reaching _checkrun_status is
+    # exactly pr_json["headRefOid"], by planting a decoy sha in the verdict
+    # body that does NOT match headRefOid and asserting it's never used.
+    saved = {}
+    now_epoch = 10_000
+    verdicts = [(1, "cc-cosem-adcda-2", "cosem-adcda PR#864 @ decoy5ha -- PASS", now_epoch - THRESHOLD - 10)]
+    resolved = {"864": ("sheikh-musa", "cosem-adcda",
+                         {"state": "OPEN", "mergedAt": None, "commits": [],
+                          "headRefOid": "liveheadsha"})}
+    cur, conn = _wire(monkeypatch, verdicts, resolved_by_pr=resolved, saved=saved)
+    monkeypatch.setattr(spw.time, "time", lambda: now_epoch)
+    seen_shas = []
+
+    def _fake_checkrun_status(owner, repo, sha):
+        seen_shas.append(sha)
+        return False, None
+
+    monkeypatch.setattr(spw, "_checkrun_status", _fake_checkrun_status)
+    spw.run(conn, dry=False)
+    assert seen_shas == ["liveheadsha"]
+    assert "decoy5ha" not in seen_shas
 
 
 def test_run_ci_completed_after_verdict_but_recently_does_not_alert(monkeypatch):
