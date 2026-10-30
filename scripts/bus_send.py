@@ -279,6 +279,144 @@ def refuse_if_instance_stale_and_base_live(to: str, dsn: str | None = None) -> N
     )
 
 
+_PR_NUM_RE = re.compile(r"\bPR\s*#\s*(\d+)\b", re.IGNORECASE)
+
+
+def _pr_number_from_subject(subject: str) -> str | None:
+    """Extract a PR number from a review-verdict subject ('cosem-adcda PR#852
+    ...', 'PR #611 at ...'). None if the subject doesn't name one."""
+    m = _PR_NUM_RE.search(subject or "")
+    return m.group(1) if m else None
+
+
+def _repo_from_cwd() -> tuple[str, str] | None:
+    """(owner, repo) from the CURRENT worktree's origin remote, or None if this
+    process isn't inside a git checkout with a GitHub origin. cc-quality sends
+    a verdict from inside the exact worktree it reviewed, so the cwd IS the
+    repo the PR number belongs to -- no registry lookup needed for this half."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+    except Exception:
+        return None
+    m = re.search(r"github\.com[:/]([^/]+)/([^/.]+?)(?:\.git)?$", out)
+    return (m.group(1), m.group(2)) if m else None
+
+
+def _pr_head_branch(owner: str, repo: str, pr_number: str) -> str | None:
+    """The PR's current head branch via `gh`, or None on any failure (unknown
+    PR, gh not authenticated, network hiccup) -- never blocks a send over an
+    API call that isn't itself the thing being verified."""
+    import json
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "view", pr_number, "-R", f"{owner}/{repo}", "--json", "headRefName"],
+            capture_output=True, text=True, timeout=15, check=True,
+        ).stdout
+        return json.loads(out).get("headRefName") or None
+    except Exception:
+        return None
+
+
+def _resolve_pr_author_instance(repo: str, branch: str, dsn: str | None = None) -> str | None:
+    """The agent_id of the LIVE instance whose worktree currently has `branch`
+    checked out, among registered lanes for `repo` -- or None if zero or more
+    than one match (ambiguous resolution never blocks a send; it only refuses
+    on a CONFIRMED mismatch). Scoped by worktree basename starting with the
+    repo name (every observed lane dir for a repo follows this convention:
+    cosem-adcda, cosem-adcda-hotfix, cosem-adcda.wt-urgent, ...) rather than
+    the stale, hand-maintained REPOS.json (missing cosem-exams entirely)."""
+    import subprocess
+
+    import psycopg2
+
+    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
+    cur = conn.cursor()
+    cur.execute("SELECT lane, worktree_path FROM fleet_lanes")
+    rows = cur.fetchall()
+    candidates = []
+    for lane, worktree_path in rows:
+        if not worktree_path or not os.path.basename(worktree_path.rstrip("/")).startswith(repo):
+            continue
+        try:
+            current = subprocess.run(
+                ["git", "-C", worktree_path, "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=10, check=True,
+            ).stdout.strip()
+        except Exception:
+            continue
+        if current == branch:
+            candidates.append(lane)
+    if len(candidates) != 1:
+        conn.close()
+        return None  # no live worktree has it checked out right now, or it's ambiguous
+    cur.execute("SELECT agent_id FROM agent_status WHERE tmux_session=%s", (candidates[0],))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def refuse_if_pr_verdict_misrouted(
+    from_agent: str, to: str, subject: str, skip: bool = False, dsn: str | None = None
+) -> None:
+    """orch-console bus #85014 (incident: cc-quality PASSed cosem-adcda PR#852/
+    855/857 to cc-cosem-adcda-1/-3; the actual author, cc-cosem-adcda-2, idled
+    ~10h unaware -- Musa caught it by asking). A review verdict from cc-quality
+    naming a PR# should reach the instance whose worktree AUTHORED that PR's
+    head branch, not whichever instance happened to be addressed by hand.
+
+    Resolution-failure-safe: any inconclusive step (not a cc-quality sender, no
+    PR# in the subject, cwd has no GitHub origin, `gh` lookup fails, zero/
+    multiple live worktrees hold the branch) is a silent no-op -- this guard
+    only ever fires on a POSITIVELY CONFIRMED mismatch, never on an inability
+    to verify, so it can't become a new way to strand a legitimate send.
+
+    Cheap pre-checks first (sender shape, subject regex) before any DB round-
+    trip or subprocess call, same shape as refuse_if_instance_stale_and_base_
+    live's own -<digits> pre-check -- the overwhelming majority of sends are
+    neither from cc-quality nor name a PR#, and must never pay for a DB call
+    just to find that out."""
+    if skip:
+        return
+    if from_agent != "cc-quality" and not from_agent.startswith("cc-quality-"):
+        return
+    pr_number = _pr_number_from_subject(subject)
+    if not pr_number:
+        return
+    from_row = _agent_status_row(from_agent, dsn=dsn)
+    from_base = from_row[0] if from_row and from_row[0] else from_agent
+    if from_base != "cc-quality":
+        return
+    repo_info = _repo_from_cwd()
+    if not repo_info:
+        return
+    owner, repo = repo_info
+    branch = _pr_head_branch(owner, repo, pr_number)
+    if not branch:
+        return
+    correct = _resolve_pr_author_instance(repo, branch, dsn=dsn)
+    if not correct or correct == to:
+        return
+    to_row = _agent_status_row(to, dsn=dsn)
+    to_base = to_row[0] if to_row and to_row[0] else to
+    correct_row = _agent_status_row(correct, dsn=dsn)
+    correct_base = correct_row[0] if correct_row and correct_row[0] else correct
+    if to_base == correct_base and to == to_base:
+        return  # addressed to the shared base itself -- not a wrong-instance misroute
+    age = _heartbeat_age_str(correct, dsn=dsn)
+    raise SystemExit(
+        f"bus_send: REFUSED — PR#{pr_number}'s head branch '{branch}' is checked out in "
+        f"{correct}'s worktree, not '{to}''s; the author instance would never see this "
+        f"verdict. Use --to {correct} [{age}]. Pass --skip-pr-author-check to override."
+    )
+
+
 def _undeliverable(to_agent: str | None) -> bool:
     """A to_agent with NO possible live wake owner -- same SSOT definition as
     scripts/fleet_health.py's _undeliverable: not eligible on agent_wake's most
@@ -763,6 +901,12 @@ def build_parser() -> argparse.ArgumentParser:
              "(bus #49220) -- normally refused with the live instance address instead",
     )
     p.add_argument(
+        "--skip-pr-author-check", action="store_true", dest="skip_pr_author_check",
+        help="send a cc-quality PR verdict to --to literally even if a different live "
+             "instance currently holds that PR's head branch (bus #85014) -- normally "
+             "refused with the author instance's address instead",
+    )
+    p.add_argument(
         "--allow-undeliverable", action="store_true", dest="allow_undeliverable",
         help="send anyway to a structurally-undeliverable --to (write-only producer, "
              "no live wake owner) -- logs a warning instead of refusing; for a genuine "
@@ -1032,6 +1176,7 @@ def main(argv: list[str] | None = None) -> int:
 
     refuse_if_base_has_live_instances(args.to, args.to_base)
     refuse_if_instance_stale_and_base_live(args.to)
+    refuse_if_pr_verdict_misrouted(from_agent, args.to, args.subject, skip=args.skip_pr_author_check)
     warn_if_answering_rr_without_reply_to(from_agent, args.to, args.reply_to)
 
     sub_tag = resolve_sub_tag(from_agent, os.environ)
