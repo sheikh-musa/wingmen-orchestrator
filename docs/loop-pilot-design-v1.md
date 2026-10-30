@@ -375,7 +375,17 @@ not a signal anything is wrong.
    masked it when the eligible pool was tiny) -- fixed by adding a test
    where the eligible pool is bigger than the correct base but smaller
    than the wrong one, so the cap can't hide the difference; not yet run
-   live. 3 more tasks still needed to hit the 6-task floor.
+   live. **task-04-local-calendar-day** drafted 2026-10-30 (H-5's explicit
+   "user's timezone, not UTC" requirement -- `reconciler.ts:103-104`'s
+   existing `elapsedDays` is raw-ms-based, not timezone-aware at all; this
+   task is the missing primitive `localCalendarDayKey`/`isSameLocalDay`,
+   NOT a fix to `reconciler.ts` itself, which stays out of scope) -- oracle
+   verified clean against a correct `Intl.DateTimeFormat`-based reference
+   and catches all 6 seeded-bug variants (ignores-timezone-uses-utc,
+   ignores-timezone-uses-system-local, hardcoded-fixed-offset-ignoring-dst,
+   sign-flipped-offset-math, wrong-output-format,
+   isSameLocalDay-ignores-timezone-param); not yet run live. 2 more tasks
+   still needed to hit the 6-task floor.
 2. Whether hifz already has a local-runner GH-status mechanism to reuse
    instead of `local_ci_runner.sh` -- asked cc-hifz-1, no answer yet.
 3. `switch_lane_token`-for-one-shot-session and the builder-worktree isolation

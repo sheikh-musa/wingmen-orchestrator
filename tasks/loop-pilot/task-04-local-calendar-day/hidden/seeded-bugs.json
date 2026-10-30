@@ -1,0 +1,30 @@
+{
+  "task_id": "task-04-local-calendar-day",
+  "note": "Informational record of the bug CATEGORIES the hidden oracle (oracle_test.ts, written transiently by grader.py) checks for. The builder writes localCalendarDayKey()/isSameLocalDay() from scratch -- nothing is literally injected into its code. 'Seeded' here means 'plausible implementation mistakes a cheap builder model might make against this exact spec', which is what the oracle is designed to catch independent of whatever the spec-writer's own acceptance tests happened to cover.",
+  "bugs": [
+    {
+      "id": "ignores-timezone-uses-utc-components",
+      "description": "Builds the day key from date.getUTCFullYear()/getUTCMonth()/getUTCDate() (or date.toISOString().slice(0,10)), ignoring the timeZone parameter entirely -- always returns the UTC calendar day regardless of what timezone was requested."
+    },
+    {
+      "id": "ignores-timezone-uses-system-local-components",
+      "description": "Builds the day key from date.getFullYear()/getMonth()/getDate() (the host machine's own local timezone) instead of the requested timeZone parameter -- a different wrong code path than the UTC-components bug, though it happens to produce the same wrong answer in a UTC-TZ CI environment."
+    },
+    {
+      "id": "hardcoded-fixed-offset-ignoring-dst",
+      "description": "Resolves timeZone to a fixed numeric UTC-offset lookup table (e.g. 'America/New_York' -> always -5) instead of using proper IANA tzdata-aware resolution (Intl.DateTimeFormat or equivalent) -- gives the wrong calendar day for any date that falls in the OTHER half of the year's DST schedule from whatever the lookup table assumed."
+    },
+    {
+      "id": "sign-flipped-offset-math",
+      "description": "Computes local time as date.getTime() - offsetMs instead of + offsetMs (or vice versa) when manually applying a UTC-offset lookup -- flips every non-UTC timezone's result by double the offset, breaking even DST-free zones like Asia/Tokyo or Pacific/Honolulu."
+    },
+    {
+      "id": "wrong-output-format",
+      "description": "Returns the day key in a different field order or separator than YYYY-MM-DD (e.g. MM-DD-YYYY, DD/MM/YYYY, or an unpadded '2026-7-15') -- isSameLocalDay's boolean comparisons can still happen to pass by accident (same wrong format on both sides), but localCalendarDayKey's own direct return value violates the spec'd format."
+    },
+    {
+      "id": "isSameLocalDay-ignores-timezone-param",
+      "description": "isSameLocalDay() is wired to call localCalendarDayKey(a, 'UTC') / localCalendarDayKey(b, 'UTC') (or omits the parameter) instead of passing through its own timeZone argument -- a composition/wiring bug distinct from localCalendarDayKey's own correctness, since localCalendarDayKey itself may be correctly implemented and still get called wrong."
+    }
+  ]
+}
