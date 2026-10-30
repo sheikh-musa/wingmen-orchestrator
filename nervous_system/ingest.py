@@ -920,9 +920,17 @@ def _session_exists(target) -> bool:
     return r.returncode == 0
 
 
-def nudge_session(target: str, channel_key: str, n_unread: int) -> bool:
+def nudge_session(target: str, channel_key: str, n_unread: int, *, urgent: bool = False) -> bool:
     """Count-only nudge. NEVER carries payload (CAI-RESP-357). Best-effort
-    signal — delivery is guaranteed by the log + reconciliation, not by this."""
+    signal — delivery is guaranteed by the log + reconciliation, not by this.
+
+    `urgent`: when True AND `target` is in ESCAPE_PREEMPT_TARGETS, sends
+    Escape BEFORE the clear+type+Enter sequence below (Musa op#36085/36098)
+    — a busy/mid-tool-call pane otherwise just queues these keystrokes
+    behind whatever it's doing, which is the exact 'URGENT did not interrupt
+    anything' failure this closes. Tested clean on a throwaway pane,
+    2026-10-30 — see ESCAPE_PREEMPT_TARGETS' comment for what was verified
+    and what Escape does NOT do (it doesn't force-kill a running command)."""
     tmux = shutil.which("tmux") or "/opt/homebrew/bin/tmux"
     line = (f"\U0001F4E5 {n_unread} unread on '{channel_key}' — "
             f"reconcile operator_log.unprocessed()")
@@ -935,6 +943,10 @@ def nudge_session(target: str, channel_key: str, n_unread: int) -> bool:
     try:
         subprocess.run([tmux, "has-session", "-t", f"={target}"],
                        check=True, capture_output=True, timeout=5)
+        if urgent and target in ESCAPE_PREEMPT_TARGETS:
+            subprocess.run([tmux, "send-keys", "-t", f"={target}:0.0", "Escape"],
+                           check=True, capture_output=True, timeout=5)
+            time.sleep(0.5)
         # Clear any leftover unsent text FIRST (C-u). 2026-07-04: the orch idled
         # with an unsent draft ('ping me when...') and the nudge got appended onto
         # it instead of landing — the operator's 'status' was silently swallowed.
@@ -988,6 +1000,42 @@ MAX_DEFER_SEC = 600      # busy-defer CAP: a message unhandled past this nudges
 # woken, it just isn't bot-acked at the sender. Env-overridable (comma-sep tags).
 SUPPRESS_CLIENT_ACK_TAGS = {
     t.strip() for t in os.environ.get("SUPPRESS_CLIENT_ACK_TAGS", "gazzabyte-irsyad,cosem-exams").split(",") if t.strip()
+}
+
+# ── Operator-channel SLA tightening (Musa op#36085/36087/36098, 2026-10-30) ──
+# ACK_AFTER_SEC/MAX_DEFER_SEC above are tuned for CLIENT channels (ACK_AFTER_SEC
+# was deliberately raised 45->150 on 2026-07-10 after an over-acking complaint)
+# and MUST stay untouched there. The operator's own two channels — his direct
+# line to each body — get a tighter SLA: a substantive reply inside ~60s even
+# mid-task, and a forced nudge inside ~2 min rather than 10. Client-channel
+# timing is read from the SAME two constants unchanged; this is an override,
+# not a replacement.
+OPERATOR_CHANNEL_TAGS = {"orch-channel", "nazim-console"}
+OPERATOR_ACK_AFTER_SEC = 60
+OPERATOR_MAX_DEFER_SEC = 120
+
+# target (tmux session) -> the agent_id it posts agent_messages under, so the
+# substantive ack below can show genuinely LIVE activity. agent_status.current_task
+# is boot-time-static fleet-wide (verified live 2026-10-30: every body reads
+# 'session-launch model=...'/'hub — always-on...' regardless of what it's
+# actually doing right now) so it is NOT used here — the most recent outbound
+# agent_messages row is the live signal instead.
+TARGET_TO_AGENT_ID = {"orch": "cc-orchestrator", "nazim": "orch-console"}
+
+# Escape-first hard preemption on URGENT (same op refs). Tested clean on a
+# disposable throwaway tmux pane, 2026-10-30, both required cases: Escape
+# mid-Bash-tool-call returns the pane to an idle, input-ready prompt within
+# ~1s (the underlying shell command is NOT force-killed — it keeps running
+# detached to its own natural completion, which is fine for our purpose:
+# this means "stop waiting, read input now," not "abort what's running");
+# Escape during an active permission-confirmation dialog cleanly rejects that
+# one action and returns to idle, no corruption either case. Per-target
+# ALLOWLIST, not a global flag: 'nazim' ships first (lower blast radius, Musa
+# accepted the risk there, bus #84092); 'orch' (the hub) stays OFF until
+# explicitly ungated — a bad interrupt on the hub's live pane is a different,
+# higher-blast-radius risk than on the console's.
+ESCAPE_PREEMPT_TARGETS = {
+    t.strip() for t in os.environ.get("ESCAPE_PREEMPT_TARGETS", "nazim").split(",") if t.strip()
 }
 
 
@@ -1095,6 +1143,31 @@ def _chat_type(token: str, chat_id) -> str:
     return t
 
 
+def _live_status_suffix(conn, target: str) -> str:
+    """Best-effort live-status fragment for the operator-channel ack (Musa
+    op#36085/36098): the most recent agent_messages row THIS target itself
+    posted, as a genuinely-live substitute for agent_status.current_task
+    (verified boot-time-static fleet-wide 2026-10-30 — every body reads
+    'session-launch model=...'/'hub — always-on...' regardless of what it's
+    actually doing, so it would show stale boot info here). Empty string on
+    any miss or staleness — never fabricate activity."""
+    agent_id = TARGET_TO_AGENT_ID.get(target)
+    if not agent_id:
+        return ""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT subject, extract(epoch from (now() - created_at))::int "
+                "FROM agent_messages WHERE from_agent=%s ORDER BY id DESC LIMIT 1",
+                (agent_id,))
+            row = cur.fetchone()
+    except Exception:
+        return ""   # best-effort; never let this block an ack
+    if not row or row[1] is None or row[1] > 1800:   # >30 min isn't "live"
+        return ""
+    return f" Last update: {row[0]}"
+
+
 def throttled_busy_ack(conn, ch: "Channel") -> None:
     """Enqueue ONE 'got it, mid-task' ack per ACK_THROTTLE_SEC per channel (via
     the tg_out queue), so a deferred operator isn't left wondering."""
@@ -1115,11 +1188,23 @@ def throttled_busy_ack(conn, ch: "Channel") -> None:
         if ch.mode == "log-and-route"
         else "\U0001F4E8 Got your message — I'm mid-task right now, I'll reply at "
              "my next pause. (Reply URGENT to interrupt now.)")
+    # Operator channels only (Musa op#36085/36098): append a live-status
+    # fragment. Client-channel wording stays byte-identical to the above —
+    # that text was tuned by operator complaint (2026-08-17/2026-08-20) and
+    # this never touches it.
+    if ch.channel_tag in OPERATOR_CHANNEL_TAGS:
+        target = ch.inject_target if ch.mode == "agent-session" else "orch"
+        ack += _live_status_suffix(conn, target)
     with conn.cursor() as cur:
+        # LIKE, not exact-text match (op#36085/36098): the live-status suffix
+        # above makes the text vary call-to-call, so an exact-match throttle
+        # would never dedup and would re-ack every pass. The '📨 Got your
+        # message' prefix stays fixed either way (see the LOAD-BEARING note
+        # above) so matching on it is still a correct per-channel throttle.
         cur.execute(
-            "SELECT 1 FROM tg_out WHERE channel_key=%s AND text=%s "
+            "SELECT 1 FROM tg_out WHERE channel_key=%s AND text LIKE %s "
             "AND created_at > now() - make_interval(secs => %s) LIMIT 1",
-            (ch.key, ack, ACK_THROTTLE_SEC))
+            (ch.key, "\U0001F4E8 Got your message%", ACK_THROTTLE_SEC))
         if cur.fetchone():
             return   # already acked within the window
         cur.execute("INSERT INTO tg_out (channel_key, text) VALUES (%s,%s)", (ch.key, ack))
@@ -1152,7 +1237,11 @@ def drain_stale_deferred(conn, ch: "Channel") -> None:
         n, oldest, newest_id = cur.fetchone()
         if not oldest:
             return
-        cur.execute("SELECT now() - %s > make_interval(secs => %s)", (oldest, MAX_DEFER_SEC))
+        # Operator channels get a tighter cap (Musa op#36085/36098): "no silent
+        # run longer than a minute or two." Client channels keep MAX_DEFER_SEC
+        # unchanged.
+        defer_cap = OPERATOR_MAX_DEFER_SEC if ch.channel_tag in OPERATOR_CHANNEL_TAGS else MAX_DEFER_SEC
+        cur.execute("SELECT now() - %s > make_interval(secs => %s)", (oldest, defer_cap))
         if not cur.fetchone()[0]:
             return
     if newest_id <= getattr(ch, "_last_forced_nudge_id", 0):
@@ -1165,15 +1254,18 @@ def drain_stale_deferred(conn, ch: "Channel") -> None:
     if not _session_exists(target):
         if (ch.key, target) not in _ABSENT_TARGET_LOGGED:
             _ABSENT_TARGET_LOGGED.add((ch.key, target))
-            _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s but nudge target "
+            _log_line(f"{ch.key}: {n} unhandled past {defer_cap}s but nudge target "
                       f"'{target}' is not a session on this host — NOT nudged (needs an "
                       f"owner_lane/inject_target, or unpin the channel here)")
         return
     ch._last_forced_nudge_id = newest_id
-    if nudge_session(target, ch.key, n):
-        _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s — FORCED nudge (max-latency cap)")
+    # Past the (possibly tightened) defer cap is itself the "stop waiting"
+    # signal this exists for — treat it as urgent so an Escape-eligible
+    # target (ESCAPE_PREEMPT_TARGETS) actually preempts, not just queues.
+    if nudge_session(target, ch.key, n, urgent=True):
+        _log_line(f"{ch.key}: {n} unhandled past {defer_cap}s — FORCED nudge (max-latency cap)")
     else:
-        _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s — FORCED nudge to "
+        _log_line(f"{ch.key}: {n} unhandled past {defer_cap}s — FORCED nudge to "
                   f"'{target}' NOT delivered (fire-window hold or tmux error)")
 
 
@@ -1207,6 +1299,13 @@ def reassure_if_unhandled(conn, ch: "Channel") -> None:
         if ch.mode == "log-and-route"
         else "\U0001F4E8 Got your message — it's logged and I'll pick it up. "
              "(Reply URGENT to bump it now.)")
+    # Operator channels only (Musa op#36085/36098): tighter stale-threshold +
+    # a live-status fragment. Client wording/timing above is untouched.
+    ack_after = ACK_AFTER_SEC
+    if ch.channel_tag in OPERATOR_CHANNEL_TAGS:
+        ack_after = OPERATOR_ACK_AFTER_SEC
+        target = ch.inject_target if ch.mode == "agent-session" else "orch"
+        ack += _live_status_suffix(conn, target)
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*), min(created_at), max(created_at), "
@@ -1216,7 +1315,7 @@ def reassure_if_unhandled(conn, ch: "Channel") -> None:
         n, oldest, newest, chat_id = cur.fetchone()
         if not oldest:
             return
-        cur.execute("SELECT now() - %s > make_interval(secs => %s)", (oldest, ACK_AFTER_SEC))
+        cur.execute("SELECT now() - %s > make_interval(secs => %s)", (oldest, ack_after))
         if not cur.fetchone()[0]:
             return   # not stale enough yet — a fast reply needs no ack
 
@@ -1247,7 +1346,7 @@ def reassure_if_unhandled(conn, ch: "Channel") -> None:
             return   # this batch already acked once (busy-ack OR reassurance)
         cur.execute("INSERT INTO tg_out (channel_key, text) VALUES (%s,%s)", (ch.key, ack))
         conn.commit()
-    _log_line(f"{ch.key}: {n} unhandled past {ACK_AFTER_SEC}s — reassurance ack (belt+suspenders)")
+    _log_line(f"{ch.key}: {n} unhandled past {ack_after}s — reassurance ack (belt+suspenders)")
 
 
 # ── Per-update processing (sync, called from the channel task) ────────────────
@@ -1616,7 +1715,7 @@ def process_update(conn, ch: Channel, upd: dict,
         if urg == "btw":
             _log_line(f"{ch.key}: BTW — logged, not nudged (drains at next idle)")
         elif urg == "urgent" or ch.nudge_when_busy or not pane_working(target):
-            nudge_session(target, ch.key, unread_count(conn, ch))
+            nudge_session(target, ch.key, unread_count(conn, ch), urgent=(urg == "urgent"))
         elif _is_group_chat(msg) and not _bot_is_addressed(ch, msg):
             # group banter not addressed to the bot (bus #47483): still logged
             # + routed above, just no '📨 Got your message' ack into the group.
