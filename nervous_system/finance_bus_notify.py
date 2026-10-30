@@ -57,9 +57,21 @@ def _unread_count(conn) -> int:
         return cur.fetchone()[0]
 
 
-def _nudge(unread: int) -> None:
+def _nudge(unread: int) -> bool:
     """Delegate to the sanctioned verified-submit lane nudge. Ghost-aware; a
-    missing/busy session it handles itself. Count-only reconcile line — no content."""
+    missing/busy session it handles itself. Count-only reconcile line — no content.
+
+    op#35929 (Musa zero-waste directive, bus #83575/#83579): returns False and
+    skips the delegate call entirely when `unread` is 0 -- a wake must carry an
+    unread item or it does not fire, fleet-wide, not just nazim_bus_notify (#649).
+    `unread` is ALREADY a live recount taken immediately before this call (see
+    main()), so this is the send-time check, not a stale snapshot; the gap this
+    closes is real rows that were read/auto-acked between `mx = _max_id(conn)`
+    detecting new arrivals and this call -- without this guard the delegate still
+    fired with a literal "0 new bus msg(s)" nudge."""
+    if unread == 0:
+        _log("recount at send-time: 0 still unread (already handled) — skip")
+        return False
     line = (f"\U0001F4E5 {unread} new bus msg(s) — reconcile your inbox "
             f"(agent_messages to_agent='{TARGET}') now.")
     try:
@@ -69,6 +81,8 @@ def _nudge(unread: int) -> None:
         _log(f"lane_nudge.sh({SESSION}) rc={r.returncode} :: {tail}")
     except Exception as e:
         _log(f"lane_nudge.sh error ({type(e).__name__}): {e}")
+        return False
+    return True
 
 
 def main() -> int:
