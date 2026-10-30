@@ -17,10 +17,17 @@ Neither failure announces itself, which is exactly why this is a checker and not
 (feedback_enforce_process_in_code_not_promises). A memory system that silently forgets is
 worse than one that is obviously empty, because it is trusted.
 
---fix APPENDS missing index lines, generated from each file's own frontmatter `description`.
-That is deliberately the only mutation offered: appending strictly INCREASES what is
-visible and is trivially reversible. Pruning, rewording and re-grouping stay manual —
-an auto-editor loose in another agent's memory is a worse problem than a missing line.
+--fix APPENDS missing index lines, generated from each file's own frontmatter `description`,
+to MEMORY-INDEX.md (the tail), NEVER to MEMORY.md (the hot index) — console ruling 2026-10-31
+(bus #85239, after cc-quality's #85235: --fix used to re-append orphan lines straight into
+MEMORY.md, re-bloating an index an owner had just manually compacted by folding those same
+files into clustered lines elsewhere). MEMORY-INDEX.md is created on first use if it doesn't
+exist yet, and MEMORY.md gets a one-line pointer to it if it doesn't already have one — so a
+dir that has never split before gets the two-tier pattern for free the first time --fix runs
+on it, and the tail is never left unreachable. That is deliberately the only mutation offered:
+appending strictly INCREASES what is visible and is trivially reversible. Pruning, rewording
+and re-grouping stay manual — an auto-editor loose in another agent's memory is a worse
+problem than a missing line.
 
 Usage:
   python scripts/memory_index_audit.py             # audit all agents, exit 1 on any problem
@@ -234,9 +241,14 @@ def missing_index_is_lossy(result: dict) -> bool:
 
 
 def fix(result: dict) -> int:
-    """Append an index line for each orphan. Returns how many were added."""
+    """Append an index line for each orphan to MEMORY-INDEX.md (the tail), never MEMORY.md
+    (the hot index) -- console ruling bus #85239. Creates MEMORY-INDEX.md if this dir has
+    never split before, and adds a one-line pointer to it from MEMORY.md if one isn't already
+    there, so the tail --fix just created (or added to) is never left unreachable. Returns how
+    many orphan lines were added."""
     mem_dir = result["dir"]
     index_path = mem_dir / INDEX
+    tail_path = mem_dir / TAIL_INDEX
     if not result["orphans"]:
         return 0
     lines = []
@@ -245,10 +257,21 @@ def fix(result: dict) -> int:
         title = name[:-3].replace("_", " ")
         hook = f" - {desc}" if desc else ""
         lines.append(f"- [{title}]({name}){hook}\n")
-    with index_path.open("a", encoding="utf-8") as fh:
-        if not index_path.read_text(encoding="utf-8", errors="replace").endswith("\n"):
+    with tail_path.open("a", encoding="utf-8") as fh:
+        if tail_path.exists() and tail_path.stat().st_size and not tail_path.read_text(
+                encoding="utf-8", errors="replace").endswith("\n"):
             fh.write("\n")
         fh.writelines(lines)
+    index_text = index_path.read_text(encoding="utf-8", errors="replace")
+    if TAIL_INDEX not in index_text:
+        pointer = (
+            f"\n> Full memory index: see [{TAIL_INDEX}]({TAIL_INDEX}) "
+            f"(grep it for anything not listed above).\n"
+        )
+        with index_path.open("a", encoding="utf-8") as fh:
+            if not index_text.endswith("\n"):
+                fh.write("\n")
+            fh.write(pointer)
     return len(lines)
 
 
@@ -439,9 +462,10 @@ def _hard_body(posts: list, rmap: dict) -> tuple:
             lines.append(f"      orphan: {n}")
     lines += [
         "",
-        "FIX: `python scripts/memory_index_audit.py --fix` appends missing index lines from each "
-        "file's own frontmatter (append-only, reversible). An OVER-LIMIT index needs a manual "
-        "compaction pass — group related entries onto one line and trim hooks; never drop a link.",
+        "FIX: `python scripts/memory_index_audit.py --fix` appends missing index lines (from "
+        "each file's own frontmatter) to MEMORY-INDEX.md, the tail -- never to MEMORY.md, the "
+        "hot index (append-only, reversible). An OVER-LIMIT MEMORY.md needs a manual compaction "
+        "pass — group related entries onto one line and trim hooks; never drop a link.",
     ]
     return (f"memory-index audit: {len(posts)} agent memory dir(s) losing entries silently",
             "\n".join(lines))
