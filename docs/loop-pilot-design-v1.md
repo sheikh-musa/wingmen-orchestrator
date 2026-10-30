@@ -232,10 +232,50 @@ reading what it was handed), not the adversarial one.
 
 ## 5. Cost tracking (orch-console guard #2, bus #81749)
 
-- Claude role sessions (condition B's spec-writer + reviewer) run under the
-  **Syed** token pool, not Musa's -- need to confirm `switch_lane_token`
-  (or equivalent) works for a one-shot `--scheduled-prompt` session, not just
-  an interactive lane boot.
+- **RESOLVED (2026-10-30, op#35690): condition-B Claude auth gap, found and
+  fixed in `run_pilot.py`, not `switch_lane_token`.** The original framing
+  here ("confirm `switch_lane_token` works for a one-shot session") was a
+  wrong mental model -- `switch_lane_token.sh` only re-tokens a *persistent
+  tmux lane* (kill + relaunch); it has no bearing on this harness's one-shot
+  `launch_dangerous_cc.sh --scheduled-prompt` subprocess launches at all.
+  The real root cause, confirmed by a probe whose own session transcript
+  showed `"Not logged in · Please run /login"` with every message
+  `type: "<synthetic>"` (no real model turn ever happened): `launch_role()`
+  invokes `launch_dangerous_cc.sh` from `ORCH_DIR` (this harness's own
+  worktree, which carries no `.env`), so that script's `. "$ORCH_DIR/.env"`
+  silently no-ops and its token-resolver call also resolves against the
+  wrong `orch_dir` -- the launched Claude-model role subprocess ends up with
+  neither `CLAUDE_CODE_OAUTH_TOKEN` nor `ANTHROPIC_API_KEY` at all. Fixed by
+  having `run_pilot.py` resolve and inject `CLAUDE_CODE_OAUTH_TOKEN` itself,
+  explicitly against the **live** checkout (`LIVE_ORCH_DIR`, not `ORCH_DIR`):
+  `resolve_claude_oauth_token()` calls
+  `lane_token_resolver.resolve_lane_token_path(tmux_session, orch_dir=str(LIVE_ORCH_DIR))`
+  using the real tmux session name (`tmux display-message -p '#S'`, exactly
+  how `launch_dangerous_cc.sh` itself derives `_LANE_SESSION`) -- not the
+  agent_id, which would silently miss this lane's explicit per-session pin
+  `.lane_session_token.loop` (keyed on the tmux session name "loop", not
+  "cc-loop") and wrongly fall through to Musa's personal account instead of
+  the fleet's deliberate Syed token-pool-conservation pin for this lane.
+  Verified end-to-end (not just in isolation): a real condition-B probe
+  (task-02, `--max-turns-spec 8`) produced a genuine, fully-authenticated
+  Claude Opus session (real model turns, `modelUsage.claude-opus-4-8.costUSD
+  = 0.87367`, real file writes) -- it only exited nonzero because 8 turns
+  was too tight a diagnostic budget for the real task, not an auth failure.
+- **`claude_cost` is now measured, not a placeholder.** `launch_role()` calls
+  `extract_claude_session_cost(worktree, start_wall)` for every
+  `model.startswith("claude-")` role launch: it finds that exact role's own
+  Claude Code transcript under `~/.claude/projects/*/*.jsonl` by matching the
+  transcript's own `"cwd":"<worktree>"` field (never a hand-rolled guess at
+  Claude Code's undocumented project-dir escaping scheme) among files
+  modified since that launch's start time, and reads the last `cost-state`
+  line's `totalCostUSD`. `run_task()` records each role's cost into
+  `result.claude_cost_usd_by_role` (captured right after `launch_role`
+  returns, before the error check -- tokens are spent even on a
+  max-turns-truncated role, as the task-02 probe above demonstrated) and
+  sums them into `result.claude_cost` in the `finally` block; a role whose
+  transcript isn't found is reported as
+  `"could not measure: no matching transcript found for role(s) [...]"`
+  (with any partial known cost noted), never silently treated as free.
 - DeepSeek cost: `GET /user/balance` immediately before and after each task
   run, delta = that task's spend. Key fetched via `provider_vault_fetch.py`
   (confirmed working end-to-end for `cc-loop-1`, 2026-10-29), never printed.
@@ -409,11 +449,20 @@ not a signal anything is wrong.
    **6 of 6 minimum pilot tasks now drafted and individually
    oracle-verified** (each against a correct reference implementation
    AND every one of its own seeded-bug variants, in a scratch worktree,
-   before being trusted) -- none run live yet except task-01. Next: get
-   PR#666 merged (orch-console + cc-quality both waiting on green CI,
-   "no live runs until it lands" per #83851), then run the full A-vs-B
+   before being trusted) -- none run live yet except task-01.
+   **PR#666 merged** (2026-10-30T09:25:45Z, confirmed CI green on the
+   merge commit). **Condition-A unblock in flight**: `deepseek_key_for_family.py`
+   fail-closed-refused `family='loop'` (no vault-key mapping) -- escalated
+   to orch-console/cc-fleet-health rather than self-editing the vault/map;
+   cc-fleet-health's PR#669 (adds an explicit `loop` row -> the shared
+   `DEEPSEEK_CODING_KEY`) is built and pushed, awaiting cc-quality then
+   orch-console merge. **Condition-B unblock DONE** (this section, 2026-10-30):
+   the Claude-auth gap is fixed and verified end-to-end in `run_pilot.py`.
+   Next: resume condition A once PR#669 merges, then run the full A-vs-B
    measured pilot across all 6 tasks.
 2. Whether hifz already has a local-runner GH-status mechanism to reuse
    instead of `local_ci_runner.sh` -- asked cc-hifz-1, no answer yet.
-3. `switch_lane_token`-for-one-shot-session and the builder-worktree isolation
-   probe (section 4) are unverified -- both on Friday's build list.
+3. ~~`switch_lane_token`-for-one-shot-session and the builder-worktree isolation~~
+   The builder-worktree isolation probe (section 4) is still open; the
+   condition-B auth gap (originally miscategorized as a `switch_lane_token`
+   question) is resolved -- see section 5.
