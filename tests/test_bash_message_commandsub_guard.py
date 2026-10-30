@@ -180,6 +180,46 @@ def test_heredoc_body_containing_its_own_backticks_stays_safe(monkeypatch):
     assert _run(cmd, monkeypatch) == 0
 
 
+# --- cc-quality bus #83877/#83878 (2026-10-30): confirmed delimiter-injection
+# bypass of the allow above, grounded against real bash (the embedded
+# substitution EXECUTED). A body line equal to the delimiter ends the
+# heredoc at that FIRST occurrence in real bash, but the old non-greedy
+# `.*?` + backref regex could match a LATER occurrence instead, treating a
+# live trailing substitution between the two as inert body text. Fixed by
+# parsing the heredoc the way bash does (line by line, first-match-wins)
+# instead of a single backtracking regex.
+
+def test_refuses_cc_quality_83877_delimiter_injection_bypass(monkeypatch):
+    # $(cat <<'EOF'\nEOF\n)$(id)\nEOF\n) -- bash ends the heredoc at the
+    # FIRST "EOF" (empty body), so the trailing )$(id) is a LIVE, separate
+    # substitution, not heredoc body. Must refuse.
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\nEOF\n)" + "$(id)" + "\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_refuses_delimiter_line_with_trailing_space(monkeypatch):
+    # A line "EOF " (trailing space) is NOT an exact match for the delimiter
+    # in real bash -- it does not terminate the heredoc. No valid terminator
+    # line exists in this construction, so it must refuse.
+    cmd = "git commit " + "-m \"$(cat <<'EOF'\ndocs: fix\nEOF \n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
+def test_allows_dash_heredoc_with_tab_indented_terminator(monkeypatch):
+    # <<- strips only LEADING TABS from the terminator line before comparing
+    # -- a tab-indented "\tEOF" is a valid terminator for the dash form.
+    cmd = "git commit " + "-m \"$(cat <<-'EOF'\ndocs: fix\n\tEOF\n)\""
+    assert _run(cmd, monkeypatch) == 0
+
+
+def test_refuses_dash_heredoc_delimiter_injection_bypass(monkeypatch):
+    # Same bypass shape as 83877, but via the tab-stripping dash form: a
+    # tab-indented "\tEOF" line still terminates the heredoc at its FIRST
+    # occurrence, so trailing )$(id) + a second EOF + ) must still refuse.
+    cmd = "git commit " + "-m \"$(cat <<-'EOF'\n\tEOF\n)" + "$(id)" + "\nEOF\n)\""
+    assert _run(cmd, monkeypatch) == 2
+
+
 # --- cc-quality PR#657 review, Finding B: no outer catch-all = fail-open risk ---
 
 def test_unexpected_exception_in_main_fails_closed(monkeypatch):
