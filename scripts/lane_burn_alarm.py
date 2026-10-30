@@ -35,9 +35,17 @@ extrapolated number. If more than MEASURE_FAILURE_PAGE_FRACTION of expected
 lanes are unmeasurable in one run, that is itself paged once (dedup'd) as a
 tooling-health signal, separate from any burn breach.
 
-Dedup: a lane that stays over threshold across consecutive runs is paged at
-most once per REPAGE_MIN, tracked in a JSON state file (same shape as
-priority_sla_watchdog.py's STATE_FILE convention) -- never a page per tick.
+Dedup (orch-console #85152/#85266, second round of repeat pages on the same
+acknowledged-busy lanes): a lane that stays over threshold is suppressed for
+BREACH_SUPPRESS_MIN (default 4h) -- UNLESS its rate has
+risen BREACH_RATE_RISE_FRAC (default 50%) or more since the last page, or its
+context fill (from context_health_watchdog's own gauge) has crossed
+BREACH_CONTEXT_FILL_ESCAPE_PCT (default 90%) -- either escape re-pages
+immediately, because those are genuinely new information, not a repeat of
+what was already acknowledged. Tracked in the same JSON state file
+(priority_sla_watchdog.py's STATE_FILE convention), now storing {ts, tph} per
+breach key instead of a bare timestamp so the rate-rise check has something
+to compare against.
 """
 from __future__ import annotations
 
@@ -58,11 +66,16 @@ REMOTE_HOSTS = {"gzbai", "gzb"}  # agent_status.host spellings seen for the gzb 
 
 WINDOW_MIN_DEFAULT = int(os.environ.get("LANE_BURN_ALARM_WINDOW_MIN", "60"))
 THRESHOLD_TPH_DEFAULT = int(os.environ.get("LANE_BURN_ALARM_THRESHOLD_TPH", "40000000"))
-REPAGE_MIN = int(os.environ.get("LANE_BURN_ALARM_REPAGE_MIN", "60"))
 # If this fraction (or more) of expected lanes come back unmeasurable, page once
 # (dedup'd separately) -- that is a tooling-health problem, not a burn problem.
 MEASURE_FAILURE_PAGE_FRACTION = float(os.environ.get("LANE_BURN_ALARM_FAILURE_FRACTION", "0.5"))
 MEASURE_FAILURE_REPAGE_MIN = int(os.environ.get("LANE_BURN_ALARM_FAILURE_REPAGE_MIN", "180"))
+
+# Per-lane breach repage dedup (orch-console #85152/#85266, second round of repeat pages on
+# the same already-acknowledged-busy lanes): suppress for this long UNLESS an escape fires.
+BREACH_SUPPRESS_MIN = int(os.environ.get("LANE_BURN_ALARM_BREACH_SUPPRESS_MIN", "240"))
+BREACH_RATE_RISE_FRAC = float(os.environ.get("LANE_BURN_ALARM_BREACH_RATE_RISE_FRAC", "0.5"))
+BREACH_CONTEXT_FILL_ESCAPE_PCT = int(os.environ.get("LANE_BURN_ALARM_BREACH_CONTEXT_FILL_ESCAPE_PCT", "90"))
 
 
 def log(line: str) -> None:
@@ -94,10 +107,14 @@ def pick_latest_jsonl(filenames: list[str], mtimes: dict[str, float]) -> str | N
 
 def sum_usage_lines(lines: list[str], cutoff: datetime) -> dict | None:
     """Sum usage tokens for JSONL lines timestamped >= cutoff. Returns
-    {'total': int, 'nmsg': int} or None if nothing parseable at all (empty
-    transcript -- distinct from "below threshold", still a real 0 reading)."""
+    {'total': int, 'nmsg': int, 'cache_read': int} or None if nothing parseable
+    at all (empty transcript -- distinct from "below threshold", still a real 0
+    reading). cache_read is tracked separately (it is already inside total) so
+    callers can report what SHARE of the burn is cheap cache reads vs real
+    input/output/cache-write work (console #85266: add it to the alert text)."""
     total = 0
     nmsg = 0
+    cache_read = 0
     saw_any_line = False
     for line in lines:
         line = line.strip()
@@ -121,16 +138,18 @@ def sum_usage_lines(lines: list[str], cutoff: datetime) -> dict | None:
         usage = msg.get("usage") if isinstance(msg, dict) else None
         if not usage:
             continue
+        cache_r = usage.get("cache_read_input_tokens") or 0
         total += (
             (usage.get("input_tokens") or 0)
             + (usage.get("output_tokens") or 0)
             + (usage.get("cache_creation_input_tokens") or 0)
-            + (usage.get("cache_read_input_tokens") or 0)
+            + cache_r
         )
+        cache_read += cache_r
         nmsg += 1
     if not saw_any_line and not lines:
-        return {"total": 0, "nmsg": 0}
-    return {"total": total, "nmsg": nmsg}
+        return {"total": 0, "nmsg": 0, "cache_read": 0}
+    return {"total": total, "nmsg": nmsg, "cache_read": cache_read}
 
 
 def tokens_per_hour(total_tokens: int, window_min: int) -> float:
@@ -253,7 +272,12 @@ def measure_lane(lane: dict, window_min: int, now: datetime) -> dict:
             lines = _read_transcript_lines_local(cwd)
         summed = sum_usage_lines(lines, cutoff)
         tph = tokens_per_hour(summed["total"], window_min)
-        return {"status": "ok", "tph": tph, "total": summed["total"], "nmsg": summed["nmsg"], "agent_id": agent_id}
+        cache_read_share = (summed["cache_read"] / summed["total"]) if summed["total"] else 0.0
+        return {
+            "status": "ok", "tph": tph, "total": summed["total"], "nmsg": summed["nmsg"],
+            "cache_read": summed["cache_read"], "cache_read_share": cache_read_share,
+            "agent_id": agent_id,
+        }
     except Exception as exc:  # noqa: BLE001 -- fail visible per-lane, never crash the run
         return {"status": "error", "reason": f"{type(exc).__name__}: {exc}", "agent_id": agent_id}
 
@@ -283,6 +307,83 @@ def _should_page(state: dict, key: str, now: datetime, repage_min: int) -> bool:
     except ValueError:
         return True
     return (now - last_dt) >= timedelta(minutes=repage_min)
+
+
+def should_repage_breach(
+    prior,
+    now: datetime,
+    current_tph: float,
+    current_pct: "int | None",
+    *,
+    suppress_min: int,
+    rate_rise_frac: float,
+    pct_escape: int,
+) -> bool:
+    """True if a lane already paged for breach should page again now
+    (console #85152/#85266: stop re-paging an already-acknowledged lane every
+    tick, but never suppress genuinely new information).
+
+    `prior` is this lane's breach-state entry from the last page: {'ts':
+    iso8601, 'tph': float}, or anything else (missing key, a bare string from
+    before this field existed, a corrupt value) -- treated as "no prior data",
+    which pages. Fail toward alerting, never silently suppress forever, same
+    posture as the rest of this file's dedup.
+
+    Two escapes always re-page regardless of suppress_min, because they are
+    new information, not a repeat of what was already seen+acknowledged:
+      - current_pct (context fill %, from context_health_watchdog's gauge)
+        has crossed pct_escape. None (gauge unavailable) never escapes --
+        absence of data is not evidence of a crossed threshold.
+      - current_tph has risen by rate_rise_frac or more since the tph that
+        was actually paged last time.
+    Otherwise: page again only once suppress_min has elapsed since the last
+    page, same shape as the plain time-based dedup elsewhere in this file."""
+    if not isinstance(prior, dict) or "ts" not in prior:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(prior["ts"])
+    except (ValueError, TypeError):
+        return True
+    if current_pct is not None and current_pct >= pct_escape:
+        return True
+    last_tph = prior.get("tph")
+    if isinstance(last_tph, (int, float)) and last_tph > 0 and current_tph >= last_tph * (1 + rate_rise_frac):
+        return True
+    return (now - last_dt) >= timedelta(minutes=suppress_min)
+
+
+def breach_alert_body(b: dict, window_min: int, threshold_tph: float, context_pct: "int | None") -> str:
+    """Pure alert-text builder (console #85266: add context fill % and
+    cache-read share so the page itself carries enough to triage without a
+    follow-up query). context_pct is None when the gauge was unavailable or
+    had no reading for this agent -- reported as 'unknown', never guessed."""
+    fill_line = f"{context_pct}%" if context_pct is not None else "unknown (gauge had no reading)"
+    cache_read_share = b.get("cache_read_share")
+    share_line = f"{cache_read_share * 100:.0f}%" if cache_read_share is not None else "unknown"
+    return (
+        f"TL;DR: {b['agent_id']} is burning tokens well above the normal-work ceiling -- check for a "
+        f"false-wake loop or an oversized re-read context.\n\n"
+        f"Measured {b['total']:,} tokens over the last {window_min}min window "
+        f"({b['nmsg']} messages with usage) -> {b['tph']:,.0f} tokens/hour.\n"
+        f"Context fill: {fill_line}. Cache-read share of this window's tokens: {share_line} "
+        f"(high = mostly re-reading existing context, not new work).\n"
+        f"Threshold is {threshold_tph:,.0f}/hr (set from this session's own readings: idle=0, "
+        f"normal work=0.5-3.65M/60min, the PR#649 false-wake episode=81-93M/60min)."
+    )
+
+
+def _context_fill_map() -> dict:
+    """{agent_id: pct} from context_health_watchdog's own gauge -- reused rather than
+    re-querying cc_session_costs independently, so this file's 'context fill' figure can
+    never drift from the one the context watchdog itself classifies on. Failure here
+    (import, DB, gauge unreachable) must never crash the burn alarm -- it is an enrichment,
+    not this file's primary job -- so any error just means every agent reports 'unknown'."""
+    try:
+        from scripts import context_health_watchdog as chw
+        return {a.agent: a.pct for a in chw.read_context_gauge()}
+    except Exception as exc:  # noqa: BLE001 -- enrichment only, never fatal to this run
+        log(f"context fill map unavailable: {type(exc).__name__}: {exc}")
+        return {}
 
 
 def send_bus_alert(subject: str, body: str, priority: str, dry_run: bool) -> bool:
@@ -338,24 +439,23 @@ def main(argv: list[str] | None = None) -> int:
     state = _load_state()
     breaches = [r for r in results if r["status"] == "ok" and r["tph"] >= args.threshold_tph]
     errors = [r for r in results if r["status"] == "error"]
+    context_pct_by_agent = _context_fill_map() if breaches else {}
 
     for b in breaches:
         agent_id = b["agent_id"]
         key = f"breach:{agent_id}"
-        if not _should_page(state, key, now, REPAGE_MIN):
-            log(f"breach {agent_id} tph={b['tph']:.0f} suppressed (repage backoff)")
+        context_pct = context_pct_by_agent.get(agent_id)
+        if not should_repage_breach(
+            state.get(key), now, b["tph"], context_pct,
+            suppress_min=BREACH_SUPPRESS_MIN, rate_rise_frac=BREACH_RATE_RISE_FRAC,
+            pct_escape=BREACH_CONTEXT_FILL_ESCAPE_PCT,
+        ):
+            log(f"breach {agent_id} tph={b['tph']:.0f} suppressed (already acknowledged, no escape)")
             continue
         subject = f"⚠️ lane burn: {agent_id} at {b['tph']:,.0f} tok/hr (threshold {args.threshold_tph:,.0f})"
-        body = (
-            f"TL;DR: {agent_id} is burning tokens well above the normal-work ceiling -- check for a "
-            f"false-wake loop or an oversized re-read context.\n\n"
-            f"Measured {b['total']:,} tokens over the last {args.window_min}min window "
-            f"({b['nmsg']} messages with usage) -> {b['tph']:,.0f} tokens/hour.\n"
-            f"Threshold is {args.threshold_tph:,.0f}/hr (set from this session's own readings: idle=0, "
-            f"normal work=0.5-3.65M/60min, the PR#649 false-wake episode=81-93M/60min)."
-        )
+        body = breach_alert_body(b, args.window_min, args.threshold_tph, context_pct)
         if send_bus_alert(subject, body, "P1", args.dry_run):
-            state[key] = now.isoformat()
+            state[key] = {"ts": now.isoformat(), "tph": b["tph"]}
 
     if lanes:
         failure_fraction = len(errors) / len(lanes)
