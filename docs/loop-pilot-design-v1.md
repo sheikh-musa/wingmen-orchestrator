@@ -384,8 +384,19 @@ not a signal anything is wrong.
    and catches all 6 seeded-bug variants (ignores-timezone-uses-utc,
    ignores-timezone-uses-system-local, hardcoded-fixed-offset-ignoring-dst,
    sign-flipped-offset-math, wrong-output-format,
-   isSameLocalDay-ignores-timezone-param); not yet run live. 2 more tasks
-   still needed to hit the 6-task floor.
+   isSameLocalDay-ignores-timezone-param); not yet run live.
+   **task-05-ayah-status-classifier** drafted 2026-10-30 (H-8's "an ayah
+   can be fluent in hifz and weak in tajweed simultaneously -- collapsing
+   them corrupts both signals") -- oracle verified clean against a
+   correct reference and catches all 6 seeded-bug variants
+   (tajweed-grade-affects-hifz-fluent, hifz-state-affects-tajweed-weak,
+   wrong-retrievability-boundary, ignores-leech-flag,
+   wrong-grade-boundary, wrong-combined-label-mapping); the
+   hifz-state-affects-tajweed-weak variant wasn't caught on the first
+   pass (my no-cross-contamination test only varied retrievability, never
+   isLeech, so a bug that leaked isLeech into tajweedWeak sailed through)
+   -- fixed by adding an isLeech-specific no-cross-contamination test; not
+   yet run live. 1 more task still needed to hit the 6-task floor.
 2. Whether hifz already has a local-runner GH-status mechanism to reuse
    instead of `local_ci_runner.sh` -- asked cc-hifz-1, no answer yet.
 3. `switch_lane_token`-for-one-shot-session and the builder-worktree isolation
