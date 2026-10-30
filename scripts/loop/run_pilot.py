@@ -39,6 +39,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ORCH_DIR = Path(__file__).resolve().parent.parent.parent
+# The LIVE checkout, distinct from ORCH_DIR (this harness's own worktree) --
+# needed ONLY to resolve the real Claude OAuth token (op#35690, 2026-10-30
+# condition-B auth gap, see CLAUDE_CODE_OAUTH_TOKEN handling in launch_role()
+# below). launch_dangerous_cc.sh self-locates its ORCH_DIR from its own
+# invoked path (worktree-relative, `dirname "${BASH_SOURCE[0]}"/..`), so when
+# this harness invokes it from ORCH_DIR, its `. "$ORCH_DIR/.env"` silently
+# no-ops (worktrees don't carry `.env`) and its lane_token_resolver call
+# resolves against the WRONG orch_dir too -- neither failure is loud (both
+# are deliberately fail-open elsewhere in the fleet), so a Claude-model role
+# session launches with no CLAUDE_CODE_OAUTH_TOKEN and no ANTHROPIC_API_KEY
+# at all. Confirmed via a real probe run: the session's own JSONL transcript
+# showed an "assistant" turn whose text was literally "Not logged in ·
+# Please run /login", with every message type "<synthetic>" (no real model
+# turn ever happened) -- not a theory, an observed failure.
+LIVE_ORCH_DIR = Path.home() / "wingmen" / "orchestrator"
 HIFZ_WORKTREE_ROOT = Path.home() / "wingmen" / "projects"
 RESULTS_DIR = Path.home() / "wingmen" / "loop-pilot-state"
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
@@ -86,6 +101,7 @@ class RoleResult:
     duration_s: float
     stdout: str
     stderr: str
+    claude_cost_usd: float | None = None  # only set for model.startswith("claude-")
 
 
 @dataclass
@@ -109,7 +125,8 @@ class TaskRunResult:
     outcome: str | None = None  # correct_catch | false_pass | correct_pass | false_alarm | None
     role_timings_s: dict = field(default_factory=dict)
     deepseek_cost_usd: float | str | None = None  # float, or "could not measure: <reason>"
-    claude_cost: str | None = None
+    claude_cost: float | str | None = None  # float, or "could not measure: <reason>"
+    claude_cost_usd_by_role: dict = field(default_factory=dict)  # role -> float | None, audit detail behind claude_cost
     error: str | None = None
     finished_at: str | None = None
 
@@ -169,6 +186,97 @@ def write_task_files(worktree: Path, task_id: str, brief_text: str) -> None:
 
 # ── role launch ──────────────────────────────────────────────────────────
 
+def resolve_claude_oauth_token() -> str:
+    """The real fix for the condition-B auth gap (see LIVE_ORCH_DIR's comment
+    above): resolve the SAME token file a normal `cc-loop` lane boot would
+    get -- the live checkout's lane-default pointer chain -- verify its
+    fingerprint against scripts/lib/token_fps.map (same discipline
+    launch_dangerous_cc.sh's own token_file_guard applies), and return its
+    contents. Never logs the token itself. Raises PilotError (fail-closed --
+    no silent "launch unauthenticated and hope") if no usable token is
+    resolved or it fails the fingerprint check."""
+    sys.path.insert(0, str(ORCH_DIR))
+    from scripts.lib.lane_token_resolver import resolve_lane_token_path  # noqa: E402
+    from scripts.lib.token_file_guard import check as token_file_check  # noqa: E402
+
+    # Pass the real TMUX SESSION NAME, not the agent_id -- identical to how
+    # launch_dangerous_cc.sh derives `_LANE_SESSION`. These differ in
+    # practice: cc-loop's own lane has an explicit per-SESSION pin
+    # (.lane_session_token.loop -> Syed, token-pool conservation) keyed on
+    # the tmux session "loop", NOT on "cc-loop" -- passing the agent_id
+    # instead would silently miss that pin and fall through to the fleet
+    # default (Musa's personal account), exactly the quota-stealing mistake
+    # this per-lane pin exists to prevent. Caught empirically: the two
+    # session strings resolved to DIFFERENT accounts (syed vs musa) when
+    # tested directly.
+    tmux_session = run(["tmux", "display-message", "-p", "#S"], check=False).stdout.strip()
+    path = resolve_lane_token_path(tmux_session, orch_dir=str(LIVE_ORCH_DIR))
+    if not path:
+        raise PilotError(
+            "resolve_claude_oauth_token: lane_token_resolver returned no pointer "
+            f"for tmux session {tmux_session!r} against live orch_dir {LIVE_ORCH_DIR} -- a "
+            "condition-B Claude role session would launch with no "
+            "CLAUDE_CODE_OAUTH_TOKEN at all (confirmed failure mode: the "
+            "session's own transcript shows 'Not logged in', every message "
+            "type '<synthetic>', no real model turn). Refusing to launch.")
+    ok, reason = token_file_check(path)
+    if not ok:
+        raise PilotError(f"resolve_claude_oauth_token: {reason}")
+    token = Path(path).read_text(encoding="utf-8").strip()
+    if not token:
+        raise PilotError(f"resolve_claude_oauth_token: {path} resolved but is empty.")
+    return token
+
+
+def extract_claude_session_cost(worktree: Path, since_epoch: float) -> float | None:
+    """Best-effort: find the Claude Code session transcript this exact role
+    launch produced and return its final self-reported totalCostUSD.
+
+    Matched on the transcript's own `"cwd":"<worktree>"` field, not a
+    hand-rolled guess at Claude Code's `~/.claude/projects/<mangled>` dir-name
+    escaping scheme (undocumented, and a wrong guess here would silently
+    misattribute cost to the wrong session rather than fail loudly) -- same
+    discipline as the `actual_sha` vs self-reported-marker check above:
+    trust ground truth, not a derived guess. Scoped to files modified no
+    earlier than `since_epoch` (this role launch's own start time) since a
+    worktree path is unique per launch (each gets a fresh timestamp suffix)
+    but transcripts from unrelated sessions could in principle share a stale
+    jsonl mtime scan window otherwise. Returns None (never 0.0) if no
+    matching transcript is found -- the caller must treat that as
+    unmeasured, not free."""
+    projects_root = Path.home() / ".claude" / "projects"
+    if not projects_root.is_dir():
+        return None
+    needle = f'"cwd":"{worktree}"'.encode("utf-8")
+    candidates: list[Path] = []
+    for d in projects_root.iterdir():
+        if not d.is_dir():
+            continue
+        for jf in d.glob("*.jsonl"):
+            try:
+                if jf.stat().st_mtime < since_epoch - 5:
+                    continue
+                data = jf.read_bytes()
+            except OSError:
+                continue
+            if needle in data:
+                candidates.append(jf)
+    if not candidates:
+        return None
+    jf = max(candidates, key=lambda p: p.stat().st_mtime)
+    cost = None
+    for line in jf.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if '"type":"cost-state"' not in line:
+            continue
+        try:
+            doc = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if "totalCostUSD" in doc:
+            cost = doc["totalCostUSD"]
+    return cost
+
+
 def launch_role(role: str, worktree: Path, model: str, max_turns: int,
                  dry_run: bool) -> RoleResult:
     prompt_rel = f"scripts/loop/prompts/{role}.md"
@@ -179,6 +287,14 @@ def launch_role(role: str, worktree: Path, model: str, max_turns: int,
     env = dict(os.environ)
     env["MODEL"] = model
     env["CC_BASE_OVERRIDE"] = "cc-loop"
+    if model.startswith("claude-"):
+        # Max-subscription billing, matching launch_dangerous_cc.sh's own
+        # intent (CLAUDE.md: "unset ANTHROPIC_API_KEY ... so every lane runs
+        # on the Mac Mini's Claude Max subscription, not metered API
+        # billing") -- belt-and-suspenders since that script's own scrub
+        # relies on `.env` sourcing which no-ops from this harness's worktree.
+        env.pop("ANTHROPIC_API_KEY", None)
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = resolve_claude_oauth_token()
 
     if dry_run:
         print(f"[dry-run] would launch {role} in {worktree} with MODEL={model} "
@@ -187,15 +303,18 @@ def launch_role(role: str, worktree: Path, model: str, max_turns: int,
                            stdout="", stderr="")
 
     t0 = time.monotonic()
+    start_wall = time.time()
     r = subprocess.run(cmd, cwd=str(worktree), env=env, capture_output=True, text=True)
     duration = time.monotonic() - t0
+    claude_cost_usd = (extract_claude_session_cost(worktree, start_wall)
+                        if model.startswith("claude-") else None)
     # Redact at the source: the role session's own process carries DATABASE_URL
     # (launch_dangerous_cc.sh's shared KEEP tier) -- its captured output must
     # never be stored unredacted, even transiently, since callers embed
     # rr.stdout/rr.stderr straight into error messages / the result object.
     return RoleResult(role=role, model=model, returncode=r.returncode,
                        duration_s=duration, stdout=redact_text(r.stdout),
-                       stderr=redact_text(r.stderr))
+                       stderr=redact_text(r.stderr), claude_cost_usd=claude_cost_usd)
 
 
 def extract_marker(text: str, prefix: str) -> str | None:
@@ -314,6 +433,8 @@ def do_spec_writer(task_id: str, worktree: Path, model: str, max_turns: int,
     t0 = time.monotonic()
     rr = launch_role("spec_writer", worktree, model, max_turns, dry_run)
     result.role_timings_s["spec_writer"] = time.monotonic() - t0
+    if model.startswith("claude-"):
+        result.claude_cost_usd_by_role["spec_writer"] = rr.claude_cost_usd
     if dry_run:
         return None
     if rr.returncode != 0:
@@ -397,6 +518,8 @@ def do_reviewer(task_id: str, hifz_checkout: str, review_worktree: Path, head_sh
     t0 = time.monotonic()
     rr = launch_role("reviewer", review_worktree, model, max_turns, dry_run)
     result.role_timings_s["reviewer"] = time.monotonic() - t0
+    if model.startswith("claude-"):
+        result.claude_cost_usd_by_role["reviewer"] = rr.claude_cost_usd
     if dry_run:
         return None, None
     if rr.returncode != 0:
@@ -537,9 +660,17 @@ def run_task(task_id: str, condition: str, brief_path: Path, owner: str, repo: s
         elif track_deepseek:
             result.deepseek_cost_usd = "could not measure: balance read failed before task start"
 
-        if "claude-opus" in models["spec_writer"] or "claude-opus" in models["reviewer"]:
-            result.claude_cost = ("could not measure: switch_lane_token-for-one-shot-session "
-                                   "verification pending (docs/loop-pilot-design-v1.md section 5)")
+        claude_roles = [r for r in ("spec_writer", "reviewer") if "claude-opus" in models[r]]
+        if claude_roles:
+            costs = result.claude_cost_usd_by_role
+            missing = [r for r in claude_roles if costs.get(r) is None]
+            known = [costs[r] for r in claude_roles if costs.get(r) is not None]
+            if missing:
+                partial = f" (partial, from {len(known)}/{len(claude_roles)} role(s): ${round(sum(known), 4)})" if known else ""
+                result.claude_cost = (
+                    f"could not measure: no matching transcript found for role(s) {missing}{partial}")
+            else:
+                result.claude_cost = round(sum(known), 4)
 
         result.finished_at = now_iso()
 
