@@ -86,8 +86,11 @@ The order **is** the safety property. This is not a preference.
    body. This is the point of no return.
 4. **propagate** — the tmux global `DATABASE_URL`, and the standing instruction for the
    hub to re-run `fetch-secrets` (pull) and then its restart groups.
-5. **restart** — every loader is kicked. This must be adjacent to the patch: the only
-   interval in which the fleet is broken is between 3 and 5, and it should be seconds.
+5. **restart** — every launchd loader is kicked. This must be adjacent to the patch: the
+   only interval in which the fleet is broken is between 3 and 5, and it should be
+   seconds. **This step does NOT cover the three tmux singletons** (console, cai,
+   fleet-health) — see the heartbeat box below; they need their own restart and only the
+   console can order it.
 6. **verify** — the new value must connect, and the old value must **fail**. Both halves
    matter; a rotation where the old password still works did not happen.
 7. **watch** — re-probe for the configured window.
@@ -102,6 +105,20 @@ first and the vault is the recovery path.
 time. A file that carries the not-yet-active value breaks nothing until the moment the
 old value stops working — which is the moment the patch lands, immediately followed by
 the restart. There is no window where a rewrite alone causes an outage.
+
+**The heartbeat trap (found by correcting my own earlier claim, bus 87897).** The 5-min
+heartbeat loops in `boot_nazim.sh`, `boot_cai.sh` and `boot_fleet_health.sh` read the DSN
+from `os.environ` inside a bash subshell forked when the singleton booted. A rewritten
+file and a `tmux set-environment` change nothing for that already-running process: every
+beat after the patch fails, silently (the connect is wrapped in discard-stderr-or-true),
+and `last_heartbeat` freezes on the three singleton rows — a live body read as dead,
+exactly when the console is watching.
+
+`scripts/lib/dsn_at_use.py` makes every **future** fork immune by reading the file at the
+moment of use. It does **not** retrofit the running loops. Re-forking them means
+restarting the three singleton boot scripts, which costs the console its live session and
+is therefore the console's decision, not the operator of this tool. Do not start a
+detached replacement loop to dodge it — that is `nohup`-shaped and forbidden.
 
 **The Supavisor cache.** The pooler keeps a credential cache that can hold the old value
 for roughly 15 seconds while connections are active. An idle pool may refresh only on a
