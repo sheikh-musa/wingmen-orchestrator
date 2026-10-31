@@ -487,9 +487,17 @@ exercised on both units without a password prompt (both active since 2026-10-30 
 
 **Because sudoers matches the exact argv, the call form is part of the rule, not a style
 choice.** Restart with `/usr/bin/systemctl restart <unit>.service` and no extra flags. For
-status set `SYSTEMD_PAGER=cat` in the environment rather than passing `--no-pager` — the
-environment does not change argv, so the rule still matches; `--no-pager` does, so it
-would fall through to a password prompt in the middle of the window.
+status, **pipe it**: `sudo -n /usr/bin/systemctl status <unit>.service | cat`. The pipe
+changes what systemctl writes to, not the argv sudo matches, so the rule still applies and
+the pager never starts.
+
+Do **not** reach for `SYSTEMD_PAGER=cat` here. It looks like the obvious answer — an
+environment variable cannot change argv — and it does not work: `sudo` runs with
+`env_reset`, the rule carries no `SETENV` tag and gzb matches no `Defaults` exceptions, so
+the variable is stripped before systemctl reads it. Measured on gzb 2026-10-31 22:10Z:
+`SYSTEMD_PAGER=/bin/false sudo -n systemctl status <unit>.service` under a TTY still
+paged, i.e. the value never arrived. `... status <unit>.service | cat` returned clean.
+This entry exists because the wrong form is the one that sounds right at 4am.
 
 If either unit comes back still holding the old password, that is a failed step, not a
 warning.
