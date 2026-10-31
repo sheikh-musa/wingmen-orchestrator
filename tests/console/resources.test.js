@@ -124,13 +124,20 @@ assert.ok(cubHtml.indexOf("Windows host") !== -1, "cubeasht labels the Windows-h
 assert.ok(cubHtml.indexOf("WSL (ci-orchestrator)") !== -1, "cubeasht labels the WSL section, not '1 of 5'");
 assert.ok(cubHtml.indexOf("55.0%") !== -1, "cubeasht WSL mem reads from the nested wsl sub-dict");
 assert.ok(cubHtml.indexOf("could not measure") !== -1, "cubeasht null cpu_temp_c shows could-not-measure");
+
+const cubNoRunnerHtml = api.cubeashtRows({
+  cpu_load_pct: 1, ram_used_pct: 2, disk_c_free_pct: 3, cpu_temp_c: 4, gpu_temp_c: 5, nvme_temp_c: 6,
+  wsl: { mem_used_pct: 10 },
+});
+const runnerRowHtml = cubNoRunnerHtml.slice(cubNoRunnerHtml.indexOf("Runner service"));
+assert.ok(runnerRowHtml.indexOf('<span class="na">could not measure</span>') !== -1,
+  "missing wsl.runner_service gets the same greyed .na styling as every other missing field, not bold .rv text");
 console.log("miniRows/gzbRows/cubeashtRows: ok");
 
 // ---- hostCard: failed sample vs stale sample vs healthy --------------------
 const failedCard = api.hostCard(api.HOSTS[1], { gzb: { host: "gzb", ok: false, error: "ssh timeout", age_s: 920, metrics: {} } });
 assert.ok(failedCard.indexOf("COULD NOT MEASURE") !== -1, "failed sample shows the error pill");
 assert.ok(failedCard.indexOf("ssh timeout") !== -1, "failed sample surfaces the stored error text");
-assert.ok(failedCard.indexOf("could not measure") === -1 || true); // metrics not rendered at all
 assert.strictEqual(failedCard.indexOf("%"), -1, "a failed sample NEVER renders a frozen metric number");
 
 const staleCard = api.hostCard(api.HOSTS[0],

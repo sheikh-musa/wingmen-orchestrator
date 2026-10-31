@@ -108,7 +108,8 @@
     out += measureRow("NVMe temp", m.nvme_temp_c, c1);
     out += '<div class="sub">WSL (ci-orchestrator)</div>';
     out += measureRow("Mem used", wsl.mem_used_pct, pct1);
-    out += row("Runner service", esc(wsl.runner_service != null ? wsl.runner_service : "could not measure"));
+    out += row("Runner service", wsl.runner_service != null
+      ? esc(wsl.runner_service) : '<span class="na">could not measure</span>');
     return out;
   }
 
