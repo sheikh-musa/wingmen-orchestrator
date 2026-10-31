@@ -189,3 +189,40 @@ def test_lane_boot_keeps_its_identity_notice_and_gains_facts(fleet_db, tmp_path)
     assert "NOT the consol" in ctx
     assert "DeepSeek console login done" in ctx
     assert elapsed < BUDGET_S
+
+
+# ── F1 (cc-quality on PR#747): two hooks must not emit the same block twice ──
+
+def test_global_hook_defers_when_the_project_emits_facts_itself(fleet_db, tmp_path):
+    """The orchestrator checkout runs BOTH hooks: its project-level
+    session_start_reconstitute.py (which emits facts for lanes/console) and
+    this global one. Emitting identical facts twice wastes boot context every
+    single session, so the global hook stands down where the project already
+    covers it.
+
+    Deferral is read from the project's own .claude/settings.json rather than
+    from a path: worktrees live outside ~/wingmen/orchestrator and each
+    carries its own copy, so a path check would miss them.
+    """
+    proj = tmp_path / "an-orchestrator-checkout"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".claude" / "settings.json").write_text(
+        '{"hooks": {"SessionStart": [{"hooks": [{"type": "command",'
+        ' "command": "scripts/session_start_reconstitute.py"}]}]}}',
+        encoding="utf-8",
+    )
+    proc, elapsed = _boot(fleet_db, cwd=proj, env_extra={"CLAUDE_PROJECT_DIR": str(proj)})
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == "", "facts were emitted by both hooks"
+    assert elapsed < BUDGET_S
+
+
+def test_global_hook_still_emits_where_the_project_does_not(fleet_db, tmp_path):
+    """The deferral must be narrow: a repo with no such hook still gets facts,
+    which is the whole reason the global hook exists."""
+    proj = tmp_path / "second-brain"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".claude" / "settings.json").write_text(
+        '{"hooks": {"PreToolUse": []}}', encoding="utf-8")
+    proc, _ = _boot(fleet_db, cwd=proj, env_extra={"CLAUDE_PROJECT_DIR": str(proj)})
+    assert "DeepSeek console login done" in _context(proc)

@@ -25,6 +25,32 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.lib import boot_facts  # noqa: E402
 
 
+def _project_emits_facts_itself() -> bool:
+    """True when this project's own hooks already emit the facts block.
+
+    The orchestrator checkout runs session_start_reconstitute.py at PROJECT
+    level, and that hook emits facts for lanes and the console. This global
+    hook fires there too, so without this check an orchestrator session would
+    get the same block twice -- real token waste on every startup and clear
+    (cc-quality F1 on PR#747).
+
+    Detected from the project's own .claude/settings.json rather than from a
+    path: orchestrator worktrees live outside ~/wingmen/orchestrator and each
+    carries its own copy of the settings, so a path comparison would miss
+    them. Unreadable settings mean "cannot tell" -> emit, because a duplicate
+    block is a smaller failure than a session booting with no facts at all.
+    """
+    project = os.environ.get("CLAUDE_PROJECT_DIR")
+    if not project:
+        return False
+    settings = os.path.join(project, ".claude", "settings.json")
+    try:
+        with open(settings, "r", encoding="utf-8") as fh:
+            return "session_start_reconstitute.py" in fh.read()
+    except OSError:
+        return False
+
+
 def main() -> int:
     # Drain the hook payload so the writer never sees a broken pipe. Nothing
     # in it changes the scope: that comes from cwd and CC_CLIENT.
@@ -33,6 +59,8 @@ def main() -> int:
             sys.stdin.read()
         except OSError:
             pass
+    if _project_emits_facts_itself():
+        return 0
     boot_facts.emit(boot_facts.facts_block())
     return 0
 
