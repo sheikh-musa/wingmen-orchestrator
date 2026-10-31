@@ -32,7 +32,10 @@
 #     ANTHROPIC_AUTH_TOKEN, ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL,
 #     CLAUDE_CODE_SUBAGENT_MODEL; always unsets CLAUDE_CODE_OAUTH_TOKEN(_OVERRIDE),
 #     and handles ANTHROPIC_API_KEY per the row's api_key_mode (see below) so
-#     no Anthropic credential can reach a non-Anthropic endpoint. Returns 0.
+#     no Anthropic credential can reach a non-Anthropic endpoint. ALSO sets the
+#     global array PROVIDER_ROUTING_DISALLOWED_ARGS (argv for tool schemas this
+#     provider rejects — Artifact today; bus #87004) that every boot path
+#     splices into its claude argv. Returns 0.
 #   - matching prefix + vault fetch fails (empty key): prints FATAL to
 #     stderr, exports NOTHING, returns 1. Fail-closed — the caller must abort
 #     the boot rather than silently fall back to Anthropic/metered billing.
@@ -137,6 +140,14 @@ apply_provider_routing() {
     # stale label from a hypothetical earlier call in the same shell.
     PROVIDER_ROUTING_LABEL=""
     PROVIDER_ROUTING_SMALL=""
+    # PROVIDER_ROUTING_DISALLOWED_ARGS: ready-to-splice claude argv (e.g.
+    # (--disallowedTools Artifact)) for tools THIS provider rejects — see the
+    # Artifact note at the bottom of this function. Deliberately GLOBAL, same
+    # reason as the label above, and outside the `local` list on purpose so it
+    # reaches the caller's shell. Empty on a claude-* no-op and on every
+    # failed-closed path, so a lane that never actually routed gets no extra
+    # argv flags.
+    PROVIDER_ROUTING_DISALLOWED_ARGS=()
 
     local resolved_model="$1" orch_dir="$2" venv_py="$3" agent_id="$4"
     local fetch_script="${5:-$orch_dir/scripts/lib/provider_vault_fetch.py}"
@@ -213,5 +224,16 @@ apply_provider_routing() {
 
     PROVIDER_ROUTING_LABEL="$label"
     PROVIDER_ROUTING_SMALL="$small"
+    # NON-ANTHROPIC TOOL-SCHEMA WALL (bus #87004, 2026-10-31): these providers
+    # speak the Anthropic Messages API but validate the TOOL schemas Claude
+    # Code sends on every request, and reject the ones they don't support.
+    # DeepSeek 400s with "Invalid schema for function Artifact" on EVERY turn,
+    # which is not a degraded reply — the session cannot take a single turn
+    # (cc-substrate-1, right after the fleet moved to deepseek-flash). Every
+    # boot path (launch_dangerous_cc.sh, boot_cai.sh, boot_fleet_health.sh)
+    # splices this array into its claude argv, so the tool is never sent at
+    # all. Kept here, next to the provider table, so a future provider arm
+    # inherits the same treatment instead of rediscovering the 400.
+    PROVIDER_ROUTING_DISALLOWED_ARGS=(--disallowedTools Artifact)
     return 0
 }
