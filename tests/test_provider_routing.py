@@ -20,6 +20,7 @@ var to prove the distinction actually holds.
 Drives the REAL bash function via subprocess, with a stub fetch_script (never
 the real nervous_system.vault) standing in for the vault read.
 """
+import json
 import os
 import stat
 import subprocess
@@ -268,27 +269,43 @@ def test_provider_small_model_override_env_honored_per_provider(tmp_path):
 # its vault key by the AGENT's lane family, never the shared/leak-flagged
 # DEEPSEEK_CODING_KEY, and fails closed on an unmapped family ──────────────
 
-@pytest.mark.parametrize("agent_id,vault_key_name", [
-    ("cc-bariq-1", "DEEPSEEK_CODING_KEY"),
-    ("cc-oeh-1", "DEEPSEEK_CODING_KEY"),
-    ("cc-ffsfulfilment-1", "DEEPSEEK_CODING_KEY"),
-    ("cc-cosem-exams-1", "DEEPSEEK_CODING_KEY"),
-    ("cc-cosem-platform-author", "DEEPSEEK_CODING_KEY"),
-    ("cc-cosem-tdu-coord", "DEEPSEEK_CODING_KEY"),  # compound family "cosem-tdu" maps to the SAME client key as "cosem"
-    ("cc-hc95-broker-1", "DEEPSEEK_CODING_KEY"),
-    ("cc-fleet-health", "DEEPSEEK_CODING_KEY"),
-    ("cc-loop-1", "DEEPSEEK_CODING_KEY"),
-    ("cc-scholar-1", "DEEPSEEK_CODING_KEY"),
+def _map_named_key(agent_id):
+    """The vault key NAME deepseek_key_map.json names for this lane's family.
+
+    Read from the shipped map rather than pinned as a literal: the map is
+    mid-migration from the shared DEEPSEEK_CODING_KEY to one key per family
+    (orch-console bus #87091/#87110/#87165), so any hardcoded expectation is
+    a test that fails on every flip PR and says nothing about routing. What
+    this file is responsible for is the WIRING -- that provider_routing.sh
+    asks the vault for exactly the name the map names, and nothing else.
+    Correctness of the map's contents is tests/test_deepseek_key_for_family.py.
+    """
+    sys.path.insert(0, _ROOT)
+    from scripts.lib.lane_token_resolver import family_of
+
+    with open(os.path.join(_ROOT, "scripts", "lib", "deepseek_key_map.json")) as f:
+        return json.load(f)[family_of(agent_id)]
+
+
+@pytest.mark.parametrize("agent_id", [
+    "cc-bariq-1",
+    "cc-oeh-1",
+    "cc-ffsfulfilment-1",
+    "cc-cosem-exams-1",
+    "cc-cosem-platform-author",
+    "cc-cosem-tdu-coord",  # compound family "cosem-tdu": derives its OWN family, never bare "cosem"
+    "cc-hc95-broker-1",
+    "cc-fleet-health",
+    "cc-loop-1",
+    "cc-scholar-1",
 ])
-def test_deepseek_resolves_vault_key_by_lane_family(agent_id, vault_key_name, tmp_path):
-    """The fetch stub only knows ONE key name — the one this family is
-    supposed to resolve to. If the routing code still asked for a DIFFERENT
-    key than the map names, the stub would have nothing for it and the call
-    would fail closed instead of rc==0. Interim state (bus #84011, 2026-10-30):
-    every family explicitly maps to the shared DEEPSEEK_CODING_KEY until
-    real per-client keys are provisioned -- an explicit mapping, not a
-    silent fallback, so this is the map naming the shared key on purpose,
-    not the resolver guessing it."""
+def test_deepseek_resolves_vault_key_by_lane_family(agent_id, tmp_path):
+    """The fetch stub only knows ONE key name — the one this family's map row
+    names. If the routing code asked for a DIFFERENT key (the wrong family's,
+    or a guess), the stub would have nothing for it and the call would fail
+    closed instead of rc==0. That is what makes an EXPLICIT mapping in the
+    map different from a resolver-side fallback (bus #84011)."""
+    vault_key_name = _map_named_key(agent_id)
     fetch = _write_fetch_stub(tmp_path, key_by_vault_key={vault_key_name: "per-client-secret"})
     rc, env, stderr = _run("deepseek-v4-pro", str(tmp_path), fetch, agent_id=agent_id)
     assert rc == 0, (agent_id, vault_key_name, stderr)

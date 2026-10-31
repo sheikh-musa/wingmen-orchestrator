@@ -202,12 +202,18 @@ def test_map_round_trip_preserves_existing_entries(tmp_path):
     spec.loader.exec_module(mod)
 
     mapping = mod._load_map()
+    untouched = {k: v for k, v in mapping.items() if k != "zzz-test-only"}
     mapping["zzz-test-only"] = "DEEPSEEK_KEY_ZZZ_TEST_ONLY"
     mod._write_map(mapping)
 
     reread = mod._load_map()
     assert reread["zzz-test-only"] == "DEEPSEEK_KEY_ZZZ_TEST_ONLY"
-    assert reread["bariq"] == "DEEPSEEK_CODING_KEY"  # untouched original entry (interim state, bus #84011)
+    # Every pre-existing entry survives byte-identically. Written against the
+    # map loaded at the top of the test rather than against a literal, because
+    # the map legitimately changes as families are split one PR at a time --
+    # pinning "bariq is shared" would fail on the PR that splits bariq and
+    # tell us nothing about round-tripping.
+    assert {k: v for k, v in reread.items() if k != "zzz-test-only"} == untouched
 
 
 def test_slug_regex_boundary_lengths():
@@ -534,6 +540,19 @@ def _rewrite_map(script_path, updates):
     return map_file
 
 
+def _force_shared(script_path, slug="bariq"):
+    """Put one row back on the shared key before a split test runs.
+
+    The split tests must not depend on how far the real migration has got.
+    The map legitimately flips families one PR at a time, so a test that
+    assumed 'bariq is still shared' would fail on the very PR that splits
+    bariq -- and, worse, quietly start testing the 'already split' refusal
+    instead of the behaviour it names. Forcing the precondition states the
+    test's real requirement instead of inheriting it from production state.
+    """
+    return _rewrite_map(script_path, {slug: "DEEPSEEK_CODING_KEY"})
+
+
 def _install_fake_vault(monkeypatch, on_put=None):
     import types
 
@@ -606,6 +625,7 @@ def test_split_key_refuses_to_repoint_a_row_this_script_did_not_set(tmp_path):
 def test_split_key_refuses_when_a_previous_run_already_vaulted(tmp_path, monkeypatch):
     script = _isolated_scripts_copy(tmp_path)
     mod = _load_module(script, "deepseek_split_partial")
+    _force_shared(script)
     monkeypatch.setattr(mod, "_vault_has_key", lambda name: True)
 
     rc = mod.cmd_split_key(_split_args("bariq"))
@@ -617,6 +637,7 @@ def test_split_key_flip_only_refuses_when_the_vault_has_no_secret(tmp_path, monk
     provider_routing.sh refuse to boot the family."""
     script = _isolated_scripts_copy(tmp_path)
     mod = _load_module(script, "deepseek_split_fliponly")
+    _force_shared(script)
     map_file = script.parent / "lib" / "deepseek_key_map.json"
     before = map_file.read_text()
 
@@ -630,6 +651,7 @@ def test_split_key_flip_only_refuses_when_the_vault_has_no_secret(tmp_path, monk
 def test_split_key_dry_run_changes_nothing(tmp_path, monkeypatch, capsys):
     script = _isolated_scripts_copy(tmp_path)
     mod = _load_module(script, "deepseek_split_dry")
+    _force_shared(script)
     map_file = script.parent / "lib" / "deepseek_key_map.json"
     before = map_file.read_text()
 
@@ -653,6 +675,7 @@ def test_split_key_dry_run_changes_nothing(tmp_path, monkeypatch, capsys):
 def test_split_key_vaults_before_flipping_the_map_row(tmp_path, monkeypatch, capsys):
     script = _isolated_scripts_copy(tmp_path)
     mod = _load_module(script, "deepseek_split_order")
+    _force_shared(script)
     map_file = script.parent / "lib" / "deepseek_key_map.json"
 
     monkeypatch.setattr(mod, "_vault_has_key", lambda name: False)
@@ -685,6 +708,7 @@ def test_split_key_vaults_before_flipping_the_map_row(tmp_path, monkeypatch, cap
 def test_split_key_leaves_the_map_alone_when_key_creation_fails(tmp_path, monkeypatch):
     script = _isolated_scripts_copy(tmp_path)
     mod = _load_module(script, "deepseek_split_createfail")
+    _force_shared(script)
     map_file = script.parent / "lib" / "deepseek_key_map.json"
     before = map_file.read_text()
 
@@ -821,6 +845,7 @@ def test_usage_export_validates_since_before_driving_a_browser():
 def _split_with_failures(tmp_path, monkeypatch, *, boot_ok, check_rc, rollback=True):
     script = _isolated_scripts_copy(tmp_path)
     mod = _load_module(script, "deepseek_split_rollback_%s_%s" % (boot_ok, check_rc))
+    _force_shared(script)
     map_file = script.parent / "lib" / "deepseek_key_map.json"
 
     monkeypatch.setattr(mod, "_vault_has_key", lambda name: False)
