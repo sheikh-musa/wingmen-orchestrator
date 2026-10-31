@@ -84,7 +84,8 @@ def run_nudge(tmp_path, *, before=BEFORE, after=AFTER, postredraw=None, unstable
     # DATABASE_URL="" is load-bearing: no test may reach the live bus (#23895).
     env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", LANE_NUDGE_LOG_DIR=str(logdir),
                FIRE_WINDOW_DIR=str(fwdir), BUSY_LIVENESS_S="0", DATABASE_URL="",
-               PROBE_INSTABILITY_SAMPLE_S="0", LANE_NUDGE_REDRAW_SETTLE_S="0")
+               PROBE_INSTABILITY_SAMPLE_S="0", LANE_NUDGE_REDRAW_SETTLE_S="0",
+               LANE_NUDGE_SETTLE_S="0")
     out = subprocess.run(["/bin/bash", str(NUDGE), "testlane", "a nudge message"],
                          capture_output=True, text=True, env=env, timeout=60)
     calls = (st / "calls").read_text() if (st / "calls").exists() else ""

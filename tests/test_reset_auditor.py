@@ -86,6 +86,11 @@ def _run(tmp_path, target, pane=IDLE_PANE, extra=None, arm_row=None):
         "RESET_AUDITOR_REPORTS_DIR": str(tmp_path / "reports"),
         "RESET_AUDITOR_AUDIT_CMD": str(_audit_stub(tmp_path, log)),
         "RESET_AUDITOR_LOGDIR": str(tmp_path / "logs"),
+        # The settle waits after each keystroke exist for a LIVE TUI to repaint; this
+        # stub returns a fixture instantly, so they are dead wall-clock here (~10s per
+        # happy-path run). The knob changes only their duration — every keystroke and
+        # every assertion below is unchanged.
+        "RESET_AUDITOR_SETTLE_S": "0",
         "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
         "HOME": str(Path.home()),
     }
@@ -234,6 +239,24 @@ def test_armed_happy_path_is_in_place_audit_first_boot_names_handoff(tmp_path):
     boot = [l for l in lines if "cc-storefront" in l and "send-keys" in l and "-l" in l]
     assert boot and str(h.resolve()) in boot[-1], "boot must name the ABSOLUTE handoff path"
     assert not any(w in keys for w in ("kill-session", "kill-server", "respawn")), "not in-place"
+
+
+def test_settle_waits_are_env_injectable_so_tests_do_not_really_wait(tmp_path):
+    """The settle waits after each keystroke exist so a LIVE tmux TUI can repaint; the
+    test STUB returns a fixture instantly, so under test they are pure dead wall-clock
+    (~10s per happy-path run). RESET_AUDITOR_SETTLE_S overrides those waits ONLY — the
+    production default is unchanged, and the keystroke sequence must stay identical."""
+    h = _handoff(tmp_path / "reports")
+    t0 = time.monotonic()
+    r, keys = _run(tmp_path, "storefront", extra={
+        "RESET_AUDITOR_ARMED": "1", "RESET_AUDITOR_SETTLE_S": "0"})
+    elapsed = time.monotonic() - t0
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert elapsed < 5, f"settle waits were not injected: {elapsed:.1f}s (expected ~0)"
+    lines = keys.splitlines()
+    assert any("/clear" in l for l in lines), "no /clear sent"
+    boot = [l for l in lines if "cc-storefront" in l and "send-keys" in l and "-l" in l]
+    assert boot and str(h.resolve()) in boot[-1], "boot must name the ABSOLUTE handoff path"
 
 
 def test_script_never_targets_a_non_auditor_even_via_session_override(tmp_path):

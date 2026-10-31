@@ -111,9 +111,32 @@ def find_verified_authorization(
     return None
 
 
+_DEFAULT_CONNECT_TIMEOUT_S = 15
+_CONNECT_TIMEOUT_ENV = "REQUIRE_VERIFIED_AUTH_CONNECT_TIMEOUT_S"
+
+
+def _connect_timeout_s() -> int:
+    """The connect budget for the authorization DB — 15s in production.
+
+    An unreachable DB must DENY (see `verified_authorization`), and on a host that
+    filters the address the dial really does burn the whole budget; the fail-closed
+    test must not pay 15s of wall clock for that, so the knob lets it inject a short
+    one. Read at CALL time, never at import, so the test can set it.
+
+    Fail-safe in one direction: anything unparseable or non-positive (libpq reads
+    connect_timeout=0 as "wait indefinitely", which would turn a DENY into a hang)
+    falls back to the production default rather than shortening or disabling the gate.
+    """
+    try:
+        val = int(os.environ.get(_CONNECT_TIMEOUT_ENV, ""))
+    except (TypeError, ValueError):
+        return _DEFAULT_CONNECT_TIMEOUT_S
+    return val if val > 0 else _DEFAULT_CONNECT_TIMEOUT_S
+
+
 def _fetch_candidate_rows(dsn: str, operator_chat_id: str, after: datetime) -> list[dict]:
     import psycopg
-    with psycopg.connect(dsn, connect_timeout=15) as conn, conn.cursor() as cur:
+    with psycopg.connect(dsn, connect_timeout=_connect_timeout_s()) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT id, direction, channel, chat_id, tag, text, created_at "
             "FROM operator_messages "

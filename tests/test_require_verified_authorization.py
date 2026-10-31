@@ -135,8 +135,49 @@ def test_wrapper_missing_dsn_fails_closed(monkeypatch):
     assert res.ok is False and "DSN" in res.reason
 
 
-def test_wrapper_db_error_fails_closed():
+def test_db_connect_timeout_is_env_injectable(monkeypatch):
+    """15s is the right production budget for an unreachable DB, but the fail-closed test
+    must not pay it (on a runner that filters 127.0.0.1:1 the full timeout elapses).
+    REQUIRE_VERIFIED_AUTH_CONNECT_TIMEOUT_S changes ONLY the timeout handed to psycopg —
+    the default stays 15, and a bad/absent value falls back to it rather than to 0
+    (libpq reads 0 as 'wait forever', which would turn a DENY into a hang).
+
+    connect() is faked here on purpose: the subject is the timeout this gate HANDS the
+    driver, and the dial itself is already covered end-to-end by the test below.
+    """
+    import psycopg
+
+    seen = {}
+
+    def _fake_connect(dsn, **kw):
+        seen.clear()
+        seen.update(kw)
+        raise psycopg.OperationalError("unreachable")
+
+    monkeypatch.setattr(psycopg, "connect", _fake_connect)
+
+    def _run():
+        return verified_authorization(
+            "op", after=REQUEST_TS, approval_phrases=PHRASES, op_tokens=TOKENS,
+            operator_chat_id=OPERATOR, dsn="host=127.0.0.1 port=1 dbname=nodb")
+
+    monkeypatch.delenv("REQUIRE_VERIFIED_AUTH_CONNECT_TIMEOUT_S", raising=False)
+    assert _run().ok is False
+    assert seen.get("connect_timeout") == 15, "production default must stay 15s"
+
+    monkeypatch.setenv("REQUIRE_VERIFIED_AUTH_CONNECT_TIMEOUT_S", "2")
+    assert _run().ok is False
+    assert seen.get("connect_timeout") == 2
+
+    for bad in ("nonsense", "0", "-3"):
+        monkeypatch.setenv("REQUIRE_VERIFIED_AUTH_CONNECT_TIMEOUT_S", bad)
+        assert _run().ok is False
+        assert seen.get("connect_timeout") == 15, f"{bad!r} must fall back to 15s"
+
+
+def test_wrapper_db_error_fails_closed(monkeypatch):
     """An unreachable DB must DENY, never assume yes."""
+    monkeypatch.setenv("REQUIRE_VERIFIED_AUTH_CONNECT_TIMEOUT_S", "2")
     res = verified_authorization(
         "op", after=REQUEST_TS, approval_phrases=PHRASES, op_tokens=TOKENS,
         operator_chat_id=OPERATOR,
