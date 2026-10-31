@@ -289,6 +289,64 @@ def test_an_interpreter_one_liner_that_opens_a_store_file_is_refused():
         'python3 -c "print(open(\'/srv/site/wp-config.php\').read())"'))
 
 
+# ── cc-quality 87497 findings B/D/A/E (deny tests for each real bypass) ─────────
+
+def test_env_prefixed_db_client_is_refused():
+    """Finding B: `env VAR=val psql` is the NORMAL way to pass a DB password, and an
+    `env` word defeated the leading-token anchor, so Rule 2 never fired."""
+    assert_denied(*bash(
+        'env PGPASSWORD=x psql "$WOO_DSN" -c "select * from wp_options"'))
+    assert_denied(*bash(
+        'env PGPASSWORD=x PGSSLMODE=require psql "$WOO_DSN" -tAc "select * from wp_users"'))
+
+
+def test_command_and_exec_prefixed_db_client_is_refused():
+    """Finding D: same root cause as B — a launcher word before the DB client."""
+    assert_denied(*bash('command psql "$WOO_DSN" -c "select * from wp_options"'))
+    assert_denied(*bash('exec psql "$WOO_DSN" -c "select * from wp_options"'))
+    assert_denied(*bash(
+        'env A=b command psql "$WOO_DSN" -c "select * from wp_options"'))
+
+
+def test_launcher_prefixes_do_not_create_false_positives():
+    """Stripping launchers must not turn ordinary work into a refusal."""
+    assert_allowed(*bash("env FOO=bar ls -l /srv/site/wp-config.php"))
+    assert_allowed(*bash("command -v psql"))
+    assert_allowed(*bash('psql "$WOO_DSN" -tAc "SELECT option_value FROM wp_options '
+                         "WHERE option_name = 'siteurl'\""))
+    assert_allowed(*bash('env FOO=1 psql "$WOO_DSN" -tAc "SELECT ID FROM wp_posts LIMIT 1"'))
+
+
+def test_verbless_command_substitution_read_of_a_store_file_is_refused():
+    """Finding A: `$(< file)` reads a file with NO command verb, so the verb-anchored
+    Rule 1 never saw it. `$(cat file)` was already caught."""
+    assert_denied(*bash('echo "$(< wp-config.php)"'))
+    assert_denied(*bash('echo "$(< /srv/site/wp-config.php)" | head -5'))
+    assert_denied(*bash('X="$(< /srv/site/client.env)"; echo "$X"'))
+    assert_allowed(*bash('echo "$(< /tmp/notes.txt)"'))
+
+
+def test_non_wp_client_store_dsn_env_is_refused():
+    """Finding E, narrow half: a Stripe/Shopify store's DSN env var is the same leak
+    class as $WOO_DSN, and the fix is cheap because the env-var NAME is unambiguous."""
+    assert_denied(*bash('psql "$STRIPE_DSN" -c "select * from accounts"'))
+    assert_denied(*bash('psql "$SHOPIFY_DATABASE_URL" -c "select * from orders"'))
+    assert_allowed(*bash('psql "$SUBSTRATE_DSN" -tAc "select 1"'))
+
+
+def test_documented_residuals_stay_allowed():
+    """Findings C and the broad half of E are NOT fixed here, deliberately — the
+    playbook's residual list names them. Pinned so the gap is stated in code, not
+    just in prose: if a later change makes these deny, this test says so loudly
+    rather than leaving the doc stale."""
+    # C: cross-stage dataflow through xargs — the store name is in stage 1, the
+    # printing verb in stage 2, so neither stage matches Rule 1's argument test.
+    assert_allowed(*bash("echo wp-config.php | xargs cat"))
+    # E (broad): Rule 2 identifies a CLIENT SITE by WordPress markers only, so a
+    # non-WP store's bare table names are not recognised.
+    assert_allowed(*bash('psql "$CLIENT_DSN" -c "select * from stripe_events"'))
+
+
 def test_guard_is_registered_in_project_settings():
     settings = json.loads((REPO / ".claude" / "settings.json").read_text())
     commands = [
