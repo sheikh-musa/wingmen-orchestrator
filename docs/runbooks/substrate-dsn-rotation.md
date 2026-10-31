@@ -461,10 +461,43 @@ not more, which is why they are recorded rather than absorbed silently.
   re-issued immediately): bayanqa, encoder, scholar's lane, the three irsyad pool workers,
   and cosem-convergence. The hub has the exact relaunch command staged for each.
 
-**The sudo gap is a gate, not a footnote.** The hub has passwordless sudo for every unit
-on that list except `wingmen-body-activity-oracle-vps` and
-`wingmen-wake-backstop-sweep`. Both held the current password at scan time and both need
-a password the hub does not have. Until that is closed — by adding the two labels to the
-hub's NOPASSWD line, or by restarting those two from another account — the hub cannot
-complete its half, and a rotation that leaves a live holder on the dead value is worse
-than a rotation deferred by a day. The console owns closing it (bus 87834).
+**The sudo gap was a gate, and it is now closed (2026-10-31 21:51Z, bus 88254).** It is
+kept here because it is the reason two units on the list above are special, and because
+the call form is part of the rule.
+
+The hub had passwordless sudo for every unit on that list except
+`wingmen-body-activity-oracle-vps` and `wingmen-wake-backstop-sweep`. Both held the
+current password at scan time. A rotation that leaves a live holder on the dead value is
+worse than a rotation deferred by a day, so those two were treated as a gate: the run did
+not go while they could not be restarted.
+
+`/etc/sudoers.d/wingmen-oracle-backstop-restart` on gzb now grants the hub's user
+(`gazzai`) exactly these four argv and nothing wider:
+
+```
+(root) NOPASSWD: /usr/bin/systemctl restart wingmen-body-activity-oracle-vps.service,
+                 /usr/bin/systemctl status  wingmen-body-activity-oracle-vps.service
+(root) NOPASSWD: /usr/bin/systemctl restart wingmen-wake-backstop-sweep.service,
+                 /usr/bin/systemctl status  wingmen-wake-backstop-sweep.service
+```
+
+Re-verified from gzb as that user: `sudo -n -l` lists both pairs, and the status half was
+exercised on both units without a password prompt (both active since 2026-10-30 04:15:37
++08). This is not taken from the message that announced it.
+
+**Because sudoers matches the exact argv, the call form is part of the rule, not a style
+choice.** Restart with `/usr/bin/systemctl restart <unit>.service` and no extra flags. For
+status, **pipe it**: `sudo -n /usr/bin/systemctl status <unit>.service | cat`. The pipe
+changes what systemctl writes to, not the argv sudo matches, so the rule still applies and
+the pager never starts.
+
+Do **not** reach for `SYSTEMD_PAGER=cat` here. It looks like the obvious answer — an
+environment variable cannot change argv — and it does not work: `sudo` runs with
+`env_reset`, the rule carries no `SETENV` tag and gzb matches no `Defaults` exceptions, so
+the variable is stripped before systemctl reads it. Measured on gzb 2026-10-31 22:10Z:
+`SYSTEMD_PAGER=/bin/false sudo -n systemctl status <unit>.service` under a TTY still
+paged, i.e. the value never arrived. `... status <unit>.service | cat` returned clean.
+This entry exists because the wrong form is the one that sounds right at 4am.
+
+If either unit comes back still holding the old password, that is a failed step, not a
+warning.
