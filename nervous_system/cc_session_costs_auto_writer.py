@@ -98,11 +98,24 @@ def lane_dir_map_from_fleet_lanes(dsn: str) -> dict:
     SAME CONTAINMENT as _LANE_DIR_TO_CC (deliberate): this map is consumed ONLY by
     this cost/context writer's resolution (passed as `extra` to resolve_cc_identity)
     — it NEVER widens _DIR_TO_CC, so it can't enrol a lane into the
-    autonomous_loop_detector / watchdog KILL paths. Singletons are excluded (they
-    resolve canonically via _DIR_TO_CC). Fail-safe: any DB error returns {} (no
-    dynamic coverage) rather than crashing the writer."""
+    autonomous_loop_detector / watchdog KILL paths. That containment is the ONLY
+    thing keeping protected agents out of a kill path from here, so it must stay
+    true: if a future KILL consumer starts reading this map, take protected agents
+    back out of it first. Fail-safe: any DB error returns {} (no dynamic coverage)
+    rather than crashing the writer.
+
+    PROTECTED AGENTS ARE INCLUDED (2026-11-01, cc-fleet-health bus #88345). This map
+    used to drop every protected base_agent_id, carrying over the op#42896/#42909
+    containment from _LANE_DIR_TO_CC. The containment argument does not apply here
+    — this map's only consumer is the cost writer — and the exclusion made exactly
+    the protected agents WITHOUT a static entry invisible to cost telemetry:
+    cc-finance (silent since 2026-09-05), cc-quality (2026-09-21) and cc-storefront
+    (2026-09-19) were all resolve_cc_identity -> None, so the writer dropped them at
+    `if not cc_identity: continue`. cc-fleet-health stayed measurable only because
+    it has a static _LANE_DIR_TO_CC entry. Static-first precedence in
+    resolve_cc_identity still wins (a canonical identity can never be shadowed by
+    a fleet_lanes row)."""
     import psycopg
-    from nervous_system.protected_agents import protected_agent_ids
     out: dict = {}
     try:
         with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
@@ -111,15 +124,12 @@ def lane_dir_map_from_fleet_lanes(dsn: str) -> dict:
             # of them must resolve to that base — distinct-on-base dropped the
             # non-first perimeter worktrees to None (op#10550). The sub_tag map
             # then distinguishes the instances.
-            # op#42896/#42909 P1: singleton exclusion now reads the ONE registry
-            # (nervous_system.protected_agents) instead of its own hardcoded
-            # literal — same `dsn` this connection already uses, so this reads
-            # correctly on whichever host runs this writer (Mini or gzb), not
-            # necessarily this process's own DATABASE_URL.
+            # NO protected-agent exclusion here (see the docstring): it moved the
+            # silent-drop from the KILL paths to the cost table, where the same
+            # agents read as zero-spend rather than as unknown.
             cur.execute(
                 "SELECT base_agent_id, worktree_path FROM fleet_lanes "
-                "WHERE worktree_path IS NOT NULL AND base_agent_id != ALL(%s)",
-                (list(protected_agent_ids(dsn)),))
+                "WHERE worktree_path IS NOT NULL")
             for base, wt in cur.fetchall():
                 d = _mangle_worktree(wt)
                 out[d] = base

@@ -204,3 +204,132 @@ class TestSweepProjectsRoot:
         _make_jsonl(repo_dir, "old.jsonl", [{"input_tokens": 1, "output_tokens": 1}], mtime=100.0)
         rows = sweep_projects_root(tmp_path, modified_since=1000.0)
         assert rows == []  # older than cutoff
+
+
+# ---------------------------------------------------------------------------
+# Protected agents must be MEASURED, not silently dropped (cc-fleet-health
+# bus #88345, 2026-11-01). The dynamic lane map used to exclude every
+# protected base_agent_id, so the three protected agents with no static entry
+# (cc-finance, cc-quality, cc-storefront) resolved to None and the writer
+# skipped them at `if not cc_identity: continue` -- they read as zero spend.
+# ---------------------------------------------------------------------------
+class _FakeCursor:
+    def __init__(self, rows):
+        self._rows = rows
+        self.executed: list[str] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.executed.append(sql if params is None else sql + " | params=%r" % (params,))
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _FakeConn:
+    def __init__(self, cur):
+        self._cur = cur
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def cursor(self):
+        return self._cur
+
+
+@pytest.fixture
+def fleet_lanes_rows(monkeypatch):
+    """Patch psycopg.connect so lane_dir_map_from_fleet_lanes reads given rows."""
+
+    def _install(rows):
+        import psycopg
+
+        cur = _FakeCursor(rows)
+        monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _FakeConn(cur))
+        return cur
+
+    return _install
+
+
+def _worktree_for(dir_name: str) -> str:
+    """A worktree path whose _mangle_worktree() output IS `dir_name`.
+
+    Round-tripping through the mangling rule (rather than hardcoding a real
+    checkout path) keeps the test about the mechanism: any path mangling to
+    this ~/.claude/projects dir is the one the writer will see."""
+    return "/" + dir_name.lstrip("-").replace("-", "/")
+
+
+class TestProtectedAgentCoverage:
+    """The three protected agents fleet_lanes knew about but the map hid."""
+
+    @pytest.mark.parametrize("ident,dir_name", [
+        ("cc-finance", "-Users-sheikhmusa-wingmen-projects-finance"),
+        ("cc-quality", "-Users-sheikhmusa-wingmen-quality"),
+        ("cc-storefront", "-Users-sheikhmusa-wingmen-projects-ihsanos-storefront"),
+    ])
+    def test_protected_lane_without_static_entry_resolves_via_dynamic_map(
+            self, fleet_lanes_rows, ident, dir_name):
+        from nervous_system.cc_session_costs_auto_writer import (
+            lane_dir_map_from_fleet_lanes, resolve_cc_identity)
+        fleet_lanes_rows([(ident, _worktree_for(dir_name))])
+        extra = lane_dir_map_from_fleet_lanes("postgresql://fake/db")
+        assert resolve_cc_identity(dir_name, extra) == ident
+
+    def test_protected_lane_with_a_static_entry_still_wins_statically(self, fleet_lanes_rows):
+        """Precedence: a stale fleet_lanes row can never shadow a canonical id."""
+        from nervous_system.cc_session_costs_auto_writer import (
+            lane_dir_map_from_fleet_lanes, resolve_cc_identity)
+        fleet_lanes_rows([("some-other-agent", "/Users/sheikhmusa/wingmen/wingmen-cai")])
+        extra = lane_dir_map_from_fleet_lanes("postgresql://fake/db")
+        assert resolve_cc_identity("-Users-sheikhmusa-wingmen-wingmen-cai", extra) == "cai"
+
+    def test_query_does_not_filter_protected_agents(self, fleet_lanes_rows):
+        """Pins the fix at the SQL level: reverting the WHERE clause fails here."""
+        from nervous_system.cc_session_costs_auto_writer import lane_dir_map_from_fleet_lanes
+        cur = fleet_lanes_rows([("cc-finance", "/Users/sheikhmusa/wingmen/projects/finance")])
+        lane_dir_map_from_fleet_lanes("postgresql://fake/db")
+        assert cur.executed, "the map builder issued no query"
+        sql = cur.executed[0]
+        assert "protected" not in sql.lower()
+        assert "ALL(" not in sql
+        assert "worktree_path IS NOT NULL" in sql
+
+    def test_the_cost_writer_is_the_only_consumer_of_this_map(self):
+        """The whole safety argument for including protected agents.
+
+        If a future KILL path (loop detector, watchdog, reaper) starts reading
+        this map, the protected-agent exclusion has to come back FIRST. This
+        fails the moment a second consumer appears.
+        """
+        root = Path(__file__).resolve().parent.parent
+        allowed = {
+            "nervous_system/cc_session_costs_auto_writer.py",  # definition
+            "scripts/cc_session_costs_writer_run.py",          # the one consumer
+            "tests/test_cc_session_costs_auto_writer.py",      # this file
+        }
+        hits = set()
+        for path in root.rglob("*.py"):
+            rel = path.relative_to(root).as_posix()
+            if rel.startswith(".claude/"):
+                continue  # stale agent/worktree copies, not part of this tree
+            if rel in allowed:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if "lane_dir_map_from_fleet_lanes" in text:
+                hits.add(rel)
+        assert not hits, (
+            "lane_dir_map_from_fleet_lanes gained a consumer outside the cost "
+            "writer: %s -- protected agents must be taken back out of that map "
+            "before it feeds anything on a kill path." % sorted(hits))
