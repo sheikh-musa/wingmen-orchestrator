@@ -66,6 +66,36 @@ Every migration ends with a `DO $$ ... END $$` block that verifies the migration
 
 See `supabase/migrations/20260521_active_loops_parent_pid.sql` for the canonical pattern.
 
+## Convention 6: Test the migration against a POPULATED table
+
+A migration test that starts from an empty table proves only that the DDL
+parses. Triggers, backfills, NOT NULL constraints and audit rows are all
+invisible on zero rows — the migration passes, and then fails on the real
+silo where the table has rows.
+
+**Rule:** if a migration reads or rewrites existing rows — any backfill, any
+`ALTER COLUMN ... SET NOT NULL`, any change to a table with an `AFTER` trigger
+— the test must insert representative rows **before** applying the migration,
+then assert both the end state of those rows and the state of anything the
+trigger wrote.
+
+Worked example (migration 139, 2026-11-01): `verified_at` was backfilled with
+`UPDATE fleet_memory SET verified_at = created_at`. `fleet_memory_audit_trg`
+is `AFTER INSERT OR UPDATE` and assumes every UPDATE is a retire — it writes
+`NEW.retired_op_ref` into a `NOT NULL` column. Migration 135 made that safe by
+having the immutability trigger reject non-retire updates, so the audit
+trigger could never see one. On an empty table it never fired and all 19
+tests passed; against the live table's two rows it raised `NotNullViolation`
+and rolled back. Caught by console's rolled-back dry run, not by the suite.
+
+The fix (`migrations/139_fleet_memory_facts.sql`) stands the audit trigger
+down for the backfill window alongside the immutability trigger, and
+`test_backfill_survives_pre_existing_rows` now seeds two rows first.
+
+This does not replace the live dry run — see PB-01. It is what makes the
+scratch rehearsal worth anything: a rehearsal against an empty table is not a
+rehearsal.
+
 ## Linter advisories
 
 `scripts/check_additive_migration.py` emits **non-blocking** advisories for:
