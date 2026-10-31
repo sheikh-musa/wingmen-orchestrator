@@ -45,9 +45,18 @@ documented):
     action with a clear stderr message and a nonzero exit -- never a best-
     effort guess at a different selector.
 
+split-key (bus #87091 GO) is the migration off the leak-flagged shared
+DEEPSEEK_CODING_KEY: one console key per family slug, named exactly the slug,
+vaulted as DEEPSEEK_KEY_<SLUG>, with the map row flipped LAST. The order is
+load-bearing -- provider_routing.sh fails closed on a missing vault secret, so
+vault-before-map is what keeps every crash point bootable. It never revokes
+the shared key; that is a separate step gated on orch-console's explicit go
+after every family is verified.
+
 Usage:
     deepseek_console.py login --headed
     deepseek_console.py add-client <slug>
+    deepseek_console.py split-key <slug> [--flip-only] [--dry-run]
     deepseek_console.py list-clients
     deepseek_console.py usage-export [--since YYYY-MM-DD] [--out PATH]
 """
@@ -60,6 +69,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -72,7 +82,19 @@ sys.path.insert(0, _ORCH_ROOT)
 from scripts.lib.lane_token_resolver import family_of  # noqa: E402
 
 _MAP_FILE = os.path.join(_SCRIPT_DIR, "lib", "deepseek_key_map.json")
+_CHECK_MAP_SCRIPT = os.path.join(_SCRIPT_DIR, "check_deepseek_key_map.py")
 _PROFILE_DIR = os.path.expanduser("~/.wingmen/deepseek_browser")
+
+# The one key every family pointed at before the split (bus #84011 interim
+# state). split-key only ever repoints a slug that is on THIS key: anything
+# else was set by hand and is not ours to overwrite.
+_SHARED_KEY_NAME = "DEEPSEEK_CODING_KEY"
+
+# amount x price must reproduce the console's own cost export to within this.
+# Observed live diff is exactly 0.0 (2026-11-01), so anything above float
+# noise means the export shape changed or the per-key split double-counts --
+# see the enforcement comment in parse_export_zip.
+_COST_CROSS_CHECK_TOLERANCE_USD = 1e-6
 _USAGE_JSONL_DEFAULT = os.path.expanduser(
     "~/wingmen/fleet-health/state/deepseek_usage_by_key.jsonl"
 )
@@ -230,6 +252,94 @@ def _write_map(mapping: dict) -> None:
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,40}$")
 
 
+def _key_name_for_slug(slug: str) -> str:
+    """Vault key NAME for a slug. Hyphens fold to underscores: vault names are
+    the identifier half of the resolver chain (deepseek_key_for_family ->
+    provider_vault_fetch), and `-` is the lane-family separator, so it must
+    not leak into the secret name."""
+    return f"DEEPSEEK_KEY_{slug.upper().replace('-', '_')}"
+
+
+def _vault_has_key(key_name: str) -> bool:
+    """Name-only existence check. Deliberately NOT vault.get(): that decrypts
+    and returns the value, and a key value must never enter this process
+    unless it is on its way into vault.put()."""
+    import psycopg
+
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        raise RuntimeError(
+            "DATABASE_URL not set in this process's environment (source "
+            "~/wingmen/orchestrator/.env first)."
+        )
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM public.vault_secrets WHERE name = %s", (key_name,))
+        return cur.fetchone() is not None
+
+
+def _create_console_key(slug: str, headed: bool) -> str:
+    """Drive /api_keys, create ONE key named `slug`, return its value.
+
+    Shared by add-client and split-key so the split path can never drift from
+    the creation path that was verified against the live DOM. The return value
+    exists only to be handed to vault.put() by the caller in the same frame --
+    it is never printed, logged, or stored anywhere else.
+    """
+    from playwright.sync_api import sync_playwright
+
+    sel = _SEL["api_keys_page"]
+    with sync_playwright() as p:
+        ctx = _context(p, headed=headed)
+        try:
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            page.goto(sel["url"])
+            _require_logged_in(page, sel)
+
+            page.click(sel["create_button"])
+            try:
+                page.wait_for_selector(sel["dialog_title"], timeout=8000)
+                page.fill(sel["name_input"], slug)
+                # Doubles as the form-accepted-the-name check: the footer
+                # primary stays --disabled until the input has content.
+                page.wait_for_selector(sel["confirm_create"], timeout=8000)
+            except Exception as exc:
+                raise LayoutMismatch(
+                    "create-key dialog did not appear in the expected shape "
+                    "(title / name input / enabled confirm button) -- aborting "
+                    "before anything is created or written"
+                ) from exc
+            page.click(sel["confirm_create"])
+
+            try:
+                page.wait_for_selector(sel["revealed_key_value"], timeout=15000)
+            except Exception as exc:
+                raise LayoutMismatch(
+                    "key-created dialog didn't show the expected revealed-value "
+                    "selector -- the console may have created the key but its "
+                    f"value was NOT captured. Check /api_keys for a duplicate "
+                    f"named {slug!r} before re-running; nothing was vaulted."
+                ) from exc
+
+            key_value = page.locator(sel["revealed_key_value"]).first.inner_text().strip()
+            # Dismiss the dialog before returning -- the caller vaults
+            # immediately and never reads key_value again.
+            for candidate in sel["dialog_done_candidates"]:
+                if page.locator(candidate).count() > 0:
+                    page.click(candidate)
+                    break
+            else:
+                page.keyboard.press("Escape")
+        finally:
+            ctx.close()
+
+    if not key_value:
+        raise LayoutMismatch(
+            f"revealed key field was empty for {slug!r} -- the console may have "
+            "created the key but no value was captured; nothing was vaulted."
+        )
+    return key_value
+
+
 def cmd_add_client(args) -> int:
     slug = args.slug.strip().lower()
     if not _SLUG_RE.match(slug):
@@ -260,56 +370,11 @@ def cmd_add_client(args) -> int:
         )
         return 1
 
-    key_name = f"DEEPSEEK_KEY_{slug.upper().replace('-', '_')}"
+    key_name = _key_name_for_slug(slug)
 
-    from playwright.sync_api import sync_playwright
     from nervous_system.vault import vault
 
-    sel = _SEL["api_keys_page"]
-    with sync_playwright() as p:
-        ctx = _context(p, headed=args.headed)
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        page.goto(sel["url"])
-        _require_logged_in(page, sel)
-
-        page.click(sel["create_button"])
-        try:
-            page.wait_for_selector(sel["dialog_title"], timeout=8000)
-            page.fill(sel["name_input"], slug)
-            # Doubles as the form-accepted-the-name check: the footer primary
-            # stays --disabled until the input has content.
-            page.wait_for_selector(sel["confirm_create"], timeout=8000)
-        except Exception as exc:
-            raise LayoutMismatch(
-                "create-key dialog did not appear in the expected shape "
-                "(title / name input / enabled confirm button) -- aborting "
-                "before anything is created or written"
-            ) from exc
-        page.click(sel["confirm_create"])
-
-        try:
-            page.wait_for_selector(sel["revealed_key_value"], timeout=15000)
-        except Exception as exc:
-            raise LayoutMismatch(
-                "key-created dialog didn't show the expected revealed-value "
-                "selector -- aborting before any vault write, no key value "
-                "was captured"
-            ) from exc
-
-        key_value = page.locator(sel["revealed_key_value"]).first.inner_text().strip()
-        # Dismiss the dialog BEFORE releasing key_value from scope -- no
-        # screenshot, no further read of key_value past the vault.put below.
-        for candidate in sel["dialog_done_candidates"]:
-            if page.locator(candidate).count() > 0:
-                page.click(candidate)
-                break
-        else:
-            page.keyboard.press("Escape")
-        ctx.close()
-
-    if not key_value:
-        print("revealed key field was empty -- aborting, nothing written", file=sys.stderr)
-        return 1
+    key_value = _create_console_key(slug, args.headed)
 
     vault.put(
         key_name,
@@ -321,6 +386,257 @@ def cmd_add_client(args) -> int:
     mapping[slug] = key_name
     _write_map(mapping)
     print(f"client {slug!r} -> vault key {key_name!r} (map updated, value never printed)")
+    return 0
+
+
+def _run_key_map_check() -> tuple[int, str]:
+    """Shell out to the standing map/vault consistency check
+    (scripts/check_deepseek_key_map.py, bus #84005/#84011). Self-locating, so
+    it reads the same deepseek_key_map.json this script just wrote."""
+    proc = subprocess.run(
+        [sys.executable, _CHECK_MAP_SCRIPT],
+        capture_output=True, text=True, cwd=_ORCH_ROOT,
+    )
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return proc.returncode, out
+
+
+def _boot_check(slug: str, vault_key: str) -> tuple[bool, str]:
+    """Walk the REAL launch-time key chain for one family and report only
+    whether it survives.
+
+    provider_routing.sh resolves the vault key NAME via
+    deepseek_key_for_family.py(<agent_id>) and then fetches its value via
+    provider_vault_fetch.py. We do exactly the same two hops. The second hop
+    prints the raw key on stdout, so its stdout goes to DEVNULL and is never
+    read into this process -- only the exit status counts. The first hop
+    prints a key NAME, which is not a secret and is compared to what we just
+    wrote, catching the case where the map flip silently didn't take.
+    """
+    agent_id = f"cc-{slug}-1"
+    env = dict(os.environ, AGENT_ID=agent_id)
+
+    resolver = os.path.join(_ORCH_ROOT, "scripts", "lib", "deepseek_key_for_family.py")
+    fetch = os.path.join(_ORCH_ROOT, "scripts", "lib", "provider_vault_fetch.py")
+    for path in (resolver, fetch):
+        if not os.path.exists(path):
+            return False, f"missing {path}"
+
+    resolved = subprocess.run(
+        [sys.executable, resolver, agent_id],
+        capture_output=True, text=True, cwd=_ORCH_ROOT, env=env,
+    )
+    name = (resolved.stdout or "").strip()
+    if resolved.returncode != 0 or not name:
+        return False, f"family resolver failed for {agent_id}: {(resolved.stderr or '').strip()}"
+    if name != vault_key:
+        return False, f"resolver returned {name!r} for {agent_id}, expected {vault_key!r}"
+
+    fetched = subprocess.run(
+        [sys.executable, fetch, vault_key, "deepseek"],
+        stdout=subprocess.DEVNULL, text=True, cwd=_ORCH_ROOT, env=env,
+        stderr=subprocess.PIPE,
+    )
+    if fetched.returncode != 0:
+        # stderr is captured for diagnosis and then PRINTED, so it is treated
+        # as untrusted: provider_vault_fetch.py writes the value to stdout
+        # only, but nothing here should depend on that staying true forever
+        # (cc-quality confirm on PR#745).
+        return False, f"vault fetch failed for {vault_key!r}: {_redact(fetched.stderr)}"
+    return True, f"{agent_id} -> {vault_key!r} -> value present"
+
+
+_KEY_SHAPE_RE = re.compile(r"sk-[A-Za-z0-9_\-]{16,}")
+
+
+def _redact(text: str | None) -> str:
+    """Strip anything key-shaped out of text that is about to be printed.
+    Belt and braces: the value should never reach stderr in the first place."""
+    # The replacement deliberately carries no "sk-" of its own, so a blunt
+    # "no sk- in the output" check keeps meaning what it says.
+    return _KEY_SHAPE_RE.sub("[REDACTED-KEY]", (text or "").strip())
+
+
+def _rollback(slug: str, previous: str, enabled: bool) -> str:
+    """Restore one map row after a POST-FLIP verification failure.
+
+    Default ON (cc-quality F1 on PR#745). The failure state this covers is a
+    family whose map now points at a key we just proved does not resolve or
+    load -- i.e. that family cannot boot -- left for a human to notice in
+    stderr. That is the same down-state the vault-before-map ordering exists
+    to prevent, just relocated past the flip. `current` is already in hand, so
+    restoring it is free.
+
+    --no-rollback-on-failure keeps the row flipped, for when the operator wants
+    to inspect a genuine resolver bug in place instead of watching the symptom
+    disappear.
+    """
+    if not enabled:
+        return (
+            f"NOT rolled back (--no-rollback-on-failure): map row {slug!r} is "
+            f"still on the NEW key. Restore it to {previous!r} to make the "
+            "family boot again.\n"
+        )
+    try:
+        mapping = _load_map()
+        mapping[slug] = previous
+        _write_map(mapping)
+    except Exception as exc:  # noqa: BLE001 -- reporting beats crashing here
+        return (
+            f"ROLLBACK FAILED ({exc}) -- restore {slug!r} to {previous!r} in "
+            "scripts/lib/deepseek_key_map.json by hand; until then that family "
+            "cannot boot.\n"
+        )
+    return (
+        f"ROLLED BACK: map row {slug!r} restored to {previous!r}, so this "
+        "family still boots on the key it used before.\n"
+    )
+
+
+def cmd_split_key(args) -> int:
+    """Repoint ONE existing client slug from the shared DEEPSEEK_CODING_KEY to
+    its own console key (bus #87091 GO: 16 keys, one per family slug, named
+    exactly the slug).
+
+    Order is the whole point, and it is NOT negotiable: create the console key
+    -> vault the value -> flip the map row -> re-run the consistency check.
+    provider_routing.sh FAILS CLOSED when the resolved vault key is missing,
+    so flipping the map before the secret exists would stop that family's
+    lanes from booting. Every intermediate crash therefore leaves a state that
+    still boots: before the flip the map points at the shared key, which is
+    still valid.
+
+    --flip-only exists for the one recovery case: a previous run crashed after
+    the vault write but before the map flip (vault has the secret, map still
+    on the shared key). Without it the natural retry would create a SECOND
+    console key with the same name.
+
+    The shared key itself is NEVER revoked here -- that is a separate,
+    explicitly-gated step after every family has been verified.
+    """
+    slug = args.slug.strip().lower()
+    if not _SLUG_RE.match(slug):
+        print(
+            f"invalid slug {args.slug!r}: must be lowercase, start with a "
+            "letter, alnum/hyphen only, <=41 chars",
+            file=sys.stderr,
+        )
+        return 1
+
+    mapping = _load_map()
+    if slug not in mapping:
+        print(
+            f"refusing: slug {slug!r} is not in the map. split-key only "
+            "re-points an EXISTING family; use add-client for a brand-new client.",
+            file=sys.stderr,
+        )
+        return 1
+
+    target = _key_name_for_slug(slug)
+    current = mapping[slug]
+
+    if current == target:
+        print(f"already split: {slug!r} -> {target!r}. Nothing to do.", file=sys.stderr)
+        return 1
+    if current != _SHARED_KEY_NAME:
+        print(
+            f"refusing: {slug!r} is mapped to {current!r}, not the shared "
+            f"{_SHARED_KEY_NAME!r}. That row was set outside this script; "
+            "not repointing it.",
+            file=sys.stderr,
+        )
+        return 1
+
+    vault_has = _vault_has_key(target)
+    if vault_has and not args.flip_only:
+        print(
+            f"refusing: vault already holds {target!r} but the map still "
+            f"points at {_SHARED_KEY_NAME!r} -- an earlier run stopped after "
+            "the vault write. Re-run with --flip-only to finish the flip "
+            "without creating a SECOND console key.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.flip_only and not vault_has:
+        print(
+            f"refusing --flip-only: vault has no {target!r}. Flipping now "
+            "would make provider_routing.sh fail closed and the family's "
+            "lanes would not boot. Run without --flip-only.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.dry_run:
+        print(
+            f"dry run -- {slug!r}\n"
+            f"  1. {'(skip: --flip-only) ' if args.flip_only else ''}"
+            f"create console API key named {slug!r}, read its value once\n"
+            f"  2. {'(skip: --flip-only) ' if args.flip_only else ''}"
+            f"vault.put({target!r}, <value>)  -- value never printed\n"
+            f"  3. map row {slug!r}: {current!r} -> {target!r}\n"
+            f"  4. re-run check_deepseek_key_map.py\n"
+            f"  5. boot check: cc-{slug}-1 resolves to {target!r} and its "
+            "value loads (stdout discarded)\n"
+            f"  6. {_SHARED_KEY_NAME!r} is NOT revoked (separate gated step)"
+        )
+        return 0
+
+    from nervous_system.vault import vault
+
+    if not args.flip_only:
+        key_value = _create_console_key(slug, args.headed)
+        try:
+            vault.put(
+                target,
+                key_value,
+                reason=f"deepseek_console.py split-key {slug} (op#36768, bus #87091)",
+            )
+        finally:
+            key_value = None  # noqa: F841 -- scrubbed even if the write raised
+        print(f"1/4 created console key {slug!r} and vaulted {target!r} (value never printed)")
+    else:
+        print(f"1/4 --flip-only: reusing existing vault secret {target!r}, no console key created")
+
+    mapping[slug] = target
+    _write_map(mapping)
+    print(f"2/4 map row flipped: {slug!r}: {current!r} -> {target!r}")
+
+    rc, out = _run_key_map_check()
+    if rc != 0:
+        print(
+            "3/4 check_deepseek_key_map.py FAILED (exit %d):\n%s\n\n%s"
+            "The vault secret %r is harmless if left in place."
+            % (
+                rc,
+                _redact(out) or "(no output)",
+                _rollback(slug, current, args.rollback_on_failure),
+                target,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    print("3/4 check_deepseek_key_map.py: every referenced vault key exists")
+
+    if args.skip_boot_check:
+        print("4/4 boot check SKIPPED (--skip-boot-check)")
+        return 0
+
+    ok, detail = _boot_check(slug, target)
+    if not ok:
+        print(
+            f"4/4 boot check FAILED: {_redact(detail)}\n"
+            f"This family would fail closed at launch.\n"
+            + _rollback(slug, current, args.rollback_on_failure),
+            file=sys.stderr,
+        )
+        return 2
+    print(f"4/4 boot check OK: {detail}")
+    print(
+        f"\nNext: confirm real spend lands under api_key_name={slug!r} by "
+        "running `deepseek_console.py usage-export` once a request has gone "
+        f"through this family. {_SHARED_KEY_NAME!r} is still live and is NOT "
+        "revoked by this command."
+    )
     return 0
 
 
@@ -360,9 +676,12 @@ def parse_export_zip(zip_bytes: bytes, since: str | None = None):
 
     Cost is amount x price, summed per record. cost-<from>_<to>.csv is the
     console's own per-(day, model) total and carries the currency, so it is
-    read both for the currency label and as a CROSS-CHECK -- its delta is
-    reported in the summary rather than silently trusted, because a mismatch
-    means either the export shape changed or the per-key split double-counts.
+    read both for the currency label and as an ENFORCED cross-check: a delta
+    above _COST_CROSS_CHECK_TOLERANCE_USD raises LayoutMismatch and writes
+    nothing, because a mismatch means either the export shape changed or the
+    per-key split double-counts, and the JSONL is consumed as authoritative.
+    Rows that cannot be attributed raise rather than being skipped for the
+    same reason.
     """
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         members = zf.namelist()
@@ -387,17 +706,20 @@ def parse_export_zip(zip_bytes: bytes, since: str | None = None):
         )
 
     agg: dict = {}
-    for row in amount_rows:
+    unattributable: list = []
+    for lineno, row in enumerate(amount_rows, start=2):
         day = (row.get("start_time_iso") or "")[:10]
         key_name = (row.get("api_key_name") or "").strip()
         model = (row.get("model") or "").strip()
         usage_type = (row.get("type") or "").strip()
         if not day or not key_name or not usage_type:
+            unattributable.append(f"amount csv line {lineno}: missing day/key/type")
             continue
         try:
             amount = float(row.get("amount") or 0)
             price = float(row.get("price") or 0)
-        except ValueError:
+        except (TypeError, ValueError):
+            unattributable.append(f"amount csv line {lineno}: non-numeric amount/price")
             continue
         rec = agg.setdefault(
             (day, key_name, model),
@@ -414,7 +736,7 @@ def parse_export_zip(zip_bytes: bytes, since: str | None = None):
 
     console_cost: dict = {}
     currency = None
-    for row in cost_rows:
+    for lineno, row in enumerate(cost_rows, start=2):
         day = (row.get("start_time_iso") or "")[:10]
         model = (row.get("model") or "").strip()
         currency = row.get("currency") or currency
@@ -422,8 +744,23 @@ def parse_export_zip(zip_bytes: bytes, since: str | None = None):
             console_cost[(day, model)] = (
                 console_cost.get((day, model), 0.0) + float(row.get("cost") or 0)
             )
-        except ValueError:
+        except (TypeError, ValueError):
+            unattributable.append(f"cost csv line {lineno}: non-numeric cost")
             continue
+
+    if unattributable:
+        # Fail closed instead of dropping the row. A skipped row does not
+        # disappear -- it silently moves its spend into somebody else's
+        # bucket or out of the total entirely, and the JSONL is written as
+        # authoritative. Same posture as the shape checks above: abort rather
+        # than guess (cc-quality F1 on PR#744).
+        raise LayoutMismatch(
+            f"usage export has {len(unattributable)} row(s) this parser cannot "
+            "attribute, so any per-key total we computed would be a guess "
+            f"({len(amount_rows)} amount rows, {len(cost_rows)} cost rows): "
+            + "; ".join(unattributable[:5])
+            + (" ..." if len(unattributable) > 5 else "")
+        )
 
     our_cost: dict = {}
     for (day, _key, model), rec in agg.items():
@@ -431,6 +768,28 @@ def parse_export_zip(zip_bytes: bytes, since: str | None = None):
     max_abs_diff = max(
         (abs(our_cost.get(k, 0.0) - v) for k, v in console_cost.items()), default=0.0
     )
+
+    if max_abs_diff > _COST_CROSS_CHECK_TOLERANCE_USD:
+        # ENFORCED, not just printed (cc-quality F1 on PR#744): this delta is
+        # the only detector of a changed export shape or a per-key split that
+        # double-counts. Reporting it in a summary only helps whoever reads
+        # that summary; a consumer of the JSONL sees authoritative-looking
+        # rows either way. Refuse to write.
+        worst = sorted(
+            ((abs(our_cost.get(k, 0.0) - v), k) for k, v in console_cost.items()),
+            reverse=True,
+        )[:3]
+        detail = ", ".join(
+            f"{k[0]}/{k[1]}: ours={our_cost.get(k, 0.0):.10f} "
+            f"console={console_cost[k]:.10f}"
+            for _diff, k in worst
+        )
+        raise LayoutMismatch(
+            "cost cross-check FAILED: summing amount x price does not reproduce "
+            f"the console's own cost export (max abs diff ${max_abs_diff:.10f}, "
+            f"tolerance ${_COST_CROSS_CHECK_TOLERANCE_USD:g}). Worst: {detail}. "
+            "Per-key attribution would be wrong if written; refusing to write."
+        )
 
     if since:
         _validate_iso_date(since)
@@ -516,6 +875,11 @@ def cmd_usage_export(args) -> int:
     sel = _SEL["usage_page"]
     out_path = os.path.expanduser(args.out or _USAGE_JSONL_DEFAULT)
 
+    # Validate the date BEFORE driving a browser: a typo should cost a second,
+    # not a full export download (cc-quality, PR#744 minor note).
+    if args.since:
+        _validate_iso_date(args.since)
+
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -575,6 +939,33 @@ def main(argv) -> int:
     p_add.add_argument("slug")
     p_add.add_argument("--headed", action="store_true", help="show the browser (debugging only; default headless)")
     p_add.set_defaults(func=cmd_add_client)
+
+    p_split = sub.add_parser(
+        "split-key",
+        help="repoint ONE existing client slug onto its own console key "
+             "(create -> vault -> flip map row -> consistency check -> boot check)",
+    )
+    p_split.add_argument("slug")
+    p_split.add_argument("--headed", action="store_true", help="show the browser (debugging only; default headless)")
+    p_split.add_argument(
+        "--flip-only",
+        action="store_true",
+        help="skip key creation; finish a run that crashed after the vault write but before the map flip",
+    )
+    p_split.add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
+    p_split.add_argument(
+        "--skip-boot-check",
+        action="store_true",
+        help="skip walking the real launch-time resolver/fetch chain after the flip",
+    )
+    p_split.add_argument(
+        "--no-rollback-on-failure",
+        dest="rollback_on_failure",
+        action="store_false",
+        help="leave the map row flipped if post-flip verification fails "
+             "(default: restore it, so the family keeps booting)",
+    )
+    p_split.set_defaults(func=cmd_split_key, rollback_on_failure=True)
 
     p_list = sub.add_parser("list-clients", help="list mapped clients: slug, vault key NAME, created_at (no values)")
     p_list.set_defaults(func=cmd_list_clients)
