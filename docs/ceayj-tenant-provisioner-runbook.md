@@ -163,3 +163,116 @@ What the four steps do (each idempotent; re-runs report already-applied):
   (#77536), and CREATEROLE cannot escalate on 17 (finding 2).
 - server: full ladder incl. audit invariant (no store connection before a
   committed started row), server-major >=16 floor, DSN never echoed.
+
+## Adoption round (bus #80291 plan, #80298 approval, 2026-10-29) — migration 129
+
+The live apply died at the step-3 canary: RLS on `organizations` (all tables
+store-wide carry it) blocks fleet_provisioner — the platform ships exactly 3
+public policies on that table (slug-lookup SELECT, org-admin UPDATE,
+users-see-their-orgs SELECT) and NO INSERT/DELETE policy, so the canary's
+org INSERT violates row-level security.
+
+Fix = migration `129_ceayj_adopt_bariq_provisioner.sql` (sha12
+4583e00059a4; requires installer step 3 landed first). **#80366
+redesign: NO ownership transfer, NO admin grant on the editor role** —
+the earlier draft transferred ownership of the live artifacts to fp (so
+the bundle's REVOKE/GRANT/RLS block would run) and granted fp ADMIN
+OPTION on bariq_editor (so the bundle's DROP ROLE would run). Both are
+gone: the revert could never give ownership back (PG16+ ALTER ... OWNER
+TO requires SET ROLE to the target owner, which fp must never hold), a
+revert that drops bariq_editor takes down Bariq's LIVE editing, and the
+admin grant widened fp's power over a live client role only to enable
+that drop. Ownership never moves; the record tells the bundle what to
+skip instead:
+
+1. **org policies for fp only**: `organizations_fp_insert` (INSERT, WITH
+   CHECK on the `managed_by` marker) + `organizations_fp_delete` (DELETE,
+   USING on the marker). No SELECT policy → no tenant read path widens. An
+   INSERT policy carries no USING; a DELETE whose USING never matches is a
+   silent 0-row no-op — fp can only ever touch rows a bundle created.
+   KNOWN LIMIT (accepted, #80298 A.1): a tenant org_admin can edit its own
+   settings; the marker is not tamper-proof against that tenant.
+2. **privilege sync, the only admin-side artifact change**: the live
+   posture was probed read-only (2026-10-29) and pinned by asserts — RLS
+   on both content tables, anon SELECT-only on content, editor
+   SELECT+UPDATE on content / SELECT-only on history, anon nothing on
+   history. The ONE divergence from the rendered posture (PUBLIC-default
+   EXECUTE on the audit fn, never revoked in the manual era) is REVOKEd
+   here, as the owner. The artifacts stay exactly where they are.
+3. **marker on the org row** (`settings.managed_by`), idempotent.
+4. **`provisioner_revert_snapshots`** marker table (ops metadata ONLY:
+   counts, sha256s, path, timestamp) + fp-only ALL policy + SELECT/INSERT.
+5. **`provisioner_adopted_objects`** — the adoption RECORD (#80366): one
+   row per adopted object (both tables, audit fn, bariq_editor role, the
+   org row), with `original_owner` read LIVE from the catalog (never
+   typed) at adoption time. fp holds SELECT-only on it. A fresh
+   bundle-created client records nothing (seeds guard on
+   `owner IS DISTINCT FROM 'fleet_provisioner'`).
+
+The migration ASSERTS the live shape first (roles — bariq_editor must be
+LOGIN, it is in live use; the three org policies; the bariq org row
+id/slug/type; column shapes via pg_attribute — NOT information_schema,
+whose columns view is privilege-visible and would wrongly refuse a re-run
+once the admin no longer owns the tables; policy presence COUNTED per
+named policy — `NOT EXISTS (... IN (a,b,c))` refuses only at zero
+matches, so partial drift passed (cc-quality #80372); plus the full
+privilege/RLS posture above) and refuses named-error on any drift.
+Idempotent: a re-run over a completed adoption is a no-op.
+
+**Bundle render changes** (new bundle sha256
+ae080e121a1c7f7413fbcdbcbd6fe3b23a1f743a309b9b47c4f8ec39abe945cc):
+
+- org INSERT carries the marker (canary too).
+- every object-creating statement sits in an EXACT-shape guard: absent →
+  created; present → accepted ONLY at the exact rendered shape; anything
+  else `SHAPE-REFUSED` (#80298 condition 3 — pg_policies deparse equality
+  for policies, whitespace-normalized prosrc for the audit fn, column
+  shape for tables). Deparse ground truth pinned against the live store:
+  `(org_id = '<uuid>'::uuid)`.
+- migration_ledger creation is existence-guarded (pre-existing ledger =
+  store infra; the REVOKE/ENABLE-RLS only run on the create path).
+- **adoption-guarded forward**: the privilege/RLS block (REVOKE/GRANT/
+  ENABLE-RLS on the content tables) and the editor table grants run on
+  the FRESH path only — when the adoption record names the content table,
+  the forward skips both with `FORWARD-SKIPPED-ADOPTED` notices (the
+  adopting migration already asserted+synced that posture; REVOKE/GRANT/
+  RLS need an ownership fp no longer has, deliberately). The adoption
+  check is two-level on purpose: SQL's AND does not short-circuit, so an
+  inline `to_regclass(...) IS NOT NULL AND EXISTS(...)` plan-errors on a
+  world without the record table.
+- **revert skips ALL teardown for adopted objects** (#80366): each of the
+  three teardown blocks (tables group, editor role, org row) checks the
+  record first and skips with a named `REVERT-SKIPPED-ADOPTED` notice —
+  the editor stays LOGIN, the tables keep their rows under their ORIGINAL
+  owner, the site read path (policies, trigger, fn) and the org row stay.
+  The revert undoes only what the forward CREATED.
+- **revert refuses without a verified snapshot** (#80298 condition 1),
+  FRESH clients only: dropping tables that hold rows raises
+  `REVERT-REFUSED` unless a marker row in provisioner_revert_snapshots
+  matches the LIVE counts. The daemon's revert flow consults the
+  adoption record first and SKIPS the belt for adopted clients — their
+  revert drops nothing, and fp deliberately holds no read path on the
+  adopted tables, so the export could not run (the belt arms the
+  destructive path). For fresh clients the snapshot lands in the SAME
+  store txn right before executing the revert SQL: COPY each table
+  (deterministic order), write 0600 files under
+  `.secrets/provisioner_snapshots/` (0700 dir), re-read the bytes,
+  reconcile line count vs SQL count, then insert the marker — anything
+  short refuses and nothing drops. Restoring = re-run forward, then
+  `COPY ... FROM` the snapshot files (psycopg3 surfaces COPY streams
+  WITHOUT the `\.` trailer; COPY FROM takes trailer-less data).
+- snapshot files are tenant data on disk (that is their job); the marker
+  row is ops metadata only (TENANT-RESIDENCY-001).
+
+PG17 harness (test_install_store_role_pg17.py) now mirrors the LIVE world —
+RLS'd organizations with the 3 platform policies, pre-existing
+admin-owned artifacts with real rows, bariq_editor created LOGIN — and
+proves: the pre-fix canary denial (RED anchor), forward idempotency over
+the adopted world, SHAPE-REFUSED on a drifted policy, adoption NEVER
+transfers ownership or privileges (original owners recorded read-live,
+fn PUBLIC-EXECUTE synced), the adopted revert leaves the live surface
+intact (editor still LOGIN, rows kept under the original owner, policies/
+trigger/fn/org row untouched), the FRESH cycle still refuses-without-
+snapshot then drops and restores byte-identically (the belt survives the
+adoption path), migration idempotency, unmarked-row DELETE is a silent
+0-row no-op, and the full grants/canary/lifecycle surface as fp.

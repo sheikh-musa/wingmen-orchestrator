@@ -73,6 +73,7 @@ import os
 import shutil
 import socket
 import subprocess
+import re
 import sys
 import tempfile
 import time
@@ -672,11 +673,42 @@ def _apply_sql(dsn: str, sql_text: str, label: str, *, tolerate: str | None = No
         raise RuntimeError(f"failed applying {label}: {e}") from e
 
 
+_HEADER_SILO_RE = re.compile(r"^--\s*ledger:\s*silo=([a-z0-9]+)\s*$", re.MULTILINE)
+
+
 def _apply_file(dsn: str, path: Path) -> None:
     sql_text = path.read_text()
     for needle, replacement in _PSQL_BINDVAR_SUBSTITUTIONS.get(path, {}).items():
         sql_text = sql_text.replace(needle, replacement)
     tolerate = _KNOWN_SCHEMA_SQL_OVERLAP.get(path) or _DEAD_MIGRATION_TARGETS.get(path)
+
+    # orch-console #80426/#80462, guard per #80463: a migrations/*.sql file
+    # whose ledger header declares a REGISTERED production store other than
+    # the orchestrator substrate is store-targeted (129 is the first) — out
+    # of this SUBSTRATE bootstrap's scope by its own declaration, and its
+    # section-0 asserts correctly refuse on the ephemeral substrate (no
+    # fleet_provisioner there). Skip loudly. A header naming an UNKNOWN ref
+    # FAILS the bootstrap instead: a typo can never silently drop a substrate
+    # migration out of CI. Headerless files (the 53 historical migrations)
+    # and substrate-declaring files apply as before. Both refs are checked
+    # against apply_migration's own constants — never a typed list here.
+    m = _HEADER_SILO_RE.search(sql_text)
+    if m:
+        declared = m.group(1)
+        if declared == am.ORCHESTRATOR_SUBSTRATE_SILO:
+            pass  # in scope — apply below exactly as a headerless file would
+        elif declared in am.PRODUCTION_SILOS:
+            print(f"  (skipping {path.name}: ledger header declares silo={declared} — "
+                  f"store-targeted, out of the substrate bootstrap's scope)",
+                  file=sys.stderr)
+            return
+        else:
+            raise RuntimeError(
+                f"{path.name}: ledger header declares silo={declared}, which is "
+                f"neither the orchestrator substrate nor a registered production "
+                f"store — refusing rather than guessing scope (a typo here must "
+                f"fail the bootstrap loud, not silently drop a substrate "
+                f"migration from CI)")
 
     # bus #64418 option (a): mirror apply_migration.py's own CAI-RESP-1397 #5 gate
     # here, so a migration with an unasserted REVOKE/DROP FUNCTION fails CI the same
