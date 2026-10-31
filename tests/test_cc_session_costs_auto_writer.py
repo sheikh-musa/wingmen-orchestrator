@@ -310,17 +310,35 @@ class TestProtectedAgentCoverage:
         this map, the protected-agent exclusion has to come back FIRST. This
         fails the moment a second consumer appears.
         """
+        import subprocess
+
         root = Path(__file__).resolve().parent.parent
         allowed = {
             "nervous_system/cc_session_costs_auto_writer.py",  # definition
             "scripts/cc_session_costs_writer_run.py",          # the one consumer
             "tests/test_cc_session_costs_auto_writer.py",      # this file
         }
+        # A new consumer has to be COMMITTED to matter, so scan tracked files
+        # when this is a git checkout: it is both the right semantic and far
+        # cheaper than walking an installed .venv (13k of 16k files, 5s).
+        candidates: list[Path] = []
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(root), "ls-files", "*.py"],
+                capture_output=True, text=True, timeout=60, check=True)
+            candidates = [root / line for line in out.stdout.splitlines() if line]
+        except (OSError, subprocess.SubprocessError):
+            candidates = []  # not a git tree — fall back to a directory walk
+        if not candidates:
+            skip_dirs = {".git", ".venv", "venv", "node_modules", "__pycache__"}
+            for path in root.rglob("*.py"):
+                rel_parts = path.relative_to(root).parts
+                if rel_parts[0].startswith(".") or skip_dirs.intersection(rel_parts[:-1]):
+                    continue  # .claude/worktrees, .venv, node_modules, caches
+                candidates.append(path)
         hits = set()
-        for path in root.rglob("*.py"):
+        for path in candidates:
             rel = path.relative_to(root).as_posix()
-            if rel.startswith(".claude/"):
-                continue  # stale agent/worktree copies, not part of this tree
             if rel in allowed:
                 continue
             try:
