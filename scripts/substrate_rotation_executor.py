@@ -147,14 +147,6 @@ def vault_rotate(name: str, value: str, reason: str) -> None:
     rot._vault().rotate(name, value, reason)
 
 
-def vault_has_current(name: str, reason: str):
-    rot._ensure_database_url_in_process(rot.DEFAULT_ENV_FILE)
-    try:
-        return rot._vault().get(name, reason=reason)
-    except Exception:
-        return None
-
-
 # ── the executor ──────────────────────────────────────────────────────────────
 
 class Rotation:
@@ -171,6 +163,12 @@ class Rotation:
         return self.d.get(name, globals()[name])
 
     def _record(self, step, outcome, **fields):
+        # Scrub EVERY string that leaves this process, not only the failure text the
+        # driver builds (cc-quality 88061). A step can carry third-party text into a
+        # journal line — an API error body, launchctl stderr, a tmux complaint — and the
+        # rule is that no emitted line holds the value, whatever produced it.
+        fields = {k: (self._scrub(v) if isinstance(v, str) else v)
+                  for k, v in fields.items()}
         entry = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                  "step": step, "outcome": outcome}
         entry.update(fields)
@@ -196,8 +194,12 @@ class Rotation:
     def preflight(self):
         """Everything that can be known without writing. Raises Refused."""
         needle = self.args.old_sha8.strip().lower()
-        if not rot.sha_prefix_matches("x", needle) and len(needle) < 8:
-            raise Refused("--old-sha8 must be at least 8 hex characters")
+        # Same rule cmd_apply uses: 8..64 hex. A shorter or empty prefix matches
+        # everything, which would rewrite the whole file.
+        if not (8 <= len(needle) <= 64) or any(c not in "0123456789abcdef"
+                                               for c in needle):
+            raise Refused("--old-sha8 must be 8 to 64 hex characters of the sha256 of "
+                          "the CURRENT password")
         targets = self._targets()
         for path in targets:
             if not path.exists():
@@ -218,9 +220,25 @@ class Rotation:
             if not self._fn("launchd_present")(label):
                 raise Refused(f"launchd job {label} is not loaded — the restart pass "
                               "would silently miss a holder")
-        if not os.environ.get("SUPABASE_ACCESS_TOKEN") and not self.args.token_env:
-            raise Refused("SUPABASE_ACCESS_TOKEN is not set and no --token-env given")
-        if not self._fn("probe")(rot.database_url(targets[0]) or ""):
+        # The PAT names the variable to read, so check THAT variable. The earlier form
+        # tested only the default env var and short-circuited on the default being set
+        # on args, so it could never fire: a missing PAT surfaced at patch time, after
+        # the files were already rewritten.
+        if not os.environ.get(self.args.token_env or "SUPABASE_ACCESS_TOKEN"):
+            raise Refused(f"{self.args.token_env or 'SUPABASE_ACCESS_TOKEN'} is not "
+                          "set — the PATCH could not be authorised")
+        old_dsn = rot.database_url(targets[0]) or ""
+        # Hold the OLD DSN for the verify step. It must be THIS run's old value, taken
+        # from a file the preflight has just proved is live. Reading the newest backup
+        # at verify time would accept any older dead password as proof that the reset
+        # landed — a false PASS on the only check that decides whether it happened.
+        #
+        # Set BEFORE the probe on purpose: the probe is the first step that reaches the
+        # network, so it is the most likely place for a library error that quotes the
+        # connection string it could not use. Held only after the probe, that value was
+        # not yet known to _scrub, so the refusal printed the live old password.
+        self.old_dsn = old_dsn
+        if not self._fn("probe")(old_dsn):
             raise Refused("the OLD password does not connect right now — rotating now "
                           "would leave no working credential and no way back")
         for path in targets:
@@ -236,10 +254,10 @@ class Rotation:
         if len(pw) < rot.MIN_PASSWORD_LEN or any(c.isspace() for c in pw):
             raise Refused("generated value does not satisfy our own floor")
         self.new_password = pw
-        current = self._fn("vault_has_current")("SUBSTRATE_DB_PASSWORD_NEW",
-                                                "rotation: read current before rotate")
-        if current is not None and current.value == pw:
-            raise Refused("the vault already holds this value — refuse to run twice")
+        # No "already generated" guard here: pw is freshly random every run, so
+        # comparing it to the stored value compares two different random strings and
+        # can never fire. Running twice is refused where it can actually be detected —
+        # preflight, because the second run's files no longer carry --old-sha8.
         self._fn("vault_rotate")("SUBSTRATE_DB_PASSWORD_NEW", pw,
                                  self.args.reason)
         self._record("generate", "OK", new=rot.mask(pw))
@@ -275,12 +293,20 @@ class Rotation:
         self._record("patch", "OK", ref=self.args.ref, detail=detail)
 
     def step_propagate(self):
-        ok, detail = self._fn("tmux_set_global")("DATABASE_URL", self.new_password)
+        # DATABASE_URL is a full postgresql:// DSN everywhere in this fleet — dsn_at_use
+        # parses it as a URL and falls back to os.environ when no file is readable. The
+        # BARE password here would hand every new pane an unparseable value: the step
+        # would "succeed" and corrupt the one surface it exists to fix.
+        dsn = rot.database_url(self._targets()[0])
+        if not dsn:
+            raise Refused("the rewritten file holds no DSN to propagate")
+        ok, detail = self._fn("tmux_set_global")("DATABASE_URL", dsn)
         self._record("propagate", "OK" if ok else "WARN", surface="tmux-global",
                      detail=detail or "set")
         self._record("propagate", "TODO",
                      surface="hub",
-                     detail="hub must set its environment after fetch-secrets")
+                     detail="hub must PULL (fetch-secrets), then run its restart "
+                            "groups — no push into its files")
 
     def step_restart(self):
         failed = []
@@ -294,25 +320,18 @@ class Rotation:
 
     def step_verify(self):
         new_dsn = rot.database_url(self._targets()[0])
-        old_dsn = None
-        for path in self._targets():
-            backup = rot.latest_backup(path)
-            if backup:
-                old_pw = rot.url_password(rot.database_url(backup) or "")
-                if old_pw:
-                    old_dsn = rot.dsn_with_password(new_dsn or "", old_pw)
-                    break
         if not new_dsn:
             raise Refused("no DSN in the rewritten file")
         # The old half is NOT optional. "New value connects" only proves the file and
         # the server agree; it does not prove the reset landed, because a pooler with a
-        # warm credential cache happily accepts both for a while. If no backup yields
-        # the old value we cannot ask the only question that answers "did this happen",
-        # so the run is not verified — refuse rather than record a pass we did not earn.
+        # warm credential cache happily accepts both for a while. And it must be THIS
+        # run's old value, captured by a preflight that proved it live — a backup picked
+        # up here could hold any older, already-dead password, which would answer
+        # "rejected" for a reason that has nothing to do with tonight's reset.
+        old_dsn = getattr(self, "old_dsn", None)
         if not old_dsn:
-            raise Refused("cannot recover the OLD password from any backup, so the "
-                          "old-password check cannot run — refusing to call this "
-                          "rotation verified")
+            raise Refused("no old credential captured at preflight — the old-password "
+                          "check cannot run; refusing to call this rotation verified")
         ok = False
         for attempt in range(1, self.args.retries + 1):
             ok = self._fn("probe")(new_dsn)
@@ -359,6 +378,23 @@ class Rotation:
         self._record("rollback", "OK" if restored else "nothing-to-do",
                      targets=len(restored))
 
+    def _scrub(self, text: str) -> str:
+        """No failure message may carry a credential into the journal or stdout.
+
+        The executor's own failures are `Refused` with hand-written text, but a library
+        error (psycopg, requests) can quote the connection it failed on, and this run's
+        values are in memory. Replacing the known values with their masks keeps a
+        traceback useful without turning it into a leak.
+        """
+        secrets_seen = [self.new_password]
+        old_dsn = getattr(self, "old_dsn", None)
+        if old_dsn:
+            secrets_seen.append(rot.url_password(old_dsn))
+        for value in secrets_seen:
+            if value and value in text:
+                text = text.replace(value, rot.mask(value))
+        return text
+
     def run(self):
         plan_only = not self.args.execute
         steps = [("preflight", self.preflight), ("generate", self.step_generate),
@@ -366,7 +402,18 @@ class Rotation:
                  ("propagate", self.step_propagate), ("restart", self.step_restart),
                  ("verify", self.step_verify)]
         if plan_only:
-            self.preflight()
+            # Plan is the dry run a human reads before executing. A refusal here is a
+            # normal answer, so it gets the same clean message and exit code as one in
+            # execute mode — not a Python traceback, which reads as "the tool is broken"
+            # and exits 1, a code that means something else.
+            try:
+                self.preflight()
+            except Exception as exc:  # noqa: BLE001 — same reason as the execute loop
+                text = self._scrub(str(exc))
+                err = (Refused(text) if isinstance(exc, Refused)
+                       else Refused(f"{type(exc).__name__}: {text}"))
+                print(f"plan: REFUSED — {err}. Nothing written.", file=sys.stderr)
+                return 3
             print("plan: preflight OK. Steps that WOULD run: " +
                   ", ".join(name for name, _ in steps[1:]) + ", watch")
             print("plan: nothing written. Re-run with --execute --confirm "
@@ -382,14 +429,26 @@ class Rotation:
                 fn()
                 if name == "patch":
                     patched = True
-            except Refused as exc:
-                self._record(name, "REFUSED", detail=str(exc))
+            except Exception as exc:  # noqa: BLE001
+                # EVERY failure lands here, not just Refused. A psycopg or OSError
+                # escaping this loop would skip the rollback for the exact failures
+                # (a dead vault table, a half-written file) the rollback exists for —
+                # the guarantee would then hold only for the errors we anticipated.
+                #
+                # A Refused is scrubbed too, not passed through: its text can carry a
+                # third party's words — the Management API's error body is built inside
+                # patch_password and echoes what was sent — so "we wrote this string
+                # ourselves" is not a reason to trust it (cc-quality 88061).
+                text = self._scrub(str(exc))
+                err = (Refused(text) if isinstance(exc, Refused)
+                       else Refused(f"{type(exc).__name__}: {text}"))
+                self._record(name, "REFUSED", detail=str(err))
                 if not patched:
                     self.rollback()
-                    print(f"execute: STOPPED at {name}: {exc}. Files restored; the "
+                    print(f"execute: STOPPED at {name}: {err}. Files restored; the "
                           "database still has the OLD password.", file=sys.stderr)
                 else:
-                    print(f"execute: STOPPED at {name}: {exc}. THE DATABASE NOW HAS "
+                    print(f"execute: STOPPED at {name}: {err}. THE DATABASE NOW HAS "
                           "THE NEW PASSWORD and the files already hold it; the failed "
                           "step is the only thing left — re-run that step, do not "
                           "re-rotate.", file=sys.stderr)
@@ -397,8 +456,11 @@ class Rotation:
         if self.args.watch_seconds > 0:
             try:
                 self.step_watch()
-            except Refused as exc:
-                self._record("watch", "REFUSED", detail=str(exc))
+            except Exception as exc:  # noqa: BLE001 — same reason as above
+                text = self._scrub(str(exc))
+                err = (Refused(text) if isinstance(exc, Refused)
+                       else Refused(f"{type(exc).__name__}: {text}"))
+                self._record("watch", "REFUSED", detail=str(err))
                 return 3
         print("execute: rotation COMPLETE — journal at " + self.args.journal)
         return 0
