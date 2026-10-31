@@ -79,7 +79,7 @@ ESCALATE_AFTER = _dt.timedelta(hours=2)
 # getFile answers can never be fixed by retrying: 400 "file is too big" (the
 # Bot API cannot download over 20 MB) and 400 "invalid file_id" / expired file
 # reference, plus 404. Those now map to the TERMINAL media_status
-# 'unrecoverable' (migration 140) instead of 'failed':
+# 'unrecoverable' (migration 141) instead of 'failed':
 #   - ingest._unrecoverable_reason(exc) is the single classifier, shared by
 #     ingest.py and this reaper so the two can never disagree;
 #   - a terminal row leaves RETRYABLE_STATUSES, so it stops being retried here;

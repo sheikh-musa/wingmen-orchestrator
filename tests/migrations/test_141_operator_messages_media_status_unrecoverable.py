@@ -1,4 +1,4 @@
-"""TDD proof for migrations/140_operator_messages_media_status_unrecoverable.sql
+"""TDD proof for migrations/141_operator_messages_media_status_unrecoverable.sql
 and for nervous_system/ingest.py's schema-drift dead-man's switch that guards it.
 
 held_commitment #964 (source bus #85768). Migration 115 constrained
@@ -7,7 +7,7 @@ retries every 'pending'/'failed' row forever. But some getFile answers are
 permanent — 400 "file is too big" (Bot API cannot download >20 MB), 400
 "invalid file_id"/expired file reference, 404 — so those rows re-entered the
 retry loop and re-paged the console every 2h for something no retry can fix.
-140 widens the CHECK with a TERMINAL value, 'unrecoverable'.
+141 widens the CHECK with a TERMINAL value, 'unrecoverable'.
 
 Runs against tests/conftest.py's ephemeral pg_dsn ONLY. Never DATABASE_URL.
 
@@ -35,17 +35,17 @@ import apply_migration as am  # noqa: E402
 
 from nervous_system import ingest  # noqa: E402
 
-MIGRATION_140 = ROOT / "migrations" / "140_operator_messages_media_status_unrecoverable.sql"
+MIGRATION_141 = ROOT / "migrations" / "141_operator_messages_media_status_unrecoverable.sql"
 SILO = "tscuymavysscrvoberrr"
 
 _MEDIA_CHECK_115 = ("media_status IS NULL OR media_status IN "
                     "('pending','ok','failed')")
-_MEDIA_CHECK_140 = ("media_status IS NULL OR media_status IN "
+_MEDIA_CHECK_141 = ("media_status IS NULL OR media_status IN "
                     "('pending','ok','failed','unrecoverable')")
 
 
 def _make_115_era_table(dsn: str, extra_checks: str = "") -> None:
-    """The pre-140 schema. Deliberately minimal: 140 touches only the
+    """The pre-141 schema. Deliberately minimal: 141 touches only the
     media_status CHECK, so the rest of operator_messages is irrelevant here."""
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(
@@ -86,7 +86,7 @@ def _make_ledger_table(dsn: str) -> None:
 
 
 @pytest.fixture
-def pre_140_db(fresh_db):
+def pre_141_db(fresh_db):
     dsn = f"{fresh_db} application_name={SILO}"
     _make_115_era_table(dsn)
     _make_ledger_table(dsn)
@@ -94,10 +94,10 @@ def pre_140_db(fresh_db):
 
 
 @pytest.fixture
-def post_140_db(pre_140_db):
-    with psycopg.connect(pre_140_db, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute(MIGRATION_140.read_text())
-    return pre_140_db
+def post_141_db(pre_141_db):
+    with psycopg.connect(pre_141_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(MIGRATION_141.read_text())
+    return pre_141_db
 
 
 def _q(dsn, sql, params=None):
@@ -111,50 +111,50 @@ def _q(dsn, sql, params=None):
 def _constraint_def(dsn: str) -> str:
     rows = _q(dsn, "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
                    "WHERE conname = 'operator_messages_media_status_check'")
-    assert rows, "the media_status CHECK must still exist after 140"
+    assert rows, "the media_status CHECK must still exist after 141"
     return rows[0][0]
 
 
 # ── the migration itself ────────────────────────────────────────────────────
 
-def test_140_widens_the_check_to_accept_unrecoverable(post_140_db):
-    definition = _constraint_def(post_140_db)
+def test_141_widens_the_check_to_accept_unrecoverable(post_141_db):
+    definition = _constraint_def(post_141_db)
     assert "unrecoverable" in definition
     for still_valid in ("pending", "ok", "failed"):
-        assert still_valid in definition, f"140 must not drop {still_valid}"
+        assert still_valid in definition, f"141 must not drop {still_valid}"
 
 
-def test_every_115_value_still_inserts(post_140_db):
+def test_every_115_value_still_inserts(post_141_db):
     """Widening must never narrow: a row written by today's code path has to
     keep working across the deploy."""
     for status in (None, "pending", "ok", "failed", "unrecoverable"):
-        _q(post_140_db,
+        _q(post_141_db,
            "INSERT INTO operator_messages (direction, media_status) "
            "VALUES ('inbound', %s)", (status,))
-    assert _q(post_140_db, "SELECT count(*) FROM operator_messages")[0][0] == 5
+    assert _q(post_141_db, "SELECT count(*) FROM operator_messages")[0][0] == 5
 
 
-def test_an_unknown_status_is_still_rejected(post_140_db):
+def test_an_unknown_status_is_still_rejected(post_141_db):
     """The constraint must stay a real constraint — widening is not removal."""
     with pytest.raises(psycopg.errors.CheckViolation):
-        _q(post_140_db,
+        _q(post_141_db,
            "INSERT INTO operator_messages (direction, media_status) "
            "VALUES ('inbound', 'totally-made-up')")
 
 
-def test_140_is_idempotent(post_140_db):
+def test_141_is_idempotent(post_141_db):
     """Re-running a migration must be a no-op, not an error (apply_migration
     may retry after a partial-silo rollout)."""
-    with psycopg.connect(post_140_db, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute(MIGRATION_140.read_text())
-        cur.execute(MIGRATION_140.read_text())
-    assert "unrecoverable" in _constraint_def(post_140_db)
+    with psycopg.connect(post_141_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(MIGRATION_141.read_text())
+        cur.execute(MIGRATION_141.read_text())
+    assert "unrecoverable" in _constraint_def(post_141_db)
 
 
-def test_dry_run_via_apply_migration(pre_140_db):
-    """140 must be acceptable to the real gate (sha256 recorded, silo resolved)
+def test_dry_run_via_apply_migration(pre_141_db):
+    """141 must be acceptable to the real gate (sha256 recorded, silo resolved)
     before anyone runs it for real."""
-    result = am.apply_migration(pre_140_db, MIGRATION_140, silo=SILO, dry_run=True)
+    result = am.apply_migration(pre_141_db, MIGRATION_141, silo=SILO, dry_run=True)
     assert result["sha256"]
 
 
@@ -178,24 +178,24 @@ def _insert_via_ingest(dsn, media_status="unrecoverable", tag="operator-orch"):
     return op_id, stored
 
 
-def test_unrecoverable_is_stored_when_the_migration_is_present(post_140_db):
-    op_id, stored = _insert_via_ingest(post_140_db)
+def test_unrecoverable_is_stored_when_the_migration_is_present(post_141_db):
+    op_id, stored = _insert_via_ingest(post_141_db)
     assert stored == "unrecoverable"
-    row = _q(post_140_db, "SELECT media_status FROM operator_messages WHERE id=%s",
+    row = _q(post_141_db, "SELECT media_status FROM operator_messages WHERE id=%s",
              (op_id,))[0][0]
     assert row == "unrecoverable"
 
 
-def test_code_ahead_of_migration_downgrades_instead_of_losing_the_message(pre_140_db):
+def test_code_ahead_of_migration_downgrades_instead_of_losing_the_message(pre_141_db):
     """THE deploy-ordering proof. With the 115-era CHECK still in place, the
     helper must store 'failed' and keep going — not raise, and not leave the
     outer transaction poisoned (both sentinels must commit)."""
-    op_id, stored = _insert_via_ingest(pre_140_db)
+    op_id, stored = _insert_via_ingest(pre_141_db)
     assert stored == "failed"
-    row = _q(pre_140_db, "SELECT media_status FROM operator_messages WHERE id=%s",
+    row = _q(pre_141_db, "SELECT media_status FROM operator_messages WHERE id=%s",
              (op_id,))[0][0]
     assert row == "failed"
-    tags = {r[0] for r in _q(pre_140_db, "SELECT tag FROM operator_messages")}
+    tags = {r[0] for r in _q(pre_141_db, "SELECT tag FROM operator_messages")}
     assert tags == {"sentinel-before", "sentinel-after", "operator-orch"}, \
         "the savepoint rollback must not have taken the surrounding writes with it"
 
@@ -211,6 +211,6 @@ def test_a_different_check_violation_is_still_raised(fresh_db):
         _insert_via_ingest(dsn, tag="poison")
 
 
-def test_a_non_media_row_still_inserts_normally(post_140_db):
-    op_id, stored = _insert_via_ingest(post_140_db, media_status=None)
+def test_a_non_media_row_still_inserts_normally(post_141_db):
+    op_id, stored = _insert_via_ingest(post_141_db, media_status=None)
     assert stored is None

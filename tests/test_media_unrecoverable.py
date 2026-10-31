@@ -11,7 +11,7 @@ A Telegram attachment can fail to download for two very different reasons:
                  'failed', the reaper retried it every tick, and re-paged the
                  console every ESCALATE_AFTER (2h) forever.
 
-The fix is a TERMINAL status ('unrecoverable', migration 140) plus a single
+The fix is a TERMINAL status ('unrecoverable', migration 141) plus a single
 shared classifier, `ingest._unrecoverable_reason`, used by BOTH the ingest
 first-attempt path and the reaper — so the two can never disagree about what
 is retryable.

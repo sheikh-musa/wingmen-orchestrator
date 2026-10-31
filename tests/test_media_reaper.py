@@ -70,10 +70,10 @@ def reaper_dsn(pg_dsn, monkeypatch):
                 cur.execute(f'CREATE ROLE "{role}" NOLOGIN')
         for ddl in _DDL:
             cur.execute(ddl)
-        # migration 140's CHECK, so the reaper's UPDATE to 'unrecoverable' is
+        # migration 141's CHECK, so the reaper's UPDATE to 'unrecoverable' is
         # validated by the real constraint here (held_commitment #964).
         cur.execute((MIGRATIONS_DIR /
-                     "140_operator_messages_media_status_unrecoverable.sql").read_text())
+                     "141_operator_messages_media_status_unrecoverable.sql").read_text())
         cur.execute("INSERT INTO agents (id, display_name, status) "
                     "VALUES ('media-reaper', 'reaper', 'active'), "
                     "('orch-console', 'console', 'active')")
@@ -276,7 +276,7 @@ def test_media_reaper_channels_resolving_to_no_known_channel_refuses_loudly(reap
     assert "MEDIA_REAPER_CHANNELS" in capsys.readouterr().err
 
 
-# ── TERMINAL failures (held_commitment #964, migration 140) ─────────────────
+# ── TERMINAL failures (held_commitment #964, migration 141) ─────────────────
 # A getFile answer that no retry can fix must flip the row to the TERMINAL
 # 'unrecoverable' (leaving RETRYABLE_STATUSES, so the loop stops) AND tell the
 # operator ONCE (so "terminal" never means "silently dropped").

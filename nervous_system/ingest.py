@@ -211,7 +211,7 @@ def _get_file_path(token: str, file_id: str, sleep=time.sleep) -> str:
 # ever fix. They used to land as 'failed', so media_reaper re-paged the console
 # every ESCALATE_AFTER (2h) about a file that will never download — noise that
 # trains people to ignore the pager. These map to the TERMINAL
-# media_status='unrecoverable' (migration 140) instead.
+# media_status='unrecoverable' (migration 141) instead.
 #
 # Only an HTTPError qualifies: it carries a real Telegram API answer, whereas an
 # OSError (Errno 54 reset, timeout, DNS) is transient and MUST stay retryable —
@@ -328,7 +328,7 @@ def _insert_operator_message(conn, cur, *, chat_id, tag, content, from_user_id,
     """Insert the inbound envelope. Returns (op_msg_id, media_status AS STORED).
 
     held_commitment #964 dead-man's switch. 'unrecoverable' only exists once
-    migration 140 is applied. If this code meets a database that has not had it
+    migration 141 is applied. If this code meets a database that has not had it
     yet (deploy ahead of migration, or a silo that skipped it), the CHECK
     rejects the insert — and an unhandled rejection here is not "one lost
     status": it rolls back the envelope, leaves the dedup row unwritten and the
@@ -357,7 +357,7 @@ def _insert_operator_message(conn, cur, *, chat_id, tag, content, from_user_id,
                 != _MEDIA_STATUS_CONSTRAINT):
             raise
         _log_line(
-            f"{tag}: migration 140 NOT APPLIED on this silo — accepted media_status="
+            f"{tag}: migration 141 NOT APPLIED on this silo — accepted media_status="
             f"'unrecoverable' is rejected by {_MEDIA_STATUS_CONSTRAINT}; this row is stored "
             f"as 'failed' and the media reaper will keep retrying and re-paging until the "
             f"migration is applied. The message itself is safe; the retry-stop is inert.")
