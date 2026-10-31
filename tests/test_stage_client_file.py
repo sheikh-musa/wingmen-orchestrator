@@ -239,6 +239,24 @@ def test_classify_large_row_count_name_column_all_blank_is_clean():
     assert v.verdict == "CLEAN"
 
 
+def test_classify_holds_on_large_row_count_name_column_with_one_real_row_among_blanks():
+    # orch-console #86964 adversarial ask: the exact real-world shape (a
+    # bulk >20-row template, mostly blank) must still HOLD if even ONE row
+    # carries a real person value -- field-emptiness only clears a column
+    # that is blank in EVERY row, never "mostly" blank.
+    rows_data = [["", ""]] * 24 + [["Ahmad", "99"]]
+    structure = scf.FileStructure(
+        kind="xlsx",
+        sheets=[scf.SheetStructure(name="s1", rows=25, cols=2, header=["Name", "Amount"],
+                                    rows_data=rows_data)],
+        texts=[],
+    )
+    v = scf.classify(structure)
+    assert v.verdict == "HOLD"
+    assert v.person_record is True
+    assert any("25 rows with a name-like column" in r for r in v.reasons)
+
+
 # ── repeated-boilerplate dedup (bus #85559/#961, fix_direction 2) ──────────
 
 def test_classify_dedupes_repeated_boilerplate_name_shaped_values():
