@@ -240,9 +240,18 @@ _heartbeat_loop() {
     while true; do
         sleep 300
         "$VENV_PY" - <<'PY' 2>/dev/null || true
-import os, psycopg
-dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
-with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+import os, sys, psycopg
+# Re-read the DSN from the env FILE each beat (dsn_at_use): after a password
+# rotation the inherited value in this shell is DEAD, and a silent failing beat
+# reads downstream as a dead singleton. Killing this loop would silence the
+# heartbeat entirely, so the loop reads the current value instead.
+try:
+    sys.path.insert(0, os.path.expanduser("~/wingmen/orchestrator/scripts/lib"))
+    from dsn_at_use import dsn as _dsn_now
+except Exception:
+    def _dsn_now():
+        return os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+with psycopg.connect(_dsn_now()) as conn, conn.cursor() as cur:
     cur.execute("SELECT set_config('app.current_agent_id', 'cc-fleet-health', true)")
     # Re-ASSERT status='working' (not just last_heartbeat) each beat: a live
     # heartbeat loop only runs while THIS launcher is alive, and a live launcher
