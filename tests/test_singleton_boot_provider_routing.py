@@ -27,7 +27,13 @@ BOOTS = {
     "boot_cai.sh": ROOT / "scripts" / "boot_cai.sh",
     "boot_fleet_health.sh": ROOT / "scripts" / "boot_fleet_health.sh",
 }
-LAUNCH = 'claude --dangerously-skip-permissions --model "$MODEL"'
+# boot_fleet_health.sh resolves CLAUDE_BIN (bus #86258/#86793 PATH fix) and
+# launches via the resolved binary instead of a bare `claude`; boot_cai.sh is
+# untouched by that fix and still launches bare.
+LAUNCH = {
+    "boot_cai.sh": 'claude --dangerously-skip-permissions --model "$MODEL"',
+    "boot_fleet_health.sh": '"$CLAUDE_BIN" --dangerously-skip-permissions --model "$MODEL"',
+}
 
 
 # ── (1) STATIC: sources lib + calls apply_provider_routing BEFORE the launch ──
@@ -37,7 +43,7 @@ def test_boots_route_before_launch():
         assert 'scripts/lib/provider_routing.sh' in text, f"{name}: does not source provider_routing.sh"
         i_src = text.index('scripts/lib/provider_routing.sh')
         i_call = text.index('apply_provider_routing "$MODEL"')
-        i_launch = text.index(LAUNCH)
+        i_launch = text.index(LAUNCH[name])
         assert i_src < i_launch, f"{name}: sources lib AFTER the claude launch"
         assert i_call < i_launch, f"{name}: calls apply_provider_routing AFTER the claude launch"
         # routing call must pass the script's own AGENT_ID (vault keying)
