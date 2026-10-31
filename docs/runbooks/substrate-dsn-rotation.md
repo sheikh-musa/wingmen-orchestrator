@@ -35,12 +35,13 @@ files is the whole job on this side and the hub pulls the new value when it runs
 `fetch-secrets`. **Do not use `--remote` against `gzb`.** A push into its files from
 outside that pull was never reviewed, and the pull already does the same work.
 
-**Open, and it can sink the hub's restart:** the bundle is assembled from three sources —
-the Mini's orchestrator env file, and two private env files under `~/.wingmen/private`
-(one for the write DSN, one for bayanqa). If either of those also embeds the substrate
-credential, the pull carries a dead value for it and the hub's restarts fail *after* a
-successful reset. Reading those paths is guard-blocked from this lane, so their owner
-must confirm whether they carry the substrate DSN. Asked of the console (87892).
+**OPEN, and it can sink the hub's restart — ANSWERED 2026-10-31 (87894): it does not.**
+The bundle is assembled from three sources — the Mini's orchestrator env file, and two
+private env files under `~/.wingmen/private` (one for the write DSN, one for bayanqa).
+The hub reads those same bytes in its own tmpfs copy and checked both, hashes only: the
+write-DSN file carries the goumlyne and ihsanos values and no substrate value at all, and
+the bayanqa file has no database value whatsoever. **Rewriting the live orchestrator env
+file is therefore sufficient; there is no dead-value risk on the hub's restart.**
 
 **Also asked, not yet answered:** whether all three Mini env files are in scope, or only
 the live one. Preflight reads all three and they all carry the current value, so the
@@ -115,10 +116,14 @@ and `last_heartbeat` freezes on the three singleton rows — a live body read as
 exactly when the console is watching.
 
 `scripts/lib/dsn_at_use.py` makes every **future** fork immune by reading the file at the
-moment of use. It does **not** retrofit the running loops. Re-forking them means
-restarting the three singleton boot scripts, which costs the console its live session and
-is therefore the console's decision, not the operator of this tool. Do not start a
-detached replacement loop to dodge it — that is `nohup`-shaped and forbidden.
+moment of use. It does **not** retrofit the running loops, and neither does editing the
+boot script: measured on this machine (bus 87909), a running bash loop whose heredoc is
+changed — by full-file replacement *and* by in-place overwrite of the same inode — keeps
+printing the OLD body, five beats out of five. Bash parses the function once. **There is
+no no-restart fallback.** Re-forking means restarting the three singleton boot scripts,
+which costs the console its live session and is therefore the console's decision, not the
+operator of this tool. Do not start a detached replacement loop to dodge it — that is
+`nohup`-shaped and forbidden.
 
 **The Supavisor cache.** The pooler keeps a credential cache that can hold the old value
 for roughly 15 seconds while connections are active. An idle pool may refresh only on a
