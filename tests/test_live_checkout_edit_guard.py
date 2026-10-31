@@ -160,6 +160,57 @@ def test_console_role_with_cc_base_agent_id_is_not_console_and_stays_blocked(mon
     assert guard.main() == 2
 
 
+# -- any-body handoff exception (bus #86146, cc-quality) --------------------
+
+def test_non_console_body_writing_its_own_handoff_is_allowed(monkeypatch, tmp_path):
+    root = tmp_path / "orchestrator"
+    rc = _run(monkeypatch, tmp_path, tool_name="Write",
+              file_path=str(root / "reports" / "cc-quality-handoff-NOW.md"), root=root, console=False)
+    assert rc == 0
+
+
+def test_console_role_writing_a_non_console_handoff_is_also_allowed(monkeypatch, tmp_path):
+    # Deliberately NOT identity-gated -- the whole point is that the identity signal
+    # (ORCH_BODY_ROLE/CC_BASE_AGENT_ID) is unreliable, so this exception doesn't try to
+    # match the caller's own name against the filename.
+    root = tmp_path / "orchestrator"
+    rc = _run(monkeypatch, tmp_path, tool_name="Write",
+              file_path=str(root / "reports" / "cc-fleet-health-handoff-NOW.md"), root=root, console=True)
+    assert rc == 0
+
+
+def test_timestamped_handoff_variant_is_allowed(monkeypatch, tmp_path):
+    root = tmp_path / "orchestrator"
+    rc = _run(monkeypatch, tmp_path, tool_name="Edit",
+              file_path=str(root / "reports" / "cc-fleet-health-handoff-20261031T2130Z.md"),
+              root=root, console=False)
+    assert rc == 0
+
+
+def test_handoff_nested_under_a_nested_handoff_dir_is_still_blocked(monkeypatch, tmp_path):
+    # Same [^/]*-never-crosses-/ discipline as the console allowlist's own regression test.
+    root = tmp_path / "orchestrator"
+    rc = _run(monkeypatch, tmp_path, tool_name="Write",
+              file_path=str(root / "reports" / "cc-quality-handoff-sub" / "evil.md"),
+              root=root, console=False)
+    assert rc == 2
+
+
+def test_handoff_filename_must_live_directly_under_reports(monkeypatch, tmp_path):
+    root = tmp_path / "orchestrator"
+    rc = _run(monkeypatch, tmp_path, tool_name="Write",
+              file_path=str(root / "cc-quality-handoff-NOW.md"), root=root, console=False)
+    assert rc == 2
+
+
+def test_arbitrary_md_under_reports_is_not_allowed_by_the_handoff_exception(monkeypatch, tmp_path):
+    # Only the *-handoff*.md shape is allowlisted -- an unrelated reports/ doc is still blocked.
+    root = tmp_path / "orchestrator"
+    rc = _run(monkeypatch, tmp_path, tool_name="Write",
+              file_path=str(root / "reports" / "some-other-note.md"), root=root, console=False)
+    assert rc == 2
+
+
 def test_is_console_pure_helper(monkeypatch):
     monkeypatch.setenv("ORCH_BODY_ROLE", "console")
     monkeypatch.delenv("CC_BASE_AGENT_ID", raising=False)

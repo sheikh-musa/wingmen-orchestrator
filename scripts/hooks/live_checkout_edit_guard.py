@@ -46,6 +46,16 @@ glob `*` (cc-quality bus #85297): a plain fnmatch `*` crosses `/`, which would w
 console write to a NESTED path like reports/nazim-handoff-sub/evil.md -- the allowlist is meant
 to cover specific files directly under the live checkout, never a whole subtree.
 
+ANY-BODY HANDOFF EXCEPTION (bus #86146, cc-quality, 2026-10-31): the console allowlist above
+only ever covered the console's OWN handoff, so this guard (armed mid-session) immediately
+blocked cc-quality's reports/cc-quality-handoff-NOW.md write -- every body's own handoff doc is
+the same kind of legitimate live-checkout write the console exception already recognizes, just
+never extended past Nazim's file. `reports/<name>-handoff*.md` (any lowercase-alnum-dash name,
+same `[^/]*`-never-crosses-`/` discipline as the console allowlist) is allowlisted for EVERYONE,
+unconditionally -- not gated on is_console() or on matching the caller's own body name, because
+the identity signal itself (CC_BASE_AGENT_ID/ORCH_BODY_ROLE) is the exact thing bus #86124/#86146
+both found unreliable; gating this fix on that same signal would just recreate the bug it fixes.
+
 Exit 2 + stderr = the tool call is refused and the reason is shown to the model.
 """
 import json
@@ -62,6 +72,23 @@ _CONSOLE_ALLOWLIST = (
     re.compile(r"^reports/nazim-handoff[^/]*\.md$"),
 )
 
+# Any BODY's own handoff doc (bus #86146, cc-quality: live_checkout_edit_guard armed
+# mid-session blocked its reports/cc-quality-handoff-NOW.md write -- the console
+# allowlist above only ever covered the console's own file). Agent handoffs are the
+# one legitimate live-checkout write every body needs: post-reset tooling (reset_
+# auditor, self-recycle) reads a body's handoff from THIS live path, never from a
+# branch, so writing it in a worktree is useless. Deliberately NOT identity-gated --
+# unlike the console allowlist above, this one does not check is_console() or try to
+# match the caller's own body name against the filename, because the identity signal
+# itself (CC_BASE_AGENT_ID/ORCH_BODY_ROLE) is the exact thing bus #86124/#86146 both
+# found unreliable (ambient console bleed, missing CC_BASE_AGENT_ID) -- gating a fix
+# for an identity bug ON that same identity signal would just recreate the bug. The
+# blast radius of a wrong body overwriting another's status doc is low (self-
+# correcting, not a security breach); the pattern itself only ever matches a
+# `*-handoff*.md` file directly under reports/ (never a subtree, never code/config),
+# matching the existing allowlist's own `[^/]*` discipline.
+_HANDOFF_FILE_RE = re.compile(r"^reports/[a-z][a-z0-9_-]*-handoff[^/]*\.md$")
+
 _PATH_KEYS = ("file_path", "notebook_path", "path")
 
 
@@ -75,6 +102,14 @@ def _console_allowlisted(target: Path) -> bool:
     except ValueError:
         return False
     return any(pattern.match(rel) for pattern in _CONSOLE_ALLOWLIST)
+
+
+def _is_any_body_handoff(target: Path) -> bool:
+    try:
+        rel = target.relative_to(LIVE_ORCH_DIR).as_posix()
+    except ValueError:
+        return False
+    return bool(_HANDOFF_FILE_RE.match(rel))
 
 
 def _target_path(tool_input: dict) -> "Path | None":
@@ -112,6 +147,8 @@ def main() -> int:
     if target is None or not is_inside_live_checkout(target):
         return 0
     if is_console() and _console_allowlisted(target):
+        return 0
+    if _is_any_body_handoff(target):
         return 0
     sys.stderr.write(
         f"BLOCKED by live_checkout_edit_guard: {target} is inside the LIVE checkout "
