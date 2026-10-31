@@ -146,6 +146,33 @@ def test_backreference_ignores_re_prefixed_word_and_unterminated_number():
         assert rra.match_via_backreference(candidate, rra.index_backreferences([reply])) is None, subj
 
 
+def test_backreference_does_not_match_dates_or_lists_in_a_bare_subject():
+    """cc-quality #88405: `-` and `,` in the bare form made dates and lists match."""
+    later = T0 + timedelta(hours=1)
+    cases = [
+        (2026, "2026-11-01 rollout plan"),
+        (2025, "2025-12 freeze window"),
+        (42, "42, 43 and 44 reviewed"),
+        (100, "100-200 batch range"),
+        (5, "5; see below"),
+        (2026, "2026: enrollment plan"),  # colon still not enough: calendar range
+    ]
+    for cid, subject in cases:
+        candidate = _row(cid, to_agent="cc-finance", created_at=T0)
+        reply = _row(99, thread_id="other", from_agent="cc-finance",
+                     subject=subject, created_at=later)
+        assert rra.match_via_backreference(candidate, rra.index_backreferences([reply])) is None, subject
+
+
+def test_backreference_still_matches_prefixed_dash_form():
+    """The `Re <id> --` shape is a genuine reply and must survive the tightening."""
+    candidate = _row(34426, to_agent="cc-finance", created_at=T0)
+    reply = _row(99, thread_id="other", from_agent="cc-finance",
+                 subject="Re: 34426 -- already matches 34429s rework",
+                 created_at=T0 + timedelta(hours=1))
+    assert rra.match_via_backreference(candidate, rra.index_backreferences([reply])) is not None
+
+
 def test_backreference_indexes_a_dual_form_subject_only_once():
     reply = _row(99, from_agent="cc-finance", subject="Re #42: ack", created_at=T0)
     idx = rra.index_backreferences([reply])

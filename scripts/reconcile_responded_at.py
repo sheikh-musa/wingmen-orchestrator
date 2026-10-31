@@ -174,12 +174,22 @@ _BACKREF_TOKEN_RE = re.compile(r"(?<!\d)#(\d+)(?!\d)")
 #   (a) anchored at the START of the subject, never scanned in the body, so prose
 #       like "re 900 duplicates" cannot match;
 #   (b) `re` must be a whole word, so "Reconciliation 88366" does not match;
-#   (c) the id must be followed by a terminator (: ; , -) or end of string, so a
-#       subject opening with a bare number for another reason ("2026 enrollment
-#       plan", "2026-11-01 rollout" -> dash still qualifies, but the caller's
-#       id/agent/time checks apply) does not silently claim an id.
-_ID_SUBJECT_RE = re.compile(r"^\s*(?:re\b[\s:.\-]*)?#?(\d{1,9})\s*(?=[:;,\-]|$)",
+#   (c) the id must be followed by a terminator or end of string. WHICH
+#       terminators are allowed depends on whether the `re` prefix was present,
+#       because that prefix is itself the evidence that this is a reply:
+#         - prefixed (`Re 34426 -- ...`):  : ; -   and end-of-string
+#         - bare (`87347: ...`)         :  :      and end-of-string only
+#       The bare form is strict on purpose. cc-quality's review of PR#784 found
+#       that admitting `-` and `,` there made dates and lists match: "2026-11-01
+#       rollout plan" -> id 2026, "42, 43 and 44 reviewed" -> id 42. Both are
+#       common subject shapes and neither is a backreference.
+#   (d) a BARE id in the plausible-calendar range is rejected outright, so even
+#       "2026: enrollment plan" cannot claim id 2026. No live message id is in
+#       that range; a real one is worth a manual stamp.
+_ID_SUBJECT_RE = re.compile(r"^\s*re\b[\s:.\-]*#?(\d{1,9})\s*(?=[:;\-]|$)",
                             re.IGNORECASE)
+_ID_SUBJECT_BARE_RE = re.compile(r"^\s*#?(\d{1,9})\s*(?=:|$)")
+_YEAR_LO, _YEAR_HI = 1900, 2100
 
 
 def index_backreferences(replies: list[dict]) -> dict[int, list[dict]]:
@@ -195,9 +205,13 @@ def index_backreferences(replies: list[dict]) -> dict[int, list[dict]]:
         subject = r.get("subject") or ""
         text = f"{subject} {r.get('body') or ''}"
         toks = {int(tok.group(1)) for tok in _BACKREF_TOKEN_RE.finditer(text)}
-        m = _ID_SUBJECT_RE.match(subject)
-        if m:
-            toks.add(int(m.group(1)))
+        prefixed = _ID_SUBJECT_RE.match(subject)
+        if prefixed:
+            toks.add(int(prefixed.group(1)))
+        elif (bare := _ID_SUBJECT_BARE_RE.match(subject)) is not None:
+            bid = int(bare.group(1))
+            if not (_YEAR_LO <= bid <= _YEAR_HI):
+                toks.add(bid)
         for tok in toks:
             idx[tok].append(r)
     for k in idx:
