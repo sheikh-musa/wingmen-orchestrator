@@ -738,3 +738,30 @@ def test_secrets_stdin_alone_needs_no_env_file(tmp_path, monkeypatch):
     _write(tr, json.dumps({"o": "nothing secret here"}) + "\n")
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
     assert s.main(["--scan", str(tr)]) == 2, "no value source at all must refuse, not sweep empty"
+
+
+def test_every_credential_named_value_is_covered_regardless_of_shape(tmp_path, monkeypatch):
+    """bus #87241/#87257: the live miss was that only the EAA-prefixed tokens were handed to
+    the sweep, so the 32-hex wc_facebook_feed_url_secret in the SAME dump stayed raw. A sweep
+    fed the full set of credential-named values must redact all of them — no shape or prefix
+    dependence, and no key left behind."""
+    import io
+
+    values = [
+        "EAABfabricatedfeedtoken0000000000000000000000000000000000",   # Facebook-shaped
+        "9f8e7d6c5b4a39281706f5e4d3c2b1a0",                            # 32-hex secret
+        "Zm9vYmFyLXNob3Atc2VjcmV0LWtleQ0000000000",                    # generic base64ish key
+    ]
+    tr = tmp_path / "dump.jsonl"
+    _write(tr, "\n".join(json.dumps({"k%d" % i: v}) for i, v in enumerate(values)) + "\n")
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("\n".join(values) + "\n"))
+    ledger = tmp_path / "ledger.jsonl"
+    rc = s.main(["--scan", str(tr), "--secrets-stdin", "--execute", "--ledger", str(ledger)])
+    assert rc == 0
+
+    after = tr.read_text()
+    for v in values:
+        assert v not in after, "a credential-named value survived the sweep"
+        assert "[REDACTED:%s]" % s.hash8(v.encode()) in after
+    assert len(ledger.read_text().splitlines()) == len(values)
