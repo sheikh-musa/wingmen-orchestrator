@@ -101,6 +101,73 @@ def live_tmux_sessions():
     return {ln.split(":", 1)[0] for ln in out.splitlines() if ":" in ln}
 
 
+def local_host():
+    """This machine's identity, as agent_status.host spells it."""
+    import socket
+    return (socket.gethostname() or "").split(".")[0]
+
+
+def row_is_remote(host, local_host_name):
+    """PURE: does this agent_status row belong to ANOTHER machine? (bus #87832)
+
+    A NULL/empty host means "written before the column was populated", NOT "elsewhere" —
+    treating absence as remote would silently disarm the crash check for every legacy row,
+    which is the fail-open shape this whole file exists to avoid."""
+    if not host:
+        return False
+    return host.strip().split(".")[0].lower() != (local_host_name or "").strip().split(".")[0].lower()
+
+
+def drift_for_row(aid, status, host, tmux, live_sessions, protected, local_host_name,
+                  worktree_path=None):
+    """PURE: the drift verdict for ONE agent_status row — (kind, line) or None.
+
+    kind is 'gone' (this host, session missing → a real crash signal) or 'remote' (the
+    row is another host's, so a local `tmux ls` miss says NOTHING about it).
+
+    WHY (cc-orchestrator, bus #87832): agent_status.host exists and the drift check never
+    read it. Six lanes that cc-orchestrator had moved Mini → gzb kept rows here saying
+    'working' with a gzb host, and this check reported all six "GONE (crashed?)". Every
+    measurement was locally correct — no session here, no claude process here — and the
+    conclusion was still wrong, because the lanes were alive on the other host. Reported
+    as a crash, a lane looks dead and invites a boot: the one action that loses work.
+    A row on another host is therefore reported as NOT VERIFIED HERE, never as dead."""
+    if status != "working" or not tmux or aid in protected:
+        return None
+    if tmux in live_sessions:
+        return None
+    if row_is_remote(host, local_host_name):
+        line = f"  ~ {aid}: on host '{host}' — tmux '{tmux}' is not a local session, NOT verified from here"
+        # A row that claims another host while its registered worktree sits on THIS
+        # machine is a data inconsistency worth seeing: it means host and path disagree,
+        # so neither is trustworthy until someone looks.
+        if worktree_path and worktree_path.startswith(os.path.expanduser("~") + os.sep) \
+                and os.path.isdir(worktree_path):
+            line += f" (host/path disagree: fleet_lanes.worktree_path '{worktree_path}' is local)"
+        return ("remote", line)
+    return ("gone", f"  ! {aid}: 'working' but tmux '{tmux}' is GONE (crashed?)")
+
+
+def load_lane_paths(cur, conn):
+    """lane -> registered worktree_path, for the host/path cross-check (bus #87832).
+
+    A missing table or column is tolerated: it only removes an ANNOTATION, and the verdict
+    never depends on it (drift_for_row works with worktree_path=None). Every OTHER error
+    propagates on purpose — a connection fault or a programming error must fail LOUD rather
+    than be downgraded to a NOTE (charter §2.1: never swallow an exception on a path that
+    reports state). cc-quality-2's two advisories on #775, folded in rather than deferred.
+    """
+    try:
+        cur.execute("SELECT lane, worktree_path FROM fleet_lanes WHERE worktree_path IS NOT NULL")
+        return dict(cur.fetchall())
+    except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as e:
+        # The query just aborted the surrounding transaction; make that state explicit
+        # instead of relying on `with conn:` to convert it at exit.
+        conn.rollback()
+        print(f"NOTE: fleet_lanes unavailable for host/path cross-check: {e}", file=sys.stderr)
+        return {}
+
+
 def observed_activity(recent_bus, tmux_session, live_sessions):
     """OBSERVED-ACTIVITY gate before offline-marking (cc-fleet-health, re-derived from #23952,
     Nazim #24044). A stale HEARTBEAT is not death: an on-demand body (boot_quality.sh has no
@@ -785,22 +852,34 @@ def main():
         if seq_fixed:
             conn.commit()
 
-        cur.execute("""SELECT agent_id, status, tmux_session,
+        cur.execute("""SELECT agent_id, status, tmux_session, host,
                        round(extract(epoch from (now()-last_heartbeat))/60) AS m
                        FROM agent_status ORDER BY last_heartbeat DESC NULLS LAST""")
         rows = cur.fetchall()
 
+        # lane -> registered worktree_path, so a row whose host and path disagree can say
+        # so instead of picking one (bus #87832). See load_lane_paths() for why only the
+        # missing-table/column case is tolerated here.
+        lane_paths = load_lane_paths(cur, conn)
+
     # reconcile against ground truth
     drift = []
+    offhost = []
+    here = local_host()
     registered_sessions = set()
-    for aid, status, tmux, m in rows:
+    for aid, status, tmux, host, m in rows:
         if tmux:
             registered_sessions.add(tmux)
-        # Skip singletons: their tmux may live on another host (the hub runs on the
-        # VPS, not this Mini) and their liveness is lease/reclaim-tracked, so a local
-        # `tmux ls` miss is NOT a crash — flagging it manufactures a false alarm.
-        if status == "working" and tmux and tmux not in sessions and aid not in protected:
-            drift.append(f"  ! {aid}: 'working' but tmux '{tmux}' is GONE (crashed?)")
+        # Singletons are host-gated here too: their tmux may live on another host (the hub
+        # runs on the VPS, not this Mini) and their liveness is lease/reclaim-tracked, so a
+        # local `tmux ls` miss is NOT a crash — flagging it manufactures a false alarm.
+        # Every OTHER row is gated on its own agent_status.host by drift_for_row(): a lane
+        # that lives on another machine is "not verified here", never "crashed".
+        verdict = drift_for_row(aid, status, host, tmux, sessions, protected, here,
+                                lane_paths.get(tmux))
+        if not verdict:
+            continue
+        (drift if verdict[0] == "gone" else offhost).append(verdict[1])
     # live CC sessions with no fresh registration (ignore the desktop 'claude' app + helpers)
     for s in sessions:
         if s not in registered_sessions and not re.match(r"^(claude|orchestrator)$", s):
@@ -846,13 +925,19 @@ def main():
         if pruned:
             print("reaped (old offline rows):", ", ".join(pruned))
         print(f"live lanes: {sum(1 for r in rows if r[1]=='working')} working / {len(rows)} rows")
-        for aid, status, tmux, m in rows:
+        for aid, status, tmux, host, m in rows:
             print(f"  {aid:<20} {status:<9} hb={m}m  tmux={tmux}")
         if drift:
             print("DRIFT:")
             print("\n".join(drift))
         else:
             print("no drift — DB matches live tmux")
+        # Rows belonging to another host are NOT drift and NOT a clean bill of health:
+        # this sweep cannot see their tmux. Printed separately so the ! list above keeps
+        # meaning "verified crashed/odd here" (bus #87832).
+        if offhost:
+            print(f"OTHER HOSTS (not verified from {here} — a local tmux miss says nothing):")
+            print("\n".join(offhost))
     return 0
 
 
