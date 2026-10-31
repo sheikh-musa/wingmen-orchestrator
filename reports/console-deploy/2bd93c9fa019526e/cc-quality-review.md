@@ -1,15 +1,36 @@
 # cc-quality — console-deploy Gate 4 review: machines-resources panel (op#36664)
 
 - **op:** Musa op#36664 (bus #86675), plan approved by orch-console (#86818) — self-served review request (precedent orch-console #83531 citing #81035/#81059/#81098/`caa7e37ad5431cee`/`0e90cbd400200dc6`)
-- **Branch:** `lane/console-revamp-backlog135-137`
-- **Reviewed head:** `e48cf93d16f8ee1bf933d7d90794d774985fd547`
-- **Branch base (merge-base):** `84e0dd25c63cf56f6ad36f3813e52388a6c969b1` (note: `origin/fable/substrate-safe-fixes` has since advanced to `8b54b09b09da6265b466fc94b9f09613bcc1d1e4`; not yet rebased)
-- **Content hash:** `9cff0e9d0315e20a`
+- **Branch:** `lane/console-revamp-machines-resources` (retargeted onto `fable/substrate-safe-fixes` after PR#736 squash-merged as `4aa8e0e`)
+- **Reviewed head (original, pre-rebase):** `e48cf93d16f8ee1bf933d7d90794d774985fd547`
+- **Original content hash:** `9cff0e9d0315e20a`
 - **Reviewer:** cc-quality (`/code-review` skill, forked execution, medium effort, on `claude-sonnet-5`)
 
 ## VERDICT: GO / PASS
 
 Content hash independently recomputed at the reviewed head (`source scripts/lib/console_deploy_manifest.sh; console_content_hash`) = **9cff0e9d0315e20a** — exact match with the requested hash.
+
+## ADDENDUM — rebase onto `fable/substrate-safe-fixes` (2026-10-31)
+
+PR#736 squash-merged into `fable/substrate-safe-fixes` as `4aa8e0e`, so this branch
+(previously based on `lane/console-revamp-backlog135-137`'s unsquashed history) was
+rebased with `git rebase --onto origin/fable/substrate-safe-fixes
+origin/lane/console-revamp-backlog135-137` — same 4 commits, verified byte-identical
+diff (`git diff --stat` against the old base matches exactly). The rebase alone moved
+`console_content_hash` to **`2bd93c9fa019526e`** purely because unrelated commits
+already merged to `fable/substrate-safe-fixes` in the interim (#738/#733/#737) are now
+part of the same tree — not because this feature's own diff changed.
+
+A second cc-quality pass (medium, forked) re-reviewed the rebased worktree directly
+against `origin/fable/substrate-safe-fixes` and reconfirmed GO/PASS. It raised one new
+LOW finding, not a regression from the rebase: `cubeashtRows()` in `resources.js` never
+surfaces `m.cpu_temp_source` (set by `cubeasht_monitor.py` to e.g. `"unavailable"` when
+LibreHardwareMonitor isn't installed), so a permanent sensor-unavailability reads
+identically to a transient probe failure on the CPU-temp row. Tracked as a follow-up,
+not a ship blocker — the panel's existing invariant (never show a frozen/fabricated
+number) still holds; this is a missing *reason*, not a wrong value. Local test suite
+re-run against the rebased head: 369 passed (`tests/console/test_app.py` +
+`tests/migrations/`).
 
 Scope: two commits reviewed. `1f6d85f` adds the machines-resources panel (new `/resources` page + `/api/resources` route reading `host_metrics`, migrations 137/138 granting `console_readonly` read access). `e48cf93` fixes three findings surfaced during this same review round (below) — so this is the resolved state, not the as-shipped-then-patched one.
 
