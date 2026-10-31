@@ -59,6 +59,9 @@ from scripts.lib import fleet_health_lease  # noqa: E402
 from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 from scripts.lib.console_alive import console_alive  # noqa: E402  (audit-20261006 item 4)
 from scripts.lib.reply_evidence import replied_row_ids  # noqa: E402  (orch-console #80400)
+from scripts.lib.nothing_goes_dark import (  # noqa: E402  (op#34349/34354 Phase 2)
+    build_open_items_query, annotate_status_rows, STATUS_CADENCE_S,
+)
 from scripts import bus_send  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -174,6 +177,16 @@ DEFAULT_CAPTURED_OWNER = "orch-console"
 # ("client_asks_chase") so it can never collide with the operator net's.
 CLIENT_ASKS_CHASE_EVERY_MIN = _envint("SLA_CLIENT_ASKS_CHASE_EVERY_MIN", ASKS_CHASE_EVERY_MIN)
 MAX_CLIENT_ASKS_CHASE_PER_RUN = _envint("SLA_CLIENT_ASKS_MAX_CHASE_PER_RUN", MAX_ASKS_CHASE_PER_RUN)
+
+# "Nothing goes dark" Phase 2 (op#34349/34354, bus #86475, design doc part 3):
+# an OPEN operator-facing held_commitment/operator_ask that scripts/lib/
+# nothing_goes_dark.derive_overdue() has already flagged "dark" (past its due
+# date, or quiet past STATUS_CADENCE_S["operator"]) gets its owning agent
+# re-chased — same dead-man's-switch/cap shape as the asks-chase nets above,
+# separate state namespace ("party_update_chase"). OPERATOR-FACING ONLY per
+# the bus #86475 scope line; client-waiting items are Phase 3.
+PARTY_UPDATE_CHASE_EVERY_MIN = _envint("SLA_PARTY_UPDATE_CHASE_EVERY_MIN", 240)
+MAX_PARTY_UPDATE_CHASE_PER_RUN = _envint("SLA_PARTY_UPDATE_MAX_CHASE_PER_RUN", 3)
 
 # op#34803 part B slow-ask page (Musa op#34841 via console #78235; console #78229
 # after a misroute dropped 2 Musa asks ~9h on 10-27): an OPEN operator ask
@@ -1395,6 +1408,68 @@ def _send_captured_triage_page(conn, owner: str, target: dict) -> bool:
         except Exception:
             pass
         return False
+
+
+# ---------------------------------------------------------------------------
+# "Nothing goes dark" Phase 2 (op#34349/34354, bus #86475) — party-update-
+# chase: an OPEN operator-facing item scripts/lib/nothing_goes_dark has
+# already flagged dark gets its owner re-chased. Reuses that module's exact
+# overdue derivation (never a re-derived, possibly-diverging copy) so the
+# console's pulled status board and this pushed chase can never disagree.
+# ---------------------------------------------------------------------------
+
+def _fetch_party_update_open_items(conn):
+    """Impure: every OPEN operator-facing item currently flagged dark.
+    Reuses build_open_items_query() (Phase 1's SQL, now shared) + the same
+    annotate_status_rows() the status board calls, then filters to the
+    exact slice this net owns: waiting_party='operator' (Phase 2's explicit
+    scope — a client-channel item is Phase 3), overdue=True, and NOT a
+    commitment the sweeper already escalated (overdue_reason='fired' is its
+    breach-escalation path, not ours to double-chase)."""
+    sql, params = build_open_items_query()
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+    return [
+        r for r in annotate_status_rows(rows)
+        if r.get("waiting_party") == "operator"
+        and r.get("overdue")
+        and r.get("overdue_reason") != "fired"
+    ]
+
+
+def party_update_chase_targets(rows, *, now, chase_state, active_turn_check,
+                                chase_every_min=PARTY_UPDATE_CHASE_EVERY_MIN,
+                                max_targets=MAX_PARTY_UPDATE_CHASE_PER_RUN):
+    """PURE: select which dark operator-facing rows to chase this scan.
+
+    Dead-man's-switch dedup (own `chase_state` namespace, `{"last_chase_ts":
+    ts}` per row id) — a row chased within `chase_every_min` of its last
+    chase is skipped. `active_turn_check(owner) -> bool` is INJECTED (never
+    called directly here) so this stays unit-testable without tmux — the
+    stronger pane_busy oracle (the 2026-10-26 near-miss, bus #76991/#76993/
+    #76998), not the weaker 'esc to interrupt' substring check the older
+    chase nets lean on at send time. Rows already arrive darkest-first
+    (annotate_status_rows' own sort), so the per-scan cap naturally keeps
+    the quietest items. Does NOT mutate chase_state — stamping happens only
+    on the caller's later confirmation of a successful send (mirrors
+    client_chase_targets/chase_client_asks's pure/impure split)."""
+    due = []
+    for r in rows:
+        if r.get("waiting_party") != "operator":
+            continue
+        if r.get("overdue_reason") == "fired":
+            continue
+        if active_turn_check(r.get("owner")):
+            continue
+        last = (chase_state.get(str(r.get("id")), {}) or {}).get("last_chase_ts", 0) or 0
+        if (now - last) < chase_every_min * 60:
+            continue
+        due.append(r)
+        if len(due) >= max_targets:
+            break
+    return due
 
 
 def _fetch_waiting_asks(conn):
