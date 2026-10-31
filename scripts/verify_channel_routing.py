@@ -87,32 +87,50 @@ def load_group(conn, token_env_key):
         r["allowed_chat_ids"] = [_norm_chat(c) for c in (r["allowed_chat_ids"] or [])]
         r["allowed_usernames"] = list(r["allowed_usernames"] or [])
         r["created_at"] = _as_aware(r["created_at"])
-    _attach_bound_chats(conn, rows)
+    _attach_invites(conn, rows)
     return rows
 
 
-def _attach_bound_chats(conn, rows):
-    """When an invite bound a chat, THAT is when the row claimed it — a row
-    can exist for hours with an empty allowlist while its invite is out
-    (live: faizul created 05:41, chat 1578424630 bound by the deep-link tap
-    at 06:45:39). created_at alone would report every invite onboarding's own
-    tap as a cross-wire."""
+def _attach_invites(conn, rows):
+    """Everything the invite ledger knows about these rows.
+
+    bound_chats: when an invite bound a chat, THAT is when the row claimed it —
+    a row can exist for hours with an empty allowlist while its invite is out
+    (live: faizul created 05:41, chat bound by the deep-link tap at 06:45:39).
+    created_at alone would report every invite onboarding's own tap as a
+    cross-wire.
+
+    invite_pending: an unexpired, unused invite. The ingest already exempts an
+    empty allowlist in that state (op#34846) — it is the designed pre-bind
+    window, not a row that can never route.
+    """
     keys = [r["channel_key"] for r in rows]
+    invites = []
     if keys:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT channel_key, bound_chat_id, used_at FROM bot_channel_invites "
-                "WHERE channel_key = ANY(%s) AND used_at IS NOT NULL "
-                "AND bound_chat_id IS NOT NULL",
+                "SELECT channel_key, bound_chat_id, used_at, expires_at "
+                "FROM bot_channel_invites WHERE channel_key = ANY(%s)",
                 (keys,),
             )
-            binds = cur.fetchall()
-        for key, chat, used in binds:
-            for r in rows:
-                if r["channel_key"] == key:
-                    r.setdefault("bound_chats", {})[_norm_chat(chat)] = _as_aware(used)
+            invites = cur.fetchall()
+    now = datetime.now(timezone.utc)
     for r in rows:
         r.setdefault("bound_chats", {})
+        r.setdefault("invite_pending", False)
+        r.setdefault("invite_expires_at", None)
+    for key, chat, used, exp in invites:
+        for r in rows:
+            if r["channel_key"] != key:
+                continue
+            if used is not None and chat is not None:
+                r["bound_chats"].setdefault(_norm_chat(chat), _as_aware(used))
+            if used is None and exp is not None:
+                exp = _as_aware(exp)
+                if r["invite_expires_at"] is None or exp > r["invite_expires_at"]:
+                    r["invite_expires_at"] = exp
+                if exp > now:
+                    r["invite_pending"] = True
 
 
 def _group_for_channel(conn, channel_key):
@@ -261,10 +279,23 @@ def evaluate(rows, messages, channel_key):
                      f"bot_channels row found for {channel_key!r}")]
 
     declared = bool(mine or (this.get("allowed_usernames") or []))
-    checks.append(_check(
-        "allowlist_declared", declared,
-        f"allowed_chat_ids={sorted(mine)} usernames={len(this.get('allowed_usernames') or [])}"
-        if declared else "the row claims no chat and no username — gate_allows() can never pass"))
+    pending = bool(this.get("invite_pending"))
+    pending_until = this.get("invite_expires_at")
+    pending_iso = (pending_until.replace(microsecond=0).isoformat()
+                   if pending_until else None)
+    pending_note = (f" (outstanding invite expires {pending_iso})"
+                    if pending and pending_iso else "")
+    if declared:
+        declared_detail = (f"allowed_chat_ids={sorted(mine)} "
+                           f"usernames={len(this.get('allowed_usernames') or [])}")
+    elif pending:
+        declared_detail = ("no chat claimed yet; invite outstanding until "
+                           f"{pending_iso} (designed pre-bind state — "
+                           "ingest exempts it too)")
+    else:
+        declared_detail = ("the row claims no chat and no username — gate_allows() "
+                           "can never pass")
+    checks.append(_check("allowlist_declared", declared or pending, declared_detail))
 
     overlaps = {cid: keys for cid, keys in claimed_chats(rows).items() if len(keys) > 1}
     checks.append(_check(
@@ -278,18 +309,23 @@ def evaluate(rows, messages, channel_key):
         if got is None or got.key != channel_key:
             unresolved.append(f"{cid}->{got.key if got else None}")
     checks.append(_check(
-        "resolves_to_self", not unresolved and bool(mine),
+        "resolves_to_self", (not unresolved and bool(mine)) or (pending and not mine),
         "every allowed chat resolves to this channel" if not unresolved and mine
+        else "not applicable until the client taps the invite" if pending and not mine
         else f"unresolved/misdirected chats: {unresolved or 'no chat ids'}"))
 
     mine_msgs = [m for m in messages if m["chat_id"] in mine]
     routed = [m for m in mine_msgs if m["tag"] == this["channel_tag"]]
-    checks.append(_check(
-        "routed_evidence", bool(routed),
-        f"{len(routed)} inbound row(s) under {this['channel_tag']!r} from this chat"
-        if routed else
-        f"no inbound row under {this['channel_tag']!r} yet — has the client sent the "
-        f"SECOND message after the ingest restart?"))
+    if routed:
+        routed_detail = (f"{len(routed)} inbound row(s) under "
+                         f"{this['channel_tag']!r} from this chat")
+    elif pending:
+        routed_detail = (f"no inbound row under {this['channel_tag']!r} yet — "
+                         f"awaiting the client tap{pending_note}")
+    else:
+        routed_detail = (f"no inbound row under {this['channel_tag']!r} yet — has the "
+                         f"client sent the SECOND message after the ingest restart?")
+    checks.append(_check("routed_evidence", bool(routed), routed_detail))
 
     under_this_tag = [m for m in messages if m["tag"] == this["channel_tag"]]
     foreign = [m for m in under_this_tag if m["chat_id"] not in mine]
@@ -352,6 +388,8 @@ def evaluate(rows, messages, channel_key):
             "sibling_tags": sorted(sibling_tags),
             "fallback_tag": fallback,
             "enabled": bool(this.get("enabled")),
+            "invite_pending": pending,
+            "invite_expires_at": pending_iso,
         },
     }
 

@@ -48,10 +48,12 @@ def vr():
     return mod
 
 
-def row(key, tag, ids=(), users=(), created=None, enabled=False):
-    return {"channel_key": key, "token_env_key": TOK, "channel_tag": tag,
-            "allowed_chat_ids": list(ids), "allowed_usernames": list(users),
-            "enabled": enabled, "created_at": created or T0}
+def row(key, tag, ids=(), users=(), created=None, enabled=False, **extra):
+    r = {"channel_key": key, "token_env_key": TOK, "channel_tag": tag,
+         "allowed_chat_ids": list(ids), "allowed_usernames": list(users),
+         "enabled": enabled, "created_at": created or T0}
+    r.update(extra)
+    return r
 
 
 def msg(id, chat_id, tag, created=None):
@@ -249,6 +251,33 @@ def test_a_message_under_this_tag_after_the_bind_is_still_a_cross_wire():
     assert "newclient" in check["detail"]
 
 
+def test_a_row_waiting_on_its_invite_is_pre_bind_not_misconfigured():
+    """The ingest already exempts an empty allowlist while an invite is
+    outstanding (op#34846): that is the designed pre-bind state, not a row
+    that can never route. Saying otherwise invites exactly the wrong alarm
+    (live bariq: Afiq had simply not tapped the 06 Nov link yet)."""
+    waiting = row("bariq", "bariq", ids=[], created=T0,
+                  invite_pending=True, invite_expires_at=T0 + timedelta(days=5))
+    rows = HEALTHY_ROWS[:2] + [waiting]
+    report = _check(rows, [msg(1, 100, "alderei")], "bariq")
+    names = _by_name(report)
+    assert names["allowlist_declared"]["ok"] is True
+    assert "invite" in names["allowlist_declared"]["detail"]
+    assert names["resolves_to_self"]["ok"] is True
+    assert report["evidence"]["invite_pending"] is True
+    # step 5 is still unproven, but the reason must name the invite
+    assert names["routed_evidence"]["ok"] is False
+    assert "tap" in names["routed_evidence"]["detail"]
+
+
+def test_an_expired_invite_does_not_excuse_an_empty_allowlist():
+    dead = row("bariq", "bariq", ids=[], created=T0,
+               invite_pending=False, invite_expires_at=T0 - timedelta(hours=1))
+    rows = HEALTHY_ROWS[:2] + [dead]
+    report = _check(rows, [], "bariq")
+    assert _by_name(report)["allowlist_declared"]["ok"] is False
+
+
 def test_json_output_is_stable_and_machine_readable():
     report = _check(HEALTHY_ROWS, HEALTHY_MSGS, "newclient")
     assert json.loads(json.dumps(report)) == report
@@ -394,6 +423,20 @@ def test_e2e_an_invite_bound_chat_is_only_claimed_from_the_bind(db):
     assert report["ok"] is True, json.dumps(report, indent=2)
     assert report["evidence"]["pre_onboarding_rows"] == 1
     assert report["evidence"]["pre_onboarding_tags"] == ["alderei"]
+
+
+def test_e2e_an_outstanding_invite_reads_as_pre_bind(db):
+    v = vr()
+    db.execute("""INSERT INTO bot_channels
+                  (channel_key, token_env_key, channel_tag, allowed_chat_ids, created_at)
+                  VALUES ('newclient', %s, 'newclient', '{}', now() - interval '1 hour')""",
+               (TOK,))
+    db.execute("""INSERT INTO bot_channel_invites (channel_key, expires_at)
+                  VALUES ('newclient', now() + interval '5 days')""")
+    db.commit()
+    report = v.check(db, "newclient")
+    assert report["evidence"]["invite_pending"] is True
+    assert _by_name(report)["allowlist_declared"]["ok"] is True
 
 
 def test_e2e_check_proves_the_second_message_routed_and_no_cross_wire(db):
