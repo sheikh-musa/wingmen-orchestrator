@@ -75,6 +75,31 @@ RUNNER_NAME = "cubeasht-orchestrator"
 FROM_AGENT = "cc-fleet-health"
 TO_AGENT = "orch-console"
 
+# All 5 cubeasht-labeled runners live across 3 WSL distros (op#35970/bus #86104,
+# discovered 2026-10-31 via `wsl -l -v` + per-distro `systemctl list-units` --
+# cc-fleet-health's own #86102 found the original single-distro probe covered
+# only the orchestrator pair; this map is the corrected, verified topology).
+# WSL_DISTRO/RUNNER_NAME above stay the PRIMARY distro/runner (unchanged
+# behavior, unchanged stored-metrics shape under m["wsl"]/m["runner"]);
+# EXTRA_WSL_DISTROS and RUNNER_NAMES are purely ADDITIVE (m["wsl_by_distro"]/
+# m["runners_by_name"]) so no existing alert logic or stored-row consumer can
+# regress.
+EXTRA_WSL_DISTROS = ["ci-cosem-adcda", "ci-cosem-platform"]
+# GitHub's runners API is PER-REPO: the other 2 runner pairs/singles are
+# registered under their OWN repos, not GH_REPO (wingmen-orchestrator) --
+# querying only GH_REPO for them always resolves "not_registered" (verified
+# live: `gh api repos/sheikh-musa/wingmen-orchestrator/actions/runners` never
+# lists the cosem-adcda/cosem-platform runners at all). Confirmed live via
+# `gh api repos/sheikh-musa/<repo>/actions/runners`, 2026-10-31.
+RUNNER_REPOS = {
+    "cubeasht-orchestrator": GH_REPO,
+    "cubeasht-orchestrator-2": GH_REPO,
+    "cubeasht-cosem-adcda-runner": "sheikh-musa/cosem-adcda",
+    "cubeasht-cosem-adcda-runner-2": "sheikh-musa/cosem-adcda",
+    "cubeasht-cosem-platform-runner": "sheikh-musa/cosem-platform",
+}
+RUNNER_NAMES = list(RUNNER_REPOS)
+
 PS_TIMEOUT_S = 35   # PowerShell probe measured ~5.5s; budget for a busy box
 WSL_TIMEOUT_S = 15
 GH_TIMEOUT_S = 10   # total worst case ~60s
@@ -101,6 +126,7 @@ THRESHOLDS = {
 SCRIPTS_DIR = Path(__file__).resolve().parent
 PS_SCRIPT = SCRIPTS_DIR / "cubeasht_collect.ps1"
 WSL_SCRIPT = SCRIPTS_DIR / "cubeasht_collect_wsl.sh"
+GENERIC_WSL_SCRIPT = SCRIPTS_DIR / "cubeasht_collect_wsl_generic.sh"
 
 
 class MonitorError(RuntimeError):
@@ -231,6 +257,56 @@ def parse_wsl_output(text: str) -> dict:
     return out
 
 
+def parse_wsl_generic_output(text: str) -> dict:
+    """Like parse_wsl_output, but for cubeasht_collect_wsl_generic.sh's output: a
+    RUNNER_SERVICES_BEGIN/END block of N `<unit>=<status>` lines (whichever
+    actions.runner.*.service units exist in the distro this ran inside) instead
+    of one hardcoded runner_service= line. Same mem_total_mb/mem_used_mb/
+    mem_available_mb/mem_used_pct field names as parse_wsl_output, so callers
+    that only care about memory (e.g. the job-memory report) can treat either
+    shape's dict the same way."""
+    text = text.replace("\0", "")
+    if "CUBEMON_WSL_BEGIN" not in text or "CUBEMON_WSL_END" not in text:
+        raise ProbeParseError(f"WSL probe output has no CUBEMON_WSL markers: {text[:300]!r}")
+    out: dict = {"runner_services": {}}
+    in_free = False
+    in_services = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line == "RUNNER_SERVICES_BEGIN":
+            in_services = True
+            continue
+        if line == "RUNNER_SERVICES_END":
+            in_services = False
+            continue
+        if in_services:
+            if "=" in line:
+                unit, status = line.split("=", 1)
+                out["runner_services"][unit.strip()] = status.strip()
+            continue
+        if line == "FREE_BEGIN":
+            in_free = True
+            continue
+        if line == "FREE_END":
+            in_free = False
+            continue
+        if in_free:
+            cols = line.split()
+            if cols and cols[0] == "Mem:" and len(cols) >= 7:
+                total, used, avail = _num(cols[1]), _num(cols[2]), _num(cols[6])
+                out["mem_total_mb"], out["mem_used_mb"], out["mem_available_mb"] = total, used, avail
+                if total:
+                    out["mem_used_pct"] = round((total - avail) / total * 100, 1)
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+            if k == "uptime_s":
+                out["uptime_s"] = _num(v)
+            elif k == "loadavg":
+                out["loadavg"] = [x for x in (_num(p) for p in v.split()) if x is not None]
+    return out
+
+
 def runner_from_api(data: dict, name: str = RUNNER_NAME) -> dict:
     """GitHub /actions/runners response → {name, status, busy}. A runner missing
     from the list is status 'not_registered' (it cannot run CI either)."""
@@ -244,7 +320,9 @@ def runner_from_api(data: dict, name: str = RUNNER_NAME) -> dict:
 
 
 def build_metrics(ps: dict, wsl: Optional[dict], runner: Optional[dict],
-                  probe_errors: Optional[dict] = None) -> dict:
+                  probe_errors: Optional[dict] = None,
+                  wsl_by_distro: Optional[dict] = None,
+                  runners_by_name: Optional[dict] = None) -> dict:
     """Normalise one reachable sample into the stored metrics shape."""
     errs = dict(probe_errors or {})
     for k in ("os_error", "cpu_error", "disk_error", "gpu_error", "disks_error", "lhm_error", "vmmem_error"):
@@ -302,6 +380,12 @@ def build_metrics(ps: dict, wsl: Optional[dict], runner: Optional[dict],
     m["vmmem_ws_mb"] = round(vm / 1048576) if vm is not None else None
     m["wsl"] = wsl
     m["runner"] = runner
+    # ADDITIVE (op#35970/bus #86104): per-distro WSL memory + per-runner GH
+    # status for all 5 cubeasht runners, alongside the unchanged primary-only
+    # m["wsl"]/m["runner"] above. {} (never None) so a consumer can always
+    # .get() into it without a None-check.
+    m["wsl_by_distro"] = wsl_by_distro or {}
+    m["runners_by_name"] = runners_by_name or {}
     m["probe_errors"] = errs
     return m
 
@@ -727,8 +811,8 @@ def _ssh(remote_cmd: str, stdin_path: Path, timeout: int) -> subprocess.Complete
         cp.stderr.replace(b"\0", b"").decode("utf-8", "replace"))
 
 
-def fetch_runner() -> dict:
-    path = f"repos/{GH_REPO}/actions/runners?per_page=100"
+def _fetch_runners_json(repo: str = GH_REPO) -> dict:
+    path = f"repos/{repo}/actions/runners?per_page=100"
     try:
         cp = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github+json", path],
                             capture_output=True, text=True, timeout=GH_TIMEOUT_S)
@@ -739,10 +823,33 @@ def fetch_runner() -> dict:
     if cp.returncode != 0:
         raise MonitorError(f"gh api {path} failed rc={cp.returncode}: {(cp.stderr or cp.stdout).strip()[:300]}")
     try:
-        data = json.loads(cp.stdout)
+        return json.loads(cp.stdout)
     except json.JSONDecodeError as e:
         raise MonitorError(f"gh api {path} unparseable: {cp.stdout[:200]!r}") from e
-    return runner_from_api(data)
+
+
+def fetch_runner() -> dict:
+    return runner_from_api(_fetch_runners_json())
+
+
+def fetch_all_runners(repos: dict = RUNNER_REPOS) -> dict:
+    """ADDITIVE (op#35970/bus #86104): every known cubeasht runner's online/busy
+    state, not just the primary RUNNER_NAME. The runners API is per-repo (the
+    cosem-adcda/cosem-platform runners are registered under THEIR OWN repos,
+    never GH_REPO -- querying only GH_REPO for them always resolves
+    'not_registered', which is wrong, not just incomplete), so this groups by
+    repo first and makes one `gh api` call per DISTINCT repo (3 today, not 5) --
+    kept fully separate from fetch_runner() so the existing primary-runner
+    path/tests are untouched."""
+    by_repo: dict = {}
+    for name, repo in repos.items():
+        by_repo.setdefault(repo, []).append(name)
+    out: dict = {}
+    for repo, names in by_repo.items():
+        data = _fetch_runners_json(repo)
+        for name in names:
+            out[name] = runner_from_api(data, name)
+    return out
 
 
 def collect() -> tuple[bool, dict, Optional[str], list[str]]:
@@ -754,19 +861,25 @@ def collect() -> tuple[bool, dict, Optional[str], list[str]]:
         runner = None
         loud.append(f"runner status: {e}")
 
+    runners_by_name: dict = {}
+    try:
+        runners_by_name = fetch_all_runners()
+    except MonitorError as e:
+        loud.append(f"all-runner status: {e}")
+
     try:
         cp = _ssh("powershell -NoProfile -ExecutionPolicy Bypass -Command -", PS_SCRIPT, PS_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return False, {"reachable": False, "runner": runner}, \
+        return False, {"reachable": False, "runner": runner, "runners_by_name": runners_by_name}, \
             f"ssh/powershell timed out after {PS_TIMEOUT_S}s", loud
     if cp.returncode == 255:  # ssh's own failure code: connect/auth/network
-        return False, {"reachable": False, "runner": runner}, \
+        return False, {"reachable": False, "runner": runner, "runners_by_name": runners_by_name}, \
             f"ssh unreachable (rc=255): {cp.stderr.strip()[-200:]}", loud
     try:
         ps = parse_ps_output(cp.stdout)
     except ProbeParseError as e:
         loud.append(str(e))
-        return False, {"reachable": True, "runner": runner}, \
+        return False, {"reachable": True, "runner": runner, "runners_by_name": runners_by_name}, \
             f"probe output unparseable (rc={cp.returncode}): {e}"[:500], loud
 
     probe_errors: dict = {}
@@ -778,7 +891,27 @@ def collect() -> tuple[bool, dict, Optional[str], list[str]]:
         probe_errors["wsl"] = f"wsl probe timed out after {WSL_TIMEOUT_S}s"
     except ProbeParseError as e:  # distro stopped/missing: data, not a monitor bug
         probe_errors["wsl"] = str(e)[:300]
-    return True, build_metrics(ps, wsl, runner, probe_errors), None, loud
+
+    # ADDITIVE (op#35970/bus #86104): the other 2 of 3 WSL distros hosting
+    # cubeasht runners (ci-cosem-adcda x2, ci-cosem-platform), discovered via
+    # `wsl -l -v` + per-distro systemd units -- see EXTRA_WSL_DISTROS comment.
+    # Each probe is independent and failure-isolated exactly like the primary
+    # one above: a stopped/unreachable distro becomes a probe_errors note, and
+    # never prevents the other distros' data (or the rest of this sample) from
+    # being collected and stored.
+    wsl_by_distro: dict = {}
+    if wsl is not None:
+        wsl_by_distro[WSL_DISTRO] = dict(wsl)
+    for distro in EXTRA_WSL_DISTROS:
+        try:
+            gcp = _ssh(f"wsl -d {distro} -- bash -s", GENERIC_WSL_SCRIPT, WSL_TIMEOUT_S)
+            wsl_by_distro[distro] = parse_wsl_generic_output(gcp.stdout)
+        except subprocess.TimeoutExpired:
+            probe_errors[f"wsl_{distro}"] = f"wsl probe timed out after {WSL_TIMEOUT_S}s"
+        except ProbeParseError as e:
+            probe_errors[f"wsl_{distro}"] = str(e)[:300]
+
+    return True, build_metrics(ps, wsl, runner, probe_errors, wsl_by_distro, runners_by_name), None, loud
 
 
 # ---------------------------------------------------------------- main
@@ -788,11 +921,15 @@ def _brief(m: dict) -> str:
         return "UNREACHABLE"
     r = m.get("runner") or {}
     w = m.get("wsl") or {}
+    wbd = m.get("wsl_by_distro") or {}
+    extra = " ".join(
+        f"{d}:{(wbd.get(d) or {}).get('mem_used_pct')}%" for d in wbd if d != WSL_DISTRO
+    )
     return (f"cpu={m.get('cpu_load_pct')}% cpu_temp={m.get('cpu_temp_c')}({m.get('cpu_temp_source')}) "
             f"gpu={m.get('gpu_temp_c')}C/{m.get('gpu_util_pct')}% nvme={m.get('nvme_temp_c')}C "
             f"ram={m.get('ram_used_pct')}% diskC_free={m.get('disk_c_free_pct')}% "
             f"wsl_mem={w.get('mem_used_pct')}% runner={r.get('status')}/busy={r.get('busy')} "
-            f"svc={w.get('runner_service')}")
+            f"svc={w.get('runner_service')}" + (f" other_distros[{extra}]" if extra else ""))
 
 
 def build_parser() -> argparse.ArgumentParser:
