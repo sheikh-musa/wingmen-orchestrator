@@ -117,6 +117,10 @@ state/ci_orphan_watchdog.json
 state/opus_reprobe_storefront.json
 state/cosem_dashboard_msg_id
 state/preview_devserver_reaper_state.json
+# op#36531/36535 headless canary (TEMPORARY, removed with the canary itself).
+state/canary_angullia_log.jsonl
+state/canary_angullia_session_id.txt
+state/synthetic_feed_angullia_sent.jsonl
 # Broaden the PII/residency block to ALL depths under reports/ (the top-level-only
 # reports/*.png globs missed subdir artifacts — screenshots, client namelists,
 # result spreadsheets). Client PII/media must NEVER reach git, and MUST NOT ride a
