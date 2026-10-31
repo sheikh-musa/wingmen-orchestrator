@@ -361,6 +361,17 @@ Anything less is "in progress", and the console should hear that word rather tha
   pulls. It re-runs `fetch-secrets` in the same window and restarts its groups — the
   auto-respawning ones and the manual ones, per the hub's own list (bus 87827). Until it
   does, the hub holds a dead value, which is why it must act in the same window.
+- **A shutdown handler that writes telemetry inverts every freshness check** (SRE, bus
+  88056, generalising 88036). These boot scripts stamp `last_heartbeat = now()` as part of
+  marking themselves offline, so "recent" is ambiguous at the exact moment it is read. This
+  is the class of bug, not one instance: **any liveness check on this fleet must ask "did it
+  move across a beat, and was it in the state that means alive", never "does it look
+  recent."** The next person writing such a check should meet this sentence first.
+- **A monitor that is absent looks exactly like a monitor with nothing to report.** Where a
+  checklist item concerns a *monitor* rather than a workload, record the consequence for the
+  night ("nothing on that host has a wake backstop, and fleet telemetry would not have told
+  us") rather than a status word. An accepted named blind spot is legitimate; an absorbed
+  one is not.
 
 ---
 
