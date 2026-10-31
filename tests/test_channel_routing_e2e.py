@@ -56,9 +56,10 @@ def row(key, tag, ids=(), users=(), created=None, enabled=False, **extra):
     return r
 
 
-def msg(id, chat_id, tag, created=None):
+def msg(id, chat_id, tag, created=None, username=None):
     return {"id": id, "chat_id": str(chat_id), "tag": tag,
-            "created_at": created or T0 + timedelta(minutes=5)}
+            "created_at": created or T0 + timedelta(minutes=5),
+            "username": username}
 
 
 HEALTHY_ROWS = [
@@ -87,6 +88,12 @@ def test_unmatched_rows_are_the_unclaimed_chats_under_the_fallback_tag():
                                   msg(2, 100, "alderei"),
                                   msg(3, 777, "coffeemedia")])
     assert [m["chat_id"] for m in out] == ["555", "777"]
+
+
+def test_unmatched_rows_ignore_a_chat_a_row_claims_by_username():
+    rows = [row("alderei", "alderei", ids=[100], users=["bob"])]
+    out = vr().unmatched_rows(rows, [msg(1, 777, "alderei", username="bob")])
+    assert out == []
 
 
 def test_unmatched_rows_ignore_an_empty_chat_id():
@@ -278,6 +285,46 @@ def test_an_expired_invite_does_not_excuse_an_empty_allowlist():
     assert _by_name(report)["allowlist_declared"]["ok"] is False
 
 
+def test_a_username_claimed_chat_under_this_tag_is_a_cross_wire():
+    """cc-quality #86479 finding 1: gate_allows matches on allowed_usernames
+    too, so a sibling that claims a chat by username could have owned the
+    message — detecting only chat ids would label that misroute 'unclaimed'."""
+    rows = HEALTHY_ROWS[:2] + [
+        row("newclient", "newclient", ids=[555], created=T0 + timedelta(hours=1)),
+        row("usersonly", "usersonly", ids=[], users=["bob"], created=T0),
+    ]
+    msgs = HEALTHY_MSGS + [
+        msg(9, 777, "newclient", T0 + timedelta(hours=2), username="bob")]
+    report = _check(rows, msgs, "newclient")
+    check = _by_name(report)["no_foreign_rows_under_this_tag"]
+    assert check["ok"] is False
+    assert "usersonly" in check["detail"]
+
+
+def test_messages_claimed_by_our_own_username_are_not_foreign():
+    rows = HEALTHY_ROWS[:2] + [
+        row("newclient", "newclient", ids=[555], users=["alice"],
+            created=T0 + timedelta(hours=1))]
+    msgs = HEALTHY_MSGS + [
+        msg(9, 888, "newclient", T0 + timedelta(hours=2), username="alice")]
+    report = _check(rows, msgs, "newclient")
+    assert report["ok"] is True, json.dumps(report, indent=2)
+    assert report["evidence"]["routed_rows"] == 2      # chat 555 + the username-owned sender
+    assert report["evidence"]["unclaimed_arrivals"] == 0
+
+
+def test_a_non_numeric_chat_id_does_not_abort_the_check():
+    """cc-quality #86479 finding 2: a bad allowlist entry must fail that one
+    check, not raise out of evaluate()."""
+    rows = HEALTHY_ROWS[:2] + [
+        row("newclient", "newclient", ids=["not-a-number"],
+            created=T0 + timedelta(hours=1))]
+    report = _check(rows, HEALTHY_MSGS, "newclient")
+    check = _by_name(report)["resolves_to_self"]
+    assert check["ok"] is False
+    assert "not-a-number" in check["detail"]
+
+
 def test_json_output_is_stable_and_machine_readable():
     report = _check(HEALTHY_ROWS, HEALTHY_MSGS, "newclient")
     assert json.loads(json.dumps(report)) == report
@@ -329,6 +376,7 @@ def cluster():
         chat_id text,
         tag text,
         text text,
+        from_username text,
         delivered boolean,
         created_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE bot_channel_invites (

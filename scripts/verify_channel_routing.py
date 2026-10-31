@@ -58,6 +58,21 @@ def _as_aware(dt):
     return dt
 
 
+def _norm_user(username):
+    """Usernames match case-insensitively, with or without the @ (gate_allows)."""
+    if username is None:
+        return None
+    s = str(username).strip().lstrip("@").lower()
+    return s or None
+
+
+def _as_int(chat_id):
+    try:
+        return int(chat_id)
+    except (TypeError, ValueError):
+        return None
+
+
 def _norm_chat(chat_id):
     """Chat ids are stored as text; compare them as canonical strings."""
     if chat_id is None:
@@ -148,23 +163,25 @@ def load_group_messages(conn, rows, limit=None):
     tags = sorted({r["channel_tag"] for r in rows if r.get("channel_tag")})
     if not tags:
         return []
+    cols = "id, chat_id, tag, created_at, from_username"
     if limit:
         # A cap must keep the NEWEST rows: ORDER BY id LIMIT n alone returns
         # the oldest n, so a capped scan would never see today's arrivals.
-        sql = ("SELECT id, chat_id, tag, created_at FROM ("
-               "SELECT id, chat_id, tag, created_at FROM operator_messages "
+        sql = (f"SELECT {cols} FROM ("
+               f"SELECT {cols} FROM operator_messages "
                "WHERE direction = 'inbound' AND chat_id IS NOT NULL AND tag = ANY(%s) "
                "ORDER BY id DESC LIMIT %s) newest ORDER BY id")
         params = [tags, int(limit)]
     else:
-        sql = ("SELECT id, chat_id, tag, created_at FROM operator_messages "
+        sql = (f"SELECT {cols} FROM operator_messages "
                "WHERE direction = 'inbound' AND chat_id IS NOT NULL AND tag = ANY(%s) "
                "ORDER BY id")
         params = [tags]
     with conn.cursor() as cur:
         cur.execute(sql, tuple(params))
         out = [{"id": r[0], "chat_id": _norm_chat(r[1]), "tag": r[2],
-                "created_at": _as_aware(r[3])} for r in cur.fetchall()]
+                "created_at": _as_aware(r[3]), "username": _norm_user(r[4])}
+               for r in cur.fetchall()]
     return out
 
 
@@ -188,9 +205,16 @@ def claimed_chats(rows):
 
 
 def unmatched_rows(rows, messages):
-    """Inbound rows from chats NO row in the group claims."""
+    """Inbound rows from chats NO row in the group claims (by id OR username —
+    a username claim is a claim, so such a chat is not an onboarding
+    candidate)."""
     claimed = set(claimed_chats(rows))
-    return [m for m in messages if m.get("chat_id") and m["chat_id"] not in claimed]
+    users = {_norm_user(u) for r in rows
+             for u in (r.get("allowed_usernames") or [])}
+    users.discard(None)
+    return [m for m in messages
+            if m.get("chat_id") and m["chat_id"] not in claimed
+            and not (m.get("username") and _norm_user(m["username"]) in users)]
 
 
 def summarise_capture(token_env_key, rows, messages):
@@ -224,22 +248,31 @@ def _namespaces(rows):
             for r in sorted(rows, key=lambda r: r["channel_key"])]
 
 
-def _claims_at(rows, chat_id, when):
-    """Rows whose allowlist contained `chat_id` at `when`.
+def _claims_at(rows, chat_id, when, username=None):
+    """Rows whose allowlist contained this chat (id OR username) at `when`.
 
     Routing is judged as of the message's own arrival, not as of today: a chat
     is legitimately logged wherever it landed while NOBODY claimed it (the
     unclaimed-inbound capture path), and a cross-wire only if it was already
     someone else's when it arrived.
+
+    Usernames count because gate_allows matches on them too — a sibling with
+    allowed_usernames=['bob'] owned chat 777 the moment 'bob' wrote in it, so
+    detecting chat ids alone would label that misroute an unclaimed arrival.
     """
     when = _as_aware(when)
+    user = _norm_user(username)
     out = []
     for r in rows:
+        claimed = chat_id in {_norm_chat(c) for c in (r.get("allowed_chat_ids") or [])}
+        if not claimed and user:
+            claimed = user in {_norm_user(u) for u in (r.get("allowed_usernames") or [])}
+        if not claimed:
+            continue
         claimed_at = _claim_time(r, chat_id)
         if claimed_at is not None and when < claimed_at:
             continue
-        if chat_id in {_norm_chat(c) for c in (r.get("allowed_chat_ids") or [])}:
-            out.append(r)
+        out.append(r)
     return out
 
 
@@ -274,6 +307,13 @@ def evaluate(rows, messages, channel_key):
     fallback = fallback_tag(rows)
     mine = {_norm_chat(c) for c in (this.get("allowed_chat_ids") or [])}
     mine.discard(None)
+    mine_users = {_norm_user(u) for u in (this.get("allowed_usernames") or [])}
+    mine_users.discard(None)
+
+    def _owned(m):
+        return (m["chat_id"] in mine
+                or bool(m.get("username") and m["username"] in mine_users))
+
     created = this["created_at"]
     checks = [_check("channel_exists", True,
                      f"bot_channels row found for {channel_key!r}")]
@@ -305,7 +345,8 @@ def evaluate(rows, messages, channel_key):
 
     unresolved = []
     for cid in sorted(mine):
-        got = match_channel_in_group(group, int(cid), None)
+        as_chat = _as_int(cid)
+        got = match_channel_in_group(group, as_chat, None) if as_chat is not None else None
         if got is None or got.key != channel_key:
             unresolved.append(f"{cid}->{got.key if got else None}")
     checks.append(_check(
@@ -314,7 +355,7 @@ def evaluate(rows, messages, channel_key):
         else "not applicable until the client taps the invite" if pending and not mine
         else f"unresolved/misdirected chats: {unresolved or 'no chat ids'}"))
 
-    mine_msgs = [m for m in messages if m["chat_id"] in mine]
+    mine_msgs = [m for m in messages if _owned(m)]
     routed = [m for m in mine_msgs if m["tag"] == this["channel_tag"]]
     if routed:
         routed_detail = (f"{len(routed)} inbound row(s) under "
@@ -328,7 +369,7 @@ def evaluate(rows, messages, channel_key):
     checks.append(_check("routed_evidence", bool(routed), routed_detail))
 
     under_this_tag = [m for m in messages if m["tag"] == this["channel_tag"]]
-    foreign = [m for m in under_this_tag if m["chat_id"] not in mine]
+    foreign = [m for m in under_this_tag if not _owned(m)]
     # A foreign row is a cross-wire only if a SIBLING already claimed that chat
     # when the message arrived (live: faizul claimed 1578424630 at 05:41 and
     # its 06:45 message still landed under coffeemedia). A chat nobody had
@@ -337,7 +378,8 @@ def evaluate(rows, messages, channel_key):
     # is capture evidence, counted and reported, never a gate failure.
     cross_wire, unclaimed = [], []
     for m in foreign:
-        claimers = [r for r in _claims_at(rows, m["chat_id"], m["created_at"])
+        claimers = [r for r in _claims_at(rows, m["chat_id"], m["created_at"],
+                                          m.get("username"))
                     if r["channel_key"] != channel_key]
         (cross_wire if claimers else unclaimed).append((m, claimers))
     checks.append(_check(
