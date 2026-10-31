@@ -187,7 +187,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(401, {"error": "unauthorized"}, extra={"WWW-Authenticate": "Bearer"})
                 return
             try:
-                with psycopg.connect(hosted_view._dsn(), connect_timeout=15) as conn:
+                with psycopg.connect(hosted_view._txn_dsn(), connect_timeout=15) as conn:
                     payload = hosted_view.build_cloned_payload(conn)
                 self._json(200, payload)
             except Exception as e:  # noqa: BLE001
@@ -330,14 +330,15 @@ _RESET_BODIES = ("nazim", "cai", "hub")
 # prior comment literally said "mirrors app.py", the exact disagreement-prone
 # duplication that accessor exists to end. This process uses CONSOLE_DB_URL, not
 # DATABASE_URL (see module docstring's Run: line), so the dsn is resolved via
-# hosted_view._dsn() explicitly rather than the accessor's own DATABASE_URL-only
-# default — wrapped defensively so a missing/broken DSN at IMPORT time can never
-# crash the process before it even starts; console_protected_identities() itself
-# already fails safe to its own static floor on any DB error either way (never
-# empty, never raises) — "never boot the console without the guard set" holds
-# either way.
+# hosted_view._txn_dsn() explicitly rather than the accessor's own DATABASE_URL-
+# only default — a one-shot read at import time, so transaction-mode pooling
+# (see hosted_view._txn_dsn()) applies here too — wrapped defensively so a
+# missing/broken DSN at IMPORT time can never crash the process before it even
+# starts; console_protected_identities() itself already fails safe to its own
+# static floor on any DB error either way (never empty, never raises) — "never
+# boot the console without the guard set" holds either way.
 try:
-    _PROTECTED = console_protected_identities(dsn=hosted_view._dsn())
+    _PROTECTED = console_protected_identities(dsn=hosted_view._txn_dsn())
 except Exception:  # noqa: BLE001 — never boot the console without the guard set
     _PROTECTED = console_protected_identities()
 
@@ -426,7 +427,7 @@ def _strip_fps(node):
 # ---- read-only DB lookups (console_readonly role) ----------------------------------
 def _db_lane_roster() -> set:
     """Worker-lane names (fleet_lanes.lane, launcher = launch_dangerous_cc.sh)."""
-    with psycopg.connect(hosted_view._dsn(), connect_timeout=15) as conn, conn.cursor() as cur:
+    with psycopg.connect(hosted_view._txn_dsn(), connect_timeout=15) as conn, conn.cursor() as cur:
         cur.execute("SELECT lane FROM fleet_lanes WHERE launcher = %s AND lane IS NOT NULL",
                     ("launch_dangerous_cc.sh",))
         return {r[0] for r in cur.fetchall()}
@@ -434,7 +435,7 @@ def _db_lane_roster() -> set:
 
 def _db_lane_host(session: str):
     """The host the session last heart-beat from (agent_status), or None."""
-    with psycopg.connect(hosted_view._dsn(), connect_timeout=15) as conn, conn.cursor() as cur:
+    with psycopg.connect(hosted_view._txn_dsn(), connect_timeout=15) as conn, conn.cursor() as cur:
         cur.execute("SELECT host FROM agent_status WHERE tmux_session = %s "
                     "ORDER BY last_heartbeat DESC NULLS LAST LIMIT 1", (session,))
         row = cur.fetchone()

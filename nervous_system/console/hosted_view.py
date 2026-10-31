@@ -164,6 +164,38 @@ def _dsn() -> str:
     return dsn
 
 
+# Supabase's transaction-mode pooler port, as opposed to _dsn()'s session-mode
+# 5432 (same host/role, different pooler front). op#<console-pooler-fix>,
+# orch-console #86539 after cc-console-revamp-1's investigation (#86533):
+# console_readonly's session-mode pool hit its 15-slot ceiling, and every
+# hosted-clone caller here opens ONE connection, runs one or more SELECTs
+# inside the single implicit transaction psycopg opens by default, and closes
+# — no SET, no temp table, no LISTEN, no state held across requests — so none
+# of them need a session-mode slot at all. Use _txn_dsn() for every one-shot
+# hosted-clone read; _dsn() stays session-mode for anything that genuinely
+# needs it (none of this module's live callers do as of this change).
+_TXN_POOLER_PORT = "6543"
+
+
+def _txn_dsn() -> str:
+    """_dsn(), but pointed at the transaction-mode pooler port -- ONLY when
+    CONSOLE_DB_URL is actually set. db.py's own resolve_dsn() docstring is
+    explicit that the DATABASE_URL fallback is "LOCAL DEV ONLY": in that path
+    DATABASE_URL may not be a Supavisor-fronted DSN at all (e.g. a bare local
+    Postgres with nothing listening on 6543), so forcing the port there would
+    break local dev instead of fixing pooler contention (code-review finding,
+    cc-console-revamp-1 #86539 PR). Only rewrite the port for the real
+    console_readonly production credential; fall back to plain session-mode
+    _dsn() otherwise, exactly matching this module's prior behaviour."""
+    if not os.environ.get("CONSOLE_DB_URL"):
+        return _dsn()
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    params = conninfo_to_dict(_dsn())
+    params["port"] = _TXN_POOLER_PORT
+    return make_conninfo(**params)
+
+
 def build_minimized_payload(conn) -> Dict[str, Any]:
     """Return the scrubbed, field-minimized fleet view. `conn` is a psycopg
     connection on the READ-ONLY role. Only the cai-signed-off columns are read."""
