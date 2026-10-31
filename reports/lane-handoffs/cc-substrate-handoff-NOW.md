@@ -89,6 +89,14 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**22:08Z — cc-quality's Q on 782 was RIGHT and my doc was wrong.** They asked whether
+`SYSTEMD_PAGER=cat` even survives `sudo` (default `env_reset`, no SETENV tag). Measured on gzb under
+a real TTY: `SYSTEMD_PAGER=/bin/false sudo -n systemctl status <unit>` **still paged** — the variable
+never arrives. So the advice was inert, case (c), not (a)/(b). The working form is
+`sudo -n systemctl status <unit>.service | cat` (pipe changes what systemctl writes to, not the argv
+sudo matches) — verified clean under `-tt`. **782 head is now `cb5e9e0`**; re-confirm requested (88316).
+Note: the test itself hung on the pager — `ssh -tt` + a pager is a hang risk, always set a timeout.
+
 **22:02Z — 776 MERGED at `55473bae9bbc7c76194571f89dba15c7921fb8df`** (verified from the PR, not from
 merge_pinned's echo: merged=true, mergedAt 22:02:15Z, base head moved to it). CI was `success` on the
 exact head. **PR 782 opened (`cc-substrate/sudo-closed`, head `2041453`)** carrying the sudo correction
