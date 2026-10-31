@@ -7,8 +7,17 @@ sufficient: the operator ruled the schedule settles before the rotation and reop
 questions, so it is not settled; and the 21:45Z checklist could not clear because CI was
 queued behind two long jobs. Nothing fires tonight.
 
-**NEW SINCE 20:45Z — three defects found in my own executor, all on the paths a human
-touches first. PR 774's head moved twice; cc-quality's PASS is now on NONE of them.**
+**NEW SINCE 20:45Z — four defects found in my own executor, three of them on the paths a
+human touches first. PR 774's head moved three times; every cc-quality PASS in the bus is
+on a head that no longer exists.**
+
+0. **`_scrub` skipped our own `Refused` text** (cc-quality 88061 FAIL; fixed at `cee1dd4`).
+   `patch_password` builds its failure detail from the Management API's **response body**,
+   which echoes what was sent — so the one step that must never leak the value assembled its
+   own error text out of a third party's echo of it. Fixed twice over: the driver scrubs
+   every exception's text (Refused included) **and** `_record` scrubs every string field, so
+   no emitted line holds the value whatever produced it. Verified RED at `e02a0e2`.
+   **The lesson to keep: "we wrote this string ourselves" is not a reason to trust it.**
 
 1. **Rollback skipped on any non-`Refused` exception** (fixed at `16b7c69`). `run()` caught
    only its own exception type, so a psycopg/OSError/ImportError escaped as a traceback and
@@ -63,15 +72,15 @@ runbook as step 7 plus a dedicated section.
 |---|---|---|---|
 | 771 | `cc-substrate/verify-no-argv-dsn` | `511c587` | **MERGED as `05f2797`** |
 | 765 | `cc-substrate/substrate-dsn-rotation` | — | **CLOSED as superseded** |
-| 774 | `cc-substrate/rotation-executor` | `e02a0e2c` | re-review requested 88057 (**PASSes 87957/87987 are on dead heads**); CI queued |
+| 774 | `cc-substrate/rotation-executor` | `cee1dd40` | **FAIL 88061** on `e02a0e2` (scrub hole) → fixed, re-review requested 88073; every earlier PASS is on a dead head |
 | 773 | `cc-substrate/merge-signoff` | `079e9eb9` | cc-quality **PASS** 87946; CI queued; console's waiter may merge — coordinate |
 | 762 | `cc-substrate/credguard-bypass-followup` | `d3b71dd` | **MERGED `d3b71ddeb5fc`** |
 | 766 | `cc-substrate/sweep-multi-scan` | `61f3dce` | **MERGED `61f3dcef2084`** |
 | 761 | `cc-substrate/no-cross-provider-resume` | `675c2e7` | PASS 87984; CI queued |
 | 776 | `cc-substrate/rotation-runbook` | `0277a81` | doc; §1 targets=3→1, step-e verify, residuals; needs a sign-off to merge |
 
-**Outstanding at the 21:45Z checklist** (owed to the console): (a) 774 — **not** PASSed on
-`e02a0e2`, therefore **not merged**; (b) heartbeat — answered, declaration accepted on terms
+**Outstanding at the 21:45Z checklist** (owed to the console): (a) 774 — **FAILed** at `e02a0e2`
+(cc-quality 88061, real leak), fixed and re-reviewing at `cee1dd40`, therefore **not merged**; (b) heartbeat — answered, declaration accepted on terms
 4a–g, step seven in the runbook; (c) hub sudo gap — **asked the hub (88048), no answer
 yet**; do not report it closed, and per fleet-health (88056) report the *consequence* for
 the night (wake backstop absent = nobody would learn it from fleet telemetry), not a status
