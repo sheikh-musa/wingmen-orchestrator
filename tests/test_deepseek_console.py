@@ -63,7 +63,7 @@ def test_no_screenshot_or_trace_cli_flags_exist():
     """Per-subcommand help (not the top-level --help, which also prints the
     module docstring that names --screenshot/--trace in prose while
     describing the ban) -- this checks the actual argparse option strings."""
-    for sub in ("add-client", "usage-export"):
+    for sub in ("add-client", "usage-export", "split-key"):
         rc, out, err = _run([sub, "--help"])
         assert rc == 0
         assert "--screenshot" not in out
@@ -108,10 +108,10 @@ def test_context_launches_real_chrome_and_strips_automation_tells(tmp_path):
 
 # --- CLI wiring --------------------------------------------------------
 
-def test_help_lists_all_four_subcommands():
+def test_help_lists_all_five_subcommands():
     rc, out, err = _run(["--help"])
     assert rc == 0
-    for sub in ("login", "add-client", "list-clients", "usage-export"):
+    for sub in ("login", "add-client", "split-key", "list-clients", "usage-export"):
         assert sub in out
 
 
@@ -410,3 +410,205 @@ def test_merge_jsonl_refreshes_a_changed_day_without_duplicating(tmp_path):
     lines = [json.loads(l) for l in open(out) if l.strip()]
     assert len(lines) == 1
     assert lines[0]["usage"]["output_tokens"] == 250
+
+
+# --- split-key: migrate one family off the shared key (bus #87091 GO) ------
+#
+# The property that matters most is ORDER: create -> vault -> flip map ->
+# check. provider_routing.sh fails closed when the resolved vault key is
+# absent, so a map flip that lands before the secret exists stops that
+# family's lanes from booting. These tests assert the order directly by
+# reading the map file from inside the vault.put() call, not by trusting the
+# source to stay in the right order.
+
+import argparse  # noqa: E402
+
+
+def _rewrite_map(script_path, updates):
+    map_file = script_path.parent / "lib" / "deepseek_key_map.json"
+    mapping = json.loads(map_file.read_text())
+    mapping.update(updates)
+    map_file.write_text(json.dumps(mapping, indent=2, sort_keys=True) + "\n")
+    return map_file
+
+
+def _install_fake_vault(monkeypatch, on_put=None):
+    import types
+
+    calls = []
+
+    class _FakeVault:
+        def put(self, name, value, reason):
+            if on_put is not None:
+                on_put()
+            calls.append((name, value, reason))
+
+    parent = types.ModuleType("nervous_system")
+    child = types.ModuleType("nervous_system.vault")
+    child.vault = _FakeVault()
+    monkeypatch.setitem(sys.modules, "nervous_system", parent)
+    monkeypatch.setitem(sys.modules, "nervous_system.vault", child)
+    return calls
+
+
+def _split_args(slug, **kw):
+    base = dict(headed=False, flip_only=False, dry_run=False, skip_boot_check=True)
+    base.update(kw)
+    return argparse.Namespace(slug=slug, **base)
+
+
+# guardrails -- all fire before any playwright/vault import or DB access
+
+def test_split_key_rejects_invalid_slug():
+    rc, out, err = _run(["split-key", "Upper Case"])
+    assert rc == 1
+    assert "invalid slug" in err
+
+
+def test_split_key_refuses_a_slug_that_is_not_mapped(tmp_path):
+    script = _isolated_scripts_copy(tmp_path)
+    before = (script.parent / "lib" / "deepseek_key_map.json").read_text()
+
+    rc, out, err = _run_isolated(script, ["split-key", "never-mapped-before"])
+    assert rc == 1
+    assert "not in the map" in err
+    assert (script.parent / "lib" / "deepseek_key_map.json").read_text() == before
+
+
+def test_split_key_refuses_an_already_split_slug(tmp_path):
+    script = _isolated_scripts_copy(tmp_path)
+    _rewrite_map(script, {"bariq": "DEEPSEEK_KEY_BARIQ"})
+
+    rc, out, err = _run_isolated(script, ["split-key", "bariq"])
+    assert rc == 1
+    assert "already split" in err
+
+
+def test_split_key_refuses_to_repoint_a_row_this_script_did_not_set(tmp_path):
+    """A row pointing anywhere other than the shared key was set by hand --
+    repointing it could strand a family that was deliberately routed."""
+    script = _isolated_scripts_copy(tmp_path)
+    before = _rewrite_map(script, {"bariq": "DEEPSEEK_KEY_SOMETHING_ELSE"}).read_text()
+
+    rc, out, err = _run_isolated(script, ["split-key", "bariq"])
+    assert rc == 1
+    assert "not the shared" in err
+    assert (script.parent / "lib" / "deepseek_key_map.json").read_text() == before
+
+
+# state-machine refusals (need the vault presence bit, so patch it)
+
+def test_split_key_refuses_when_a_previous_run_already_vaulted(tmp_path, monkeypatch):
+    script = _isolated_scripts_copy(tmp_path)
+    mod = _load_module(script, "deepseek_split_partial")
+    monkeypatch.setattr(mod, "_vault_has_key", lambda name: True)
+
+    rc = mod.cmd_split_key(_split_args("bariq"))
+    assert rc == 1
+
+
+def test_split_key_flip_only_refuses_when_the_vault_has_no_secret(tmp_path, monkeypatch):
+    """Flipping without the secret is exactly the state that makes
+    provider_routing.sh refuse to boot the family."""
+    script = _isolated_scripts_copy(tmp_path)
+    mod = _load_module(script, "deepseek_split_fliponly")
+    map_file = script.parent / "lib" / "deepseek_key_map.json"
+    before = map_file.read_text()
+
+    monkeypatch.setattr(mod, "_vault_has_key", lambda name: False)
+    rc = mod.cmd_split_key(_split_args("bariq", flip_only=True))
+
+    assert rc == 1
+    assert map_file.read_text() == before
+
+
+def test_split_key_dry_run_changes_nothing(tmp_path, monkeypatch, capsys):
+    script = _isolated_scripts_copy(tmp_path)
+    mod = _load_module(script, "deepseek_split_dry")
+    map_file = script.parent / "lib" / "deepseek_key_map.json"
+    before = map_file.read_text()
+
+    monkeypatch.setattr(mod, "_vault_has_key", lambda name: False)
+    calls = _install_fake_vault(monkeypatch)
+
+    def _explode(*_a, **_k):
+        raise AssertionError("dry run must not create a console key")
+
+    monkeypatch.setattr(mod, "_create_console_key", _explode)
+
+    rc = mod.cmd_split_key(_split_args("bariq", dry_run=True))
+    assert rc == 0
+    assert calls == []
+    assert map_file.read_text() == before
+    assert "DEEPSEEK_KEY_BARIQ" in capsys.readouterr().out
+
+
+# the real command
+
+def test_split_key_vaults_before_flipping_the_map_row(tmp_path, monkeypatch, capsys):
+    script = _isolated_scripts_copy(tmp_path)
+    mod = _load_module(script, "deepseek_split_order")
+    map_file = script.parent / "lib" / "deepseek_key_map.json"
+
+    monkeypatch.setattr(mod, "_vault_has_key", lambda name: False)
+    monkeypatch.setattr(
+        mod, "_create_console_key", lambda slug, headed: "sk-ORDERING-SENTINEL-VALUE"
+    )
+    monkeypatch.setattr(mod, "_run_key_map_check", lambda: (0, "ok"))
+
+    seen = {}
+
+    def on_put():
+        seen["map_during_put"] = json.loads(map_file.read_text())["bariq"]
+
+    calls = _install_fake_vault(monkeypatch, on_put=on_put)
+
+    rc = mod.cmd_split_key(_split_args("bariq"))
+
+    assert rc == 0
+    assert seen["map_during_put"] == "DEEPSEEK_CODING_KEY", (
+        "map row was flipped BEFORE the vault held the secret -- that family "
+        "would fail closed at launch"
+    )
+    assert json.loads(map_file.read_text())["bariq"] == "DEEPSEEK_KEY_BARIQ"
+    assert len(calls) == 1
+    assert calls[0][0] == "DEEPSEEK_KEY_BARIQ"
+    # the whole point of the no-print rule
+    assert "sk-ORDERING-SENTINEL-VALUE" not in capsys.readouterr().out
+
+
+def test_split_key_leaves_the_map_alone_when_key_creation_fails(tmp_path, monkeypatch):
+    script = _isolated_scripts_copy(tmp_path)
+    mod = _load_module(script, "deepseek_split_createfail")
+    map_file = script.parent / "lib" / "deepseek_key_map.json"
+    before = map_file.read_text()
+
+    monkeypatch.setattr(mod, "_vault_has_key", lambda name: False)
+    calls = _install_fake_vault(monkeypatch)
+
+    def _boom(slug, headed):
+        raise mod.LayoutMismatch("simulated dialog change")
+
+    monkeypatch.setattr(mod, "_create_console_key", _boom)
+
+    try:
+        mod.cmd_split_key(_split_args("bariq"))
+    except mod.LayoutMismatch:
+        pass
+    else:
+        raise AssertionError("expected LayoutMismatch to propagate to main()")
+
+    assert calls == []
+    assert map_file.read_text() == before
+
+
+def test_the_console_allowlist_still_has_no_delete_or_revoke_action():
+    """orch-console #87091: revoking the shared key 'needs my explicit go
+    after every family is verified'. The allowlist is what makes that
+    structurally true -- there is no page or action here that could revoke
+    anything, so no later edit can route around the gate by accident."""
+    mod = _load_module(name="deepseek_allowlist")
+    assert set(mod._SEL) == {"api_keys_page", "usage_page", "login_page"}
+    blob = json.dumps(mod._SEL).lower()
+    for forbidden in ("delete", "revoke", "remove"):
+        assert forbidden not in blob
