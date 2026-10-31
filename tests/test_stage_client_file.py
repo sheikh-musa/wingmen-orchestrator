@@ -1083,3 +1083,308 @@ def test_attest_read_coexists_with_operator_attested_lines_in_same_log(tmp_path,
     assert len(all_lines) == 2
     tags = {ln.split("\t")[0] for ln in all_lines}
     assert "READ-ATTEST" in tags  # the operator-attested line's first field is an ISO ts
+
+
+# ── zip bundle support (Hariz's FF01 skill sheets arrive as .zip) ───────────
+# SYNTHETIC ONLY. Proves: (a) the member-list safety scan is fail-closed and
+# collects every violation, (b) ANY unsafe member refuses the WHOLE zip, no
+# silent skip-past, (c) a safe zip's supported members run through the exact
+# same extract()+classify() pipeline as a standalone file, (d) --export on a
+# zip is ALWAYS structure-only, regardless of a member's own CLEAN/HOLD
+# verdict, (e) --operator-attested is refused cleanly on a zip input.
+
+import zipfile as _zipfile_mod
+
+
+def _make_zip(tmp_path, members: dict) -> "pathlib.Path":
+    """members: {member_name: bytes}. Writes a real zip via zipfile so
+    file_size/compress_size are genuine, not faked."""
+    p = tmp_path / "bundle.zip"
+    with _zipfile_mod.ZipFile(p, "w", compression=_zipfile_mod.ZIP_DEFLATED) as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+    return p
+
+
+class _FakeZipInfo:
+    """Duck-typed stand-in for zipfile.ZipInfo -- scan_zip_safety only reads
+    these four attributes/method, never extracts bytes, so a fake lets the
+    size/ratio/count caps be tested directly without writing huge real data."""
+    def __init__(self, filename, file_size=0, compress_size=1, is_dir=False):
+        self.filename = filename
+        self.file_size = file_size
+        self.compress_size = compress_size
+        self._is_dir = is_dir
+
+    def is_dir(self):
+        return self._is_dir
+
+
+class _FakeZipFile:
+    def __init__(self, infos):
+        self._infos = infos
+
+    def infolist(self):
+        return self._infos
+
+
+# -- is_safe_zip_member_name / is_nested_archive_name ------------------------
+
+@pytest.mark.parametrize("name", [
+    "../../etc/passwd",
+    "/etc/passwd",
+    "a/../../b.csv",
+    "sub/../../../escape.csv",
+    "\\windows\\system32\\evil.csv",
+    "C:\\windows\\system32\\evil.csv",
+])
+def test_is_safe_zip_member_name_rejects_traversal_and_absolute(name):
+    assert scf.is_safe_zip_member_name(name) is False
+
+
+@pytest.mark.parametrize("name", ["sheet.csv", "sub/sheet.csv", "a/b/c.xlsx", "report.pdf"])
+def test_is_safe_zip_member_name_accepts_ordinary_relative_paths(name):
+    assert scf.is_safe_zip_member_name(name) is True
+
+
+@pytest.mark.parametrize("name", ["nested.zip", "archive.tar.gz", "data.7z", "old.rar", "x.tgz"])
+def test_is_nested_archive_name_detects_common_archive_exts(name):
+    assert scf.is_nested_archive_name(name) is True
+
+
+@pytest.mark.parametrize("name", ["sheet.csv", "report.xlsx", "doc.docx", "scan.pdf"])
+def test_is_nested_archive_name_false_for_supported_kinds(name):
+    assert scf.is_nested_archive_name(name) is False
+
+
+# -- scan_zip_safety: unit-level, duck-typed ZipInfo doubles -----------------
+
+def test_scan_zip_safety_ok_for_small_safe_members():
+    infos = [_FakeZipInfo("a.csv", file_size=100, compress_size=80),
+              _FakeZipInfo("b.xlsx", file_size=200, compress_size=150)]
+    result = scf.scan_zip_safety(_FakeZipFile(infos))
+    assert result.ok is True
+    assert result.reasons == []
+    assert len(result.members) == 2
+
+
+def test_scan_zip_safety_skips_directory_entries():
+    infos = [_FakeZipInfo("subdir/", is_dir=True), _FakeZipInfo("subdir/a.csv", file_size=10, compress_size=8)]
+    result = scf.scan_zip_safety(_FakeZipFile(infos))
+    assert result.ok is True
+    assert len(result.members) == 1
+
+
+def test_scan_zip_safety_rejects_too_many_members():
+    infos = [_FakeZipInfo(f"f{i}.csv", file_size=10, compress_size=8) for i in range(scf._ZIP_MAX_MEMBERS + 1)]
+    result = scf.scan_zip_safety(_FakeZipFile(infos))
+    assert result.ok is False
+    assert result.members == []
+    assert "exceeds the cap" in result.reasons[0]
+
+
+def test_scan_zip_safety_rejects_unsafe_member_name():
+    infos = [_FakeZipInfo("ok.csv", file_size=10, compress_size=8),
+              _FakeZipInfo("../escape.csv", file_size=10, compress_size=8)]
+    result = scf.scan_zip_safety(_FakeZipFile(infos))
+    assert result.ok is False
+    assert result.members == []
+    assert any("unsafe" in r for r in result.reasons)
+
+
+def test_scan_zip_safety_rejects_nested_archive_member():
+    infos = [_FakeZipInfo("ok.csv", file_size=10, compress_size=8),
+              _FakeZipInfo("inner.zip", file_size=10, compress_size=8)]
+    result = scf.scan_zip_safety(_FakeZipFile(infos))
+    assert result.ok is False
+    assert any("nested archive" in r for r in result.reasons)
+
+
+def test_scan_zip_safety_rejects_oversized_member():
+    too_big = (scf._ZIP_MAX_MEMBER_UNCOMPRESSED_MB + 1) * 1024 * 1024
+    infos = [_FakeZipInfo("huge.csv", file_size=too_big, compress_size=1000)]
+    result = scf.scan_zip_safety(_FakeZipFile(infos))
+    assert result.ok is False
+    assert any("per-member cap" in r for r in result.reasons)
+
+
+def test_scan_zip_safety_rejects_zip_bomb_shaped_ratio():
+    # small compressed size, huge declared uncompressed size -- classic
+    # zip-bomb shape, caught even though the member itself is under the
+    # absolute per-member size cap.
+    infos = [_FakeZipInfo("bomb.csv", file_size=50 * 1024 * 1024, compress_size=1024)]
+    result = scf.scan_zip_safety(_FakeZipFile(infos))
+    assert result.ok is False
+    assert any("compression ratio" in r for r in result.reasons)
+
+
+def test_scan_zip_safety_rejects_total_oversized_even_if_each_member_ok():
+    per_member = int((scf._ZIP_MAX_TOTAL_UNCOMPRESSED_MB / 3 + 10) * 1024 * 1024)
+    infos = [_FakeZipInfo(f"f{i}.csv", file_size=per_member, compress_size=per_member // 2) for i in range(3)]
+    result = scf.scan_zip_safety(_FakeZipFile(infos))
+    assert result.ok is False
+    assert any("total uncompressed size" in r for r in result.reasons)
+
+
+def test_scan_zip_safety_collects_every_violation_not_just_first():
+    infos = [_FakeZipInfo("../escape.csv", file_size=10, compress_size=8),
+              _FakeZipInfo("inner.zip", file_size=10, compress_size=8)]
+    result = scf.scan_zip_safety(_FakeZipFile(infos))
+    assert result.ok is False
+    assert len(result.reasons) == 2
+
+
+# -- _safe_member_basename ----------------------------------------------------
+
+def test_safe_member_basename_keeps_extension_strips_path_and_unsafe_chars():
+    assert scf._safe_member_basename("sub/dir/My Report (final)!.csv") == "My_Report__final__.csv"
+    assert scf._safe_member_basename("a/b/c.XLSX") == "c.xlsx"
+    assert scf._safe_member_basename("noext") == "noext"
+
+
+# -- end-to-end via main(): real zips, real extract()+classify() ------------
+
+def test_main_zip_clean_member_reports_clean_values_free(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    z = _make_zip(tmp_path, {"navmap.csv": "Screen,Label\nhome,Welcome\n"})
+    rc = scf.main([str(z), "op36085"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "navmap.csv" in out and "verdict=CLEAN" in out
+    assert "Welcome" not in out
+
+
+def test_main_zip_hold_member_pii_never_leaks_value(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    z = _make_zip(tmp_path, {"roster.csv": "Name,NRIC\nAhmad bin Yusof,S1234567D\n"})
+    rc = scf.main([str(z), "op36085"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "verdict=HOLD" in out
+    assert "S1234567D" not in out and "Ahmad" not in out
+
+
+def test_main_zip_mixed_clean_and_hold_members_both_reported(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    z = _make_zip(tmp_path, {
+        "clean.csv": "Screen,Label\nhome,Welcome\n",
+        "roster.csv": "Name,NRIC\nAhmad bin Yusof,S1234567D\n",
+    })
+    rc = scf.main([str(z), "op36085"])
+    out = capsys.readouterr().out
+    assert rc == 1  # any member HOLD -> whole-zip rc is 1
+    assert "clean.csv" in out and "roster.csv" in out
+    assert "1 clean, 1 held" in out
+
+
+def test_main_zip_unsupported_extension_member_skipped_not_fatal(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    z = _make_zip(tmp_path, {
+        "clean.csv": "Screen,Label\nhome,Welcome\n",
+        "readme.txt": "just some notes",
+    })
+    rc = scf.main([str(z), "op36085"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "readme.txt" in out and "skipped" in out
+    assert "1 clean, 0 held, 1 skipped" in out
+
+
+def test_main_zip_refuses_whole_zip_on_nested_archive_member(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    z = _make_zip(tmp_path, {
+        "clean.csv": "Screen,Label\nhome,Welcome\n",
+        "inner.zip": b"fake-nested-archive-bytes",
+    })
+    rc = scf.main([str(z), "op36085", "--export"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "REFUSED" in out
+    assert "nested archive" in out
+    assert not (tmp_path / "reports").exists()
+
+
+def test_main_zip_refuses_whole_zip_on_path_traversal_member_name(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / "evil.zip"
+    with _zipfile_mod.ZipFile(p, "w") as zf:
+        zi = _zipfile_mod.ZipInfo("../../escape.csv")
+        zf.writestr(zi, "Screen,Label\nhome,Welcome\n")
+        zf.writestr("clean.csv", "Screen,Label\nhome,Welcome\n")
+    rc = scf.main([str(p), "op36085", "--export"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "REFUSED" in out
+    assert not (tmp_path / "reports").exists()
+
+
+def test_main_zip_not_a_valid_zip_refuses_cleanly(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / "notreally.zip"
+    p.write_bytes(b"this is not a zip file at all")
+    rc = scf.main([str(p), "op36085"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "not a valid zip" in err
+
+
+def test_main_zip_without_export_never_writes_anything(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    z = _make_zip(tmp_path, {"clean.csv": "Screen,Label\nhome,Welcome\n"})
+    scf.main([str(z), "op36085"])
+    assert not (tmp_path / "reports").exists()
+
+
+def test_main_zip_export_is_always_structure_only_regardless_of_verdict(tmp_path, monkeypatch, capsys):
+    # The ruling: zip content stays structure-only, no blanket trust -- even
+    # a CLEAN member's --export must NOT carry full content, unlike the
+    # plain single-file path (contrast with
+    # test_main_clean_csv_with_export_writes_the_actual_content above).
+    monkeypatch.chdir(tmp_path)
+    z = _make_zip(tmp_path, {
+        "clean.csv": "Screen,Label\nhome,Welcome\n",
+        "roster.csv": "Name,NRIC\nAhmad bin Yusof,S1234567D\n",
+    })
+    rc = scf.main([str(z), "op36085", "--export"])
+    capsys.readouterr()
+    assert rc == 1
+    out_dir = tmp_path / "reports" / "client-file-staging" / "op36085"
+    clean_export = out_dir / "bundle__clean.md"
+    held_export = out_dir / "bundle__roster.md"
+    assert clean_export.exists() and held_export.exists()
+    clean_text = clean_export.read_text(encoding="utf-8")
+    held_text = held_export.read_text(encoding="utf-8")
+    assert "structure only" in clean_text
+    assert "Welcome" not in clean_text
+    assert "structure only" in held_text
+    assert "Ahmad" not in held_text and "S1234567D" not in held_text
+
+
+def test_main_zip_operator_attested_refused_cleanly(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    z = _make_zip(tmp_path, {"roster.csv": "Name,NRIC\nAhmad bin Yusof,S1234567D\n"})
+    rc = scf.main([str(z), "op36085", "--export", "--operator-attested", "12345"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "not supported for a .zip input" in err
+    assert not (tmp_path / "reports").exists()
+
+
+def test_stage_zip_members_cleans_up_scratch_dir_after(tmp_path, monkeypatch):
+    import tempfile as _tempfile_mod
+    monkeypatch.chdir(tmp_path)
+    z = _make_zip(tmp_path, {"clean.csv": "Screen,Label\nhome,Welcome\n"})
+    created_paths = []
+    real_mkdtemp = _tempfile_mod.mkdtemp
+
+    def _tracking_mkdtemp(*args, **kwargs):
+        path = real_mkdtemp(*args, **kwargs)
+        created_paths.append(path)
+        return path
+
+    monkeypatch.setattr(scf.tempfile, "mkdtemp", _tracking_mkdtemp)
+    with _zipfile_mod.ZipFile(z) as zf:
+        safety = scf.scan_zip_safety(zf)
+        scf.stage_zip_members(zf, safety.members)
+    assert len(created_paths) == 1
+    assert not pathlib.Path(created_paths[0]).exists()

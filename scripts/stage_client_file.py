@@ -100,6 +100,28 @@ including HOLD, and logs every such export to an append-only audit file.
   the audit log is what makes a wrong/over-broad citation reviewable. Plain
   --export (full content on CLEAN, nothing on HOLD), --structure-only, and the
   sensitive-channel structure-only path are all UNCHANGED by this flag.
+
+Zip bundle support (orch-console bus #85982, reported via cc-cosem-exams-1
+bus #85976: Hariz's FF01 skill sheets always arrive as .zip, which this
+stager used to refuse outright). A .zip input is handled end-to-end
+STRUCTURE-ONLY, by design -- no blanket trust of zip contents. The member
+list (names/sizes/compression ratios) is scanned FIRST, before any bytes are
+read: a nested archive, a path-traversal/absolute member name, an over-cap
+member or total size, or a zip-bomb-shaped compression ratio REFUSES THE
+WHOLE ZIP (one bad member is itself a trust signal about the archive, not
+something to quietly skip past). Each SAFE member whose extension is one of
+the supported single-file kinds is extracted to this stager's OWN scratch
+dir (reports/client-file-staging/.zip-scratch/, always removed after) and run
+through the exact same extract()+classify() pipeline as a standalone file.
+--export on a zip ALWAYS writes the values-free structural export
+(export_structure_only) for every staged member, regardless of that
+member's own CLEAN/HOLD verdict -- never full content, even on CLEAN. A lane
+wanting a specific member's actual content extracts that one file and runs
+it through the plain single-file path. --operator-attested is refused
+(cleanly, exit 2) on a zip input -- that path is for a human-reviewed
+SPECIFIC file, not a many-files-at-once bundle. --channel is accepted but a
+no-op here (structure-only is already at least as conservative as the
+sensitive-channel gate).
 """
 from __future__ import annotations
 
@@ -107,7 +129,10 @@ import argparse
 import hashlib
 import os
 import re
+import shutil
 import sys
+import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -593,6 +618,262 @@ def sanitize_op_id(op_id: str) -> str:
     return _OPID_SAFE_RE.sub("_", op_id) or "unknown"
 
 
+# ── zip bundle support (Hariz's FF01 skill sheets arrive as .zip; orch-console
+# bus #85982, reported via cc-cosem-exams-1 bus #85976) ──────────────────────
+# STRUCTURE-ONLY, by design (ruling: "no blanket trust of zip contents") — a
+# zip's own --export always writes the values-free structural header for
+# every staged member, never full content, regardless of that member's
+# CLEAN/HOLD verdict or --channel. A lane wanting a specific member's full
+# content extracts it and runs the plain single-file path on it instead.
+# Any unsafe member shape (nested archive, path-traversal/absolute name,
+# over-cap size, zip-bomb-shaped compression ratio) REFUSES THE WHOLE ZIP,
+# fail-closed — one bad member among otherwise-fine ones is itself a signal
+# the archive isn't trustworthy, not something to quietly skip past.
+_NESTED_ARCHIVE_EXTS = {
+    ".zip", ".tar", ".gz", ".tgz", ".bz2", ".tbz2", ".xz", ".txz", ".7z", ".rar",
+}
+_ZIP_MAX_MEMBERS = 200
+_ZIP_MAX_MEMBER_UNCOMPRESSED_MB = 200
+_ZIP_MAX_TOTAL_UNCOMPRESSED_MB = 500
+_ZIP_MAX_COMPRESSION_RATIO = 100  # uncompressed:compressed -> zip-bomb shape past this
+# Prefix for the stager's OWN scratch dir (tempfile.mkdtemp, system temp —
+# deliberately NOT under reports/, so a zip with no --export leaves ZERO
+# trace on disk, same as every other input kind here). A member is never
+# extracted anywhere else; the scratch dir is always removed (shutil.rmtree)
+# after staging, even on error.
+_ZIP_SCRATCH_PREFIX = "stage_client_file_zip_"
+
+
+def is_safe_zip_member_name(name: str) -> bool:
+    """True if a raw zip member filename cannot escape the extraction root:
+    no absolute path, no Windows drive letter, no '..' path-traversal
+    segment anywhere. Checked on the RAW name, before any extraction —
+    never relies on zipfile's own (version-dependent) extract-time
+    sanitization."""
+    if not name or not name.strip():
+        return False
+    if name.startswith("/") or name.startswith("\\"):
+        return False
+    if len(name) >= 2 and name[1] == ":":
+        return False
+    segments = re.split(r"[\\/]+", name)
+    return not any(seg == ".." for seg in segments)
+
+
+def is_nested_archive_name(name: str) -> bool:
+    lower = name.lower()
+    return any(lower.endswith(ext) for ext in _NESTED_ARCHIVE_EXTS)
+
+
+@dataclass
+class ZipSafetyCheck:
+    ok: bool
+    reasons: list[str] = field(default_factory=list)
+    members: list[zipfile.ZipInfo] = field(default_factory=list)
+
+
+def scan_zip_safety(zf: zipfile.ZipFile) -> ZipSafetyCheck:
+    """FAIL-CLOSED structural safety scan of a zip's member list — reads only
+    zipfile.ZipInfo metadata (names/sizes), never a member's bytes. Directory
+    entries are skipped, never counted. Collects EVERY violation (not just
+    the first) so a refusal is fully explained; ok=False means the WHOLE zip
+    is refused, members is then empty regardless of how many were individually
+    fine."""
+    infos = zf.infolist()
+    reasons: list[str] = []
+    if len(infos) > _ZIP_MAX_MEMBERS:
+        reasons.append(f"{len(infos)} members exceeds the cap of {_ZIP_MAX_MEMBERS}")
+    members: list[zipfile.ZipInfo] = []
+    total_uncompressed = 0
+    for info in infos:
+        if info.is_dir():
+            continue
+        if not is_safe_zip_member_name(info.filename):
+            reasons.append(f"member {info.filename!r} has an unsafe (path-traversal/absolute) name")
+            continue
+        if is_nested_archive_name(info.filename):
+            reasons.append(f"member {info.filename!r} is a nested archive — not allowed")
+            continue
+        size_mb = info.file_size / (1024 * 1024)
+        if size_mb > _ZIP_MAX_MEMBER_UNCOMPRESSED_MB:
+            reasons.append(
+                f"member {info.filename!r} uncompressed size {size_mb:.1f}MB exceeds "
+                f"the per-member cap of {_ZIP_MAX_MEMBER_UNCOMPRESSED_MB}MB"
+            )
+            continue
+        ratio = info.file_size / max(info.compress_size, 1)
+        if ratio > _ZIP_MAX_COMPRESSION_RATIO:
+            reasons.append(
+                f"member {info.filename!r} compression ratio {ratio:.0f}:1 exceeds "
+                f"the zip-bomb-shape cap of {_ZIP_MAX_COMPRESSION_RATIO}:1"
+            )
+            continue
+        total_uncompressed += info.file_size
+        members.append(info)
+    total_mb = total_uncompressed / (1024 * 1024)
+    if total_mb > _ZIP_MAX_TOTAL_UNCOMPRESSED_MB:
+        reasons.append(
+            f"total uncompressed size {total_mb:.1f}MB exceeds the cap of "
+            f"{_ZIP_MAX_TOTAL_UNCOMPRESSED_MB}MB"
+        )
+    ok = not reasons
+    return ZipSafetyCheck(ok=ok, reasons=reasons, members=members if ok else [])
+
+
+def _safe_member_basename(name: str) -> str:
+    """Sanitize a zip member's basename for writing into the scratch dir.
+    Keeps the extension (extract() dispatches on it via Path.suffix) but
+    scrubs everything else unsafe. Only ever the basename — no
+    sub-directories are created under the scratch dir regardless of the
+    member's own path."""
+    base = Path(name).name or "member"
+    stem, dot, ext = base.rpartition(".")
+    if not dot:
+        stem, ext = base, ""
+    safe_stem = _OPID_SAFE_RE.sub("_", stem) or "member"
+    safe_ext = _OPID_SAFE_RE.sub("", ext.lower())
+    return f"{safe_stem}.{safe_ext}" if safe_ext else safe_stem
+
+
+@dataclass
+class ZipMemberResult:
+    name: str
+    size: int
+    status: str  # "staged" | "skipped-unsupported-extension" | "parse-error"
+    verdict: StageVerdict | None = None
+    structure: FileStructure | None = None
+    error: str | None = None
+
+
+def stage_zip_members(zf: zipfile.ZipFile, members: list[zipfile.ZipInfo]) -> list[ZipMemberResult]:
+    """Extract each SAFE member (already vetted by scan_zip_safety) to the
+    stager's own scratch dir — never anywhere else on disk — and run it
+    through the EXISTING single-file extract()+classify() pipeline, exactly
+    as if it had been staged on its own. The scratch dir is always removed
+    afterward, even on error. A member whose extension isn't one of the
+    supported single-file extractors is reported skipped, never staged, and
+    never fatal to the rest of the zip."""
+    results: list[ZipMemberResult] = []
+    scratch = Path(tempfile.mkdtemp(prefix=_ZIP_SCRATCH_PREFIX))
+    try:
+        for info in members:
+            ext = Path(info.filename).suffix.lower()
+            if ext not in _EXTRACTORS:
+                results.append(ZipMemberResult(
+                    name=info.filename, size=info.file_size,
+                    status="skipped-unsupported-extension",
+                ))
+                continue
+            dest = scratch / _safe_member_basename(info.filename)
+            if dest.exists():
+                # Two members sanitized to the same basename within this zip.
+                dest = scratch / f"{dest.stem}_{len(results)}{dest.suffix}"
+            with zf.open(info) as src, open(dest, "wb") as out:
+                shutil.copyfileobj(src, out)
+            try:
+                structure = extract(dest)
+                verdict = classify(structure)
+                results.append(ZipMemberResult(
+                    name=info.filename, size=info.file_size,
+                    status="staged", verdict=verdict, structure=structure,
+                ))
+            except SystemExit as e:
+                results.append(ZipMemberResult(
+                    name=info.filename, size=info.file_size,
+                    status="parse-error", error=str(e),
+                ))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return results
+
+
+def render_zip_report(zip_name: str, results: list[ZipMemberResult]) -> str:
+    """Values-free zip-level report — per-member kind/verdict/reason summary,
+    same values-free contract as StageVerdict.render(), extended across every
+    member. Never a row data value, never a matched PII value."""
+    lines = [f"zip: {zip_name}", f"members: {len(results)}"]
+    for r in results:
+        if r.status == "skipped-unsupported-extension":
+            lines.append(f"  - {r.name} ({r.size} bytes): skipped (unsupported extension)")
+        elif r.status == "parse-error":
+            lines.append(f"  - {r.name} ({r.size} bytes): PARSE ERROR — {r.error}")
+        else:
+            v = r.verdict
+            reason_str = "; ".join(v.reasons) if v.reasons else ""
+            suffix = f" — {reason_str}" if reason_str else ""
+            lines.append(f"  - {r.name} ({r.size} bytes): verdict={v.verdict}{suffix}")
+    clean_n = sum(1 for r in results if r.status == "staged" and r.verdict.verdict == "CLEAN")
+    hold_n = sum(1 for r in results if r.status == "staged" and r.verdict.verdict == "HOLD")
+    skipped_n = sum(1 for r in results if r.status == "skipped-unsupported-extension")
+    error_n = sum(1 for r in results if r.status == "parse-error")
+    lines.append(f"summary: {clean_n} clean, {hold_n} held, {skipped_n} skipped, {error_n} parse-error")
+    return "\n".join(lines)
+
+
+def export_zip_members_structure_only(
+    results: list[ZipMemberResult], op_id: str, zip_stem: str
+) -> list[Path]:
+    """Write a values-free structural export for every STAGED member,
+    regardless of its CLEAN/HOLD verdict (ruling: zip content stays
+    structure-only, no blanket trust). Reuses export_structure_only
+    unchanged — one file per member, named with the zip's own stem so two
+    zips staged under the same op_id can never collide on filename."""
+    out_paths = []
+    for r in results:
+        if r.status != "staged":
+            continue
+        member = Path(r.name)
+        qualified_name = f"{zip_stem}__{member.stem}{member.suffix}"
+        out_paths.append(export_structure_only(r.verdict, r.structure, op_id, qualified_name))
+    return out_paths
+
+
+def stage_zip_main(
+    path: Path, op_id: str, *, export: bool, operator_attested: int | None
+) -> int:
+    """Handle a .zip input end-to-end. Structure-only by design — see the
+    section header above. REFUSES the whole zip (exit 2, nothing written) on
+    any unsafe member shape. A safe zip's supported members are each run
+    through the existing single-file pipeline; --export always writes
+    structure-only for every staged member — which is already at least as
+    conservative as the --channel sensitive-data gate, so --channel is a
+    no-op on a zip input (accepted by the CLI, simply has nothing further
+    to narrow here). --operator-attested is not supported for a zip input
+    (the whole point of the operator-attested path is a human-reviewed
+    SPECIFIC file; a zip is many files at once) — it is refused cleanly
+    rather than silently ignored or guessed at."""
+    if operator_attested is not None:
+        print(
+            "stage_client_file: --operator-attested is not supported for a .zip input "
+            "(zip handling stays structure-only by design) — extract the specific member "
+            "and run it through the plain single-file path instead",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        zf = zipfile.ZipFile(path)
+    except zipfile.BadZipFile as e:
+        print(f"stage_client_file: not a valid zip file: {type(e).__name__}", file=sys.stderr)
+        return 2
+    with zf:
+        safety = scan_zip_safety(zf)
+        if not safety.ok:
+            print("verdict: REFUSED (unsafe zip)")
+            print("reasons: " + "; ".join(safety.reasons))
+            return 2
+        results = stage_zip_members(zf, safety.members)
+    print(render_zip_report(path.name, results))
+    if export:
+        zip_stem = _OPID_SAFE_RE.sub("_", path.stem) or "zip"
+        for out_path in export_zip_members_structure_only(results, op_id, zip_stem):
+            print(f"exported (structure only — zip member): {out_path}")
+    if any(r.status == "parse-error" for r in results):
+        return 2
+    if any(r.status == "staged" and r.verdict.verdict == "HOLD" for r in results):
+        return 1
+    return 0
+
+
 def export_clean_file(verdict: StageVerdict, structure: FileStructure, op_id: str, original_name: str) -> Path:
     """Write a CLEAN file's ACTUAL content as a readable markdown copy —
     sheets as tables, docx/pdf prose as text — preceded by the same
@@ -906,7 +1187,7 @@ def attest_read_main(argv: list[str]) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("path", help="path to the client file (.xlsx/.csv/.docx/.pdf/.png/.jpg/.jpeg)")
+    p.add_argument("path", help="path to the client file (.xlsx/.csv/.docx/.pdf/.png/.jpg/.jpeg/.zip)")
     p.add_argument("op_id", help="op id this file is staged under (free-form string)")
     p.add_argument("--export", action="store_true",
                    help="on CLEAN, write the actual readable content to reports/client-file-staging/<op_id>/; "
@@ -945,6 +1226,14 @@ def main(argv: list[str] | None = None) -> int:
     if not path.is_file():
         print(f"stage_client_file: no such file: {path}", file=sys.stderr)
         return 2
+    if path.suffix.lower() == ".zip":
+        # A zip bundle (e.g. Hariz's FF01 skill sheets) doesn't fit the
+        # single-FileStructure pipeline below -- it is many heterogeneous
+        # files, each with its own verdict. Fully separate, structure-only
+        # path; see stage_zip_main's docstring.
+        return stage_zip_main(
+            path, args.op_id, export=args.export, operator_attested=args.operator_attested,
+        )
     structure = extract(path)
     verdict = classify(structure)
     print(verdict.render(structure))  # stdout: values-free, always
