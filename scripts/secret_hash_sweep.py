@@ -621,9 +621,14 @@ def _main_reverse(args) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="hash-identified exact-span secret redaction sweep")
-    ap.add_argument("--env", nargs="+", help="env file(s)/glob(s) holding real secret values")
-    ap.add_argument("--scan", nargs="+",
-                    help="file(s)/glob(s) to sweep: .jsonl transcripts (JSON-gated) or plaintext (e.g. tool-results/*.txt)")
+    ap.add_argument("--env", action="extend", nargs="+",
+                    help="env file(s)/glob(s) holding real secret values " 
+                         "(repeatable: --env a --env b ADDS, it does not replace)")
+    ap.add_argument("--scan", action="extend", nargs="+",
+                    help="file(s)/glob(s) to sweep: .jsonl transcripts (JSON-gated) or plaintext "
+                         "(e.g. tool-results/*.txt). REPEATABLE: --scan a --scan b sweeps BOTH. "
+                         "Before 2026-11-01 a second --scan silently REPLACED the first, so a "
+                         "two-glob invocation scanned half the corpus and reported it clean.")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--dry-run", action="store_true", help="detect + report only (default)")
     g.add_argument("--execute", action="store_true", help="redact in place (requires --ledger)")
