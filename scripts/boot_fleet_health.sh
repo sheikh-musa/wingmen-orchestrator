@@ -80,6 +80,24 @@ export AGENT_ID
 #     session from the console-handoff injection it only fires for
 #     ORCH_BODY_ROLE=console sessions -- this export makes that exemption
 #     correct for us too, if the hook ever reaches an off-tree cwd at all.
+# AMENDED (cc-quality PR#721 own-verdict, bus #86242, 2026-10-31): the audit
+# above was not exhaustive -- cc-quality independently re-ran it (45 files)
+# and found 2 more readers whose behavior FLIPS, both safe but one a real
+# loosening worth recording on its own line:
+#   - secrets_transcript_guard.py's check_rule_d() (line ~858): CC_BASE_AGENT_ID
+#     absent used to SKIP rule D (treated as console/hub); present now ENFORCES
+#     it, blocking cc-fleet-health from switching gcloud to a HUMAN-owner
+#     account. STRENGTHENING -- a bot lane shouldn't act as the human owner;
+#     this body uses service accounts/ADC, never that path.
+#   - console_irsyad_client_send_gate.sh (line ~52): `[ -n CC_BASE_AGENT_ID ]`
+#     is a LANE EXEMPTION from the gazzabyte-irsyad CLIENT-channel send gate.
+#     Absent (console) was GATED there (needs an explicit money/floor
+#     override); present now EXEMPTS this body, so it technically COULD send
+#     to that live client/money channel without the override. LOOSENING --
+#     immaterial today (cc-fleet-health has no legitimate reason to send
+#     there; real irsyad money-path enforcement lives in the coord send path,
+#     not this console-specific gate) but binding: cc-fleet-health must NEVER
+#     send to the irsyad client channel, exemption or not.
 # Do NOT unset ORCH_BODY_ROLE to "fix" this instead -- unset means hub doctrine
 # in orch_lease elsewhere; this body legitimately carries it ambiently from the
 # shared .env and the fix is CC_BASE_AGENT_ID, not removing that.
