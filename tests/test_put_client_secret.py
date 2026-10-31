@@ -57,8 +57,16 @@ def fake_vault(monkeypatch):
     mod = types.ModuleType("nervous_system.vault")
     mod.vault = _Vault()
     mod.VaultError = VaultError
-    import nervous_system  # noqa: F401 — the real package, so only the submodule is stubbed
+    import nervous_system  # the real package, so only the submodule is stubbed
     monkeypatch.setitem(sys.modules, "nervous_system.vault", mod)
+    # ALSO the package attribute: on Python 3.9 `import nervous_system.vault as x`
+    # resolves through nervous_system.vault (the PACKAGE ATTRIBUTE) when the real
+    # submodule has ever been imported, so setitem alone leaves two different
+    # modules reachable under one name. That is not theoretical — it made this
+    # test mutate the REAL vault singleton's put() (patching sys.modules while the
+    # `as` form handed back the real module) and poisoned four tests/test_vault.py
+    # cases in CI run 41227818506.
+    monkeypatch.setattr(nervous_system, "vault", mod, raising=False)
     return calls, VaultError
 
 
@@ -164,7 +172,11 @@ def test_vault_failure_is_reported_by_class_only(pcs, fake_vault, piped, capsys)
     class Boom(RuntimeError):
         pass
 
-    import nervous_system.vault as sv  # the stub installed by the fixture
+    # Take the STUB from sys.modules explicitly. `import nervous_system.vault as sv`
+    # hands back the package attribute, which may be the REAL module — mutating that
+    # would leak into every later test in the same process.
+    sv = sys.modules["nervous_system.vault"]
+    assert sv.vault.__class__.__name__ == "_Vault", "not the fixture's stub"
 
     def _raise(*a, **k):
         raise Boom("SENSITIVE-ERROR-DETAIL that must not be relayed")
