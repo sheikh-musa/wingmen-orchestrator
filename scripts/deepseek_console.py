@@ -731,7 +731,16 @@ def parse_export_zip(zip_bytes: bytes, since: str | None = None):
                 "cost_usd": 0.0,
             },
         )
-        rec["usage"][usage_type] = int(amount)
+        # SUM, never assign. The export writes more than one row per
+        # (day, key, model, type) -- its rows are split by wallet/user, a
+        # dimension this parser deliberately drops. Assigning made the last
+        # row win, so a past day's token counts CHANGED between two runs of
+        # the same window (live 2026-11-01: 10-29 output_tokens read 994456,
+        # then 170949, cost identical both times to 10 dp). Cost was always
+        # right because it was already summed; only the counts were being
+        # clobbered, which is the worse failure -- the JSONL is consumed as
+        # authoritative and the undercount is invisible.
+        rec["usage"][usage_type] = rec["usage"].get(usage_type, 0) + int(amount)
         rec["cost_usd"] = round(rec["cost_usd"] + amount * price, 10)
 
     console_cost: dict = {}
