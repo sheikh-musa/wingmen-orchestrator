@@ -34,6 +34,10 @@ def test_sub_tag_column_present():
 
 def test_check_rejects_cross_family_impersonation():
     with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        # Migration 124's guard trigger rejects a raw INSERT for any role other
+        # than bus_writer (backlog#124); assume the sanctioned role so the
+        # CHECK constraint below is what actually rejects the row.
+        cur.execute("SET ROLE bus_writer")
         with pytest.raises(psycopg.errors.CheckViolation):
             cur.execute(
                 """
@@ -125,7 +129,10 @@ def test_check_rejects_like_metacharacter_bypass():
         )
 
         # 3. And confirm via an actual insert that a mismatched prefix is
-        #    rejected by the CHECK constraint itself.
+        #    rejected by the CHECK constraint itself. Assume bus_writer (the
+        #    only role migration 124's guard trigger admits) so the CHECK --
+        #    not the guard -- is what rejects this row.
+        cur.execute("SET ROLE bus_writer")
         with pytest.raises(psycopg.errors.CheckViolation):
             cur.execute(
                 """
