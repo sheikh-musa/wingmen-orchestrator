@@ -89,6 +89,23 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**22:40Z — 774 was CONFLICTING, and the cause is the biggest thing found tonight.**
+**PR 776 was NOT docs-only.** API file list: runbook +470, boot_cai +12/-3, boot_fleet_health +12/-3,
+boot_nazim +49/-3, lib/dsn_at_use +68, rotate_substrate_dsn +726, **substrate_rotation_executor +440**,
+3 test files. 1341 insertions / 8 files. It merged at 55473ba, so **base carries the UNHARDENED
+executor** — no `_scrub`, `except Refused` not `except Exception`, no pre-probe old-dsn capture — i.e.
+the exact version cc-quality FAILED at 88061/88080. **Do not run the executor from the tree until 774
+lands.** Reported as a P1 blocker (88397); review-gap question put to cc-quality (88399).
+
+**774 rebased → `9a6021ee6f782f6bf2f9a8ed6e32cae5d257d752`.** Rebuilt as base + the two files at
+reviewed content (`git reset --hard origin/base; git checkout cee1dd4 -- <2 files>`) rather than
+replaying 15 commits, because 776 already carried the other nine files byte-identically. File list is
+now exactly 2 files; mergeable=true, blocked on CI. 69 rotation tests green on the pushed tree.
+Console informed (88400, 02:00Z deadline for the sha).
+
+**My error, worth keeping:** I called 776 docs-only after checking its head sha and the diff I meant
+to ship, and never listed its files. **Check `gh api pulls/N/files` before calling any PR docs-only.**
+
 **22:29Z — 782 MERGED at `b645f1da0a9170568875530aeaf1f0bac7deca08`** (verified from the PR:
 merged=true, mergedAt 22:29:21Z, base advanced). cc-quality re-confirmed PASS at `cb5e9e0` (88333)
 after the SYSTEMD_PAGER correction. The runbook's §7 is now correct in the tree.
