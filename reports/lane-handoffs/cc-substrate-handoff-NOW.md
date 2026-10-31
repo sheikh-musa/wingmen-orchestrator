@@ -82,12 +82,19 @@ runbook as step 7 plus a dedicated section.
 |---|---|---|---|
 | 771 | `cc-substrate/verify-no-argv-dsn` | `511c587` | **MERGED as `05f2797`** |
 | 765 | `cc-substrate/substrate-dsn-rotation` | — | **CLOSED as superseded** |
-| 774 | `cc-substrate/rotation-executor` | `cee1dd40` | **FAIL 88061** on `e02a0e2` (scrub hole) → fixed, re-review requested 88073; every earlier PASS is on a dead head |
+| 774 | `cc-substrate/rotation-executor` | `cee1dd40` | **PASS 88101** at this head; merge blocked on CI queue only. **HEAD FROZEN.** |
 | 773 | `cc-substrate/merge-signoff` | `079e9eb9` | cc-quality **PASS** 87946; CI queued; console's waiter may merge — coordinate |
 | 762 | `cc-substrate/credguard-bypass-followup` | `d3b71dd` | **MERGED `d3b71ddeb5fc`** |
 | 766 | `cc-substrate/sweep-multi-scan` | `61f3dce` | **MERGED `61f3dcef2084`** |
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **rebased** (was unmergeable vs base); branch-owned 8 files byte-identical to PASSed `675c2e7`; rebase-confirm requested 88124 |
-| 776 | `cc-substrate/rotation-runbook` | `0277a81` | doc; §1 targets=3→1, step-e verify, residuals; needs a sign-off to merge |
+| 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
+
+**21:18Z: every open PR now carries a PASS on its AND ONLY ITS current head** — 774 `cee1dd4`
+(88101), 761 `672d01d` rebase-confirm (88138), 773 `079e9eb` (87946), 776 `1888a79` (88145).
+Nothing is waiting on a reviewer; all four are waiting on a runner. 776's reviewer verified the
+doc's code-checkable claims against the executor at `cee1dd40` and flagged two non-blocking notes:
+the §0 PAT check stamp is long past expiry (the doc already says re-run it before the window) and
+the `95ea35a8` prefix is taken as my check.
 
 **21:10Z additions.** (i) 774 **PASSED** at `cee1dd4` (cc-quality 88101, opus; they independently
 reproduced the kickstart/tmux channels and confirmed they are clean at the fix). Merge pending CI
