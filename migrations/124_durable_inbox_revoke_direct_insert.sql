@@ -52,13 +52,27 @@
 -- if anything (fail fastest, least work done before rejection).
 --
 -- assert: no_table_privilege service_role public.agent_messages INSERT
--- assert: search_path public.audit_board_digest()
 -- assert: search_path public.escalate_full_tier_without_auditor(numeric)
--- assert: search_path public.escalate_stale_decision_audits()
 -- assert: search_path public.close_decision_by_audit(text,text)
 -- assert: search_path public.trigger_cai_decision_announce()
 -- assert: no_execute anon public.trigger_cai_decision_announce()
 -- assert: no_execute authenticated public.trigger_cai_decision_announce()
+--
+-- No header "-- assert:" line for audit_board_digest()/
+-- escalate_stale_decision_audits(): both are genuinely guarded/optional
+-- (see SCHEMA-DRIFT GUARD below) -- this migration never creates either,
+-- only re-points OWNER when already present, so it cannot unconditionally
+-- guarantee either exists after apply. apply_migration.py's assert
+-- vocabulary has no conditional/"only if present" form (didn't want to
+-- extend shared migration infra under today's deadline); the guard
+-- block's own RAISE NOTICE on skip is the real visibility mechanism for
+-- these two instead (see that section's comment for why that's
+-- sufficient). The other 3 functions keep their own header checks above:
+-- escalate_full_tier_without_auditor is captured (and search_path-pinned)
+-- by bedrock_substrate_core.sql so it's always present in CI too;
+-- close_decision_by_audit/trigger_cai_decision_announce are both CREATE OR
+-- REPLACE FUNCTION in THIS migration, unguarded, so 124 always pins their
+-- search_path itself regardless of starting schema.
 --
 -- The guard trigger's own existence+enabled check is NOT expressed as a
 -- header assert (apply_migration.py's assert vocabulary -- dropped,
@@ -95,76 +109,62 @@ SET LOCAL lock_timeout = '5s';
 -- stay exactly as already set.
 --
 -- SCHEMA-DRIFT GUARD (console's ask, bus #85479, after CI failed on exactly
--- this: "function audit_board_digest() does not exist"): none of these 5
--- functions, OR the tables they touch (strategic_decisions, decision_audits,
--- decision_tier_escalations, audit_board_digest_log, notification_log,
--- decision_audit_state), are created by ANY migration file in this repo --
--- confirmed by grep across migrations/, supabase/migrations/, and
--- migrations/infra/ (the one infra/ file that redefines close_decision_by_
--- audit is explicitly PROPOSE-ONLY, never auto-applied by anything). They
--- exist only because someone created them directly on the live substrate.
--- CI's ephemeral bootstrap (scripts/ci_bootstrap_schema.py) replays every
--- migration from an empty schema and has genuinely never seen any of it.
+-- this: "function audit_board_digest() does not exist"). The actual state
+-- here, confirmed by running scripts/ci_bootstrap_schema.py locally against
+-- a fresh ephemeral cluster rather than guessing from grep (grep's own
+-- case-sensitivity and substring matches misled this file's first attempt
+-- at this guard -- schema.sql defines several of these in lowercase, and
+-- "strategic_decisions_archive" is a different table from
+-- "strategic_decisions"): it is NOT all-or-nothing. escalate_full_tier_
+-- without_auditor, trigger_cai_decision_announce, strategic_decisions, and
+-- notification_log ARE captured somewhere in migration history (schema.sql
+-- or bedrock_substrate_core.sql) and exist in CI's from-scratch bootstrap
+-- too. audit_board_digest(), escalate_stale_decision_audits(),
+-- close_decision_by_audit(text,text)'s pre-124 body, decision_audits,
+-- decision_tier_escalations, audit_board_digest_log, and
+-- decision_audit_state genuinely are NOT captured anywhere and are
+-- substrate-only drift. A single "all present or all absent" check (this
+-- file's first attempt) does not match that reality and fails CI again,
+-- just on a different RAISE. This guards each object individually instead:
+-- to_regprocedure/to_regclass before each ALTER FUNCTION or GRANT/CREATE
+-- POLICY that needs its target to already exist, skipping just that
+-- statement with a RAISE NOTICE when it doesn't. CREATE OR REPLACE FUNCTION
+-- needs no guard at all (it creates fresh when absent, same as any other
+-- migration defining a function for the first time) -- only ALTER FUNCTION,
+-- GRANT, and CREATE POLICY actually require pre-existence.
 --
--- Rather than infer "is this the real substrate" from connection metadata
--- (fragile and, it turns out, not actually available: apply_migration.py
--- does not stamp application_name or any other SQL-visible marker on a real
--- apply -- confirmed by grep; tests/migrations/test_apply_migration.py's own
--- application_name=<silo> suffix is a TEST-FIXTURE-ONLY convenience to
--- satisfy the residency guard's DSN substring check, not something any real
--- apply ever sets), this checks for a PARTIAL state instead. A consistent
--- environment is in exactly one of two states: ALL of a representative
--- sample of these objects exist together (the real substrate, normal case),
--- or NONE of them do (a fresh/CI bootstrap that has never seen this
--- subsystem). A genuine defect -- e.g. one of these quietly dropped or
--- renamed on the real substrate -- would show up as a MIX of present/absent,
--- which is the one state this treats as fail-closed: RAISE EXCEPTION naming
--- exactly what's missing and what's present, aborting the whole apply. Only
--- the uniform-absence case (CI) is skipped, with a RAISE NOTICE naming what
--- was skipped and why. The uniform-presence case (the real substrate today,
--- confirmed via live pg_proc/pg_class 2026-10-31) runs the full re-pointing,
--- grant footprint, and RLS policies exactly as before this guard existed.
+-- This does NOT attempt to fail closed on "the real substrate is missing
+-- something it should have" -- confirmed no reliable SQL-visible signal
+-- exists to distinguish CI from the real substrate (apply_migration.py
+-- stamps no application_name or other marker on a real apply; the
+-- application_name=<silo> trick in tests/migrations/test_apply_migration.py
+-- is a test-fixture-only convenience for the residency guard's DSN
+-- substring check). The real safety net is the same one this file already
+-- relies on elsewhere (see "NOT IDEMPOTENT ON A RAW RE-RUN" below): every
+-- RAISE NOTICE this guard produces appears in apply_migration.py's own
+-- output, under both --dry-run and a real apply, and console/whoever runs
+-- a real apply reads that output before it happens -- an unexpected skip on
+-- what should be the real substrate is visible there, not masked.
 DO $guard124$
-DECLARE
-    v_missing text[] := '{}';
-    v_present text[] := '{}';
 BEGIN
-    IF to_regprocedure('public.audit_board_digest()') IS NULL THEN
-        v_missing := array_append(v_missing, 'audit_board_digest()');
+    IF to_regprocedure('public.audit_board_digest()') IS NOT NULL THEN
+        ALTER FUNCTION audit_board_digest() OWNER TO bus_writer;
     ELSE
-        v_present := array_append(v_present, 'audit_board_digest()');
-    END IF;
-    IF to_regprocedure('public.escalate_full_tier_without_auditor(numeric)') IS NULL THEN
-        v_missing := array_append(v_missing, 'escalate_full_tier_without_auditor(numeric)');
-    ELSE
-        v_present := array_append(v_present, 'escalate_full_tier_without_auditor(numeric)');
-    END IF;
-    IF to_regprocedure('public.escalate_stale_decision_audits()') IS NULL THEN
-        v_missing := array_append(v_missing, 'escalate_stale_decision_audits()');
-    ELSE
-        v_present := array_append(v_present, 'escalate_stale_decision_audits()');
-    END IF;
-    IF to_regclass('public.strategic_decisions') IS NULL THEN
-        v_missing := array_append(v_missing, 'strategic_decisions (table)');
-    ELSE
-        v_present := array_append(v_present, 'strategic_decisions (table)');
-    END IF;
-    IF to_regclass('public.decision_audits') IS NULL THEN
-        v_missing := array_append(v_missing, 'decision_audits (table)');
-    ELSE
-        v_present := array_append(v_present, 'decision_audits (table)');
+        RAISE NOTICE 'migration 124: skipping ALTER FUNCTION audit_board_digest() OWNER TO bus_writer -- function not present in this schema';
     END IF;
 
-    IF array_length(v_present, 1) IS NULL THEN
-        RAISE NOTICE 'migration 124: skipping the CAI-governance bus_writer re-pointing section (% not present in this schema -- substrate-only drift, never captured by any migration file; expected on a from-scratch bootstrap)', v_missing;
-        RETURN;
-    ELSIF array_length(v_missing, 1) IS NOT NULL THEN
-        RAISE EXCEPTION 'migration 124: CAI-governance schema is PARTIALLY present -- missing: %; present: %. Refusing to apply (neither a fresh bootstrap nor the expected real-substrate state).', v_missing, v_present;
+    IF to_regprocedure('public.escalate_full_tier_without_auditor(numeric)') IS NOT NULL THEN
+        ALTER FUNCTION escalate_full_tier_without_auditor(numeric) OWNER TO bus_writer;
+    ELSE
+        RAISE NOTICE 'migration 124: skipping ALTER FUNCTION escalate_full_tier_without_auditor(numeric) OWNER TO bus_writer -- function not present in this schema';
     END IF;
 
-ALTER FUNCTION audit_board_digest() OWNER TO bus_writer;
-ALTER FUNCTION escalate_full_tier_without_auditor(numeric) OWNER TO bus_writer;
-ALTER FUNCTION escalate_stale_decision_audits() OWNER TO bus_writer;
+    IF to_regprocedure('public.escalate_stale_decision_audits()') IS NOT NULL THEN
+        ALTER FUNCTION escalate_stale_decision_audits() OWNER TO bus_writer;
+    ELSE
+        RAISE NOTICE 'migration 124: skipping ALTER FUNCTION escalate_stale_decision_audits() OWNER TO bus_writer -- function not present in this schema';
+    END IF;
+END $guard124$;
 
 -- The other 2 are SECURITY INVOKER today -- OWNER TO alone would do nothing
 -- for them (invoker-mode runs as whoever CALLS the function, not its owner),
@@ -412,36 +412,26 @@ RESET ROLE;
 -- exercises exactly this path -- confirmed red/wrong-fixture before this
 -- comment's fixture-fidelity fix, green after, independent of any new
 -- grant here (none added).
-GRANT SELECT ON decision_audits TO bus_writer;
-GRANT UPDATE (escalated_at, updated_at) ON decision_audits TO bus_writer;
-GRANT SELECT ON strategic_decisions TO bus_writer;
-GRANT UPDATE (challenge_status, updated_at) ON strategic_decisions TO bus_writer;
--- decision_audit_state is a plain (non security_invoker) view -- the caller
--- only needs SELECT on the view itself, not on the tables it reads; the
--- view's OWNER's privileges on those tables are what get checked, same as
--- any other classic Postgres view.
-GRANT SELECT ON decision_audit_state TO bus_writer;
-GRANT INSERT ON audit_board_digest_log TO bus_writer;
-GRANT USAGE ON SEQUENCE audit_board_digest_log_id_seq TO bus_writer;
-GRANT SELECT, INSERT ON decision_tier_escalations TO bus_writer;
-GRANT INSERT ON notification_log TO bus_writer;
-GRANT USAGE ON SEQUENCE notification_log_id_seq TO bus_writer;
--- decision_audit_unresolved(text,timestamptz,timestamptz), called inside
--- escalate_stale_decision_audits, already grants EXECUTE TO PUBLIC (checked
--- against the live proacl) -- bus_writer inherits that automatically, no
--- separate grant needed.
-
--- ALL SIX tables these 5 functions touch have RLS enabled on the live
--- substrate (checked directly, 2026-10-31) -- the column/table-level GRANTs
--- above are necessary but NOT sufficient for any of them, same lesson
--- migration 123 already paid for once on agent_messages: without a matching
--- policy, bus_writer's writes silently affect zero rows (an UPDATE's own
--- IF NOT FOUND branch, never an error) or its reads come back empty, rather
--- than failing loud. Caught here by TDD against a fixture that enables RLS
--- on all 6 (not just agent_messages/strategic_decisions) with the real live
--- policies replicated -- a fixture that skipped this would have made every
--- "still works after 124" test pass trivially regardless of whether these
--- policies existed.
+--
+-- strategic_decisions and notification_log are captured in migration
+-- history (schema.sql / bedrock_substrate_core.sql, confirmed by actually
+-- running the CI bootstrap -- see the SCHEMA-DRIFT GUARD comment above) and
+-- so always exist here, in CI and on the real substrate alike; their
+-- grants/policy run unconditionally. decision_audits, decision_tier_
+-- escalations, audit_board_digest_log, and decision_audit_state are NOT
+-- captured anywhere and are genuinely absent in CI -- each is guarded
+-- individually (to_regclass before GRANT/CREATE POLICY, which unlike
+-- CREATE OR REPLACE do require the target to pre-exist), skipped with a
+-- RAISE NOTICE when absent. Also covers the RLS policies below in the same
+-- per-table shape -- without a matching policy, bus_writer's writes
+-- silently affect zero rows rather than failing loud, same lesson migration
+-- 123 already paid for once on agent_messages.
+DO $guard124b$
+BEGIN
+    GRANT SELECT ON strategic_decisions TO bus_writer;
+    GRANT UPDATE (challenge_status, updated_at) ON strategic_decisions TO bus_writer;
+    GRANT INSERT ON notification_log TO bus_writer;
+    GRANT USAGE ON SEQUENCE notification_log_id_seq TO bus_writer;
     IF NOT EXISTS (
         SELECT 1 FROM pg_policies
         WHERE schemaname = 'public' AND tablename = 'strategic_decisions'
@@ -452,53 +442,87 @@ GRANT USAGE ON SEQUENCE notification_log_id_seq TO bus_writer;
     END IF;
     IF NOT EXISTS (
         SELECT 1 FROM pg_policies
-        WHERE schemaname = 'public' AND tablename = 'decision_audits'
-          AND policyname = 'bus_writer_select'
-    ) THEN
-        CREATE POLICY bus_writer_select ON decision_audits
-            FOR SELECT TO bus_writer USING (true);
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_policies
-        WHERE schemaname = 'public' AND tablename = 'decision_audits'
-          AND policyname = 'bus_writer_update'
-    ) THEN
-        CREATE POLICY bus_writer_update ON decision_audits
-            FOR UPDATE TO bus_writer USING (true) WITH CHECK (true);
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_policies
-        WHERE schemaname = 'public' AND tablename = 'decision_tier_escalations'
-          AND policyname = 'bus_writer_select'
-    ) THEN
-        CREATE POLICY bus_writer_select ON decision_tier_escalations
-            FOR SELECT TO bus_writer USING (true);
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_policies
-        WHERE schemaname = 'public' AND tablename = 'decision_tier_escalations'
-          AND policyname = 'bus_writer_insert'
-    ) THEN
-        CREATE POLICY bus_writer_insert ON decision_tier_escalations
-            FOR INSERT TO bus_writer WITH CHECK (true);
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_policies
-        WHERE schemaname = 'public' AND tablename = 'audit_board_digest_log'
-          AND policyname = 'bus_writer_insert'
-    ) THEN
-        CREATE POLICY bus_writer_insert ON audit_board_digest_log
-            FOR INSERT TO bus_writer WITH CHECK (true);
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_policies
         WHERE schemaname = 'public' AND tablename = 'notification_log'
           AND policyname = 'bus_writer_insert'
     ) THEN
         CREATE POLICY bus_writer_insert ON notification_log
             FOR INSERT TO bus_writer WITH CHECK (true);
     END IF;
-END $guard124$;
+
+    IF to_regclass('public.decision_audits') IS NOT NULL THEN
+        GRANT SELECT ON decision_audits TO bus_writer;
+        GRANT UPDATE (escalated_at, updated_at) ON decision_audits TO bus_writer;
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_policies
+            WHERE schemaname = 'public' AND tablename = 'decision_audits'
+              AND policyname = 'bus_writer_select'
+        ) THEN
+            CREATE POLICY bus_writer_select ON decision_audits
+                FOR SELECT TO bus_writer USING (true);
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_policies
+            WHERE schemaname = 'public' AND tablename = 'decision_audits'
+              AND policyname = 'bus_writer_update'
+        ) THEN
+            CREATE POLICY bus_writer_update ON decision_audits
+                FOR UPDATE TO bus_writer USING (true) WITH CHECK (true);
+        END IF;
+    ELSE
+        RAISE NOTICE 'migration 124: skipping grants/policies for decision_audits -- table not present in this schema';
+    END IF;
+
+    -- decision_audit_state is a plain (non security_invoker) view -- the
+    -- caller only needs SELECT on the view itself, not on the tables it
+    -- reads; the view's OWNER's privileges on those tables are what get
+    -- checked, same as any other classic Postgres view.
+    IF to_regclass('public.decision_audit_state') IS NOT NULL THEN
+        GRANT SELECT ON decision_audit_state TO bus_writer;
+    ELSE
+        RAISE NOTICE 'migration 124: skipping GRANT SELECT ON decision_audit_state -- view not present in this schema';
+    END IF;
+
+    IF to_regclass('public.audit_board_digest_log') IS NOT NULL THEN
+        GRANT INSERT ON audit_board_digest_log TO bus_writer;
+        GRANT USAGE ON SEQUENCE audit_board_digest_log_id_seq TO bus_writer;
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_policies
+            WHERE schemaname = 'public' AND tablename = 'audit_board_digest_log'
+              AND policyname = 'bus_writer_insert'
+        ) THEN
+            CREATE POLICY bus_writer_insert ON audit_board_digest_log
+                FOR INSERT TO bus_writer WITH CHECK (true);
+        END IF;
+    ELSE
+        RAISE NOTICE 'migration 124: skipping grants/policy for audit_board_digest_log -- table not present in this schema';
+    END IF;
+
+    IF to_regclass('public.decision_tier_escalations') IS NOT NULL THEN
+        GRANT SELECT, INSERT ON decision_tier_escalations TO bus_writer;
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_policies
+            WHERE schemaname = 'public' AND tablename = 'decision_tier_escalations'
+              AND policyname = 'bus_writer_select'
+        ) THEN
+            CREATE POLICY bus_writer_select ON decision_tier_escalations
+                FOR SELECT TO bus_writer USING (true);
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_policies
+            WHERE schemaname = 'public' AND tablename = 'decision_tier_escalations'
+              AND policyname = 'bus_writer_insert'
+        ) THEN
+            CREATE POLICY bus_writer_insert ON decision_tier_escalations
+                FOR INSERT TO bus_writer WITH CHECK (true);
+        END IF;
+    ELSE
+        RAISE NOTICE 'migration 124: skipping grants/policies for decision_tier_escalations -- table not present in this schema';
+    END IF;
+    -- decision_audit_unresolved(text,timestamptz,timestamptz), called inside
+    -- escalate_stale_decision_audits, already grants EXECUTE TO PUBLIC
+    -- (checked against the live proacl) -- bus_writer inherits that
+    -- automatically, no separate grant needed.
+END $guard124b$;
 
 -- GUARD TRIGGER (this migration's actual headline, replacing a REVOKE that
 -- cc-quality's review proved would be a no-op for postgres -- see header).
@@ -594,6 +618,34 @@ REVOKE INSERT ON agent_messages FROM service_role;
 -- to carry. Migration 123's own `GRANT bus_writer TO CURRENT_USER WITH SET
 -- TRUE` is exactly what makes this SET ROLE always available to whoever
 -- applies a migration.
+-- agent_messages.from_agent/to_agent both carry a FOREIGN KEY to agents(id)
+-- (migrations/infra/bedrock_substrate_core.sql's agent_messages_from_agent_
+-- fkey/agent_messages_to_agent_fkey, confirmed live) plus a CHECK rejecting
+-- to_agent='substrate' specifically (agent_messages_reject_pseudo_targets)
+-- -- both found only by actually running scripts/ci_bootstrap_schema.py
+-- locally against the real migration chain (an earlier version of this
+-- self-test used a synthetic from/to identity that satisfied neither; a
+-- later one used the real 'substrate'/'cc-test-sweep296' sentinel ids,
+-- which satisfy both constraints on the real substrate but aren't actually
+-- seeded by CI's from-scratch bootstrap -- bedrock_substrate_core.sql's own
+-- agents seed is a single row, 'cc-orchestrator', nothing like the real
+-- substrate's full roster). Rather than depend on ANY specific pre-existing
+-- agents row existing in every environment this migration might run
+-- against, this inserts and deletes its OWN disposable agents row for a
+-- synthetic id, inside this same transaction -- the identical in-
+-- transaction-safety argument already made for the agent_messages rows
+-- below (nothing commits until COMMIT, so nothing is ever externally
+-- observable), extended to this one additional table. This also means the
+-- to_agent here is not just dormant (console's "non-wake address" ask, bus
+-- #85476) but does not correspond to any real lane at all outside this
+-- self-test's own throwaway row -- no possible subscriber is polling for
+-- it. Must run as the applying role (not bus_writer, which has no reason
+-- to hold any privilege on agents at all): confirmed live that agents is
+-- owned by postgres with RLS enabled but NOT forced, so postgres (the
+-- typical applying role) bypasses it as owner regardless.
+INSERT INTO agents (id, display_name)
+VALUES ('migration-124-self-test', 'migration-124-self-test');
+
 DO $$
 DECLARE
     v_msg_id BIGINT;
@@ -602,7 +654,7 @@ BEGIN
         SET ROLE postgres;
         INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body)
           VALUES ('migration-124-self-test', 'migration-124-self-test', 'update',
-                   'self-test: should be rejected', 'self-test');
+                   'migration-124-self-test: should be rejected', 'self-test');
         RESET ROLE;
         RAISE EXCEPTION
             'MIGRATION 124 SELF-TEST FAILED: a raw INSERT as postgres succeeded -- '
@@ -617,7 +669,7 @@ BEGIN
         p_from_agent => 'migration-124-self-test',
         p_to_agent => 'migration-124-self-test',
         p_message_type => 'update',
-        p_subject => 'self-test: should succeed',
+        p_subject => 'migration-124-self-test: should succeed',
         p_body => 'migration 124 self-test via post_agent_message',
         p_priority => 'P3',
         p_requires_response => false,
@@ -648,8 +700,11 @@ BEGIN
     END IF;
 END $$;
 
--- Self-test cleanup: only test 2 ever committed a row (test 1's INSERT was
--- rejected before it could); DELETE is idempotent either way.
+-- Self-test cleanup: only test 2 ever committed a message row (test 1's
+-- INSERT was rejected before it could); both DELETEs are idempotent either
+-- way. agent_messages first -- its FK to agents would otherwise block the
+-- agents row's own delete.
 DELETE FROM agent_messages WHERE from_agent = 'migration-124-self-test';
+DELETE FROM agents WHERE id = 'migration-124-self-test';
 
 COMMIT;

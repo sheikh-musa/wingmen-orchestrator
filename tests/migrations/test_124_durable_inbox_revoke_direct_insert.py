@@ -58,6 +58,44 @@ _AGENT_MESSAGES_SCHEMA = """
     )
 """
 
+# migrations/infra/bedrock_substrate_core.sql adds agent_messages_from_agent_fkey
+# and agent_messages_to_agent_fkey (both FOREIGN KEY ... REFERENCES agents(id))
+# and agent_messages_reject_pseudo_targets (CHECK to_agent <> 'substrate') --
+# both confirmed live on the real substrate too. Earlier versions of this
+# fixture had no agents table or this CHECK at all, so no test in this file
+# ever exercised either -- only caught by actually running
+# scripts/ci_bootstrap_schema.py locally, where migration 124's self-test
+# (originally using a synthetic 'migration-124-self-test' identity for both
+# from_agent and to_agent) failed the FK. The migration's own fix is to
+# INSERT and DELETE its own disposable agents row for that synthetic id,
+# rather than depend on any specific identity being pre-seeded -- confirmed
+# (again via the real bootstrap, not grep) that bedrock_substrate_core.sql's
+# own agents seed is a single row ('cc-orchestrator'), nothing like the real
+# substrate's full roster, so no "already exists everywhere" identity can
+# be assumed in both CI and a real apply. This fixture still needs its own
+# agents rows seeded, though, for the OTHER tests in this file that use
+# literal from/to-agent identities ('substrate', 'cai', 'x', 'y',
+# 'orch-console', and trigger_cai_decision_announce()'s own 'cc-ihsanos'
+# fallback) without inserting a matching agents row themselves.
+_AGENTS_SCHEMA = """
+    CREATE TABLE agents (
+        id         TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL DEFAULT '',
+        repo_scope TEXT[] NOT NULL DEFAULT '{}',
+        status     TEXT NOT NULL DEFAULT 'active',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    INSERT INTO agents (id, display_name, status) VALUES
+        ('substrate', 'substrate', 'active'), ('cai', 'cai', 'active'),
+        ('x', 'x', 'active'), ('y', 'y', 'active'),
+        ('orch-console', 'orch-console', 'active'),
+        ('cc-ihsanos', 'cc-ihsanos', 'active');
+    ALTER TABLE agent_messages
+        ADD CONSTRAINT agent_messages_from_agent_fkey FOREIGN KEY (from_agent) REFERENCES agents(id),
+        ADD CONSTRAINT agent_messages_to_agent_fkey FOREIGN KEY (to_agent) REFERENCES agents(id),
+        ADD CONSTRAINT agent_messages_reject_pseudo_targets CHECK (to_agent <> 'substrate');
+"""
+
 # Faithful minimal reproduction of the CAI decision/audit objects the 5
 # postgres-owned functions in migration 124's second half actually touch.
 _WORK_ITEM_MINIMAL = """
@@ -423,6 +461,7 @@ def _setup_base_123_and_cai_schema(cur):
     )
 
     cur.execute(_AGENT_MESSAGES_SCHEMA)
+    cur.execute(_AGENTS_SCHEMA)
     cur.execute("ALTER TABLE agent_messages ENABLE ROW LEVEL SECURITY")
     cur.execute(
         "CREATE POLICY agent_messages_service_only ON agent_messages "
@@ -515,14 +554,23 @@ def _setup_base_123_and_cai_schema(cur):
 
 
 def _setup_base_123_only(cur):
-    """123's base schema (agent_messages, bus_writer, the 3 RPCs) with NO CAI
-    schema and NONE of the 5 postgres-owned functions -- reproduces CI's
-    ci_bootstrap_schema.py bootstrap, which replays migrations/*.sql from an
-    empty schema and has never created strategic_decisions/decision_audits/
-    audit_board_digest()/etc. (confirmed: none of them are created by any
-    migration file in this repo -- substrate-only drift). This is the exact
-    scenario that made CI fail on 89be7a90 ("function audit_board_digest()
-    does not exist"), reproduced here as TDD for the schema-drift guard
+    """123's base schema (agent_messages, bus_writer, the 3 RPCs) plus bare,
+    minimal strategic_decisions/notification_log tables, and NONE of the
+    other 4 CAI objects (decision_audits, decision_tier_escalations,
+    audit_board_digest_log, decision_audit_state) or 2 functions
+    (audit_board_digest, escalate_stale_decision_audits) -- this is the
+    REAL shape of CI's ci_bootstrap_schema.py bootstrap, confirmed by
+    actually running it locally against a fresh ephemeral cluster rather
+    than guessing from grep (grep's case-sensitivity and substring matches
+    misled an earlier version of this fixture/guard into assuming a uniform
+    all-absent state, which is not what CI's bootstrap actually produces:
+    schema.sql defines strategic_decisions/notification_log in lowercase,
+    among several others, and `decision_audit_state`/`escalate_full_tier_
+    without_auditor`/`trigger_cai_decision_announce` are ALSO present there
+    -- only the 4 tables + 2 functions below are genuine drift, never
+    captured anywhere). This is the exact scenario that made CI fail on
+    89be7a90 and then again on 59e17f98 ("CAI-governance schema is
+    PARTIALLY present"), reproduced here as TDD for the schema-drift guard
     rather than relying on CI itself to prove it."""
     migration_117 = (MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text()
     migration_123 = (MIGRATIONS_DIR / "123_durable_inbox_enforce_bus_writer.sql").read_text()
@@ -537,6 +585,7 @@ def _setup_base_123_only(cur):
     )
 
     cur.execute(_AGENT_MESSAGES_SCHEMA)
+    cur.execute(_AGENTS_SCHEMA)
     cur.execute("ALTER TABLE agent_messages ENABLE ROW LEVEL SECURITY")
     cur.execute(
         "CREATE POLICY agent_messages_service_only ON agent_messages "
@@ -550,13 +599,40 @@ def _setup_base_123_only(cur):
     cur.execute("GRANT SELECT, INSERT, UPDATE ON work_item TO service_role")
     cur.execute("GRANT INSERT ON work_item_audit TO service_role")
     cur.execute(migration_123)
+
+    # The 2 of 6 CAI tables schema.sql actually carries (bare, minimal --
+    # the real schema.sql has far more columns/constraints than migration
+    # 124 ever touches).
+    cur.execute(
+        "CREATE TABLE strategic_decisions ("
+        "    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,"
+        "    decision_ref text NOT NULL UNIQUE,"
+        "    challenge_status text NOT NULL DEFAULT 'unchallenged',"
+        "    updated_at timestamptz NOT NULL DEFAULT now()"
+        ")"
+    )
+    cur.execute(
+        "CREATE TABLE notification_log ("
+        "    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,"
+        "    source text,"
+        "    decision_ref text,"
+        "    channel text DEFAULT 'telegram',"
+        "    recipient text,"
+        "    message_text text,"
+        "    created_at timestamptz NOT NULL DEFAULT now()"
+        ")"
+    )
     cur.execute("GRANT INSERT ON agent_messages TO postgres")
 
 
 @pytest.fixture
-def pre_124_db_no_cai_schema(pg_dsn):
-    """123 only, no CAI schema, no 5 functions at all -- the CI-bootstrap
-    scenario the schema-drift guard (bus #85479) exists for."""
+def pre_124_db_partial_cai_schema(pg_dsn):
+    """123 plus the 2 CAI tables schema.sql actually carries
+    (strategic_decisions, notification_log); none of the other 4 CAI
+    tables, and none of the 5 postgres-owned functions -- the REAL
+    ci_bootstrap_schema.py scenario the schema-drift guard (bus #85479)
+    exists for (confirmed against a real local run of that script, not
+    grep-derived)."""
     with psycopg.connect(pg_dsn, autocommit=True) as super_conn, super_conn.cursor() as super_cur:
         super_cur.execute("SELECT 1 FROM pg_roles WHERE rolname='live_applier'")
         if super_cur.fetchone() is None:
@@ -659,20 +735,28 @@ def test_raw_insert_as_service_role_fails_after_124(post_124_db):
     post_124_db.rollback()
 
 
-def test_124_applies_cleanly_without_cai_schema_present(pre_124_db_no_cai_schema):
+def test_124_applies_cleanly_on_the_real_ci_bootstrap_shape(pre_124_db_partial_cai_schema):
     """The actual CI failure this guard exists for (console bus #85479, CI
-    run 41157339739): ci_bootstrap_schema.py replays migrations/*.sql from an
-    empty schema and has never created audit_board_digest()/
-    strategic_decisions/etc. (substrate-only drift, confirmed absent from
-    every migration file). Before the schema-drift guard, migration 124's
+    runs 41157339739 and 41160233427): ci_bootstrap_schema.py replays
+    schema.sql + supabase/migrations/*.sql + migrations/*.sql, which carries
+    strategic_decisions/notification_log (and, live-confirmed but not
+    exercised by this fixture, escalate_full_tier_without_auditor/
+    trigger_cai_decision_announce) but never audit_board_digest()/
+    escalate_stale_decision_audits()/decision_audits/decision_tier_
+    escalations/audit_board_digest_log/decision_audit_state -- genuine,
+    PARTIAL schema drift, not the uniform all-absent state this guard's
+    first attempt assumed (that attempt replaced one CI failure with
+    another: "CAI-governance schema is PARTIALLY present", run
+    41160233427). Before any schema-drift guard at all, migration 124's
     first ALTER FUNCTION audit_board_digest() OWNER TO bus_writer failed
     with UndefinedFunction and aborted the whole transaction -- losing the
     guard trigger, self-test, and REVOKE too, not just the CAI re-pointing.
-    This reproduces that exact starting schema (no CAI tables/functions at
-    all) and confirms the migration now applies cleanly, and that the parts
-    of it which do NOT depend on the CAI schema (the guard trigger and the
-    in-migration self-test) still ran and still work."""
-    conn = pre_124_db_no_cai_schema
+    This reproduces the REAL partial shape (confirmed via an actual local
+    run of ci_bootstrap_schema.py, not grep) and confirms the migration now
+    applies cleanly, and that the guard trigger + in-migration self-test
+    (which don't depend on the CAI schema at all) still ran and still
+    work."""
+    conn = pre_124_db_partial_cai_schema
     migration_124 = (MIGRATIONS_DIR / "124_durable_inbox_revoke_direct_insert.sql").read_text()
     with conn.cursor() as cur:
         cur.execute(am.strip_txn_control(am.strip_sql_comments(migration_124)))
@@ -699,28 +783,17 @@ def test_124_applies_cleanly_without_cai_schema_present(pre_124_db_no_cai_schema
         cur.execute("RESET ROLE")
     conn.commit()
 
-
-def test_124_fails_closed_on_partial_cai_schema(pre_124_db_no_cai_schema):
-    """Neither a fresh bootstrap (ALL 5 objects absent, the case above) nor
-    the real substrate's normal state (ALL present) -- a genuine anomaly the
-    guard must not silently skip past. Simulated here by creating just
-    audit_board_digest() (one of the 5) on top of the no-CAI-schema fixture,
-    leaving strategic_decisions/decision_audits and the other functions
-    absent."""
-    conn = pre_124_db_no_cai_schema
+    # The 2 tables this fixture DOES have (strategic_decisions,
+    # notification_log) still got their grant/policy -- the guard must not
+    # have skipped those too. bus_writer only gets SELECT + UPDATE(cols) on
+    # strategic_decisions (never INSERT -- CAI/service_role write new rows),
+    # so SELECT is the access to check here.
     with conn.cursor() as cur:
-        cur.execute(
-            "CREATE FUNCTION audit_board_digest() RETURNS void "
-            "LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$ "
-            "BEGIN END; $$"
-        )
-    conn.commit()
-
-    migration_124 = (MIGRATIONS_DIR / "124_durable_inbox_revoke_direct_insert.sql").read_text()
-    with conn.cursor() as cur:
-        with pytest.raises(psycopg.errors.RaiseException) as excinfo:
-            cur.execute(am.strip_txn_control(am.strip_sql_comments(migration_124)))
-        assert "PARTIALLY present" in str(excinfo.value)
+        cur.execute("INSERT INTO strategic_decisions (decision_ref) VALUES ('tdd-partial-1')")
+        cur.execute("SET ROLE bus_writer")
+        cur.execute("SELECT decision_ref FROM strategic_decisions WHERE decision_ref = 'tdd-partial-1'")
+        assert cur.fetchone() is not None
+        cur.execute("RESET ROLE")
     conn.rollback()
 
 
