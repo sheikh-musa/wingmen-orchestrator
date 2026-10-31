@@ -51,10 +51,27 @@ def cur():
     conn.close()
 
 
+def _bus_write(cur, sql, params=()):
+    """Seed a fixture row through the sanctioned bus_writer path.
+
+    Migration 124's BEFORE INSERT guard trigger rejects a raw INSERT for any
+    role other than bus_writer (backlog#124), so test fixtures that seed
+    agent_messages rows must assume that role, exactly as
+    tests/migrations/test_124_durable_inbox_revoke_direct_insert.py does.
+    Returns the INSERT's row (or None) before dropping back to the prior role.
+    """
+    cur.execute("SET LOCAL ROLE bus_writer")
+    cur.execute(sql, params)
+    row = cur.fetchone() if cur.description else None
+    cur.execute("RESET ROLE")
+    return row
+
+
 def _seed_unresponded(cur, sender, recip, *, priority="P1", age_min=1440):
     """A read, requires_response, unstamped message old enough to breach any
     unresponded threshold."""
-    cur.execute(
+    row = _bus_write(
+        cur,
         """INSERT INTO agent_messages
              (from_agent, to_agent, message_type, subject, body, priority,
               requires_response, created_at, read_at)
@@ -63,7 +80,7 @@ def _seed_unresponded(cur, sender, recip, *, priority="P1", age_min=1440):
            RETURNING id""",
         (sender, recip, priority, age_min),
     )
-    return cur.fetchone()[0]
+    return row[0]
 
 
 def _flagged_unresponded(cur, mid):
@@ -79,9 +96,10 @@ def test_active_recipient_suppresses_the_false_unresponded_page(cur):
     responded_at -> used to page P0. Now: any bus row FROM the recipient after the
     request suppresses it."""
     mid = _seed_unresponded(cur, "_sre_snd", "_sre_rcp_active")
-    cur.execute(
+    _bus_write(
+        cur,
         """INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, priority, created_at)
-           VALUES ('_sre_rcp_active','_sre_snd','update','re','x','P3', now())"""
+           VALUES ('_sre_rcp_active','_sre_snd','update','re','x','P3', now())""",
     )
     assert not _flagged_unresponded(cur, mid), "an observably-active recipient must not page"
 
@@ -97,9 +115,10 @@ def test_dead_recipient_still_flags_the_genuine_stall(cur):
 def test_activity_before_the_request_does_not_suppress(cur):
     """Only activity AFTER the request counts — a recipient active earlier then gone
     silent is still a stall."""
-    cur.execute(
+    _bus_write(
+        cur,
         """INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, priority, created_at)
-           VALUES ('_sre_rcp_prior','_sre_snd','update','old','x','P3', now() - interval '2 days')"""
+           VALUES ('_sre_rcp_prior','_sre_snd','update','old','x','P3', now() - interval '2 days')""",
     )
     mid = _seed_unresponded(cur, "_sre_snd", "_sre_rcp_prior", age_min=1440)
     assert _flagged_unresponded(cur, mid), "activity BEFORE the request must not suppress"
@@ -108,13 +127,13 @@ def test_activity_before_the_request_does_not_suppress(cur):
 def test_unread_branch_unchanged_still_pages(cur):
     """The 'unread' branch is untouched — an unread message still violates regardless
     of recipient activity (defensive: the fix is scoped to 'unresponded')."""
-    cur.execute(
+    mid = _bus_write(
+        cur,
         """INSERT INTO agent_messages
              (from_agent, to_agent, message_type, subject, body, priority, requires_response, created_at, read_at)
            VALUES ('_sre_snd','_sre_rcp_unread','question','t','t','P1',true,
-                   now() - interval '1 day', NULL) RETURNING id"""
-    )
-    mid = cur.fetchone()[0]
+                   now() - interval '1 day', NULL) RETURNING id""",
+    )[0]
     cur.execute(
         "SELECT 1 FROM inbox_sla_violations WHERE message_id=%s AND violation_type='unread'", (mid,)
     )
@@ -124,9 +143,10 @@ def test_unread_branch_unchanged_still_pages(cur):
 def test_agent_observed_activity_exposes_last_bus_row(cur):
     """The shared oracle view Nazim's sweeper will consume: last_observed_at = the
     agent's most recent bus row."""
-    cur.execute(
+    _bus_write(
+        cur,
         """INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, priority, created_at)
-           VALUES ('_sre_obs','x','update','a','x','P3', now() - interval '5 minutes')"""
+           VALUES ('_sre_obs','x','update','a','x','P3', now() - interval '5 minutes')""",
     )
     cur.execute("SELECT last_observed_at FROM agent_observed_activity WHERE agent_id='_sre_obs'")
     row = cur.fetchone()
