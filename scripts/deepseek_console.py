@@ -320,6 +320,50 @@ def _vault_has_key(key_name: str) -> bool:
         return cur.fetchone() is not None
 
 
+def _require_name_absent(names, slug: str) -> None:
+    """Pre-condition: the console must not already have a key named `slug`.
+
+    Checked against the CONSOLE, not only against the map. The map says what
+    the fleet routes; the console says what exists and therefore what the
+    export will attribute by name. Two keys sharing one name would merge two
+    families' spend into one bucket and neither check would see it.
+    """
+    if names.count(slug) > 1:
+        raise LayoutMismatch(
+            f"{names.count(slug)} console keys are ALREADY named {slug!r} -- "
+            "refusing to add a third; nothing was created"
+        )
+    if slug in names:
+        raise LayoutMismatch(
+            f"a console key named {slug!r} ALREADY EXISTS -- nothing was created. "
+            "Renaming it is a separate, narrower step than creating a second one."
+        )
+
+
+def _require_created_name(before, after, slug: str) -> None:
+    """Post-condition: exactly one key named `slug` now exists, and it is new.
+
+    `_create_console_key` captures the revealed VALUE from a dialog, not the
+    NAME. If the console normalised or truncated what was typed, the key would
+    serve traffic under a name the family map never mentions and every later
+    per-family number would be silently wrong.
+    """
+    if after.count(slug) != 1:
+        raise LayoutMismatch(
+            f"after creating {slug!r} the console shows {after.count(slug)} "
+            "key(s) with that exact name, expected exactly 1 -- the console may "
+            "have normalised the name. The key may exist and its value may be "
+            "lost; DO NOT re-run before checking /api_keys by hand."
+        )
+    added = [n for n in after if n not in before]
+    if added != [slug]:
+        raise LayoutMismatch(
+            f"creating {slug!r} changed the key list by {added or 'nothing'}, "
+            "expected exactly that one new name -- refusing to vault a value "
+            "whose name was not read back"
+        )
+
+
 def _create_console_key(slug: str, headed: bool) -> str:
     """Drive /api_keys, create ONE key named `slug`, return its value.
 
@@ -337,6 +381,13 @@ def _create_console_key(slug: str, headed: bool) -> str:
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             page.goto(sel["url"])
             _require_logged_in(page, sel)
+
+            # Read the name list BEFORE creating, so "new" is a fact this run
+            # can check rather than an assumption. Also refuses when a key of
+            # this name already exists -- the case that would merge two
+            # families into one export bucket (bus #87201).
+            names_before = _read_key_table(page)
+            _require_name_absent(names_before, slug)
 
             page.click(sel["create_button"])
             try:
@@ -372,6 +423,14 @@ def _create_console_key(slug: str, headed: bool) -> str:
                     break
             else:
                 page.keyboard.press("Escape")
+
+            # Read the name back before the value leaves this frame. The dialog
+            # proved a key was created, not that it was created under the name
+            # that was typed; usage-export attributes by NAME, so only the
+            # table is authoritative (bus #87201).
+            page.goto(sel["url"])
+            _require_logged_in(page, sel)
+            _require_created_name(names_before, _read_key_table(page), slug)
         finally:
             ctx.close()
 
