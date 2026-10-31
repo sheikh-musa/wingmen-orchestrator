@@ -143,8 +143,28 @@ else
     # chooser. --continue auto-resumes the most-recent conversation in this dir
     # (the hub's own ongoing session) → an unattended restart returns LIVE with
     # context.
+    #
+    # CROSS-PROVIDER RESUME GUARD (bus #87276, P0 Musa op 36795): --continue
+    # replays this dir's most recent conversation to whatever provider the model
+    # below routes to. If that conversation last ran on a DIFFERENT provider and
+    # holds secret-shaped values, resuming exports them — so boot FRESH instead,
+    # with a handoff note. Same provider, or a clean transcript, resumes as before.
+    _ORCH_CONTINUE="--continue"
+    if [ -r "$ORCH_DIR/scripts/lib/session_provider_guard.sh" ]; then
+        # shellcheck source=scripts/lib/session_provider_guard.sh
+        . "$ORCH_DIR/scripts/lib/session_provider_guard.sh"
+        _SPG_RC=0
+        _SPG_OUT="$(spg_check "${ORCH_MODEL:-claude-opus-4-8}" --continue --cwd "$ORCH_DIR" 2>&1)" || _SPG_RC=$?
+        if [ "$_SPG_RC" -ne 0 ]; then
+            _ORCH_CONTINUE=""
+            log "REFUSING --continue (provider switch with a non-clean transcript) — booting FRESH"
+            printf '%s\n' "$_SPG_OUT" | while IFS= read -r _l; do log "  $_l"; done
+        else
+            log "resume guard: ${_SPG_OUT%%$'\n'*}"
+        fi
+    fi
     "$TMUX_BIN" new-session -d -s "$SESSION" -c "$ORCH_DIR" -e "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}" \
-        -- "$CLAUDE_BIN" --dangerously-skip-permissions --continue --model "${ORCH_MODEL:-claude-opus-4-8}"
+        -- "$CLAUDE_BIN" --dangerously-skip-permissions $_ORCH_CONTINUE --model "${ORCH_MODEL:-claude-opus-4-8}"
 fi
 
 # Self-register the hub's tmux session in agent_status so the realtime auto-wake
