@@ -20,14 +20,15 @@ def _run(agent_id):
 
 def test_the_real_map_file_has_every_client_console_named():
     """Guard against a silent typo/drift in the shipped map vs. console's
-    expected family set (bus #82358, interim bus #84011): COSEM, BARIQ, OEH,
-    FFSFULFILMENT, HC95, FLEET, LOOP. Interim state (2026-10-30, bus #84011):
-    none of the per-client vault keys exist yet, so every family points
-    EXPLICITLY at the shared DEEPSEEK_CODING_KEY -- an explicit mapping, not
-    a silent fallback, so the fail-closed rule for a genuinely UNMAPPED
-    family stays intact. This assertion will need updating again once real
-    per-client keys are provisioned and families start pointing at their
-    own dedicated vault key names."""
+    expected family set (bus #82358, interim bus #84011).
+
+    Values are no longer all the shared key: the per-family split is in
+    progress one row at a time (orch-console bus #87110/#87191), so the
+    invariant is now per-row rather than global. A row may hold the shared
+    DEEPSEEK_CODING_KEY, or its OWN vault key named for its own slug -- never
+    some other family's key, which is exactly the kind of typo that would
+    silently bill one client for another's usage. An explicit mapping is what
+    keeps the fail-closed rule for a genuinely UNMAPPED family intact."""
     with open(_MAP_FILE) as f:
         mapping = json.load(f)
     assert set(mapping) == {
@@ -35,7 +36,12 @@ def test_the_real_map_file_has_every_client_console_named():
         "coffeemedia", "finance", "second", "shipforge", "substrate", "wingmen", "paperclip",
         "scholar",
     }
-    assert set(mapping.values()) == {"DEEPSEEK_CODING_KEY"}
+    shared = "DEEPSEEK_CODING_KEY"
+    for slug, vault_key in mapping.items():
+        own = "DEEPSEEK_KEY_" + slug.upper().replace("-", "_")
+        assert vault_key in (shared, own), (slug, vault_key)
+    # The first family off the shared key, in the order orch-console set.
+    assert mapping["second"] == "DEEPSEEK_KEY_SECOND"
 
 
 def test_resolves_known_families():
@@ -51,7 +57,7 @@ def test_resolves_known_families():
         ("cc-angullia", "DEEPSEEK_CODING_KEY"),
         ("cc-coffeemedia", "DEEPSEEK_CODING_KEY"),
         ("cc-finance", "DEEPSEEK_CODING_KEY"),
-        ("cc-second-brain", "DEEPSEEK_CODING_KEY"),
+        ("cc-second-brain", "DEEPSEEK_KEY_SECOND"),
         ("cc-shipforge", "DEEPSEEK_CODING_KEY"),
         ("cc-substrate", "DEEPSEEK_CODING_KEY"),
         ("cc-wingmen-sites", "DEEPSEEK_CODING_KEY"),
