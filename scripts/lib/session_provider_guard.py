@@ -166,22 +166,32 @@ _CONNINFO_OTHERS = ("host=", "port=", "user=", "dbname=")
 
 
 def _conninfo_hit(text: str) -> bool:
-    """Bounded equivalent of the shared `postgres-dsn-kv` class.
+    """Bounded approximation of the shared `postgres-dsn-kv` class.
 
     The shared regex is `(?=[^\\n]*\\bpassword=\\S+)(?:\\b(?:host|port|user|dbname|password)=\\S+\\s*){3,}`
     — a lookahead plus a `{3,}` run, which backtracks catastrophically when a line
-    repeats `password=` (measured: never returned on a 640-byte line). The meaning
-    is "a `password=` value plus at least three libpq key=value tokens"; we walk the
-    line once and check that window directly. Same answer, linear time.
+    repeats `password=` (measured: never returned on a 640-byte line). Its meaning is
+    "a `password=` value plus at least three libpq key=value tokens"; we walk the
+    line once and check a window directly. Linear time in every case.
+
+    NOT a strict equivalent, and the docstring should not pretend otherwise
+    (cc-quality 87538 F1). It is a conservative SUPERSET with one deliberate
+    exception, closed here: three or more BARE `password=` tokens and no other
+    libpq key score 3 in the shared pattern and used to score 1 here, i.e. the one
+    direction that fails OPEN. All password occurrences in the window now count.
+    Remaining divergences are over-reports (fail-closed): the window is proximity,
+    not the shared pattern's contiguity, so a benign line mentioning the keyword
+    near libpq-style prose can refuse a resume. That costs one fresh boot.
     """
-    for i, m in enumerate(re.finditer(r"password=\S+", text)):
+    for i, m in enumerate(re.finditer(r"\bpassword=\S+", text)):
         if i > 50:  # bounded: a line is not a hundred-credential document
             break
         # Both directions: the other key=value fields may FOLLOW the password
         # field, not only precede it (measured against the shared pattern).
         window = text[max(0, m.start() - 400):m.end() + 400]
-        tokens = 1 + sum(1 for tok in _CONNINFO_OTHERS if tok in window)
-        if tokens >= 3:
+        passwords = len(re.findall(r"\bpassword=\S+", window))
+        others = sum(1 for tok in _CONNINFO_OTHERS if tok in window)
+        if passwords + others >= 3:
             return True
     return False
 

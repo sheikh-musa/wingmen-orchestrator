@@ -85,6 +85,14 @@ hooks already enforce — it's 🟢, included so a lane knows WHY the guard refu
   hardening); it is not bypass-proof against a shell-literate agent. The
   hash-matched transcript sweep (`scripts/secret_hash_sweep.py`) is the backstop
   for all of the above.
+  **Resume guard, interactive picker (cc-quality 87538 F2):** a BARE
+  `claude --resume` (no id) opens a picker, and the guard can only judge the
+  NEWEST transcript in that directory — the operator may arrow to an older,
+  cross-provider, dirty one and resume it unjudged. Every automated path
+  (`--continue`, an id-bearing `--resume`, the lane/boot scripts) is judged
+  correctly, so this is an interactive edge only: **when picking a session by
+  hand, pick from the directory you are already in, and scrub first with
+  `scripts/secret_hash_sweep.py` if you are switching providers.**
 
 
 ### 5. DISCOVERY
