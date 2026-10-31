@@ -1790,8 +1790,13 @@ def _maybe_page_new_contact(conn, ch: "Channel", upd: dict, matched) -> None:
             bot=ch.token_env_key, chat_id=note["chat_id"], first_name=note["first_name"],
             username=note["username"], channel_tag=note["channel_tag"],
             pending_id=note["pending_id"])
+        # tg_call URL-encodes its params, so reply_markup must be the JSON
+        # STRING Telegram's Bot API expects. Passing the dict raised
+        # "can't parse reply keyboard markup JSON object" (HTTP 400), which the
+        # except below swallowed as non-fatal — the alert never sent at all.
         tg_call(ch.token, "sendMessage",
-                {"chat_id": reviewer, "text": text, "reply_markup": keyboard})
+                {"chat_id": reviewer, "text": text,
+                 "reply_markup": json.dumps(keyboard)})
     except Exception as e:                                        # noqa: BLE001
         _log_line(f"{ch.key}: new-contact alert raised ({type(e).__name__}: {e}) — non-fatal")
 
