@@ -325,3 +325,48 @@ def test_render_facts_block_is_bounded(schema):
     block = fleet_memory.render_facts_block(fleet_memory.read_facts(dsn=schema))
     assert len(block) <= 1200
     assert "fact number 0" in block
+
+
+# ── prod fidelity: the live table was NOT empty when 139 first ran ─────────
+
+def test_backfill_survives_pre_existing_rows(fresh_db):
+    """Console's live dry run failed here; every test above missed it because
+    they all migrated an empty table.
+
+    fleet_memory_audit_trg is AFTER INSERT OR UPDATE and treats EVERY update
+    as a retire -- it writes NEW.retired_op_ref into fleet_memory_audit.op_ref,
+    which is NOT NULL. 135's design made that safe by having
+    fleet_memory_immutable_trg reject any update that is not a retire, so the
+    audit trigger's assumption could not be violated. 139's backfill
+    (verified_at = created_at) is the first update that is not a retire: with
+    rows present it raised NotNullViolation and the migration rolled back.
+
+    The fix disables the audit trigger for the backfill window alongside the
+    immutable one. This test is the prod-fidelity proof: seed first, migrate
+    second, and the rows must come out with their true verification time.
+    """
+    dsn = f"{fresh_db} application_name={SILO}"
+    created = [r for r in _ROLES if _ensure_role(dsn, r)]
+    try:
+        _make_ledger_table(dsn)
+        _make_prereqs(dsn)
+        with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute(MIGRATION_135.read_text())
+        # the two smoke rows the live substrate actually held
+        with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+            for i in range(2):
+                cur.execute(
+                    "SELECT fleet_memory_insert(%s,%s,%s,%s,%s,%s)",
+                    ("fleet", None, f"live smoke row {i}", "op#35477",
+                     "cc-smoke", None),
+                )
+        with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute(MIGRATION_139.read_text())
+
+        rows = _q(dsn, "SELECT verified_at, created_at FROM fleet_memory ORDER BY id")
+        assert len(rows) == 2
+        assert all(v == c for v, c in rows), "backfill must not invent a new time"
+        audit = _q(dsn, "SELECT count(*) FROM fleet_memory_audit")[0][0]
+        assert audit == 2, "only the two 'created' events; the backfill is not a retire"
+    finally:
+        _drop_roles_created(dsn, created)
