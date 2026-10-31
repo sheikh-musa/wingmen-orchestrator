@@ -479,7 +479,8 @@ def _log_event(cls: str, tool_name: str, transcript_path: str | None, sub_transc
         pass  # logging must never crash the hook / block the tool result
 
 
-def _page_orch_console(cls: str, tool_name: str, agent_id: str | None = None, agent_type: str | None = None) -> None:
+def _page_orch_console(cls: str, tool_name: str, agent_id: str | None = None, agent_type: str | None = None,
+                        redacted: bool = True) -> None:
     import os
     import subprocess
 
@@ -498,19 +499,36 @@ def _page_orch_console(cls: str, tool_name: str, agent_id: str | None = None, ag
     # origin, so redaction already lands correctly; this only fixes attribution.
     if agent_type:
         agent = f"{agent} (subagent: {agent_type}" + (f"/{agent_id})" if agent_id else ")")
-    body = (
-        f"secrets_output_scanner auto-redacted a secret-shaped match in the on-disk "
-        f"session transcript. pattern class: {cls}; tool: {tool_name}; host: {host}; "
-        f"agent: {agent}. The matched text itself is never relayed. This is a backstop "
-        f"detection (Musa op#24408) -- it cannot un-send anything already transmitted."
-    )
+    # bus #87010/#87072/#87073 (3rd recurrence, 2026-10-31): this body used to claim
+    # "auto-redacted" UNCONDITIONALLY, even on the exact runs where main() had already
+    # given up after 3 retries and written "NO ON-DISK REDACTION ACTUALLY LANDED" to
+    # stderr. The stderr note was honest; the page orch-console actually reads was not --
+    # "a backstop that detects but does not scrub is a false sense of safety" (#87081).
+    # `redacted` must reflect what main() actually verified, not be assumed true here.
+    if redacted:
+        subject = f"secrets_output_scanner: auto-redacted ({cls})"
+        body = (
+            f"secrets_output_scanner auto-redacted a secret-shaped match in the on-disk "
+            f"session transcript. pattern class: {cls}; tool: {tool_name}; host: {host}; "
+            f"agent: {agent}. The matched text itself is never relayed. This is a backstop "
+            f"detection (Musa op#24408) -- it cannot un-send anything already transmitted."
+        )
+    else:
+        subject = f"secrets_output_scanner: DETECTED, NOT REDACTED ({cls})"
+        body = (
+            f"secrets_output_scanner detected a secret-shaped match but could NOT redact it "
+            f"on disk after retries. pattern class: {cls}; tool: {tool_name}; host: {host}; "
+            f"agent: {agent}. The matched text itself is never relayed, but the raw value may "
+            f"still be sitting unredacted in the transcript or a persisted-output file -- "
+            f"investigate and contain. This is the backstop failing to close the loop, not "
+            f"just the original leak (Musa op#24408)."
+        )
     # orch-console bus #48740: synthetic/demo replay runs (e.g. scratch_shape_replay.py)
     # trigger this same real auto-redact path, paging a real P1 for every demo hit and
     # diluting real pages. SECRETS_SCANNER_DEMO=1 (set only by demo/replay tooling, never
     # in a live agent session) downgrades to a [DEMO]-tagged P3, no requires_response.
     # The real-hit path (unset) is untouched -- still P1 + req.
     is_demo = os.environ.get("SECRETS_SCANNER_DEMO") == "1"
-    subject = f"secrets_output_scanner: auto-redacted ({cls})"
     args = [venv_py if os.path.exists(venv_py) else "python3", bus_send,
             "--to", "orch-console", "--type", "update"]
     if is_demo:
@@ -619,8 +637,15 @@ def main() -> int:
     # redact_* calls a few times with a short sleep before concluding redaction truly
     # failed -- cheap (the tool call already completed; this hook's own latency is the
     # only cost) and never produces a WRONG success claim either way.
-    seen_classes = set()
+    # Two passes, deliberately separate: the first establishes what ACTUALLY happened
+    # (per-class redaction outcome, across every occurrence of that class in all_hits --
+    # bus #48900/#48901/#48920's same-class-in-input-and-response shape means a class can
+    # appear more than once here), the second logs/pages using that settled truth. A
+    # single combined pass used to page on the FIRST occurrence's own redacted_this_hit
+    # before a later occurrence of the same class had even been attempted, which could
+    # report success or failure that a sibling occurrence later contradicted.
     any_redacted = False
+    redacted_by_class: dict[str, bool] = {}
     for cls, match, pattern in all_hits:
         redacted_this_hit = False
         for attempt in range(3):
@@ -640,6 +665,10 @@ def main() -> int:
             if redacted_this_hit:
                 break
         any_redacted |= redacted_this_hit
+        redacted_by_class[cls] = redacted_by_class.get(cls, False) or redacted_this_hit
+
+    seen_classes = set()
+    for cls, match, pattern in all_hits:
         if cls in seen_classes:
             continue
         seen_classes.add(cls)
@@ -647,7 +676,8 @@ def main() -> int:
                    agent_id, agent_type, agent, cwd=cwd, tail_sha256=output_tail_hash)
         if is_fixture_call or _is_fixture_hit(cls, match):
             continue
-        _page_orch_console(cls, tool_name, agent_id=agent_id, agent_type=agent_type)
+        _page_orch_console(cls, tool_name, agent_id=agent_id, agent_type=agent_type,
+                           redacted=redacted_by_class.get(cls, False))
 
     classes = ", ".join(cls for cls, _, _ in all_hits)
     if any_redacted:
