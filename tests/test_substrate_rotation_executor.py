@@ -215,6 +215,26 @@ def test_verify_refuses_when_the_old_password_still_works(tmp_path, capsys):
     assert "reset did not land" in capsys.readouterr().err
 
 
+def test_verify_refuses_rather_than_skipping_when_no_backup_holds_the_old_value(
+        tmp_path, capsys, monkeypatch):
+    """'New value connects' is not proof; only 'old value is dead' is.
+
+    With no backup the old value cannot be recovered, so the check cannot run. The
+    executor must refuse, not record a pass it did not earn — that fail-open is the
+    exact shape cc-quality flagged on the tool (F2), and it must not reappear here.
+    """
+    p = _write(tmp_path)
+    monkeypatch.setattr(rot, "latest_backup", lambda path: None)
+    rc = _run(tmp_path, Deps(), files=[str(p)])
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "cannot recover the OLD password" in err
+    assert "rotation COMPLETE" not in err
+    entries = [json.loads(l) for l in (tmp_path / "journal.jsonl").read_text().splitlines()]
+    assert not [e for e in entries
+                if e["step"] == "verify" and e.get("verdict") == "not attempted (no backup)"]
+
+
 # ── the secret must never surface ─────────────────────────────────────────────
 
 def test_the_journal_and_stdout_never_contain_the_password(tmp_path, capsys):

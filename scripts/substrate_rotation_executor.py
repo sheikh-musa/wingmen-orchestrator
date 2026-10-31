@@ -304,6 +304,15 @@ class Rotation:
                     break
         if not new_dsn:
             raise Refused("no DSN in the rewritten file")
+        # The old half is NOT optional. "New value connects" only proves the file and
+        # the server agree; it does not prove the reset landed, because a pooler with a
+        # warm credential cache happily accepts both for a while. If no backup yields
+        # the old value we cannot ask the only question that answers "did this happen",
+        # so the run is not verified — refuse rather than record a pass we did not earn.
+        if not old_dsn:
+            raise Refused("cannot recover the OLD password from any backup, so the "
+                          "old-password check cannot run — refusing to call this "
+                          "rotation verified")
         ok = False
         for attempt in range(1, self.args.retries + 1):
             ok = self._fn("probe")(new_dsn)
@@ -313,13 +322,11 @@ class Rotation:
             time.sleep(self.args.retry_delay)
         if not ok:
             raise Refused("the new password does not connect")
-        if old_dsn:
-            still = self._fn("probe")(old_dsn)
-            self._record("verify", "FAIL" if still else "OK", probe="old",
-                         verdict="STILL WORKS" if still else "rejected")
-            if still:
-                raise Refused("the OLD password still works — the reset did not land")
-        self._record("verify", "OK", probe="old", verdict="not attempted (no backup)")
+        still = self._fn("probe")(old_dsn)
+        self._record("verify", "FAIL" if still else "OK", probe="old",
+                     verdict="STILL WORKS" if still else "rejected")
+        if still:
+            raise Refused("the OLD password still works — the reset did not land")
 
     def step_watch(self):
         """Re-probe both sides on a loop. Honest limit: this watches CONNECTIVITY, not
