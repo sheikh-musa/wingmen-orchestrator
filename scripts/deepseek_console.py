@@ -89,6 +89,12 @@ _PROFILE_DIR = os.path.expanduser("~/.wingmen/deepseek_browser")
 # state). split-key only ever repoints a slug that is on THIS key: anything
 # else was set by hand and is not ours to overwrite.
 _SHARED_KEY_NAME = "DEEPSEEK_CODING_KEY"
+
+# amount x price must reproduce the console's own cost export to within this.
+# Observed live diff is exactly 0.0 (2026-11-01), so anything above float
+# noise means the export shape changed or the per-key split double-counts --
+# see the enforcement comment in parse_export_zip.
+_COST_CROSS_CHECK_TOLERANCE_USD = 1e-6
 _USAGE_JSONL_DEFAULT = os.path.expanduser(
     "~/wingmen/fleet-health/state/deepseek_usage_by_key.jsonl"
 )
@@ -616,9 +622,12 @@ def parse_export_zip(zip_bytes: bytes, since: str | None = None):
 
     Cost is amount x price, summed per record. cost-<from>_<to>.csv is the
     console's own per-(day, model) total and carries the currency, so it is
-    read both for the currency label and as a CROSS-CHECK -- its delta is
-    reported in the summary rather than silently trusted, because a mismatch
-    means either the export shape changed or the per-key split double-counts.
+    read both for the currency label and as an ENFORCED cross-check: a delta
+    above _COST_CROSS_CHECK_TOLERANCE_USD raises LayoutMismatch and writes
+    nothing, because a mismatch means either the export shape changed or the
+    per-key split double-counts, and the JSONL is consumed as authoritative.
+    Rows that cannot be attributed raise rather than being skipped for the
+    same reason.
     """
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         members = zf.namelist()
@@ -643,17 +652,20 @@ def parse_export_zip(zip_bytes: bytes, since: str | None = None):
         )
 
     agg: dict = {}
-    for row in amount_rows:
+    unattributable: list = []
+    for lineno, row in enumerate(amount_rows, start=2):
         day = (row.get("start_time_iso") or "")[:10]
         key_name = (row.get("api_key_name") or "").strip()
         model = (row.get("model") or "").strip()
         usage_type = (row.get("type") or "").strip()
         if not day or not key_name or not usage_type:
+            unattributable.append(f"amount csv line {lineno}: missing day/key/type")
             continue
         try:
             amount = float(row.get("amount") or 0)
             price = float(row.get("price") or 0)
-        except ValueError:
+        except (TypeError, ValueError):
+            unattributable.append(f"amount csv line {lineno}: non-numeric amount/price")
             continue
         rec = agg.setdefault(
             (day, key_name, model),
@@ -670,7 +682,7 @@ def parse_export_zip(zip_bytes: bytes, since: str | None = None):
 
     console_cost: dict = {}
     currency = None
-    for row in cost_rows:
+    for lineno, row in enumerate(cost_rows, start=2):
         day = (row.get("start_time_iso") or "")[:10]
         model = (row.get("model") or "").strip()
         currency = row.get("currency") or currency
@@ -678,8 +690,23 @@ def parse_export_zip(zip_bytes: bytes, since: str | None = None):
             console_cost[(day, model)] = (
                 console_cost.get((day, model), 0.0) + float(row.get("cost") or 0)
             )
-        except ValueError:
+        except (TypeError, ValueError):
+            unattributable.append(f"cost csv line {lineno}: non-numeric cost")
             continue
+
+    if unattributable:
+        # Fail closed instead of dropping the row. A skipped row does not
+        # disappear -- it silently moves its spend into somebody else's
+        # bucket or out of the total entirely, and the JSONL is written as
+        # authoritative. Same posture as the shape checks above: abort rather
+        # than guess (cc-quality F1 on PR#744).
+        raise LayoutMismatch(
+            f"usage export has {len(unattributable)} row(s) this parser cannot "
+            "attribute, so any per-key total we computed would be a guess "
+            f"({len(amount_rows)} amount rows, {len(cost_rows)} cost rows): "
+            + "; ".join(unattributable[:5])
+            + (" ..." if len(unattributable) > 5 else "")
+        )
 
     our_cost: dict = {}
     for (day, _key, model), rec in agg.items():
@@ -687,6 +714,28 @@ def parse_export_zip(zip_bytes: bytes, since: str | None = None):
     max_abs_diff = max(
         (abs(our_cost.get(k, 0.0) - v) for k, v in console_cost.items()), default=0.0
     )
+
+    if max_abs_diff > _COST_CROSS_CHECK_TOLERANCE_USD:
+        # ENFORCED, not just printed (cc-quality F1 on PR#744): this delta is
+        # the only detector of a changed export shape or a per-key split that
+        # double-counts. Reporting it in a summary only helps whoever reads
+        # that summary; a consumer of the JSONL sees authoritative-looking
+        # rows either way. Refuse to write.
+        worst = sorted(
+            ((abs(our_cost.get(k, 0.0) - v), k) for k, v in console_cost.items()),
+            reverse=True,
+        )[:3]
+        detail = ", ".join(
+            f"{k[0]}/{k[1]}: ours={our_cost.get(k, 0.0):.10f} "
+            f"console={console_cost[k]:.10f}"
+            for _diff, k in worst
+        )
+        raise LayoutMismatch(
+            "cost cross-check FAILED: summing amount x price does not reproduce "
+            f"the console's own cost export (max abs diff ${max_abs_diff:.10f}, "
+            f"tolerance ${_COST_CROSS_CHECK_TOLERANCE_USD:g}). Worst: {detail}. "
+            "Per-key attribution would be wrong if written; refusing to write."
+        )
 
     if since:
         _validate_iso_date(since)
@@ -771,6 +820,11 @@ def cmd_usage_export(args) -> int:
     mapping = _load_map()
     sel = _SEL["usage_page"]
     out_path = os.path.expanduser(args.out or _USAGE_JSONL_DEFAULT)
+
+    # Validate the date BEFORE driving a browser: a typo should cost a second,
+    # not a full export download (cc-quality, PR#744 minor note).
+    if args.since:
+        _validate_iso_date(args.since)
 
     from playwright.sync_api import sync_playwright
 

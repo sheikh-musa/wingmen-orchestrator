@@ -612,3 +612,100 @@ def test_the_console_allowlist_still_has_no_delete_or_revoke_action():
     blob = json.dumps(mod._SEL).lower()
     for forbidden in ("delete", "revoke", "remove"):
         assert forbidden not in blob
+
+
+# --- F1 (cc-quality, PR#744): the cost cross-check must ENFORCE, not print ---
+
+def test_cost_cross_check_mismatch_refuses_to_write():
+    """The delta against the console's own cost export is the only detector of
+    a changed export shape or a double-counting per-key split. Printing it in a
+    summary helps nobody downstream: the JSONL is read as authoritative."""
+    mod = _load_module(name="deepseek_crosscheck")
+    zip_bytes = _build_export_zip(
+        [
+            f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,bariq,sk-MASKED,output_tokens,0.0000012,1000",
+        ],
+        # console says a different total for the same day/model
+        [
+            f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,Paid,0.0050,USD",
+        ],
+    )
+    try:
+        mod.parse_export_zip(zip_bytes)
+    except mod.LayoutMismatch as exc:
+        assert "cross-check FAILED" in str(exc)
+        assert "refusing to write" in str(exc).lower()
+    else:
+        raise AssertionError("expected LayoutMismatch when the cost cross-check diverges")
+
+
+def test_cost_cross_check_within_tolerance_still_parses():
+    mod = _load_module(name="deepseek_crosscheck_ok")
+    zip_bytes = _build_export_zip(
+        [
+            f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,bariq,sk-MASKED,output_tokens,0.0000012,1000",
+        ],
+        [
+            f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,Paid,0.0012,USD",
+        ],
+    )
+    records, meta = mod.parse_export_zip(zip_bytes)
+    assert meta["max_abs_diff_usd"] < mod._COST_CROSS_CHECK_TOLERANCE_USD
+    assert len(records) == 1
+
+
+def test_unattributable_amount_row_aborts_instead_of_being_skipped():
+    """A skipped row does not vanish -- it moves spend into someone else's
+    bucket or drops it from the total, while the file still looks complete."""
+    mod = _load_module(name="deepseek_skiprow")
+    zip_bytes = _build_export_zip(
+        [
+            f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,bariq,sk-MASKED,output_tokens,0.0000012,1000",
+            # no api_key_name -> cannot be attributed to any key
+            f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,,sk-MASKED,output_tokens,0.0000012,500",
+        ],
+        [],
+    )
+    try:
+        mod.parse_export_zip(zip_bytes)
+    except mod.LayoutMismatch as exc:
+        assert "cannot attribute" in str(exc)
+    else:
+        raise AssertionError("expected LayoutMismatch for an unattributable row")
+
+
+def test_non_numeric_amount_aborts():
+    mod = _load_module(name="deepseek_nonnum")
+    zip_bytes = _build_export_zip(
+        [
+            f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,bariq,sk-MASKED,output_tokens,0.0000012,not-a-number",
+        ],
+        [],
+    )
+    try:
+        mod.parse_export_zip(zip_bytes)
+    except mod.LayoutMismatch as exc:
+        assert "non-numeric" in str(exc)
+    else:
+        raise AssertionError("expected LayoutMismatch for a non-numeric amount")
+
+
+def test_usage_export_validates_since_before_driving_a_browser():
+    """A typo in --since should cost a second, not a full export download.
+    Runs in-process: the LayoutMismatch must fire before playwright is even
+    imported, so this passes with no browser and no display."""
+    mod = _load_module(name="deepseek_since_early")
+    args = argparse.Namespace(since="31-10-2026", out=None, headed=False)
+    try:
+        mod.cmd_usage_export(args)
+    except mod.LayoutMismatch as exc:
+        assert "YYYY-MM-DD" in str(exc)
+    else:
+        raise AssertionError("expected LayoutMismatch for a malformed --since")
