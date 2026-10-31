@@ -247,6 +247,59 @@ def test_main_reports_honest_failure_when_redaction_never_lands(tmp_path):
     assert transcript.read_text() == original_transcript_text  # genuinely untouched, matching the honest message
 
 
+def test_main_pages_an_honest_subject_when_redaction_never_lands(tmp_path):
+    # bus #87010/#87072/#87073 (cc-fleet-health, 2026-10-31), the 3rd recurrence of this
+    # exact shape (10-15, 10-23, 10-31): the hook's own stderr note to the model was
+    # already honest (test_main_reports_honest_failure_when_redaction_never_lands), but
+    # _page_orch_console's ORCH-CONSOLE-FACING page hardcoded "auto-redacted a
+    # secret-shaped match" unconditionally -- orch-console read a real detect-but-miss as
+    # a successful redaction 3 times running because the page itself never said
+    # otherwise. "A backstop that detects but does not scrub is a false sense of safety"
+    # (orch-console #87081) -- the page, not just the stderr, must say so.
+    import os
+    import subprocess
+
+    fake_dsn = "postgres://orchuser:" + "Zq9mPlKx2Rz" + "@203.0.113.88:5432/orchdb"
+    transcript = tmp_path / "session.jsonl"
+    with open(transcript, "w") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "echo unrelated"}}
+        ]}}) + "\n")
+        f.write(json.dumps({"type": "tool_result", "toolUseResult": {"output": "unrelated output, no secret here"}}) + "\n")
+
+    cmd = "psql " + json.dumps(fake_dsn)  # the hit: only in input_text, never written to transcript
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": cmd},
+        "tool_response": "unrelated output, no secret here",
+        "transcript_path": str(transcript),
+    })
+
+    orch_root_dir = tmp_path / "orch_root"
+    orch_root_dir.mkdir()
+    orch_root = _fake_orch_root(orch_root_dir)
+    captured = tmp_path / "page_body.txt"
+    # bus_send.py reads its --body-equivalent from stdin (`input=body` in the real call)
+    # -- capture exactly what the real hook would have sent, args included.
+    (orch_root / "scripts" / "bus_send.py").write_text(
+        "import sys, pathlib\n"
+        f"pathlib.Path({str(captured)!r}).write_text(repr(sys.argv) + chr(10) + sys.stdin.read())\n"
+    )
+    env = dict(os.environ, ORCH_ROOT=str(orch_root))
+    env.pop("SECRETS_SCANNER_DEMO", None)  # real mode: must not downgrade/mask the subject
+
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True, env=env)
+    assert r.returncode == 0
+    assert captured.exists(), "expected the page to still fire -- a miss must still be loud"
+    sent = captured.read_text()
+    assert "auto-redacted a secret-shaped match" not in sent, (
+        "the page must never claim success when redact_recent_lines reported no change"
+    )
+    assert "NOT" in sent.upper() and "REDACT" in sent.upper(), (
+        "the page must say plainly that this one was NOT redacted"
+    )
+
+
 def test_main_retries_before_giving_up_and_succeeds_on_a_later_attempt(monkeypatch):
     # Simulates the hypothesized race (the transcript line isn't on disk yet on the
     # first read): redact_recent_lines fails twice then succeeds on the 3rd call for
@@ -515,6 +568,39 @@ def test_page_orch_console_real_mode_is_unchanged(monkeypatch, tmp_path):
     assert not args[subject_idx].startswith("[DEMO]")
     assert args[priority_idx] == "P1"
     assert "--req" in args
+
+
+def test_page_orch_console_redacted_false_sends_an_honest_not_redacted_page(monkeypatch, tmp_path):
+    # Direct unit-level counterpart to test_main_pages_an_honest_subject_when_redaction_
+    # never_lands -- isolates _page_orch_console's own behavior from main()'s wiring.
+    import subprocess as subprocess_module
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["body"] = kwargs.get("input", "")
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setenv("ORCH_ROOT", str(_fake_orch_root(tmp_path)))
+    monkeypatch.delenv("SECRETS_SCANNER_DEMO", raising=False)
+    monkeypatch.setattr(subprocess_module, "run", fake_run)
+    scanner._page_orch_console("postgres-dsn", "Bash", redacted=False)
+
+    args = captured["args"]
+    subject_idx = args.index("--subject") + 1
+    priority_idx = args.index("--priority") + 1
+    subject = args[subject_idx]
+    body = captured["body"]
+    assert "auto-redacted" not in subject and "auto-redacted a secret-shaped match" not in body
+    assert "NOT" in subject.upper() and "REDACT" in subject.upper()
+    assert args[priority_idx] == "P1"  # still as loud as it already was -- the content is what must change
+    assert "--req" in args
+    # and the happy-path default stays exactly as it was (no caller passes redacted= today)
+    captured.clear()
+    scanner._page_orch_console("postgres-dsn", "Bash")
+    assert "auto-redacted a secret-shaped match" in captured["body"]
 
 
 # ---- bus #48907: a tool call originating inside a subagent must page with the
