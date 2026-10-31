@@ -341,16 +341,10 @@ _self_kick() {
         echo "[boot_fleet_health] self-kick: banner never appeared within ~50s — NOT firing (claude may not be up)" >&2
         return 0
     fi
-    # Take the host-wide fire-window lock the nudgers consult, so none can send-keys
-    # into the pane between our text and its Enter. Self-expiring (TTL) + released on
-    # this subshell's EXIT — a crash can never leave the pane quiesced.
-    if [ -r "$ORCH_DIR/scripts/lib/fire_window.sh" ]; then
-        . "$ORCH_DIR/scripts/lib/fire_window.sh" 2>/dev/null || true
-        declare -f fire_window_hold >/dev/null 2>&1 && fire_window_hold "$sess" 60 "boot_fleet_health self-kick" 2>/dev/null || true
-    fi
-    # Reuse the fleet's ONE busy definition: if an external nudge already started a turn
-    # (before our lock), the pane is BUSY -> skip; it is already booting, and we must
-    # not send-keys into a live turn.
+    # Reuse the fleet's ONE busy definition: if an external nudge already started a turn,
+    # the pane is BUSY -> skip; it is already booting, and we must not type into a live
+    # turn. (Boot-specific and kept: lane_nudge's guards do not re-check "a turn is
+    # already running" for a fresh pane.)
     if [ -r "$ORCH_DIR/scripts/lib/composer_capture.sh" ]; then
         . "$ORCH_DIR/scripts/lib/composer_capture.sh" 2>/dev/null || true
         if declare -f pane_busy >/dev/null 2>&1; then
@@ -361,10 +355,27 @@ _self_kick() {
             fi
         fi
     fi
-    "$tm" send-keys -t "$pane" -l "$_FH_KICK"
-    sleep 1
-    "$tm" send-keys -t "$pane" Enter
-    echo "[boot_fleet_health] self-kick fired — fresh SRE booting without waiting for an external nudge"
+
+    # VERIFIED SUBMIT (orch-console #87340). A bare `tmux send-keys Enter` frequently fails
+    # to submit: the prompt is typed but never sent, and the fresh SRE sits IDLE until a
+    # human presses Enter by hand — exactly what happened on the 17:36Z restart (4 minutes
+    # lost on a P0 recovery path, and EVERY P0 restart goes through here). lane_nudge.sh is
+    # the fleet's one verified-submit path: it retries with clear+retype and returns 0 only
+    # once the pane is genuinely WORKING (footer shows "esc to interrupt"). It also refuses
+    # a recycle fire window, a parked menu, or real staged input rather than clobbering them.
+    #
+    # Do NOT re-add a fire_window_hold around this call: lane_nudge CHECKS that same window
+    # and would self-refuse (exit 4) for its whole duration.
+    local kick_rc=0
+    bash "$ORCH_DIR/scripts/lane_nudge.sh" "$sess" "$_FH_KICK" || kick_rc=$?
+    if [ "$kick_rc" -eq 0 ]; then
+        echo "[boot_fleet_health] self-kick VERIFIED submitted (lane_nudge rc=0) — fresh SRE booting without waiting for an external nudge" >&2
+    else
+        # Fail LOUD (charter §2 dead-man's-switch): a silent no-op here manufactures false
+        # confidence that the SRE is booting when it is sitting idle on an unsent prompt.
+        echo "[boot_fleet_health] !!! SELF-KICK NOT VERIFIED (lane_nudge rc=$kick_rc) — the boot prompt may be sitting UNSENT. The SRE will idle until a human submits it by hand. Diagnose with: scripts/lane_nudge.sh '$sess' '<kick text>'; see logs/lane_nudge_*.log" >&2
+    fi
+    return "$kick_rc"
 }
 if [ "${FH_SELF_KICK:-1}" = 1 ]; then _self_kick & fi
 
