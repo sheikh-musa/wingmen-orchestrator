@@ -23,6 +23,7 @@ under test here, only whether bus_writer can SELECT it and get correct data
 for the scenarios below.
 """
 import pathlib
+import re
 import sys
 import uuid
 
@@ -305,13 +306,25 @@ _PRE_124_FUNCTIONS = r"""
     END;
     $$;
 
+    -- Faithful to the real live body (2026-10-31 pg_get_functiondef pull,
+    -- inline comments stripped) -- this exact fidelity matters: an earlier,
+    -- simplified version of this fixture dropped the parent_msg_id lookup
+    -- entirely, which let a missing `GRANT SELECT ON agent_messages TO
+    -- bus_writer` ship undetected (cc-quality review, PR#716, bus #85462,
+    -- BLOCKING 2) -- the SECURITY INVOKER->DEFINER conversion needs its own
+    -- SELECT grant for this exact path, and nothing exercised it.
     CREATE OR REPLACE FUNCTION trigger_cai_decision_announce()
     RETURNS trigger LANGUAGE plpgsql SET search_path TO 'public', 'pg_temp' AS $$
     DECLARE
       v_msg_id BIGINT;
       v_subject TEXT;
+      v_body TEXT;
+      v_message_type TEXT;
+      v_requires_response BOOLEAN;
       v_to_agent TEXT;
       v_thread_id UUID;
+      v_parent_from_agent TEXT;
+      v_parent_thread_id UUID;
     BEGIN
       IF NEW.source IS DISTINCT FROM 'claude_ai_session'
          OR NEW.challenge_status NOT IN ('challenge_window', 'accepted')
@@ -321,18 +334,57 @@ _PRE_124_FUNCTIONS = r"""
         RETURN NEW;
       END IF;
 
-      v_subject := NEW.decision_ref || ': ' || NEW.title;
-      v_to_agent := COALESCE(NEW.announce_to_agent, 'cc-ihsanos');
-      v_thread_id := COALESCE(NEW.announce_thread_id, gen_random_uuid());
+      IF TG_OP = 'UPDATE' THEN
+        IF OLD.announced_by_msg_id IS NOT NULL
+           OR OLD.execution_status = 'implemented' THEN
+          RETURN NEW;
+        END IF;
+      END IF;
 
-      INSERT INTO agent_messages (thread_id, from_agent, to_agent, message_type, subject, body, requires_response)
-      VALUES (v_thread_id, 'cai', v_to_agent, 'decision', v_subject, 'body', false)
+      IF NEW.challenge_status = 'challenge_window' THEN
+        v_message_type := 'review_request';
+        v_subject := NEW.decision_ref || ': ' || NEW.title || ' — for review + challenge';
+      ELSE
+        v_message_type := 'decision';
+        v_subject := NEW.decision_ref || ': ' || NEW.title;
+      END IF;
+
+      v_requires_response := COALESCE(NEW.announce_requires_response, false);
+
+      v_body := format(
+        E'Decision %s filed by CAI (status: %s).\nFull spec: see strategic_decisions.decision_ref=%s%s\n',
+        NEW.decision_ref,
+        NEW.challenge_status,
+        NEW.decision_ref,
+        CASE WHEN NEW.parent_ref IS NOT NULL
+             THEN E'\nParent: ' || NEW.parent_ref
+             ELSE '' END
+      );
+
+      IF NEW.parent_msg_id IS NOT NULL THEN
+        SELECT from_agent, thread_id
+          INTO v_parent_from_agent, v_parent_thread_id
+          FROM agent_messages
+         WHERE id = NEW.parent_msg_id;
+      END IF;
+
+      v_to_agent := COALESCE(NEW.announce_to_agent, v_parent_from_agent, 'cc-ihsanos');
+      v_thread_id := COALESCE(NEW.announce_thread_id, v_parent_thread_id, gen_random_uuid());
+
+      INSERT INTO agent_messages (
+        thread_id, from_agent, to_agent, message_type,
+        subject, body, requires_response
+      ) VALUES (
+        v_thread_id, 'cai', v_to_agent, v_message_type,
+        v_subject, v_body, v_requires_response
+      )
       RETURNING id INTO v_msg_id;
 
       NEW.announced_by_msg_id := v_msg_id;
       NEW.notified_at := now();
 
-      IF NEW.announce_to_agent IS NULL THEN
+      IF NEW.announce_to_agent IS NULL
+         AND v_parent_from_agent IS NULL THEN
         INSERT INTO notification_log (source, decision_ref, channel, recipient, message_text)
         VALUES ('bridge_tier3_misroute', NEW.decision_ref, 'agent_messages', 'cc-ihsanos', 'fallback fired');
       END IF;
@@ -503,39 +555,29 @@ def post_124_db(pre_124_db):
     return pre_124_db
 
 
-def test_postgres_acl_entry_loses_insert_after_124(post_124_db):
-    """This harness's pg_dsn fixture runs initdb -U postgres (tests/conftest.py),
-    so a role literally named 'postgres' is unavoidably this ephemeral
-    cluster's actual superuser -- `SET ROLE postgres` would bypass every ACL
-    check regardless of what this migration revokes, which is exactly the
-    opposite of the real substrate's postgres (rolsuper=FALSE, confirmed
-    live, migration 123's header). A direct-INSERT-as-postgres test here
-    would therefore prove nothing either way. Checking the ACL entry itself
-    (independent of the superuser-bypass quirk) proves the REVOKE statement
-    actually ran and modified the right grantee -- the real-substrate
-    rolled-back rehearsal (staged separately, not run from this lane per
-    standing policy) is what proves actual enforcement against the real,
-    non-superuser postgres."""
+def test_raw_insert_as_postgres_fails_after_124(post_124_db):
+    """postgres OWNS agent_messages (pg_class.relowner) -- a REVOKE against it
+    would be a no-op (cc-quality's PR#716 review, bus #85462, BLOCKING 1; a
+    table owner's base privileges are implicit and not grant/revoke-
+    removable). That is exactly why 124 uses a BEFORE INSERT guard trigger
+    instead of a REVOKE for postgres: triggers fire for every inserting role
+    regardless of ownership or ACL privilege -- including a role that also
+    happens to be this ephemeral harness's actual initdb-bootstrap
+    superuser. Unlike an ACL/has_table_privilege check (which a superuser
+    always passes, the limitation the previous version of this test
+    disclosed), trigger firing is NOT bypassed by superuser status -- only
+    RLS is -- so this IS a meaningful, real test of the postgres path, in
+    this harness as much as on the real substrate."""
     with post_124_db.cursor() as cur:
-        cur.execute("SELECT has_table_privilege('postgres', 'agent_messages', 'INSERT')")
-        # Not a useful assertion on its own (superuser bypass always reports
-        # True) -- the real proof is the ACL text below.
-        cur.fetchone()
-        # Schema-qualified: other test files sharing this session-scoped
-        # cluster (tests/conftest.py's pg_dsn) can leave behind their OWN
-        # same-named table in a different schema, and an unqualified lookup
-        # can nondeterministically pick up theirs instead of this fixture's
-        # 'public.agent_messages' (caught on real CI-shaped full-suite run,
-        # not locally in isolation).
-        cur.execute(
-            "SELECT array_to_string(c.relacl, ',') FROM pg_class c "
-            "JOIN pg_namespace n ON n.oid = c.relnamespace "
-            "WHERE n.nspname = 'public' AND c.relname = 'agent_messages'"
-        )
-        (acl,) = cur.fetchone()
-    assert "postgres=a" not in acl and "postgres=arwdDxt" not in acl, (
-        f"postgres still has an explicit INSERT ACL entry on agent_messages: {acl!r}"
-    )
+        cur.execute("SET ROLE postgres")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege) as excinfo:
+            cur.execute(
+                "INSERT INTO agent_messages "
+                "(from_agent, to_agent, message_type, subject, body) "
+                "VALUES ('x','y','update','s','b')"
+            )
+        assert "direct INSERT not allowed" in str(excinfo.value)
+    post_124_db.rollback()
 
 
 def test_raw_insert_as_service_role_fails_after_124(post_124_db):
@@ -703,6 +745,50 @@ def test_trigger_cai_decision_announce_still_fires_after_124(post_124_db):
         assert cur.fetchone()[0] == 1
 
 
+def test_trigger_cai_decision_announce_parent_msg_id_lookup_after_124(post_124_db):
+    """cc-quality review finding (PR#716, bus #85462, BLOCKING 2): a threaded
+    announce (parent_msg_id IS NOT NULL) makes the trigger SELECT from
+    agent_messages -- as bus_writer (DEFINER, post-124), not service_role
+    (the caller, pre-124's INVOKER mode). bus_writer has INSERT but, before
+    the fix, no SELECT -- this would raise 'permission denied for table
+    agent_messages' and roll back the whole strategic_decisions write. Also
+    confirms the COALESCE-to-parent routing (to_agent/thread_id inherited
+    from the parent message when announce_to_agent/announce_thread_id are
+    both NULL)."""
+    with post_124_db.cursor() as cur:
+        cur.execute("SET ROLE bus_writer")
+        cur.execute(
+            "INSERT INTO agent_messages (thread_id, from_agent, to_agent, message_type, subject, body) "
+            "VALUES (gen_random_uuid(), 'orch-console', 'cai', 'update', 'parent', 'parent body') "
+            "RETURNING id, thread_id, from_agent"
+        )
+        parent_id, parent_thread_id, parent_from_agent = cur.fetchone()
+        cur.execute("RESET ROLE")
+    post_124_db.commit()
+
+    with post_124_db.cursor() as cur:
+        cur.execute("SET ROLE service_role")
+        cur.execute(
+            "INSERT INTO strategic_decisions "
+            "(decision_ref, title, challenge_status, source, parent_msg_id) "
+            "VALUES ('D-6', 'threaded reply', 'challenge_window', 'claude_ai_session', %s) "
+            "RETURNING announced_by_msg_id",
+            (parent_id,),
+        )
+        (announced_by_msg_id,) = cur.fetchone()
+        cur.execute("RESET ROLE")
+    post_124_db.commit()
+    assert announced_by_msg_id is not None
+
+    with post_124_db.cursor() as cur:
+        cur.execute(
+            "SELECT to_agent, thread_id FROM agent_messages WHERE id=%s", (announced_by_msg_id,)
+        )
+        to_agent, thread_id = cur.fetchone()
+        assert to_agent == parent_from_agent
+        assert thread_id == parent_thread_id
+
+
 def test_anon_and_authenticated_cannot_execute_trigger_cai_decision_announce_after_124(
     post_124_db,
 ):
@@ -734,18 +820,30 @@ def test_anon_and_authenticated_still_cannot_write_strategic_decisions_after_124
 
 
 def test_124_revoke_and_grant_and_policy_statements_are_idempotent_on_rerun(post_124_db):
-    """The REVOKE, the 3 bare OWNER-TO-only ALTERs, and the GRANT/CREATE
-    POLICY additions are genuinely idempotent and safe to re-run (same
-    contract as test_123_is_idempotent_on_rerun). The 2 CREATE OR REPLACE
-    statements (close_decision_by_audit, trigger_cai_decision_announce) are
-    NOT -- see the migration file's own disclosed-limitation comment above
-    each -- so this test deliberately does not include them, rather than
-    asserting something the migration does not actually guarantee."""
+    """Everything in this migration EXCEPT the 2 CREATE OR REPLACE statements
+    for close_decision_by_audit and trigger_cai_decision_announce is
+    genuinely idempotent and safe to re-run (same contract as
+    test_123_is_idempotent_on_rerun) -- including the 3 bare OWNER-TO-only
+    ALTERs, the GRANT/CREATE POLICY additions, the guard trigger function +
+    CREATE OR REPLACE TRIGGER, its own existence-check DO block, and the
+    service_role REVOKE. Those 2 specific statements are NOT re-runnable --
+    see the migration file's own disclosed-limitation comment above each --
+    so this test cuts exactly those two out (by regex, not a blind prefix
+    slice, so everything AFTER them -- the guard trigger, grants, policies,
+    REVOKE -- is actually exercised here too, not silently skipped)."""
     migration_124 = (MIGRATIONS_DIR / "124_durable_inbox_revoke_direct_insert.sql").read_text()
     body = am.strip_txn_control(am.strip_sql_comments(migration_124))
-    idempotent_part = body.split("CREATE OR REPLACE FUNCTION public.close_decision_by_audit")[0]
+    for fn in ("close_decision_by_audit", "trigger_cai_decision_announce"):
+        body, n = re.subn(
+            rf"CREATE OR REPLACE FUNCTION public\.{fn}\(.*?\n\$\$;\n",
+            "",
+            body,
+            count=1,
+            flags=re.DOTALL,
+        )
+        assert n == 1, f"expected exactly one CREATE OR REPLACE FUNCTION public.{fn}(...) block"
     with post_124_db.cursor() as cur:
-        cur.execute(idempotent_part)
+        cur.execute(body)
     post_124_db.commit()
 
 
@@ -758,26 +856,20 @@ def test_124_sets_lock_timeout_as_its_first_statement():
     )
 
 
-def test_124_applies_via_apply_migration_dry_run_up_to_the_postgres_superuser_quirk(pg_dsn):
+def test_124_applies_cleanly_via_apply_migration_dry_run(pg_dsn):
     """Runs the REAL file through the REAL applier (SQL body + every
     `-- assert:` line) against an ephemeral cluster -- not hand-executed
     statements -- confirming the body itself runs clean (no ordering/
     permission error of the applier's own making, and the comment-grep/
     sequence-mutation dry-run refusals this file's text might otherwise
-    trip do not misfire) and every assertion EXCEPT the postgres one is
-    satisfied.
+    trip do not misfire) and every assertion is satisfied.
 
-    The postgres no_table_privilege assertion itself cannot be proven via
-    this route in THIS harness: tests/conftest.py's pg_dsn runs initdb -U
-    postgres, so a role literally named 'postgres' is this ephemeral
-    cluster's actual superuser, and has_table_privilege() always reports
-    TRUE for a superuser regardless of any REVOKE (same root cause already
-    documented on test_postgres_acl_entry_loses_insert_after_124, which
-    proves the REVOKE actually ran via the ACL text directly instead). The
-    expected Refuse here is that ONE specific, known, harness-only false
-    positive -- confirming apply_migration got all the way through the SQL
-    body and every OTHER assertion to reach it, not stopping early on
-    something this migration actually got wrong."""
+    No postgres-superuser-harness caveat needed here (unlike an earlier
+    version of this test, back when 124 used a REVOKE for postgres): the
+    guard trigger design means there is no `no_table_privilege postgres
+    ...` assert to begin with, and triggers fire regardless of superuser
+    status anyway (only RLS is bypassed by it) -- see
+    test_raw_insert_as_postgres_fails_after_124."""
     with psycopg.connect(pg_dsn, autocommit=True) as super_conn, super_conn.cursor() as super_cur:
         super_cur.execute("SELECT 1 FROM pg_roles WHERE rolname='live_applier'")
         if super_cur.fetchone() is None:
@@ -810,14 +902,10 @@ def test_124_applies_via_apply_migration_dry_run_up_to_the_postgres_superuser_qu
         )
 
     silo_dsn = f"{applier_dsn} application_name=tscuymavysscrvoberrr"
-    with pytest.raises(am.Refuse) as excinfo:
-        am.apply_migration(
-            silo_dsn,
-            MIGRATIONS_DIR / "124_durable_inbox_revoke_direct_insert.sql",
-            silo="tscuymavysscrvoberrr",
-            dry_run=True,
-        )
-    assert "no_table_privilege postgres public.agent_messages INSERT" in str(excinfo.value), (
-        f"expected the applier to get all the way to (and stop only on) the known "
-        f"postgres-superuser false positive, got: {excinfo.value}"
+    result = am.apply_migration(
+        silo_dsn,
+        MIGRATIONS_DIR / "124_durable_inbox_revoke_direct_insert.sql",
+        silo="tscuymavysscrvoberrr",
+        dry_run=True,
     )
+    assert result["status"] == "dry_run_ok", result

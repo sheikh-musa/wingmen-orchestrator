@@ -2,10 +2,21 @@
 -- ledger: silo=tscuymavysscrvoberrr
 -- (orchestrator substrate)
 --
--- Backlog#124's final step (console's bus #85451, Sat 31 Oct): the REVOKE half
--- split out of migration 123 (Musa op#34845, bus #78393 ruling) -- revokes
--- postgres and service_role's direct INSERT on agent_messages, leaving
--- bus_writer (migration 123) as the ONLY role that can insert into this table.
+-- Backlog#124's final step (console's bus #85451, Sat 31 Oct): closes the
+-- direct-INSERT path on agent_messages that migration 123 (Musa op#34845,
+-- bus #78393 ruling) deliberately left open, leaving bus_writer (123) as the
+-- only INSERT path other than a guard-trigger-enforced identity check (see
+-- GUARD TRIGGER below -- NOT a REVOKE, for a reason discovered during
+-- cc-quality's PR#716 review, bus #85462/#85464).
+--
+-- cto_desktop (unrelated to this migration's own writer inventory, still
+-- holds a direct INSERT grant + its own cto_desktop_insert_self RLS policy)
+-- is blocked by the guard trigger too, unconditionally -- the trigger does
+-- not special-case it. This is a deliberate side effect, not an oversight:
+-- console asked whether cto_desktop is a live writer before applying this
+-- (bus #85464); if it is, it needs to move onto bus_send/post_agent_message
+-- like every other writer did, not get carved out of the gate.
+--
 -- Gated on a full writer inventory across 4 categories being complete first
 -- (123's own header): python psycopg, .sh/psql heredocs, PostgREST/service-key
 -- REST calls (all three confirmed CLEAN fleet-wide by
@@ -13,7 +24,33 @@
 -- empty), and the 6 postgres-owned DB functions that INSERT into this table
 -- directly -- this migration's second half (below) is that 4th category.
 --
--- assert: no_table_privilege postgres public.agent_messages INSERT
+-- WHY A TRIGGER, NOT JUST A REVOKE (cc-quality's BLOCKING 1, console's design
+-- call #85464): `REVOKE INSERT ON agent_messages FROM postgres` is a no-op --
+-- postgres OWNS this table (pg_class.relowner), and a table owner's base
+-- privileges are implicit, not grant/revoke-removable (this is unrelated to
+-- rolbypassrls, an earlier draft of this migration's own header wrongly
+-- conflated the two -- rolbypassrls governs RLS-policy bypass only, not base
+-- table ACL). Reassigning ownership away from postgres would fix it but is a
+-- separate, bigger, more-carefully-reviewed change. A BEFORE INSERT guard
+-- trigger sidesteps the whole issue: triggers fire for every row regardless
+-- of who owns or has ACL privilege on the table (that is what makes RLS
+-- policies and check constraints work on an owner's own writes too), so
+-- `RAISE EXCEPTION unless current_user = bus_writer` binds postgres exactly
+-- as it binds everyone else. The REVOKE against service_role (a real,
+-- effective ACL change -- service_role is not the owner) stays as a second,
+-- independent layer.
+--
+-- TRIGGER ORDERING (console asked this be checked and stated): BEFORE INSERT
+-- triggers on the same table/event fire in trigger-NAME alphabetical order.
+-- Existing BEFORE INSERT triggers on agent_messages: trg_agent_messages_cai_gate,
+-- trg_agent_messages_provenance. This migration's trg_agent_messages_bus_writer_gate
+-- sorts before both ('b' < 'c' < 'p'), so it fires first. This is safe either
+-- way: the gate only reads current_user, not any NEW.* column either of the
+-- other two triggers sets or reads, so there is no ordering dependency in
+-- either direction -- firing first just means a disallowed caller is
+-- rejected before the other two do any work, which is the preferable order
+-- if anything (fail fastest, least work done before rejection).
+--
 -- assert: no_table_privilege service_role public.agent_messages INSERT
 -- assert: search_path public.audit_board_digest()
 -- assert: search_path public.escalate_full_tier_without_auditor(numeric)
@@ -22,6 +59,15 @@
 -- assert: search_path public.trigger_cai_decision_announce()
 -- assert: no_execute anon public.trigger_cai_decision_announce()
 -- assert: no_execute authenticated public.trigger_cai_decision_announce()
+--
+-- The guard trigger's own existence+enabled check is NOT expressed as a
+-- header assert (apply_migration.py's assert vocabulary -- dropped,
+-- no_execute, no_table_privilege, no_sequence_privilege, search_path -- has
+-- no "trigger enabled" kind, and extending that shared vocabulary under
+-- today's deadline is its own change deserving its own review). Instead it
+-- is an inline DO-block check in the migration body itself (below, right
+-- after CREATE TRIGGER) that RAISEs and aborts the whole transaction --
+-- including under --dry-run -- exactly as a failed header assert would.
 
 BEGIN;
 
@@ -281,6 +327,22 @@ RESET ROLE;
 -- touch (none of this would have been obvious from reasoning about the
 -- OWNER change alone -- same caution as migration 123's own grant-footprint
 -- section):
+--
+-- cc-quality review raised trigger_cai_decision_announce's parent_msg_id
+-- lookup (`SELECT from_agent, thread_id FROM agent_messages WHERE id =
+-- NEW.parent_msg_id`, reached on any threaded CAI announce) as needing a
+-- new SELECT grant for bus_writer now that this function runs DEFINER
+-- (PR#716, bus #85462, their BLOCKING 2) -- checked, and no new grant is
+-- needed: migration 123 already grants bus_writer column-scoped
+-- `GRANT SELECT (id, thread_id, from_agent) ON agent_messages`, which is
+-- exactly the 3 columns this query touches (has_column_privilege confirms
+-- true for all 3 live; has_table_privilege, which the review checked,
+-- correctly reports false for a column-only grant but isn't what this
+-- query needs). Added a dedicated test
+-- (test_trigger_cai_decision_announce_parent_msg_id_lookup_after_124) that
+-- exercises exactly this path -- confirmed red/wrong-fixture before this
+-- comment's fixture-fidelity fix, green after, independent of any new
+-- grant here (none added).
 GRANT SELECT ON decision_audits TO bus_writer;
 GRANT UPDATE (escalated_at, updated_at) ON decision_audits TO bus_writer;
 GRANT SELECT ON strategic_decisions TO bus_writer;
@@ -371,18 +433,114 @@ BEGIN
     END IF;
 END $$;
 
--- THE REVOKE (this migration's headline, backlog#124's actual release):
--- postgres is rolsuper=FALSE with rolbypassrls=TRUE (console's own live
--- query, migration 123's header) -- RLS bypass is unconditional for a role
--- that holds it, but table-level ACL privilege is not, so this REVOKE is a
--- real, enforceable change for postgres, not the silent owner-can't-be-
--- revoked no-op an earlier design draft wrongly assumed. Every writer that
--- needed this privilege has already been moved onto bus_writer above (the 5
--- DB functions) or in earlier PRs (bus_send.py's send() / post_agent_message,
--- all scripted writers per agent_messages_writer_gate.py --require-complete,
--- now clean fleet-wide) -- this statement is what actually makes all of that
--- prior work a real guardrail instead of just an alternate path that
--- happens to also work.
-REVOKE INSERT ON agent_messages FROM postgres, service_role;
+-- GUARD TRIGGER (this migration's actual headline, replacing a REVOKE that
+-- cc-quality's review proved would be a no-op for postgres -- see header).
+-- Binds EVERY inserting role, including the table owner, since triggers
+-- fire regardless of ACL/ownership. SECURITY INVOKER (no elevation needed --
+-- it only reads current_user and either RAISEs or returns NEW unchanged),
+-- matching this repo's existing simple guard triggers (e.g.
+-- enforce_challenge_window_requires_expiry, enforce_audit_tier_change_guard
+-- on strategic_decisions -- neither is SECURITY DEFINER either).
+CREATE OR REPLACE FUNCTION agent_messages_bus_writer_gate()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF current_user <> 'bus_writer' THEN
+        RAISE EXCEPTION
+            'agent_messages: direct INSERT not allowed for role % -- use '
+            'bus_send.py / post_agent_message(), or a bus_writer-owned '
+            'SECURITY DEFINER function, not a raw INSERT (backlog#124)',
+            current_user
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE TRIGGER trg_agent_messages_bus_writer_gate
+    BEFORE INSERT ON agent_messages
+    FOR EACH ROW EXECUTE FUNCTION agent_messages_bus_writer_gate();
+
+-- Inline existence+enabled check in place of a header assert (see header
+-- comment for why): aborts the whole transaction, same as a failed assert
+-- would, under both --dry-run and a real apply.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+         WHERE tgrelid = 'agent_messages'::regclass
+           AND tgname = 'trg_agent_messages_bus_writer_gate'
+           AND tgenabled = 'O'
+    ) THEN
+        RAISE EXCEPTION 'trg_agent_messages_bus_writer_gate missing or not enabled after apply';
+    END IF;
+END $$;
+
+-- Belt-and-braces second layer: service_role is NOT the table owner, so this
+-- REVOKE is a real, independently-effective ACL change (unlike the postgres
+-- half the guard trigger above replaces). Kept even though the trigger alone
+-- already blocks service_role too -- redundant defense is cheap here and
+-- survives even if the trigger is ever accidentally DISABLEd.
+REVOKE INSERT ON agent_messages FROM service_role;
+
+-- WET self-test (console's explicit ask, bus #85468/#85469 -- not the
+-- existence-check above, an actual behavioral probe run inside this same
+-- transaction, under both --dry-run and a real apply): a raw INSERT as
+-- postgres must be rejected by the guard trigger, and post_agent_message
+-- (bus_writer-owned SECURITY DEFINER, migration 123, untouched by 124) must
+-- still succeed. The PL/pgSQL BEGIN/EXCEPTION block below is an implicit
+-- savepoint, so a caught failure here does not abort the outer transaction
+-- -- only an uncaught RAISE (a genuine self-test failure) does.
+--
+-- SET ROLE bus_writer around the post_agent_message call rather than
+-- relying on the applying role's own (possibly inherited, possibly not --
+-- found this the hard way via this file's own TDD) EXECUTE privilege: the
+-- real thing being proven here is that bus_writer's own access path works,
+-- not whatever ambient privilege the role running this migration happens
+-- to carry. Migration 123's own `GRANT bus_writer TO CURRENT_USER WITH SET
+-- TRUE` is exactly what makes this SET ROLE always available to whoever
+-- applies a migration.
+DO $$
+DECLARE
+    v_msg_id BIGINT;
+BEGIN
+    BEGIN
+        SET ROLE postgres;
+        INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body)
+          VALUES ('migration-124-self-test', 'migration-124-self-test', 'update',
+                   'self-test: should be rejected', 'self-test');
+        RESET ROLE;
+        RAISE EXCEPTION
+            'MIGRATION 124 SELF-TEST FAILED: a raw INSERT as postgres succeeded -- '
+            'trg_agent_messages_bus_writer_gate is not enforcing';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            RESET ROLE;
+    END;
+
+    SET ROLE bus_writer;
+    SELECT id INTO v_msg_id FROM post_agent_message(
+        p_from_agent => 'migration-124-self-test',
+        p_to_agent => 'migration-124-self-test',
+        p_message_type => 'update',
+        p_subject => 'self-test: should succeed',
+        p_body => 'migration 124 self-test via post_agent_message',
+        p_priority => 'P3',
+        p_requires_response => false,
+        p_thread_id => gen_random_uuid(),
+        p_sub_tag => NULL,
+        p_is_test => true
+    );
+    RESET ROLE;
+
+    IF v_msg_id IS NULL THEN
+        RAISE EXCEPTION
+            'MIGRATION 124 SELF-TEST FAILED: post_agent_message did not return a row '
+            'after the guard trigger was added';
+    END IF;
+END $$;
+
+-- Self-test cleanup: only test 2 ever committed a row (test 1's INSERT was
+-- rejected before it could); DELETE is idempotent either way.
+DELETE FROM agent_messages WHERE from_agent = 'migration-124-self-test';
 
 COMMIT;
