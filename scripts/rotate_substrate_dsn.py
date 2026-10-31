@@ -37,6 +37,27 @@ ORDER OF OPERATIONS (the runbook this encodes)
   5. this tool: `verify`   (new DSN connects, old one is rejected)
   6. scrub the old value out of the transcripts (scripts/secret_hash_sweep.py)
 
+`verify` takes NO arguments in the normal case: it reads the new DSN out of
+`--env-file` and reconstructs the pre-rotation DSN from the newest `.env.bak.*`
+sitting beside it. That is not a convenience. The first draft wanted both DSNs on
+the command line, which is precisely how this credential leaked on 26 Oct — a
+`pgrep -fl` read a process's argv and the password went into three transcripts.
+A tool that exists to stop that cannot itself require the secret in argv.
+
+WHY `verify` RETRIES THE NEW DSN. Supabase's own KB (28P01 after a password
+rotation) says Supavisor caches database credentials briefly: with active pooled
+connections it usually refreshes in about 15 seconds, but an idle pool refreshes
+only when a real reconnect attempt happens. So the first attempts can fail with a
+plain "password authentication failed" even though the value is correct, and a
+single-shot probe would report a false FAIL at exactly the moment the operator is
+watching. Failures are retried with a delay and reported with their attempt count.
+
+The OLD probe is deliberately NOT retried, and its verdict is trusted only when
+the NEW probe succeeded in the same run: during a pooler cache window everything
+is rejected, and "the old password is rejected" is indistinguishable from "the
+pooler is rejecting everything right now". A clean new connection is what makes
+the old rejection mean something.
+
 WHY APPLY COMES BEFORE THE RESET. The vault is reached through DATABASE_URL, the
 same credential being rotated, so after the reset `apply` could no longer read the
 value it is supposed to write — a chicken-and-egg that strands the fleet with a
@@ -64,6 +85,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
@@ -126,6 +148,41 @@ def keys_embedding_password(path: Path, password_sha8: str) -> list:
         if m and sha8(m.group(2)) == password_sha8:
             found.append(key)
     return found
+
+
+def database_url(path: Path) -> Optional[str]:
+    """The DATABASE_URL value from an env file, or None when it carries no URL."""
+    for key, value in read_env_keys(path):
+        if key == "DATABASE_URL" and URL_WITH_PASSWORD_RE.search(value):
+            return value
+    return None
+
+
+def url_password(value: str) -> Optional[str]:
+    m = URL_WITH_PASSWORD_RE.search(value or "")
+    return m.group(2) if m else None
+
+
+def dsn_with_password(dsn: str, password: str) -> str:
+    """The same DSN with its password swapped — topology untouched.
+
+    Used to rebuild the pre-rotation DSN from the backup: the backup differs from
+    the live file only in the password `apply` replaced, so splicing the backup's
+    password into the live URL reproduces exactly the URL that was live before.
+    """
+    return URL_WITH_PASSWORD_RE.sub(
+        lambda m: f"://{m.group(1)}:{password}@", dsn, count=1)
+
+
+def latest_backup(env_file: Path) -> Optional[Path]:
+    """The newest `.env.bak.<timestamp>` sibling, or None.
+
+    `rewrite_env` stamps backups as .bak.<UTC timestamp>, so a name sort is a
+    time sort. Backups are written through the resolved path, hence the realpath.
+    """
+    target = Path(os.path.realpath(env_file))
+    backups = sorted(target.parent.glob(target.name + ".bak.*"))
+    return backups[-1] if backups else None
 
 
 def rewrite_env(path: Path, old_sha8: str, new_password: str,
@@ -343,30 +400,96 @@ def cmd_keys(args) -> int:
     return 0
 
 
+def _probe(psycopg, dsn: str, timeout: int = 8) -> Tuple[bool, str]:
+    """One connection attempt. Returns (ok, short reason). Never echoes the DSN."""
+    try:
+        with psycopg.connect(dsn, connect_timeout=timeout) as conn:
+            with conn.cursor() as cur:
+                cur.execute("select 1")
+                cur.fetchone()
+        return True, "connected"
+    except Exception as exc:  # auth failures surface as OperationalError
+        return False, type(exc).__name__
+
+
+def _verify_new_dsn(args) -> Optional[str]:
+    """The DSN to prove, from --new-dsn or from the env file. None = refuse."""
+    if args.new_dsn:
+        return args.new_dsn
+    if not args.env_file.exists():
+        print(f"verify: REFUSED — {args.env_file} does not exist and no --new-dsn "
+              "was given", file=sys.stderr)
+        return None
+    value = database_url(args.env_file)
+    if value is None:
+        print(f"verify: REFUSED — {args.env_file} has no DATABASE_URL with an embedded "
+              "password. Nothing probed.", file=sys.stderr)
+        return None
+    print(f"verify: using DATABASE_URL from {args.env_file} pw={mask(url_password(value))}")
+    return value
+
+
+def _verify_old_dsn(args, new_dsn: str) -> Tuple[Optional[str], Optional[str]]:
+    """(old_dsn, skipped_reason) from --old-dsn or the newest backup."""
+    if args.old_dsn:
+        return args.old_dsn, None
+    if args.no_old_dsn:
+        return None, "--no-old-dsn given"
+    backup = latest_backup(args.env_file)
+    if backup is None:
+        return None, f"no {args.env_file.name}.bak.* beside {args.env_file}"
+    old_pw = url_password(database_url(backup) or "")
+    if old_pw is None:
+        return None, f"no URL password in {backup.name}"
+    new_pw = url_password(new_dsn)
+    if new_pw is not None and sha8(old_pw) == sha8(new_pw):
+        return None, f"{backup.name} holds the same password as the env file (apply did " \
+                     "not run, or ran twice) — there is no pre-rotation value to test"
+    print(f"verify: old DSN rebuilt from {backup.name} pw={mask(old_pw)}")
+    return dsn_with_password(new_dsn, old_pw), None
+
+
 def cmd_verify(args) -> int:
     """New password must connect; the pre-rotation one must be rejected."""
     import psycopg
 
-    def connect(dsn: str, timeout: int = 8) -> Tuple[bool, str]:
-        try:
-            with psycopg.connect(dsn, connect_timeout=timeout) as conn:
-                with conn.cursor() as cur:
-                    cur.execute("select 1")
-                    cur.fetchone()
-            return True, "connected"
-        except Exception as exc:  # auth failures surface as OperationalError
-            return False, type(exc).__name__
+    new_dsn = _verify_new_dsn(args)
+    if new_dsn is None:
+        return 2
+    old_dsn, old_skipped = _verify_old_dsn(args, new_dsn)
 
-    ok_new, detail_new = connect(args.new_dsn)
-    print(f"verify: NEW dsn -> {'PASS' if ok_new else 'FAIL'} ({detail_new})")
+    attempts = max(1, int(args.retries))
+    ok_new, detail_new = False, "not attempted"
+    for attempt in range(1, attempts + 1):
+        ok_new, detail_new = _probe(psycopg, new_dsn)
+        if ok_new:
+            break
+        if attempt < attempts:
+            print(f"verify: NEW attempt {attempt}/{attempts} failed ({detail_new}) — the "
+                  "pooler caches credentials for a few seconds after a reset; retrying in "
+                  f"{args.retry_delay:g}s")
+            time.sleep(max(0.0, float(args.retry_delay)))
+
+    print(f"verify: NEW dsn -> {'PASS' if ok_new else 'FAIL'} ({detail_new})"
+          + (f" after {attempts} attempt(s)" if attempts > 1 else ""))
     rc = 0 if ok_new else 1
 
-    if args.old_dsn:
-        ok_old, detail_old = connect(args.old_dsn)
+    if not ok_new:
+        if old_dsn:
+            print("verify: OLD probe not attempted — while the pooler is still rejecting "
+                  "everything, a rejection would read as a PASS. Fix the new connection "
+                  "first.")
+        return rc
+
+    if old_dsn:
+        ok_old, detail_old = _probe(psycopg, old_dsn)
         print(f"verify: OLD dsn -> {'STILL WORKS — FAIL' if ok_old else 'rejected — PASS'} "
               f"({detail_old})")
         if ok_old:
             rc = 1
+    elif old_skipped:
+        print(f"verify: OLD probe SKIPPED ({old_skipped}). The new password works, but "
+              "nothing in this run proves the old one is dead.")
     return rc
 
 
@@ -417,9 +540,18 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=cmd_apply)
 
     p = sub.add_parser("verify", help="new DSN connects; old DSN is rejected")
-    p.add_argument("--new-dsn", required=True)
+    p.add_argument("--new-dsn", default=None,
+                   help="default: DATABASE_URL read from --env-file. Passing a DSN here "
+                        "puts the secret in this process's argv — the exact leak this "
+                        "rotation exists to stop — so prefer the default.")
     p.add_argument("--old-dsn", default=None,
-                   help="the pre-rotation DSN (from the backup file)")
+                   help="default: rebuilt from the newest .env.bak.* beside --env-file")
+    p.add_argument("--no-old-dsn", action="store_true",
+                   help="probe only the new DSN (used when no backup exists)")
+    p.add_argument("--retries", type=int, default=3,
+                   help="attempts for the NEW probe, spaced by --retry-delay "
+                        "(the pooler caches credentials ~15s after a reset)")
+    p.add_argument("--retry-delay", type=float, default=5.0)
     p.set_defaults(func=cmd_verify)
 
     p = sub.add_parser("restart-consumers", help="restart long-lived launchd consumers")

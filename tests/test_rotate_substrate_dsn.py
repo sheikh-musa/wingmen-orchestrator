@@ -312,7 +312,84 @@ def test_verify_fails_when_the_old_password_still_works(monkeypatch, capsys):
 
 def test_verify_fails_when_the_new_password_does_not_connect(monkeypatch, capsys):
     _fake_psycopg(monkeypatch, lambda dsn: False)
-    assert rot.main(["verify", "--new-dsn", NEW_DSN]) == 1
+    assert rot.main(["verify", "--new-dsn", NEW_DSN, "--retries", "1"]) == 1
+
+
+# The default path takes NO DSN on argv. That is the whole point: on 26 Oct this
+# credential reached three transcripts because a pgrep -fl read a process's
+# command line. A tool that stops that cannot demand the secret in its own argv.
+
+def _post_rotation_files(tmp_path, with_backup=True):
+    env = tmp_path / ".env"
+    env.write_text(f"DATABASE_URL={NEW_DSN}\n")
+    if with_backup:
+        (tmp_path / ".env.bak.20261101T000000Z").write_text(f"DATABASE_URL={OLD_DSN}\n")
+    return env
+
+
+def test_verify_reads_the_env_and_the_backup_without_any_argv_dsn(monkeypatch, capsys, tmp_path):
+    env = _post_rotation_files(tmp_path)
+    _fake_psycopg(monkeypatch, lambda dsn: dsn == NEW_DSN)
+    rc = rot.main(["--env-file", str(env), "verify", "--retry-delay", "0"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "NEW dsn -> PASS" in out and "OLD dsn -> rejected — PASS" in out
+    assert NEW_PW not in out and OLD_PW not in out
+
+
+def test_verify_refuses_when_the_env_file_has_no_database_url(monkeypatch, capsys, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("UNRELATED=1\n")
+    _fake_psycopg(monkeypatch, lambda dsn: True)
+    assert rot.main(["--env-file", str(env), "verify"]) == 2
+    assert "REFUSED" in capsys.readouterr().err
+
+
+def test_verify_says_so_when_there_is_no_backup_to_rebuild_the_old_dsn(monkeypatch, capsys, tmp_path):
+    env = _post_rotation_files(tmp_path, with_backup=False)
+    _fake_psycopg(monkeypatch, lambda dsn: dsn == NEW_DSN)
+    rc = rot.main(["--env-file", str(env), "verify", "--retry-delay", "0"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "OLD probe SKIPPED" in out
+    assert "nothing in this run proves the old one is dead" in out
+
+
+def test_verify_retries_the_pooler_cache_window(monkeypatch, capsys, tmp_path):
+    """Supabase KB: Supavisor can reject the CORRECT new password for ~15s."""
+    env = _post_rotation_files(tmp_path, with_backup=False)
+    seen = []
+
+    def accept(dsn):
+        seen.append(dsn)
+        return len(seen) >= 3       # first two attempts hit the stale cache
+
+    _fake_psycopg(monkeypatch, accept)
+    rc = rot.main(["--env-file", str(env), "verify", "--retries", "3", "--retry-delay", "0"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert len(seen) == 3
+    assert "retrying" in out and "after 3 attempt(s)" in out
+    assert NEW_PW not in out
+
+
+def test_verify_does_not_probe_the_old_dsn_when_the_new_one_failed(monkeypatch, capsys, tmp_path):
+    """During a pooler cache window EVERY attempt fails; a rejection then proves nothing."""
+    env = _post_rotation_files(tmp_path)
+    seen = []
+    _fake_psycopg(monkeypatch, lambda dsn: seen.append(dsn) or False)
+    rc = rot.main(["--env-file", str(env), "verify", "--retries", "1"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert seen == [NEW_DSN]        # the old DSN was never attempted
+    assert "OLD probe not attempted" in out
+
+
+def test_dsn_with_password_swaps_only_the_password():
+    with_query = _dsn(SUB_USER, OLD_PW, "?sslmode=require")
+    swapped = rot.dsn_with_password(with_query, NEW_PW)
+    assert swapped == _dsn(SUB_USER, NEW_PW, "?sslmode=require")
+    assert rot.url_password(swapped) == NEW_PW
 
 
 # ── restart-consumers ──────────────────────────────────────────────────────────
