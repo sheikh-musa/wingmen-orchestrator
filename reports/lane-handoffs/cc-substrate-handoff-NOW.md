@@ -89,6 +89,15 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**22:29Z — 782 MERGED at `b645f1da0a9170568875530aeaf1f0bac7deca08`** (verified from the PR:
+merged=true, mergedAt 22:29:21Z, base advanced). cc-quality re-confirmed PASS at `cb5e9e0` (88333)
+after the SYSTEMD_PAGER correction. The runbook's §7 is now correct in the tree.
+
+**774 = the ONLY open gate item**, CI green since 22:02Z, still `merged=false` at 22:30Z. It is the
+console's waiter (their 88230). Flagged in 88388 — if their waiter died on a recycle it will not say
+so, and I am not going to race it (two bodies on one PR is what makes the merge_pinned
+misattribution dangerous). I merge on their word.
+
 **22:08Z — cc-quality's Q on 782 was RIGHT and my doc was wrong.** They asked whether
 `SYSTEMD_PAGER=cat` even survives `sudo` (default `env_reset`, no SETENV tag). Measured on gzb under
 a real TTY: `SYSTEMD_PAGER=/bin/false sudo -n systemctl status <unit>` **still paged** — the variable
