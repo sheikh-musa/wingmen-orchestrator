@@ -86,8 +86,21 @@ runbook as step 7 plus a dedicated section.
 | 773 | `cc-substrate/merge-signoff` | `079e9eb9` | cc-quality **PASS** 87946; CI queued; console's waiter may merge — coordinate |
 | 762 | `cc-substrate/credguard-bypass-followup` | `d3b71dd` | **MERGED `d3b71ddeb5fc`** |
 | 766 | `cc-substrate/sweep-multi-scan` | `61f3dce` | **MERGED `61f3dcef2084`** |
-| 761 | `cc-substrate/no-cross-provider-resume` | `675c2e7` | PASS 87984; CI queued |
+| 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **rebased** (was unmergeable vs base); branch-owned 8 files byte-identical to PASSed `675c2e7`; rebase-confirm requested 88124 |
 | 776 | `cc-substrate/rotation-runbook` | `0277a81` | doc; §1 targets=3→1, step-e verify, residuals; needs a sign-off to merge |
+
+**21:10Z additions.** (i) 774 **PASSED** at `cee1dd4` (cc-quality 88101, opus; they independently
+reproduced the kickstart/tmux channels and confirmed they are clean at the fix). Merge pending CI
+only. (ii) 761 was **unmergeable** (base moved twice); rebased to `672d01d`, proven byte-identical
+on its 8 branch-owned files, 22 tests green, rebase-confirm requested. (iii) **The hub answered
+the sudo question directly (88017): still OPEN** — `sudo -n -l` does not list the two units and a
+direct `sudo -n true` on `wingmen-body-activity-oracle-vps.service` fails with "interactive
+authentication is required". Checklist item (c) is therefore **open with evidence**, and per
+fleet-health the consequence must be named: the wake backstop has no restart path on that host.
+(iv) **Handoff commits were sitting on top of PR 761's branch** in `wt-credguard` — any push from
+that worktree would have carried report commits into the PR. Moved to a dedicated
+`cc-substrate/handoff-log` branch; PR branch reset to origin. Worth remembering: never let a
+report worktree share a PR branch.
 
 **Outstanding at the 21:45Z checklist** (owed to the console): (a) 774 — **FAILed** at `e02a0e2`
 (cc-quality 88061, real leak), fixed and re-reviewing at `cee1dd40`, therefore **not merged**; (b) heartbeat — answered, declaration accepted on terms
