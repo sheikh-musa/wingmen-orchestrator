@@ -98,6 +98,41 @@ def _dsn() -> str | None:
     return os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 
 
+def _store_failure_status(cur, msg_id: int, terminal: str | None) -> str:
+    """Write the retry-failure status; return what was ACTUALLY stored.
+
+    cc-quality F1 on PR#786 — the reaper half of the deploy-ordering guard.
+    ingest already refuses to let a schema that lacks migration 141 take down a
+    message; this daemon wrote the same terminal value with no guard, so on a
+    silo without 141 the UPDATE raised CheckViolation from inside the `except`
+    handler and killed the whole run. Because due rows are selected ORDER BY
+    created_at, ONE such row crashed the reaper on every tick and starved every
+    newer row of its retry — the opposite of "degrades safely".
+
+    Same shape as ingest's guard: explicit SAVEPOINT, downgrade only OUR
+    constraint, re-raise anything else. Returns 'unrecoverable' or 'failed' so
+    the CALLER pages only for a status that really landed.
+    """
+    status = "unrecoverable" if terminal else "failed"
+    cur.execute("SAVEPOINT media_status_terminal")
+    try:
+        cur.execute("UPDATE operator_messages SET media_status=%s WHERE id=%s",
+                    (status, msg_id))
+        return status
+    except psycopg.errors.CheckViolation as e:
+        if (status != "unrecoverable"
+                or getattr(getattr(e, "diag", None), "constraint_name", None)
+                != _ingest._MEDIA_STATUS_CONSTRAINT):
+            raise
+        cur.execute("ROLLBACK TO SAVEPOINT media_status_terminal")
+        print(f"[schema-drift] #{msg_id}: migration 141 not applied on this silo — "
+              f"{_ingest._MEDIA_STATUS_CONSTRAINT} rejects 'unrecoverable'; storing "
+              f"'failed' and continuing (the row keeps retrying until the migration "
+              f"lands; this is NOT silent)", file=sys.stderr)
+        cur.execute("UPDATE operator_messages SET media_status='failed' WHERE id=%s", (msg_id,))
+        return "failed"
+
+
 def _notify(subject: str, body: str, priority: str = "P2") -> int:
     # Each call site already commits this independently of its neighboring writes
     # (no shared-transaction requirement), so bus_send.send()'s own connection is a
@@ -199,11 +234,14 @@ def reap(fire: bool) -> int:
                     # retry loop forever and re-pages every ESCALATE_AFTER about
                     # something no retry can fix. Transient failures (Errno 54,
                     # timeouts) stay 'failed' and keep retrying.
-                    terminal = _ingest._unrecoverable_reason(e)
-                    cur.execute(
-                        "UPDATE operator_messages SET media_status=%s WHERE id=%s",
-                        ("unrecoverable" if terminal else "failed", row["id"]))
+                    # after_retry=True: THIS call is already a retry of ingest's
+                    # own getFile, so an ambiguous "wrong file_id or the file is
+                    # temporarily unavailable" is no longer credible as a
+                    # transient blip (cc-quality F2 on PR#786).
+                    terminal = _ingest._unrecoverable_reason(e, after_retry=True)
+                    stored = _store_failure_status(cur, row["id"], terminal)
                     conn.commit()
+                    terminal = terminal if stored == "unrecoverable" else None
                     print(f"[retry-failed] #{row['id']} — {type(e).__name__}: {e}"
                           + (f" — TERMINAL, will not retry: {terminal}" if terminal else ""))
                     if terminal:

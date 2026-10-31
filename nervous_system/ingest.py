@@ -217,23 +217,36 @@ def _get_file_path(token: str, file_id: str, sleep=time.sleep) -> str:
 # OSError (Errno 54 reset, timeout, DNS) is transient and MUST stay retryable —
 # that distinction is the whole reason this cannot be "any exception".
 _UNRECOVERABLE_PATTERNS = (
-    ("file is too big", "over the 20 MB Bot API download limit"),
-    ("file_too_big", "over the 20 MB Bot API download limit"),
-    ("invalid file_id", "Telegram rejected the file_id as invalid"),
-    ("wrong file identifier", "Telegram rejected the file identifier"),
-    ("file reference", "the file reference expired on the Telegram CDN"),
-    ("file is not found", "the file is gone from the Telegram CDN"),
+    ("file is too big", "over the 20 MB Bot API download limit", False),
+    ("file_too_big", "over the 20 MB Bot API download limit", False),
+    ("invalid file_id", "Telegram rejected the file_id as invalid", False),
+    ("wrong file identifier", "Telegram rejected the file identifier", False),
+    ("file reference", "the file reference expired on the Telegram CDN", False),
+    ("file is not found", "the file is gone from the Telegram CDN", False),
+    # cc-quality F2 on PR#786: Telegram's most common bad-id answer is
+    # "Bad Request: wrong file_id or the file is temporarily unavailable". The
+    # "temporarily" half makes it ambiguous on a FIRST attempt, so ingest keeps
+    # it retryable; once the reaper has already retried (after_retry=True) that
+    # reading is no longer credible and it is terminal, which is what stops the
+    # 2-hourly re-page this commitment exists to kill.
+    ("wrong file_id", "Telegram could not resolve the stored file_id", True),
 )
 
 
-def _unrecoverable_reason(exc: BaseException) -> str | None:
+def _unrecoverable_reason(exc: BaseException, *, after_retry: bool = False) -> str | None:
     """A human-readable reason when `exc` is a PERMANENT getFile failure, else None.
 
     Reads Telegram's own JSON answer (`{"error_code":400,"description":...}`)
     from the HTTPError body. Never raises: a classification failure degrades to
     None, which keeps the row retryable — the SAFE direction, because wrongly
     calling something terminal would silently stop the reaper on a file that
-    could have been recovered."""
+    could have been recovered.
+
+    `after_retry=True` (the media_reaper) additionally accepts the patterns
+    marked retry-only — see the "wrong file_id ... temporarily unavailable"
+    note in _UNRECOVERABLE_PATTERNS.
+
+    NOTE: this consumes the HTTPError body, so call it ONCE per exception."""
     if not isinstance(exc, urllib.error.HTTPError):
         return None
     try:
@@ -244,8 +257,8 @@ def _unrecoverable_reason(exc: BaseException) -> str | None:
     description = str(payload.get("description") or "")
     code = payload.get("error_code") or getattr(exc, "code", None)
     low = description.lower()
-    for pattern, reason in _UNRECOVERABLE_PATTERNS:
-        if pattern in low:
+    for pattern, reason, retry_only in _UNRECOVERABLE_PATTERNS:
+        if pattern in low and (after_retry or not retry_only):
             return f"{reason} [{code}: {description or exc}]"
     if code == 404:
         return f"the file is gone from the Telegram CDN [{code}: {description or exc}]"

@@ -48,8 +48,7 @@ _DDL = (
 )
 
 
-@pytest.fixture
-def reaper_dsn(pg_dsn, monkeypatch):
+def _build_schema(pg_dsn, monkeypatch, *, with_141: bool):
     monkeypatch.setenv("DATABASE_URL", pg_dsn)
     # Default scope covers every channel_key the existing tests in this file
     # seed ("nazim-console", "client-x"); a test proving the scope FILTER
@@ -70,10 +69,16 @@ def reaper_dsn(pg_dsn, monkeypatch):
                 cur.execute(f'CREATE ROLE "{role}" NOLOGIN')
         for ddl in _DDL:
             cur.execute(ddl)
-        # migration 141's CHECK, so the reaper's UPDATE to 'unrecoverable' is
-        # validated by the real constraint here (held_commitment #964).
-        cur.execute((MIGRATIONS_DIR /
-                     "141_operator_messages_media_status_unrecoverable.sql").read_text())
+        if with_141:
+            # migration 141's CHECK, so the reaper's UPDATE to 'unrecoverable'
+            # is validated by the real constraint here (held_commitment #964).
+            cur.execute((MIGRATIONS_DIR /
+                         "141_operator_messages_media_status_unrecoverable.sql").read_text())
+        else:
+            # The 115-era predicate: THIS silo has not been migrated yet.
+            cur.execute("ALTER TABLE operator_messages ADD CONSTRAINT "
+                        "operator_messages_media_status_check CHECK (media_status IS NULL "
+                        "OR media_status IN ('pending','ok','failed'))")
         cur.execute("INSERT INTO agents (id, display_name, status) "
                     "VALUES ('media-reaper', 'reaper', 'active'), "
                     "('orch-console', 'console', 'active')")
@@ -81,6 +86,19 @@ def reaper_dsn(pg_dsn, monkeypatch):
         cur.execute((MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text())
         cur.execute((MIGRATIONS_DIR / "122_post_agent_message_optional_params.sql").read_text())
     return pg_dsn
+
+
+@pytest.fixture
+def reaper_dsn(pg_dsn, monkeypatch):
+    return _build_schema(pg_dsn, monkeypatch, with_141=True)
+
+
+@pytest.fixture
+def reaper_dsn_pre_141(pg_dsn, monkeypatch):
+    """A silo where migration 141 has NOT been applied yet — the deploy-ordering
+    window ingest guards with a savepoint and (before cc-quality F1) the reaper
+    did not."""
+    return _build_schema(pg_dsn, monkeypatch, with_141=False)
 
 
 def _seed_channel(dsn, channel_key, tag, token_env_key="FAKE_BOT_TOKEN"):
@@ -363,3 +381,58 @@ def test_a_transient_failure_is_NOT_marked_terminal(reaper_dsn, monkeypatch):
 
     assert _row(reaper_dsn, msg_id)["media_status"] == "failed"
     assert _console_pages(reaper_dsn) == []      # too fresh for the 2h floor
+
+
+def test_ambiguous_wrong_file_id_is_terminal_when_the_reaper_retries(reaper_dsn, monkeypatch):
+    """cc-quality F2: ingest keeps this retryable (the wording says
+    "temporarily"), the reaper — which IS the second attempt — does not."""
+    _seed_channel(reaper_dsn, "nazim-console", "nazim-console")
+    monkeypatch.setenv("FAKE_BOT_TOKEN", "tok")
+    msg_id = _seed_message(
+        reaper_dsn, tag="nazim-console", text="sent a FILE (download failed: boom)",
+        file_id="F11", file_unique_id="U11", media_kind="document", media_status="failed")
+
+    def _wrong_id(*a, **k):
+        raise _telegram_http_error(
+            400, "Bad Request: wrong file_id or the file is temporarily unavailable")
+    monkeypatch.setattr(_ingest, "_download_media", _wrong_id)
+
+    assert media_reaper.reap(fire=True) == 0
+
+    assert _row(reaper_dsn, msg_id)["media_status"] == "unrecoverable"
+    assert len(_console_pages(reaper_dsn, "%UNRECOVERABLE%")) == 1
+
+
+# ── cc-quality F1: the reaper must survive a silo without migration 141 ─────
+
+def test_reaper_degrades_instead_of_crashing_when_141_is_missing(reaper_dsn_pre_141, monkeypatch, capsys):
+    """Without the guard the terminal UPDATE raised CheckViolation out of the
+    `except` handler and killed the whole run — and because due rows are
+    selected ORDER BY created_at, ONE such row crash-looped the daemon and
+    starved every NEWER row of its retry. So this asserts the crash is gone
+    AND that the newer row behind it still gets processed."""
+    dsn = reaper_dsn_pre_141
+    _seed_channel(dsn, "nazim-console", "nazim-console")
+    monkeypatch.setenv("FAKE_BOT_TOKEN", "tok")
+    older = _seed_message(
+        dsn, tag="nazim-console", text="sent a FILE (download failed: boom)",
+        file_id="F12", file_unique_id="U12", media_kind="document",
+        media_status="failed", age=_dt.timedelta(hours=3))
+    newer = _seed_message(
+        dsn, tag="nazim-console", text="sent a photo (download failed: boom)",
+        file_id="F13", file_unique_id="U13", media_kind="photo",
+        media_status="failed")
+
+    def _dispatch(token, file_id, file_unique_id, channel_key, upd_id, name=None):
+        if file_unique_id == "U12":
+            raise _telegram_http_error(400, "Bad Request: file is too big")
+        return f"/media/{file_unique_id}"
+    monkeypatch.setattr(_ingest, "_download_media", _dispatch)
+
+    assert media_reaper.reap(fire=True) == 0, "must not raise"
+
+    assert _row(dsn, older)["media_status"] == "failed", \
+        "downgraded, not dropped, and it keeps its retry"
+    assert _row(dsn, newer)["media_status"] == "ok", \
+        "the newer row must NOT be starved by the older poison row"
+    assert "141" in capsys.readouterr().err, "the drift must be LOUD, not silent"

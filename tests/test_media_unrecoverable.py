@@ -184,3 +184,29 @@ def test_media_meta_is_clean_on_success(monkeypatch):
     assert meta == {"file_id": "F1", "file_unique_id": "U1", "kind": "photo",
                     "ok": True, "unrecoverable": None}
     assert "/tmp/x.jpg" in content
+
+
+# ── "wrong file_id or the file is temporarily unavailable" (cc-quality F2) ──
+# Ambiguous on a FIRST attempt (the wording literally says temporary), not
+# ambiguous once the reaper has already retried. The split is deliberate: it
+# keeps the unsafe direction off the ingest path while still stopping the
+# every-2h re-page that #964 exists to kill.
+
+_AMBIGUOUS = "Bad Request: wrong file_id or the file is temporarily unavailable"
+
+
+def test_ambiguous_wrong_file_id_stays_retryable_on_the_first_attempt():
+    assert ingest._unrecoverable_reason(_http_error(400, _AMBIGUOUS)) is None
+
+
+def test_ambiguous_wrong_file_id_is_terminal_after_a_retry():
+    reason = ingest._unrecoverable_reason(_http_error(400, _AMBIGUOUS), after_retry=True)
+    assert reason and "file_id" in reason
+
+
+def test_after_retry_does_not_widen_the_transient_cases():
+    """The flag must only add patterns, never turn a transient into terminal."""
+    assert ingest._unrecoverable_reason(_http_error(500, "Internal Server Error"),
+                                        after_retry=True) is None
+    assert ingest._unrecoverable_reason(
+        ConnectionResetError(54, "Connection reset by peer"), after_retry=True) is None
