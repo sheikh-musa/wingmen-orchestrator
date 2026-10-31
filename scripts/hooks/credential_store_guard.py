@@ -101,11 +101,11 @@ SOFT_FILE_RES = (
 )
 # Verbs that put a WHOLE file in the transcript. `grep`/`sed`/`awk` are deliberately
 # absent: they emit only what the pattern selects, which for a soft-class file is
-# usually the registry line, not the token.
+# usually the registry line, not the token. `scp`/`rsync` are absent too — they move
+# bytes between files/hosts, they never print them, and a later read is caught anyway.
 WHOLE_FILE_PRINT_RE = re.compile(
     r"\b(cat|head|tail|less|more|bat|nl|tac|strings|xxd|od|hexdump|base64|dd)\b"
-    r"|\bpython3?\b|\bnode\b|\bruby\b|\bperl\b|\bscp\b|\brsync\b|\btar\b"
-    r"|\bgzip\b|\bgit\s+(show|diff|log)\b"
+    r"|\bpython3?\b|\bnode\b|\bruby\b|\bperl\b|\btar\b|\bgzip\b|\bgit\s+(show|diff|log)\b"
 )
 # Bash verbs that can put a file's bytes in the transcript at all.
 FILE_PRINT_RE = re.compile(
@@ -116,6 +116,10 @@ FILE_PRINT_RE = re.compile(
 # deploy has, and blocking it teaches nothing. The match provably stops before the
 # value, so the credential cannot be in the output.
 NAME_ONLY_GREP_RE = re.compile(r"grep\b[^;&|]*\s-o\w*\b[^;&|]*['\"][^'\"]*=\s*['\"]")
+# Code idioms, not filenames: `process.env` / `import.meta.env` appear in every JS
+# command and must never be read as a `.env` path (5 false positives per 92k real
+# commands, all of them `grep -rln "process.env" tests/`).
+_NOT_A_PATH = frozenset({"process.env", "import.meta.env", "$process.env"})
 # Every CLIENT_STORE_FILE_RES / SOFT_FILE_RES pattern needs at least one of these
 # literals to be present for a match to be possible — see _matching_store_res.
 _STORE_FILE_ANCHORS = (
@@ -237,26 +241,31 @@ def _last_stage_is_sink(statement: str) -> bool:
     return bool(SAFE_SINK_RE.search(last))
 
 
-def _matching_store_res(text: str):
-    """The hard and soft store-file classes a piece of text references."""
+def _store_tokens(text: str) -> tuple[set, set]:
+    """The tokens of `text` that name a hard / soft credential-store file."""
     # Cheap sound prefilter: every pattern below requires one of these literals, so a
     # text containing none of them cannot match — this runs on EVERY Bash call,
     # including 100 KB heredocs, and the per-token loop is not free.
     low = text.lower()
     if not any(a in low for a in _STORE_FILE_ANCHORS):
-        return False, False
-    hard = soft = False
+        return set(), set()
+    hard, soft = set(), set()
     # Text may be a bare path (Read/Grep) or a shell command (Bash): split on the
     # characters a shell would separate tokens with, then test each token.
     for token in re.split(r"[\s'\"`]+", text):
         tok = token.rstrip(",;)")
-        if not tok:
+        if not tok or tok in _NOT_A_PATH:
             continue
         if any(rx.search(tok) for rx in CLIENT_STORE_FILE_RES):
-            hard = True
+            hard.add(tok)
         elif any(rx.search(tok) for rx in SOFT_FILE_RES):
-            soft = True
+            soft.add(tok)
     return hard, soft
+
+
+def _matching_store_res(text: str) -> tuple[bool, bool]:
+    hard, soft = _store_tokens(text)
+    return bool(hard), bool(soft)
 
 
 def _is_client_store_file(text: str) -> bool:
@@ -265,20 +274,30 @@ def _is_client_store_file(text: str) -> bool:
 
 
 def _rule1_violation(statement: str) -> str | None:
-    hard, soft = _matching_store_res(statement)
-    if not (hard or soft):
-        return None
-    if METADATA_ONLY_RE.search(_leading(statement)):
-        return None
-    if hard and NAME_ONLY_GREP_RE.search(statement):
-        # key-name-only extraction cannot emit a value
-        return None
-    if (hard and FILE_PRINT_RE.search(statement)) or (soft and WHOLE_FILE_PRINT_RE.search(statement)):
-        return (
-            "this command prints a file that holds credentials (wp-config.php / a "
-            "non-dotfile .env / a store settings export / a token or registry cache). "
-            "Print only what you need — or pipe the whole thing into a hash/length sink."
-        )
+    # Judged per pipeline stage, and only when a store path is an ARGUMENT of a
+    # printing command in that stage. Both halves matter and were measured on 92,701
+    # real fleet commands: `vercel env pull /tmp/x.env | tail -3` prints tail's own
+    # output, not the file, and a python heredoc that merely MENTIONS `.env` in a
+    # comment is prose. Blocking those gets the guard switched off.
+    for stage in statement.split("|"):
+        if METADATA_ONLY_RE.match(_leading(stage)):
+            continue
+        hard, soft = _store_tokens(stage)
+        if not (hard or soft):
+            continue
+        if hard and NAME_ONLY_GREP_RE.search(stage):
+            continue  # key-name-only extraction cannot emit a value
+        verbs = FILE_PRINT_RE if hard else WHOLE_FILE_PRINT_RE
+        for m in verbs.finditer(stage):
+            args = stage[m.end():].split("<<")[0]  # a heredoc BODY is not an argument
+            arg_hard, arg_soft = _store_tokens(args)
+            if (hard & arg_hard) or (soft & arg_soft):
+                return (
+                    "this command prints a file that holds credentials (wp-config.php / "
+                    "a non-dotfile .env / a store settings export / a token or registry "
+                    "cache). Print only what you need — or pipe the whole thing into a "
+                    "hash/length sink."
+                )
     return None
 
 

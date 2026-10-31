@@ -260,6 +260,35 @@ def test_key_name_only_extraction_is_allowed_but_the_whole_env_is_not():
     assert_denied(*bash('grep -n "SUPABASE_SERVICE" /tmp/prod-env-check.env'))
 
 
+def test_process_env_is_code_not_a_file():
+    assert_allowed(*bash('grep -rln "process.env" tests/ | head -20'))
+    assert_allowed(*bash('grep -rhoE "process\\.env\\.[A-Z_0-9]+" tests/ | sort -u'))
+
+
+def test_a_pipe_stage_that_prints_its_own_output_is_not_a_file_dump():
+    """`vercel env pull f | tail -3` prints tail's output, not f — but `cat f` does."""
+    assert_allowed(*bash(
+        "rm -f /tmp/prod-env-check.env; vercel env pull /tmp/prod-env-check.env "
+        "--environment=production 2>&1 | tail -2"))
+    assert_denied(*bash("cat /tmp/prod-env-check.env"))
+
+
+def test_moving_a_store_file_between_hosts_is_not_a_transcript_leak():
+    assert_allowed(*bash(
+        "scp -p gzb:/home/x/.config/wingmen/monitor_ro.env /tmp/scratch/monitor_ro.env"))
+
+
+def test_an_interpreter_heredoc_that_mentions_dot_env_is_allowed():
+    """A heredoc body is not an argument: this only NAMES the file."""
+    assert_allowed(*bash(
+        "python3 - <<'PY'\n# reads demo.env in the fixture\nprint('ok')\nPY"))
+
+
+def test_an_interpreter_one_liner_that_opens_a_store_file_is_refused():
+    assert_denied(*bash(
+        'python3 -c "print(open(\'/srv/site/wp-config.php\').read())"'))
+
+
 def test_guard_is_registered_in_project_settings():
     settings = json.loads((REPO / ".claude" / "settings.json").read_text())
     commands = [
