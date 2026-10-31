@@ -277,3 +277,76 @@ def test_context_fill_map_never_raises_on_failure(monkeypatch):
 
     monkeypatch.setattr(_chw, "read_context_gauge", boom)
     assert a._context_fill_map() == {}
+
+
+# ── bus #87241: consolidated hourly digest; per-lane page only on the false-wake signature ──
+
+def test_provider_for_model_families():
+    assert a.provider_for_model("deepseek-flash") == "deepseek"
+    assert a.provider_for_model("claude-sonnet-5") == "anthropic"
+    assert a.provider_for_model("claude-opus-5-5") == "anthropic"
+    assert a.provider_for_model("glm-4.6") == "glm"
+    assert a.provider_for_model(None) == "unknown"
+    assert a.provider_for_model("") == "unknown"
+    assert a.provider_for_model("mystery-model") == "mystery"
+
+
+def test_is_false_wake_needs_high_burn_AND_no_output():
+    b = {"tph": 90_000_000}
+    assert a.is_false_wake(b, commits=0, bus_rows=0) is True
+    assert a.is_false_wake(b, commits=3, bus_rows=0) is False        # committing = working
+    assert a.is_false_wake(b, commits=0, bus_rows=2) is False        # talking = working
+    # unreadable worktree must not, by itself, page -- bus silence alone decides
+    assert a.is_false_wake(b, commits=None, bus_rows=0) is True
+    assert a.is_false_wake(b, commits=None, bus_rows=1) is False
+
+
+def test_digest_body_carries_context_provider_and_recycle_callout():
+    rows = [
+        {"agent_id": "cc-busy-1", "context_pct": 72, "tph": 50_000_000,
+         "provider": "anthropic", "commits": 4, "false_wake": False},
+        {"agent_id": "cc-spin-1", "context_pct": 12, "tph": 95_000_000,
+         "provider": "deepseek", "commits": 0, "false_wake": True},
+        {"agent_id": "cc-unk-1", "context_pct": None, "tph": 12_000_000,
+         "provider": "unknown", "commits": None, "false_wake": False},
+    ]
+    body = a.digest_body(rows, 60, 40_000_000, 60, considered=25)
+    assert "cc-busy-1" in body and "72%" in body and "anthropic" in body
+    assert "RECYCLE-AT-NEXT-TASK-BOUNDARY" in body
+    assert "cc-spin-1" in body and "SPINNING" in body and "deepseek" in body
+    assert "unknown" in body                     # never guessed for a missing gauge
+    assert "commit state unknown" in body
+    # the lane under the recycle bar must NOT get the call-out
+    spin_line = [l for l in body.splitlines() if "cc-spin-1" in l][0]
+    assert "RECYCLE-AT-NEXT-TASK-BOUNDARY" not in spin_line
+
+
+def test_digest_body_reports_lane_count_against_considered():
+    body = a.digest_body([{"agent_id": "x", "context_pct": 61, "tph": 1_000_000,
+                           "provider": "anthropic", "commits": 1, "false_wake": False}],
+                         60, 40_000_000, 60, considered=25)
+    assert "1 lane(s) worth a look out of 25 live" in body
+
+
+def test_base_agent_strips_only_an_instance_suffix():
+    assert a._base_agent("cc-cosem-adcda-3") == "cc-cosem-adcda"
+    assert a._base_agent("cc-quality") == "cc-quality"
+    assert a._base_agent("cc-fleet-health") == "cc-fleet-health"
+    assert a._base_agent("") == ""
+
+
+def test_context_fill_map_puts_repo_root_on_path(monkeypatch):
+    """The live job runs as `python3 scripts/lane_burn_alarm.py`, so sys.path[0] is the
+    scripts dir and `from scripts import ...` raised ModuleNotFoundError 36 times --
+    context fill was silently 'unknown' for every lane (bus #87241)."""
+    import sys as _sys
+
+    root = str(a.ORCH_DIR)
+    saved = list(_sys.path)
+    try:
+        _sys.path[:] = [p for p in _sys.path if p != root]
+        monkeypatch.setattr(_chw, "read_context_gauge", lambda: [])
+        assert a._context_fill_map() == {}
+        assert root in _sys.path
+    finally:
+        _sys.path[:] = saved

@@ -46,6 +46,18 @@ what was already acknowledged. Tracked in the same JSON state file
 (priority_sla_watchdog.py's STATE_FILE convention), now storing {ts, tph} per
 breach key instead of a bare timestamp so the rate-rise check has something
 to compare against.
+
+DIGEST INSTEAD OF PER-LANE PAGES (bus #87241, orch-console): paging every lane
+that crossed one fixed threshold degenerated into noise -- six pages in an hour,
+all of them active lanes with big contexts at ~99% cache-read, i.e. real work.
+The default is now ONE consolidated row per hour carrying, per lane: context
+size, tokens/hr, provider, and a RECYCLE-AT-NEXT-TASK-BOUNDARY call-out once a
+lane is at or over RECYCLE_AT_CONTEXT_PCT (default 60%) of its window. Zero token
+waste comes from smaller contexts, not from more pages. An individual page now
+fires only on the false-wake signature: high burn AND no commits in the lane's
+worktree AND no bus rows written in the window (is_false_wake). Lanes under both
+DIGEST_BURN_FLOOR_TPH and the recycle bar are simply working and stay out of the
+row.
 """
 from __future__ import annotations
 
@@ -66,6 +78,13 @@ REMOTE_HOSTS = {"gzbai", "gzb"}  # agent_status.host spellings seen for the gzb 
 
 WINDOW_MIN_DEFAULT = int(os.environ.get("LANE_BURN_ALARM_WINDOW_MIN", "60"))
 THRESHOLD_TPH_DEFAULT = int(os.environ.get("LANE_BURN_ALARM_THRESHOLD_TPH", "40000000"))
+# bus #87241: a lane at >= this share of its context window gets a RECYCLE-AT-NEXT-TASK-BOUNDARY
+# call-out in the consolidated digest. Zero token waste comes from smaller contexts, not from
+# more pages, so the digest's job is to make the recycle decision obvious.
+RECYCLE_AT_CONTEXT_PCT = float(os.environ.get("LANE_BURN_RECYCLE_PCT", "60"))
+# The digest row is an hourly summary of lanes that are actually worth a look; below both of
+# these a lane is just working. Env-tunable so the floor can move without a code change.
+DIGEST_BURN_FLOOR_TPH = int(os.environ.get("LANE_BURN_DIGEST_FLOOR_TPH", "10000000"))
 # If this fraction (or more) of expected lanes come back unmeasurable, page once
 # (dedup'd separately) -- that is a tooling-health problem, not a burn problem.
 MEASURE_FAILURE_PAGE_FRACTION = float(os.environ.get("LANE_BURN_ALARM_FAILURE_FRACTION", "0.5"))
@@ -191,6 +210,38 @@ def _live_lanes(cur) -> list[dict]:
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+def _lane_models(cur) -> dict:
+    """{lane_name: model} -- lane names are the digest's provider source (bus #87241).
+    Missing/renamed lanes simply drop out; the row reports 'unknown'."""
+    try:
+        cur.execute("SELECT lane, model FROM fleet_lanes")
+        return {row[0]: row[1] for row in cur.fetchall()}
+    except Exception:  # noqa: BLE001 -- enrichment only
+        return {}
+
+
+def _recent_bus_rows(cur, agent_ids: list, window_min: int, now: datetime) -> dict:
+    """{agent_id: rows that agent WROTE in the window}. Instance ids are matched to their
+    base id too (cc-x-1 writes as cc-x), so a lane that is talking is never called silent."""
+    if not agent_ids:
+        return {}
+    import re as _re
+    try:
+        cur.execute(
+            "SELECT from_agent, count(*) FROM agent_messages WHERE created_at >= %s "
+            "GROUP BY from_agent",
+            (now - timedelta(minutes=window_min),),
+        )
+        counts = {row[0]: row[1] for row in cur.fetchall()}
+    except Exception:  # noqa: BLE001 -- enrichment only
+        return {}
+    out = {}
+    for a in agent_ids:
+        base = _base_agent(a)
+        out[a] = counts.get(a, 0) + (counts.get(base, 0) if base != a else 0)
+    return out
+
+
 def _list_panes_local() -> dict[str, str]:
     """session -> cwd, for every local tmux pane."""
     out = subprocess.run(
@@ -276,7 +327,7 @@ def measure_lane(lane: dict, window_min: int, now: datetime) -> dict:
         return {
             "status": "ok", "tph": tph, "total": summed["total"], "nmsg": summed["nmsg"],
             "cache_read": summed["cache_read"], "cache_read_share": cache_read_share,
-            "agent_id": agent_id,
+            "agent_id": agent_id, "session": session, "cwd": cwd,
         }
     except Exception as exc:  # noqa: BLE001 -- fail visible per-lane, never crash the run
         return {"status": "error", "reason": f"{type(exc).__name__}: {exc}", "agent_id": agent_id}
@@ -372,6 +423,102 @@ def breach_alert_body(b: dict, window_min: int, threshold_tph: float, context_pc
     )
 
 
+def _base_agent(agent_id: str) -> str:
+    """'cc-cosem-adcda-3' -> 'cc-cosem-adcda'. The context gauge and most bus writers key on
+    the BASE id while agent_status keys on the instance id, so both must be tried."""
+    import re as _re
+    return _re.sub(r"-\d+$", "", agent_id or "")
+
+
+def provider_for_model(model: "str | None") -> str:
+    """Provider family for a lane's model id, for the digest row (bus #87241).
+    Unknown/absent is reported as 'unknown' -- never guessed."""
+    m = (model or "").strip().lower()
+    if not m:
+        return "unknown"
+    if m.startswith("deepseek"):
+        return "deepseek"
+    if m.startswith("glm") or "glm" in m:
+        return "glm"
+    if m.startswith(("claude", "opus", "sonnet", "haiku", "fable")):
+        return "anthropic"
+    return m.split("-")[0] or "unknown"
+
+
+def commits_in_window(cwd: "str | None", window_min: int, now: datetime) -> "int | None":
+    """Commits made in the lane's worktree inside the window. None = could not tell
+    (no cwd, not a git tree, git missing) -- callers must treat that as UNKNOWN, not as
+    'no activity'."""
+    if not cwd:
+        return None
+    since = (now - timedelta(minutes=window_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        out = subprocess.run(
+            ["git", "-C", cwd, "log", "--oneline", f"--since={since}"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except Exception:  # noqa: BLE001 -- enrichment only
+        return None
+    if out.returncode != 0:
+        return None
+    return len([l for l in out.stdout.splitlines() if l.strip()])
+
+
+def is_false_wake(burn: dict, commits: "int | None", bus_rows: int) -> bool:
+    """The ONE signature still worth an individual page (bus #87241): high burn with no
+    new commits and no bus output in the window -- i.e. spinning, not working. A lane that
+    is committing or talking is busy, and belongs in the consolidated row instead.
+    Unknown commit state (commits is None) is NOT proof of a false wake: it falls back to
+    the bus-output test alone, so an unreadable worktree cannot by itself page."""
+    if bus_rows > 0:
+        return False
+    if commits is None:
+        return True
+    return commits == 0
+
+
+def digest_body(rows: list[dict], window_min: int, threshold_tph: float,
+                recycle_pct: float, considered: int) -> str:
+    """One consolidated hourly row (bus #87241): per lane -- context size, tokens/hr,
+    provider, and a RECYCLE-AT-NEXT-TASK-BOUNDARY call-out once context is over the bar.
+    Replaces per-lane burn pages at a single fixed threshold, which had degenerated into
+    paging busy lanes with big contexts."""
+    lines = [
+        f"TL;DR: hourly burn/context digest -- {len(rows)} lane(s) worth a look out of "
+        f"{considered} live. Recycle at the next task boundary where marked; nothing here is "
+        f"a loop alarm unless it says SPINNING.",
+        "",
+        f"window {window_min}min | burn ceiling {threshold_tph:,.0f} tok/hr | recycle bar "
+        f"{recycle_pct:.0f}% of window",
+        "",
+        "lane | ctx | tok/hr | provider | note",
+    ]
+    for r in rows:
+        ctx = f"{r['context_pct']}%" if r.get("context_pct") is not None else "unknown"
+        notes = []
+        if r.get("context_pct") is not None and r["context_pct"] >= recycle_pct:
+            notes.append("RECYCLE-AT-NEXT-TASK-BOUNDARY")
+        if r.get("tph", 0) >= threshold_tph:
+            notes.append("SPINNING (high burn, no commits or bus output)" if r.get("false_wake")
+                         else "high burn, active")
+        if r.get("commits") is None:
+            notes.append("commit state unknown")
+        elif r.get("commits") == 0 and r.get("tph", 0) >= threshold_tph:
+            notes.append("0 commits this window")
+        lines.append(" | ".join([
+            r["agent_id"],
+            ctx,
+            f"{r.get('tph', 0):,.0f}",
+            r.get("provider", "unknown"),
+            ", ".join(notes) or "active",
+        ]))
+    lines.append("")
+    lines.append("Per-lane pages now fire only on the false-wake signature; everything else "
+                 "lands here. Recycle is operator/SRE action at a safe boundary, not an "
+                 "automatic kill.")
+    return "\n".join(lines)
+
+
 def _context_fill_map() -> dict:
     """{agent_id: pct} from context_health_watchdog's own gauge -- reused rather than
     re-querying cc_session_costs independently, so this file's 'context fill' figure can
@@ -379,6 +526,13 @@ def _context_fill_map() -> dict:
     (import, DB, gauge unreachable) must never crash the burn alarm -- it is an enrichment,
     not this file's primary job -- so any error just means every agent reports 'unknown'."""
     try:
+        # launchd runs this as `python3 scripts/lane_burn_alarm.py`, so sys.path[0] is
+        # <repo>/scripts and a bare `from scripts import ...` raises ModuleNotFoundError --
+        # it did, 36 times in the live log, which silently made every lane's context fill
+        # 'unknown' (bus #87241). Put the repo root on the path before importing.
+        root = str(ORCH_DIR)
+        if root not in sys.path:
+            sys.path.insert(0, root)
         from scripts import context_health_watchdog as chw
         return {a.agent: a.pct for a in chw.read_context_gauge()}
     except Exception as exc:  # noqa: BLE001 -- enrichment only, never fatal to this run
@@ -437,14 +591,80 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(results, indent=2, default=str))
 
     state = _load_state()
-    breaches = [r for r in results if r["status"] == "ok" and r["tph"] >= args.threshold_tph]
+    measured = [r for r in results if r["status"] == "ok"]
+    breaches = [r for r in measured if r["tph"] >= args.threshold_tph]
     errors = [r for r in results if r["status"] == "error"]
-    context_pct_by_agent = _context_fill_map() if breaches else {}
+    context_pct_by_agent = _context_fill_map()
 
+    # Activity signals (bus #87241): what the lane DID this window. Commits come from its
+    # worktree; bus rows from agent_messages. Both are enrichment -- a failure to read either
+    # degrades the row to 'unknown', never crashes the alarm.
+    models: dict = {}
+    bus_counts: dict = {}
+    try:
+        conn = psycopg2.connect(dsn)
+        try:
+            with conn.cursor() as cur:
+                models = _lane_models(cur)
+                bus_counts = _recent_bus_rows(cur, [r["agent_id"] for r in measured],
+                                              args.window_min, now)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 -- enrichment only
+        log(f"activity/model enrichment unavailable: {type(exc).__name__}: {exc}")
+
+    digest_rows = []
+    for r in measured:
+        agent_id = r["agent_id"]
+        ctx = context_pct_by_agent.get(agent_id)
+        if ctx is None:                       # gauge keys on the base id
+            ctx = context_pct_by_agent.get(_base_agent(agent_id))
+        commits = commits_in_window(r.get("cwd"), args.window_min, now)
+        bus_n = bus_counts.get(agent_id, 0)
+        false_wake = r["tph"] >= args.threshold_tph and is_false_wake(r, commits, bus_n)
+        row = dict(r)
+        row.update({
+            "context_pct": ctx,
+            "provider": provider_for_model(models.get(r.get("session")) or models.get(agent_id)),
+            "commits": commits, "bus_rows": bus_n, "false_wake": false_wake,
+        })
+        worth_a_look = (
+            false_wake
+            or r["tph"] >= DIGEST_BURN_FLOOR_TPH
+            or (ctx is not None and ctx >= RECYCLE_AT_CONTEXT_PCT)
+        )
+        if worth_a_look:
+            digest_rows.append(row)
+
+    # One consolidated row per hour (bus #87241): everything that used to be a per-lane page
+    # at a single fixed threshold lands here instead, so busy lanes with big contexts stop
+    # generating individual pages.
+    if digest_rows:
+        hour_key = "digest:" + now.strftime("%Y-%m-%dT%H")
+        if hour_key not in state:
+            spinning = sum(1 for x in digest_rows if x["false_wake"])
+            subject = ("hourly burn/context digest: %d lane(s) to look at (%d spinning)"
+                       % (len(digest_rows), spinning))
+            body = digest_body(sorted(digest_rows, key=lambda x: -x.get("tph", 0)),
+                               args.window_min, args.threshold_tph, RECYCLE_AT_CONTEXT_PCT,
+                               len(measured))
+            if send_bus_alert(subject, body, "P2", args.dry_run):
+                state[hour_key] = now.isoformat()
+                # keep the state file from growing without bound
+                stale = sorted(k for k in state if k.startswith("digest:"))[:-24]
+                for k in stale:
+                    state.pop(k, None)
+
+    # Individual pages now fire ONLY on the false-wake signature.
+    digest_by_agent = {r["agent_id"]: r for r in digest_rows}
     for b in breaches:
         agent_id = b["agent_id"]
+        row = digest_by_agent.get(agent_id)
+        if not row or not row["false_wake"]:
+            log(f"breach {agent_id} tph={b['tph']:.0f} -> digest row only (not a false wake)")
+            continue
         key = f"breach:{agent_id}"
-        context_pct = context_pct_by_agent.get(agent_id)
+        context_pct = row.get("context_pct")
         if not should_repage_breach(
             state.get(key), now, b["tph"], context_pct,
             suppress_min=BREACH_SUPPRESS_MIN, rate_rise_frac=BREACH_RATE_RISE_FRAC,
@@ -452,7 +672,7 @@ def main(argv: list[str] | None = None) -> int:
         ):
             log(f"breach {agent_id} tph={b['tph']:.0f} suppressed (already acknowledged, no escape)")
             continue
-        subject = f"⚠️ lane burn: {agent_id} at {b['tph']:,.0f} tok/hr (threshold {args.threshold_tph:,.0f})"
+        subject = f"⚠️ lane burning with no output: {agent_id} at {b['tph']:,.0f} tok/hr"
         body = breach_alert_body(b, args.window_min, args.threshold_tph, context_pct)
         if send_bus_alert(subject, body, "P1", args.dry_run):
             state[key] = {"ts": now.isoformat(), "tph": b["tph"]}
@@ -473,7 +693,8 @@ def main(argv: list[str] | None = None) -> int:
                     state[key] = now.isoformat()
 
     _save_state(state)
-    log(f"run complete: {len(lanes)} lanes, {len(breaches)} breach, {len(errors)} unmeasurable")
+    log(f"run complete: {len(lanes)} lanes, {len(breaches)} breach, "
+        f"{len(digest_rows)} in digest, {len(errors)} unmeasurable")
     return 0
 
 
