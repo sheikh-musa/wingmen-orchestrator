@@ -180,6 +180,18 @@ def test_base_agent_id_strips_trailing_instance_number():
     assert w._base_agent_id(None) == ""
 
 
+def test_send_speaks_as_cc_fleet_health_matching_this_files_convention():
+    # every other post_agent_message() call in this file (asks-chase,
+    # client-asks-chase, slow-ask page) speaks as 'cc-fleet-health' -- a
+    # recipient reconciling "who's nudging me from this watchdog" should
+    # never see a second identity for the same daemon (cc-fleet-health
+    # review, PR #733, bus #86731)
+    import inspect
+    src = inspect.getsource(w._send_party_update_chase)
+    assert "post_agent_message('cc-fleet-health'" in src
+    assert "post_agent_message('sla-watchdog'" not in src
+
+
 def test_send_skips_unresolvable_owner_without_touching_conn_or_raising():
     # bus_send.send's refuse_if_undeliverable raises SystemExit for an owner
     # that is a tmux name (not a registered agents.id) or 'unassigned' —

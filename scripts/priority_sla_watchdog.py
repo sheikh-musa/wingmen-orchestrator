@@ -1591,7 +1591,7 @@ def _send_party_update_chase(conn, owner: str, target: dict, recipient_resolutio
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT * FROM post_agent_message('sla-watchdog', %s, %s, %s, %s, "
+                "SELECT * FROM post_agent_message('cc-fleet-health', %s, %s, %s, %s, "
                 "'P2', true, %s, %s, %s, %s)",
                 (owner, PAGE_MESSAGE_TYPE, subj, body, str(uuid.uuid4()), None, False, None))
         conn.commit()
