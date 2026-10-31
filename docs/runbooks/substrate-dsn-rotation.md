@@ -52,8 +52,9 @@ default covers them — but "the default covers it" is not the same as "it was d
 ## 1. Plan (harmless, do this first, always)
 
 ```bash
-cd ~/wingmen/projects/orchestrator.wt-exec
-.venv/bin/python3 scripts/substrate_rotation_executor.py plan --old-sha8 <sha8 of the CURRENT password>
+cd ~/wingmen/projects/orchestrator.wt-exec      # the worktree carrying the executor
+PY=~/wingmen/orchestrator/.venv/bin/python3     # the live venv; this worktree has none
+$PY scripts/substrate_rotation_executor.py plan --old-sha8 <sha8 of the CURRENT password>
 ```
 
 `--old-sha8` is required on purpose: you must state which value you believe you are
@@ -139,9 +140,18 @@ Only after the console's GO, and only inside the agreed window:
 
 ```bash
 cd ~/wingmen/projects/orchestrator.wt-exec
-.venv/bin/python3 scripts/substrate_rotation_executor.py execute \
+PY=~/wingmen/orchestrator/.venv/bin/python3
+$PY scripts/substrate_rotation_executor.py execute \
+  --env-file ~/wingmen/orchestrator/.env \
   --old-sha8 <sha8 of the CURRENT password> --confirm rotate-substrate
 ```
+
+`--env-file` narrows the run to the live file. That is the recommended scope for the
+first rotation: the other two places the credential sits are **stale worktree copies**
+(one a month old, one inside a client repo), and writing the NEW password into an
+abandoned worktree widens the exposure instead of reducing it. The value left there is
+dead after the patch, and a dead credential in a stale file is litter, not a leak —
+clean those up as their own decision afterwards (bus 87913).
 
 The confirm phrase is deliberately long and not a `-y` flag. A typo must be a refusal.
 
