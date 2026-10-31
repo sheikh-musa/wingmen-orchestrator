@@ -1038,6 +1038,16 @@ if [ -n "$PROVIDER_ROUTING_LABEL" ]; then
     echo -e "${BOLD}${TEAL}▶ Provider: ${PROVIDER_ROUTING_LABEL} (${RESOLVED_MODEL}, small=${PROVIDER_ROUTING_SMALL}); Anthropic credentials unset${RESET}"
 fi
 
+# NON-ANTHROPIC TOOL-SCHEMA WALL (bus #87004, 2026-10-31): a routed provider
+# validates the tool schemas Claude Code sends on EVERY request, and DeepSeek
+# rejects Artifact's ("Invalid schema for function Artifact") — a hard 400 that
+# makes the session unable to take a single turn, not a degraded one.
+# apply_provider_routing already built PROVIDER_ROUTING_DISALLOWED_ARGS for
+# whichever provider it picked (EMPTY for a claude-* no-op, so nothing changes
+# there); both exec lines below splice it in BEFORE CLAUDE_PASSTHROUGH, so an
+# operator `-- --disallowedTools ...` escape hatch still wins by coming later
+# on argv (same last-wins convention as --model).
+
 # Restore caller's directory for the actual claude session
 cd "$CALLER_DIR"
 
@@ -1143,9 +1153,9 @@ if [ -n "$SCHEDULED_PROMPT_FILE" ]; then
     fi
     echo -e "${TEAL}  Scheduled-sweep mode: reading prompt from $SCHEDULED_PROMPT_FILE${RESET}"
     PROMPT_TEXT="$(cat "$PROMPT_PATH")"
-    env -i "${_LANE_ENV_PAIRS[@]+"${_LANE_ENV_PAIRS[@]}"}" "$CLAUDE_BIN" --dangerously-skip-permissions --model "$RESOLVED_MODEL" -p "$PROMPT_TEXT" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
+    env -i "${_LANE_ENV_PAIRS[@]+"${_LANE_ENV_PAIRS[@]}"}" "$CLAUDE_BIN" --dangerously-skip-permissions --model "$RESOLVED_MODEL" "${PROVIDER_ROUTING_DISALLOWED_ARGS[@]+"${PROVIDER_ROUTING_DISALLOWED_ARGS[@]}"}" -p "$PROMPT_TEXT" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
 else
     # Always launch interactively. Context (if staged above) arrives via the
     # SessionStart hook as a system-reminder, not via stdin.
-    env -i "${_LANE_ENV_PAIRS[@]+"${_LANE_ENV_PAIRS[@]}"}" "$CLAUDE_BIN" --dangerously-skip-permissions --model "$RESOLVED_MODEL" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
+    env -i "${_LANE_ENV_PAIRS[@]+"${_LANE_ENV_PAIRS[@]}"}" "$CLAUDE_BIN" --dangerously-skip-permissions --model "$RESOLVED_MODEL" "${PROVIDER_ROUTING_DISALLOWED_ARGS[@]+"${PROVIDER_ROUTING_DISALLOWED_ARGS[@]}"}" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
 fi

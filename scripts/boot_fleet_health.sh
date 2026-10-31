@@ -145,6 +145,27 @@ if [ -z "$DSN" ]; then
     exit 1
 fi
 
+# ── Resolve the claude binary BEFORE anything below takes the watchdog +
+#    fleet-status lease (bus #86258/#86793): under launchd's minimal PATH
+#    (no ~/.local/bin) `claude` resolved to nothing, yet the script ran on
+#    past the lease `take` regardless — a CAS re-acquire every ThrottleInterval
+#    restart kept the lease looking continuously healthy ("false healthy")
+#    while no SRE process was actually up, so the hub's dead-man reclaim never
+#    fired. Mirrors boot_fleet_health_launchd.sh's TMUX_BIN resolution. Fail
+#    LOUD and exit BEFORE the lease take (below) if claude can't be found —
+#    an unresolvable claude must never look like a held, healthy lease.
+CLAUDE_BIN="$(command -v claude || true)"
+if [ -z "$CLAUDE_BIN" ]; then
+    for _c in "$HOME/.local/bin/claude" /usr/local/bin/claude /opt/homebrew/bin/claude; do
+        [ -x "$_c" ] && CLAUDE_BIN="$_c" && break
+    done
+fi
+if [ -z "$CLAUDE_BIN" ] || [ ! -x "$CLAUDE_BIN" ]; then
+    echo "FATAL: claude binary not found on PATH ($PATH) or known fallback locations — refusing to boot (never take the lease without a confirmed claude binary)" >&2
+    exit 1
+fi
+echo "[boot_fleet_health] claude resolved: $CLAUDE_BIN" >&2
+
 # ── Stable host identity (CAI-RESP-1436) — pin FLEET_HOST_ID from the git-tracked map
 #    BEFORE anything host-scoped (agent_status writes, the lease take below, in-process
 #    matchers) reads _me(). Ends the DHCP-hostname flap (bus 41834). Shared, sourced by
@@ -283,7 +304,7 @@ elif [ ! -e "$FH_DIR/scripts/self_recycle.sh" ]; then
   echo "⚠ $FH_DIR/scripts exists but has no self_recycle.sh — use an ABSOLUTE path" >&2
 fi
 
-echo "▶ Launching claude --dangerously-skip-permissions --model $MODEL in $FH_DIR"
+echo "▶ Launching $CLAUDE_BIN --dangerously-skip-permissions --model $MODEL in $FH_DIR"
 # NO-HUMAN-AT-KEYBOARD guard (Nazim #43143): enforce the AskUserQuestion deny + suppress the
 # prompt-suggestion widget in my own lane (this boot historically skipped ensure_lane_deny).
 "$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_deny.py" --cwd "$FH_DIR" || true
@@ -361,4 +382,7 @@ if ! apply_provider_routing "$MODEL" "$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" "
     exit 1
 fi
 [ -n "${PROVIDER_ROUTING_LABEL:-}" ] && echo "[boot_fleet_health] provider-routed: $PROVIDER_ROUTING_LABEL (model $MODEL)" >&2
-claude --dangerously-skip-permissions --model "$MODEL"
+# PROVIDER_ROUTING_DISALLOWED_ARGS (bus #87004): non-Anthropic providers reject some
+# tool schemas at the API layer before the model ever sees them (DeepSeek 400s on
+# Artifact's). Empty for a claude-* MODEL, so the Anthropic boot is byte-identical.
+"$CLAUDE_BIN" --dangerously-skip-permissions --model "$MODEL" "${PROVIDER_ROUTING_DISALLOWED_ARGS[@]+"${PROVIDER_ROUTING_DISALLOWED_ARGS[@]}"}"

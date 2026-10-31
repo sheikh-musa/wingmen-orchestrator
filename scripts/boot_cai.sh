@@ -222,4 +222,7 @@ fi
 # Pin this singleton's tmux window to 200x50 before claude starts (orch-console #79940): an 80x24
 # window lets stale render residue sit on the composer border and lane_nudge refuses every nudge.
 source "$ORCH_DIR/scripts/lib/pin_singleton_window_size.sh"
-claude --dangerously-skip-permissions --model "$MODEL"
+# PROVIDER_ROUTING_DISALLOWED_ARGS (bus #87004): non-Anthropic providers reject some
+# tool schemas at the API layer before the model ever sees them (DeepSeek 400s on
+# Artifact's). Empty for a claude-* MODEL, so the Anthropic boot is byte-identical.
+claude --dangerously-skip-permissions --model "$MODEL" "${PROVIDER_ROUTING_DISALLOWED_ARGS[@]+"${PROVIDER_ROUTING_DISALLOWED_ARGS[@]}"}"
