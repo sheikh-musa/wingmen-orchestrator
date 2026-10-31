@@ -1145,6 +1145,61 @@ for _lp in "${_LANE_ENV_PAIRS[@]+"${_LANE_ENV_PAIRS[@]}"}"; do
 done
 # <<< bus-dsn-leak-guard
 
+# <<< cross-provider-resume-guard (bus #87276, P0 Musa op 36795)
+# A `--resume <id>` / `--continue` replays the WHOLE prior conversation to this
+# run's provider on every subsequent turn. When the token/model was switched to a
+# DIFFERENT provider, that is a data export, not a convenience: on 31 Oct a lane
+# resumed a DeepSeek transcript on an Anthropic model, re-sending whatever it
+# held to a provider that had never seen it.
+#
+# The guard allows the resume when the provider is unchanged, or when the
+# transcript scans clean (zero secret-shaped values, sha256 recorded); otherwise
+# the lane boots FRESH with a handoff note instead of replaying, and says so
+# loudly. Logic: scripts/lib/session_provider_guard.py (tested there, incl. a
+# lockstep test against provider_routing.sh's own table).
+# shellcheck source=scripts/lib/session_provider_guard.sh
+source "$ORCH_DIR/scripts/lib/session_provider_guard.sh"
+_SPG_RESUME_ID=""
+_SPG_CONTINUE=0
+for _spg_i in "${!CLAUDE_PASSTHROUGH[@]}"; do
+    case "${CLAUDE_PASSTHROUGH[$_spg_i]}" in
+        --resume|-r)
+            _spg_next="${CLAUDE_PASSTHROUGH[$((_spg_i + 1))]:-}"
+            case "$_spg_next" in
+                ""|-*) _SPG_CONTINUE=1 ;;   # a BARE --resume opens the picker:
+                                            # equally a resume, judge the newest one
+                *)     _SPG_RESUME_ID="$_spg_next" ;;
+            esac
+            ;;
+        --resume=*)    _SPG_RESUME_ID="${CLAUDE_PASSTHROUGH[$_spg_i]#--resume=}" ;;
+        --continue|-c) _SPG_CONTINUE=1 ;;
+    esac
+done
+if [ -n "$_SPG_RESUME_ID" ] || [ "$_SPG_CONTINUE" -eq 1 ]; then
+    if [ -n "$_SPG_RESUME_ID" ]; then
+        _SPG_OUT="$(spg_check "$RESOLVED_MODEL" --session "$_SPG_RESUME_ID" 2>&1)"
+    else
+        _SPG_OUT="$(spg_check "$RESOLVED_MODEL" --continue --cwd "$CALLER_DIR" 2>&1)"
+    fi
+    _SPG_RC=$?
+    case "$_SPG_RC" in
+        0)
+            echo -e "${TEAL}  Resume guard: ${_SPG_OUT%%$'\n'*}${RESET}"
+            ;;
+        *)
+            # 3 = verified dirty transcript; anything else is an internal error.
+            # Both boot FRESH: an unverifiable resume is a refusal, never an allow.
+            echo -e "${RED}${BOLD}REFUSING to resume across a provider switch${RESET}" >&2
+            echo "$_SPG_OUT" >&2
+            spg_strip_resume_flags CLAUDE_PASSTHROUGH
+            echo -e "${YELLOW}  Booting FRESH on ${RESOLVED_MODEL}. Context: STATUS.md, last bus rows,"
+            echo -e "  and the handoff note above (if any). Scrub with scripts/secret_hash_sweep.py"
+            echo -e "  before resuming that transcript across a provider.${RESET}"
+            ;;
+    esac
+fi
+# >>> cross-provider-resume-guard
+
 if [ -n "$SCHEDULED_PROMPT_FILE" ]; then
     PROMPT_PATH="$ORCH_DIR/$SCHEDULED_PROMPT_FILE"
     if [ ! -f "$PROMPT_PATH" ]; then

@@ -56,14 +56,33 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
     sleep 2
 fi
 
-log "starting mirror orch session (claude --resume in tmux '$SESSION')"
+# CROSS-PROVIDER RESUME GUARD (bus #87276, P0 Musa op 36795): a bare --resume opens
+# the session picker, whose default is this dir's newest conversation. Check THAT
+# transcript against the provider this boot routes to; a provider change with a
+# non-clean transcript boots FRESH (with a handoff note) instead of replaying it.
+_MIRROR_RESUME="--resume"
+if [ -r "$ORCH_DIR/scripts/lib/session_provider_guard.sh" ]; then
+    # shellcheck source=scripts/lib/session_provider_guard.sh
+    . "$ORCH_DIR/scripts/lib/session_provider_guard.sh"
+    _SPG_RC=0
+    _SPG_OUT="$(spg_check "${MIRROR_MODEL:-${ORCH_MODEL:-claude-opus-4-8}}" --continue --cwd "$ORCH_DIR" 2>&1)" || _SPG_RC=$?
+    if [ "$_SPG_RC" -ne 0 ]; then
+        _MIRROR_RESUME=""
+        log "REFUSING --resume (provider switch with a non-clean transcript) — starting FRESH"
+        printf '%s\n' "$_SPG_OUT" | while IFS= read -r _l; do log "  $_l"; done
+    else
+        log "resume guard: ${_SPG_OUT%%$'\n'*}"
+    fi
+fi
+
+log "starting mirror orch session (claude ${_MIRROR_RESUME:---resume} in tmux '$SESSION')"
 
 tmux new-session -d -s "$SESSION" -c "$ORCH_DIR" \
     -e "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}" \
     -e "IS_MIRROR=${IS_MIRROR:-true}" \
     -e "TG_BRIDGE_ENABLED=${TG_BRIDGE_ENABLED:-false}" \
     -e "CAI_BRIDGE_ENABLED=${CAI_BRIDGE_ENABLED:-false}" \
-    -- "$CLAUDE_BIN" --resume
+    -- "$CLAUDE_BIN" ${_MIRROR_RESUME:---resume}
 
 log "session '$SESSION' is live"
 
