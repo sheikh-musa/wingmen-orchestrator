@@ -30,6 +30,7 @@ import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 _ORCH_DIR = Path(__file__).resolve().parent.parent
@@ -152,6 +153,55 @@ def alert_message(repo, pr_number, verdict_id, to_agent, age_s, resolved_author=
         f"the PR or the lane."
     )
     return subject, body
+
+
+# ── per-PR snooze (pure; bus #85840 -- a batched/deliberate deploy stall still
+# PASSes cc-quality but should not re-page until the batch window closes) ──────
+_SNOOZE_KEY_RE = re.compile(r"^([^/]+)/([^#]+)#(\d+)$")
+
+
+def snooze_key(owner: str, repo: str, pr_number) -> str:
+    """PURE. (owner, repo, pr_number) -> the state['snoozed'] dict key."""
+    return f"{owner}/{repo}#{pr_number}"
+
+
+def parse_snooze_arg(s: str):
+    """PURE. 'owner/repo#123' -> (owner, repo, pr_number:int), or None if malformed."""
+    m = _SNOOZE_KEY_RE.match(s.strip())
+    if not m:
+        return None
+    return m.group(1), m.group(2), int(m.group(3))
+
+
+def parse_until_arg(s: str):
+    """PURE. UTC ISO8601 (accepts a trailing 'Z') -> epoch seconds, or None if
+    malformed. A naive (tz-less) timestamp is treated as UTC, never local time
+    -- this runs on a Mac Mini but the fleet's clocks are all UTC."""
+    text = s.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def prune_expired_snoozes(state: dict, now: int) -> dict:
+    """PURE. Returns a NEW state dict with any snooze whose until <= now
+    dropped, so an expired snooze resumes alerting on its own and the state
+    file does not grow forever."""
+    new_state = dict(state)
+    new_state["snoozed"] = {k: v for k, v in state.get("snoozed", {}).items() if v > now}
+    return new_state
+
+
+def is_snoozed(state: dict, owner: str, repo: str, pr_number, now: int) -> bool:
+    """PURE. True if an active (non-expired) snooze covers this PR."""
+    until = state.get("snoozed", {}).get(snooze_key(owner, repo, pr_number))
+    return until is not None and until > now
 
 
 # ── DB / state / gh shell (never touches a PR or a lane; only detects + pages) ──
@@ -390,8 +440,8 @@ def _alert(cur, conn, repo, pr_number, verdict_id, to_agent, age_s, dry: bool,
 
 
 def run(conn, dry: bool = False) -> int:
-    state = _load_state()
     now = int(time.time())
+    state = prune_expired_snoozes(_load_state(), now)
     with conn.cursor() as cur:
         verdicts = _recent_quality_verdicts(cur)
         known_repos = _known_repos(cur, state, now)
@@ -427,6 +477,9 @@ def run(conn, dry: bool = False) -> int:
                           f"(no repo hint) -- skipping, no citation (bus #85217/#85259)")
                     continue
                 owner, repo, pr_json = resolved
+                if is_snoozed(state, owner, repo, pr_number, now):
+                    print(f"    SNOOZED {owner}/{repo}#{pr_number} -- skipping (bus #85840 shape)")
+                    continue
                 latest_commit = _latest_commit_epoch(pr_json)
                 if not is_stale(pr_json.get("state"), pr_json.get("mergedAt"),
                                  latest_commit, verdict_epoch, now):
@@ -467,7 +520,35 @@ def run(conn, dry: bool = False) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description="stale cc-quality PASS verdict watchdog (bus #85014)")
     ap.add_argument("--dry-run", action="store_true", help="detect + log only; no alert, no state write")
+    ap.add_argument("--snooze", metavar="OWNER/REPO#PR",
+                     help="suppress alerts for this PR until --until; writes state and exits, no scan")
+    ap.add_argument("--until", metavar="UTC_ISO8601",
+                     help="required with --snooze, e.g. 2026-10-31T09:00:00Z")
     args = ap.parse_args()
+
+    if args.snooze:
+        if not args.until:
+            print("--snooze requires --until", file=sys.stderr)
+            return 2
+        parsed = parse_snooze_arg(args.snooze)
+        if parsed is None:
+            print(f"malformed --snooze (want OWNER/REPO#PR): {args.snooze}", file=sys.stderr)
+            return 2
+        until_epoch = parse_until_arg(args.until)
+        if until_epoch is None:
+            print(f"malformed --until (want UTC ISO8601): {args.until}", file=sys.stderr)
+            return 2
+        owner, repo, pr_number = parsed
+        now = int(time.time())
+        if until_epoch <= now:
+            print(f"--until {args.until} is not in the future -- refusing a no-op snooze", file=sys.stderr)
+            return 2
+        state = prune_expired_snoozes(_load_state(), now)
+        state.setdefault("snoozed", {})[snooze_key(owner, repo, pr_number)] = until_epoch
+        _save_state(state)
+        print(f"SNOOZED {owner}/{repo}#{pr_number} until {args.until} (epoch {until_epoch})")
+        return 0
+
     import psycopg
     from dotenv import load_dotenv
     load_dotenv(_ORCH_DIR / ".env")
