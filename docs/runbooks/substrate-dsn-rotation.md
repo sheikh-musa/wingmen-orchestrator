@@ -27,17 +27,24 @@ If any of those is false, preflight refuses and nothing is written. That refusal
 correct outcome, not an obstacle: a rotation against a state you cannot describe is how
 you lose a database.
 
-**Still unknown, and blocking the remote half.** Two things the hub has not answered
-(bus 87815, restated 87844, 87860):
+**The hub half is PULL, not push (settled 2026-10-31, bus 87863/87890).** The hub is
+the ssh alias `gzb`; its `.env` is a tmpfs file recreated at every boot by
+`fetch-secrets`. The Mini's own `authorized_keys` carries one forced command that
+assembles the bundle **on this machine** and streams it as a tar, so rewriting the Mini
+files is the whole job on this side and the hub pulls the new value when it runs
+`fetch-secrets`. **Do not use `--remote` against `gzb`.** A push into its files from
+outside that pull was never reviewed, and the pull already does the same work.
 
-1. **The hub's exact host and bundle path.** The description says `hub-vps` and
-   `/home/wingmen/wingmen/orchestrator/.env`, but `hub-vps` does not resolve from the
-   Mini; the only ssh targets that exist here are `gzb` and `cubeasht`.
-2. **Whether all three Mini env files are in scope, or only the live one.**
+**Open, and it can sink the hub's restart:** the bundle is assembled from three sources —
+the Mini's orchestrator env file, and two private env files under `~/.wingmen/private`
+(one for the write DSN, one for bayanqa). If either of those also embeds the substrate
+credential, the pull carries a dead value for it and the hub's restarts fail *after* a
+successful reset. Reading those paths is guard-blocked from this lane, so their owner
+must confirm whether they carry the substrate DSN. Asked of the console (87892).
 
-Until both are answered, run with `remote=False` and the Mini's three files. Do not
-guess a hostname into a password rewrite: a wrong host is a failed ssh, but a wrong
-*path* on a right host overwrites the wrong file.
+**Also asked, not yet answered:** whether all three Mini env files are in scope, or only
+the live one. Preflight reads all three and they all carry the current value, so the
+default covers them — but "the default covers it" is not the same as "it was decided".
 
 ---
 
@@ -77,8 +84,8 @@ The order **is** the safety property. This is not a preference.
    travels on **stdin**, never on an ssh argv.
 3. **patch** — `PATCH /v1/projects/{ref}/database/password` with the value in the JSON
    body. This is the point of no return.
-4. **propagate** — the tmux global `DATABASE_URL`, and the instruction for the hub to
-   set its own after its next secrets fetch.
+4. **propagate** — the tmux global `DATABASE_URL`, and the standing instruction for the
+   hub to re-run `fetch-secrets` (pull) and then its restart groups.
 5. **restart** — every loader is kicked. This must be adjacent to the patch: the only
    interval in which the fleet is broken is between 3 and 5, and it should be seconds.
 6. **verify** — the new value must connect, and the old value must **fail**. Both halves
@@ -182,6 +189,7 @@ Anything less is "in progress", and the console should hear that word rather tha
   read Supabase's log by `peer_ip`; the operator's requirement to watch that log is met
   by the console watching the dashboard, not by this executor. Do not describe the watch
   step as if it did more than it does.
-- **The hub's own env file is not rewritten by this run.** It is rewritten by the hub
-  after its next secrets fetch, on the console's instruction. Until then the hub holds a
-  dead value — which is why the hub must act in the same window.
+- **The hub's own env file is not rewritten by this run.** Neither is it pushed: the hub
+  pulls. It re-runs `fetch-secrets` in the same window and restarts its groups — the
+  auto-respawning ones and the manual ones, per the hub's own list (bus 87827). Until it
+  does, the hub holds a dead value, which is why it must act in the same window.
