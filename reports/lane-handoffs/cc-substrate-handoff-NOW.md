@@ -95,7 +95,7 @@ console's merge now** — their waiter holds `cee1dd4` and they send the sha, so
 those two units before **03:30Z**, and **if it is not closed and verified by then the run defers
 again, no partial run**; order unchanged, console last. They also asked me to route the
 `merge_pinned` mis-attribution to cc-quality — **done, bus 88234** (finding: `scripts/merge_pinned.sh`
-line 73 echoes `MERGEED` unconditionally after `gh pr merge`, which exits 0 on an already-merged PR).
+line 73 echoes `MERGED` unconditionally after `gh pr merge`, which exits 0 on an already-merged PR).
 
 **CI observation worth keeping:** the runners are the cubeasht WSL distro `ci-orchestrator`
 (`actions-runner-orchestrator`, `-2`), reachable over ssh; both were `busy=true` with four jobs
