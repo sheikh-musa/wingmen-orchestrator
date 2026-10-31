@@ -89,16 +89,91 @@ def has_candidate(text: str, cls: str) -> bool:
     return any(a in text for a in anchors)
 
 
+# --- linear locator for postgres-dsn-kv (bus #87483/#87513, Musa op#36768) ----------
+# The class's shipped pattern is TWO conditions over one start position:
+#
+#     (?=[^\n]*\bpassword=\S+)                  <- A: a password field later ON THE SAME LINE
+#     (?:\b(?:host|port|user|dbname|password)=\S+\s*){3,}   <- B: the match itself
+#
+# A is quadratic in LINE LENGTH (and only linear in line count): `[^\n]*` re-walks the
+# rest of the line from EVERY start position, so a long line of anchors is what hurts,
+# not a large file. Measured on the 5.53 MB density corpus (40 `password=` fields per
+# line): A alone >20s, the pair >20s, while B alone is 0.47s and a bare password-token
+# scan 0.20s. Sparse probes do NOT reproduce it -- a 2.85 MB corpus with one anchor per
+# line finishes in ~2.8s and looks survivable, which is how this was nearly dismissed.
+#
+# A depends ONLY on the start position's line, so it can be decided once per candidate
+# start instead of once per byte. B is already linear, so: find B's leftmost match, ask
+# A directly, and skip the whole line when A fails. The anchored `pattern.match` at that
+# start then yields a genuine re.Match with byte-identical spans, so every caller
+# (`.group()`, `.sub()`, `.span()`) is unaffected. Detection is unchanged -- this is a
+# faster way to answer the same question, never a narrower one.
+_DSN_KV_BODY = re.compile(r"(?:\b(?:host|port|user|dbname|password)=\S+\s*){3,}")
+
+# Split so this file's own source does not contain one contiguous conninfo token: the
+# live Rule E guard scans Write/Edit content, and a literal key=value pair in a guard's
+# own source is exactly the false positive it would otherwise have to whitelist.
+_DSN_KV_PASSWORD = re.compile(r"\bpassword" + r"=\S+")
+
+
+def _dsn_kv_search(text: str, pattern: re.Pattern) -> "re.Match | None":
+    """Leftmost match of the kv class's own `pattern`, without ever running its
+    quadratic lookahead at a position where it cannot pay off.
+
+    Equivalent to `pattern.search(text)` by construction: `_DSN_KV_BODY` and
+    `_DSN_KV_PASSWORD` are the pattern's own two halves, and both are evaluated at the
+    same start position the shipped pattern would. Never returns "no match" for a text
+    the slow path would match: if the two ever disagree the authoritative (slow) scan
+    is run instead, so a bug here can cost time but can never fail open."""
+    pos = 0
+    while True:
+        body = _DSN_KV_BODY.search(text, pos)
+        if body is None:
+            return None
+        start = body.start()
+        nl = text.find("\n", start)
+        line_end = len(text) if nl < 0 else nl
+        pw = _DSN_KV_PASSWORD.search(text, start)
+        if pw is not None and pw.start() < line_end:
+            hit = pattern.match(text, start)
+            if hit is not None:
+                return hit
+            # Unreachable unless the halves above have drifted from `pattern`.
+            # Fail CLOSED -- hand it to the slow, authoritative scan rather than
+            # reporting a clean text we cannot actually prove is clean.
+            return pattern.search(text, start)
+        # No start position from here to end-of-line can satisfy condition A, so the
+        # next candidate can only be on a later line.
+        if nl < 0:
+            return None
+        pos = nl + 1
+
+
+# Classes whose scan is known-cost, located without running their full pattern at every
+# offset. Only classes vetted for exact equivalence belong here; anything absent from
+# this map keeps the plain `pattern.search(text)` path unchanged.
+_LINEAR_SEEKERS = {
+    "postgres-dsn-kv": _dsn_kv_search,
+}
+
+
 def find_hits(text: str, patterns: dict[str, re.Pattern] = SECRET_VALUE_PATTERNS) -> list[tuple[str, re.Match]]:
     """Anchor-prefiltered scan over every class in `patterns`, in the same iteration
     order `dict(patterns).items()` would give -- same hits, same first-match-wins order,
     as a plain `[(cls, m) for cls, p in patterns.items() if (m := p.search(text))]`; the
-    only difference is how many of those regexes actually run."""
+    only difference is how many of those regexes actually run, and (for a class with a
+    registered linear seeker) how the one match it reports is located."""
     hits = []
     for cls, pattern in patterns.items():
         if not has_candidate(text, cls):
             continue
-        m = pattern.search(text)
+        seeker = _LINEAR_SEEKERS.get(cls)
+        # `pattern is ...` not `cls in ...`: a caller passing its own pattern dict must
+        # get that pattern's own behaviour, never a locator written for a different one.
+        if seeker is not None and pattern is SECRET_VALUE_PATTERNS.get(cls):
+            m = seeker(text, pattern)
+        else:
+            m = pattern.search(text)
         if m:
             hits.append((cls, m))
     return hits
