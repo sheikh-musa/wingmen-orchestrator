@@ -452,7 +452,10 @@ def _install_fake_vault(monkeypatch, on_put=None):
 
 
 def _split_args(slug, **kw):
-    base = dict(headed=False, flip_only=False, dry_run=False, skip_boot_check=True)
+    base = dict(
+        headed=False, flip_only=False, dry_run=False, skip_boot_check=True,
+        rollback_on_failure=True,
+    )
     base.update(kw)
     return argparse.Namespace(slug=slug, **base)
 
@@ -709,3 +712,63 @@ def test_usage_export_validates_since_before_driving_a_browser():
         assert "YYYY-MM-DD" in str(exc)
     else:
         raise AssertionError("expected LayoutMismatch for a malformed --since")
+
+
+# --- F1 (cc-quality, PR#745): a post-flip failure must not strand a family ---
+
+def _split_with_failures(tmp_path, monkeypatch, *, boot_ok, check_rc, rollback=True):
+    script = _isolated_scripts_copy(tmp_path)
+    mod = _load_module(script, "deepseek_split_rollback_%s_%s" % (boot_ok, check_rc))
+    map_file = script.parent / "lib" / "deepseek_key_map.json"
+
+    monkeypatch.setattr(mod, "_vault_has_key", lambda name: False)
+    monkeypatch.setattr(mod, "_create_console_key", lambda slug, headed: "sk-X")
+    monkeypatch.setattr(mod, "_run_key_map_check", lambda: (check_rc, "check output"))
+    monkeypatch.setattr(mod, "_boot_check", lambda slug, key: (boot_ok, "boot detail"))
+    _install_fake_vault(monkeypatch)
+
+    rc = mod.cmd_split_key(
+        _split_args("bariq", skip_boot_check=boot_ok is None,
+                    rollback_on_failure=rollback)
+    )
+    return rc, json.loads(map_file.read_text())["bariq"]
+
+
+def test_boot_check_failure_rolls_the_map_row_back(tmp_path, monkeypatch):
+    """The row is on a key the boot check just proved will not load; leaving
+    it there is a family that cannot start until a human reads stderr."""
+    rc, row = _split_with_failures(tmp_path, monkeypatch, boot_ok=False, check_rc=0)
+    assert rc == 2
+    assert row == "DEEPSEEK_CODING_KEY"
+
+
+def test_map_check_failure_rolls_the_map_row_back(tmp_path, monkeypatch):
+    rc, row = _split_with_failures(tmp_path, monkeypatch, boot_ok=True, check_rc=1)
+    assert rc == 2
+    assert row == "DEEPSEEK_CODING_KEY"
+
+
+def test_no_rollback_flag_leaves_the_row_flipped_for_inspection(tmp_path, monkeypatch):
+    rc, row = _split_with_failures(
+        tmp_path, monkeypatch, boot_ok=False, check_rc=0, rollback=False
+    )
+    assert rc == 2
+    assert row == "DEEPSEEK_KEY_BARIQ"
+
+
+def test_successful_split_stays_flipped(tmp_path, monkeypatch):
+    rc, row = _split_with_failures(tmp_path, monkeypatch, boot_ok=True, check_rc=0)
+    assert rc == 0
+    assert row == "DEEPSEEK_KEY_BARIQ"
+
+
+def test_redact_strips_key_shaped_text_from_diagnostics():
+    """_boot_check prints captured stderr, so it is treated as untrusted even
+    though provider_vault_fetch.py only writes the value to stdout."""
+    mod = _load_module(name="deepseek_redact")
+    out = mod._redact("boom sk-abcdef0123456789abcdef0123456789 tail")
+    assert "sk-" not in out
+    assert "abcdef0123456789" not in out
+    assert "[REDACTED-KEY]" in out
+    assert mod._redact("plain SecretNotFoundError") == "plain SecretNotFoundError"
+    assert mod._redact(None) == ""

@@ -438,8 +438,59 @@ def _boot_check(slug: str, vault_key: str) -> tuple[bool, str]:
         stderr=subprocess.PIPE,
     )
     if fetched.returncode != 0:
-        return False, f"vault fetch failed for {vault_key!r}: {(fetched.stderr or '').strip()}"
+        # stderr is captured for diagnosis and then PRINTED, so it is treated
+        # as untrusted: provider_vault_fetch.py writes the value to stdout
+        # only, but nothing here should depend on that staying true forever
+        # (cc-quality confirm on PR#745).
+        return False, f"vault fetch failed for {vault_key!r}: {_redact(fetched.stderr)}"
     return True, f"{agent_id} -> {vault_key!r} -> value present"
+
+
+_KEY_SHAPE_RE = re.compile(r"sk-[A-Za-z0-9_\-]{16,}")
+
+
+def _redact(text: str | None) -> str:
+    """Strip anything key-shaped out of text that is about to be printed.
+    Belt and braces: the value should never reach stderr in the first place."""
+    # The replacement deliberately carries no "sk-" of its own, so a blunt
+    # "no sk- in the output" check keeps meaning what it says.
+    return _KEY_SHAPE_RE.sub("[REDACTED-KEY]", (text or "").strip())
+
+
+def _rollback(slug: str, previous: str, enabled: bool) -> str:
+    """Restore one map row after a POST-FLIP verification failure.
+
+    Default ON (cc-quality F1 on PR#745). The failure state this covers is a
+    family whose map now points at a key we just proved does not resolve or
+    load -- i.e. that family cannot boot -- left for a human to notice in
+    stderr. That is the same down-state the vault-before-map ordering exists
+    to prevent, just relocated past the flip. `current` is already in hand, so
+    restoring it is free.
+
+    --no-rollback-on-failure keeps the row flipped, for when the operator wants
+    to inspect a genuine resolver bug in place instead of watching the symptom
+    disappear.
+    """
+    if not enabled:
+        return (
+            f"NOT rolled back (--no-rollback-on-failure): map row {slug!r} is "
+            f"still on the NEW key. Restore it to {previous!r} to make the "
+            "family boot again.\n"
+        )
+    try:
+        mapping = _load_map()
+        mapping[slug] = previous
+        _write_map(mapping)
+    except Exception as exc:  # noqa: BLE001 -- reporting beats crashing here
+        return (
+            f"ROLLBACK FAILED ({exc}) -- restore {slug!r} to {previous!r} in "
+            "scripts/lib/deepseek_key_map.json by hand; until then that family "
+            "cannot boot.\n"
+        )
+    return (
+        f"ROLLED BACK: map row {slug!r} restored to {previous!r}, so this "
+        "family still boots on the key it used before.\n"
+    )
 
 
 def cmd_split_key(args) -> int:
@@ -553,11 +604,14 @@ def cmd_split_key(args) -> int:
     rc, out = _run_key_map_check()
     if rc != 0:
         print(
-            "3/4 check_deepseek_key_map.py FAILED (exit %d):\n%s\n\n"
-            "ROLLBACK: set scripts/lib/deepseek_key_map.json[%r] back to %r "
-            "(the shared key is still valid, so that restores the previous "
-            "booting state). The vault secret %r is harmless if left in place."
-            % (rc, out or "(no output)", slug, _SHARED_KEY_NAME, target),
+            "3/4 check_deepseek_key_map.py FAILED (exit %d):\n%s\n\n%s"
+            "The vault secret %r is harmless if left in place."
+            % (
+                rc,
+                _redact(out) or "(no output)",
+                _rollback(slug, current, args.rollback_on_failure),
+                target,
+            ),
             file=sys.stderr,
         )
         return 2
@@ -570,9 +624,9 @@ def cmd_split_key(args) -> int:
     ok, detail = _boot_check(slug, target)
     if not ok:
         print(
-            f"4/4 boot check FAILED: {detail}\n"
-            f"This family would fail closed at launch. Roll back the map row "
-            f"{slug!r} -> {_SHARED_KEY_NAME!r} before leaving it.",
+            f"4/4 boot check FAILED: {_redact(detail)}\n"
+            f"This family would fail closed at launch.\n"
+            + _rollback(slug, current, args.rollback_on_failure),
             file=sys.stderr,
         )
         return 2
@@ -904,7 +958,14 @@ def main(argv) -> int:
         action="store_true",
         help="skip walking the real launch-time resolver/fetch chain after the flip",
     )
-    p_split.set_defaults(func=cmd_split_key)
+    p_split.add_argument(
+        "--no-rollback-on-failure",
+        dest="rollback_on_failure",
+        action="store_false",
+        help="leave the map row flipped if post-flip verification fails "
+             "(default: restore it, so the family keeps booting)",
+    )
+    p_split.set_defaults(func=cmd_split_key, rollback_on_failure=True)
 
     p_list = sub.add_parser("list-clients", help="list mapped clients: slug, vault key NAME, created_at (no values)")
     p_list.set_defaults(func=cmd_list_clients)
