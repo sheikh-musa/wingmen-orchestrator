@@ -23,6 +23,7 @@ from the temp directory and a free local port.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -168,7 +169,8 @@ def test_first_alert_is_delivered_through_the_real_transaction_wrapper(conn, mon
     assert payload["chat_id"] == REVIEWER
     assert "Afiq" in payload["text"]
     assert any(b["callback_data"].startswith("pc:approve:")
-               for row in payload["reply_markup"]["inline_keyboard"] for b in row)
+               for row in json.loads(payload["reply_markup"])["inline_keyboard"]
+               for b in row)
 
     row = conn.execute("SELECT state, pending_id FROM public.tg_pending_contacts").fetchone()
     assert row[0] == "pending"
@@ -181,6 +183,25 @@ def test_a_second_message_from_the_same_chat_does_not_alert_again(conn, monkeypa
     conn.commit()
     assert len(sent) == 1
     assert conn.execute("SELECT count(*) FROM public.tg_pending_contacts").fetchone()[0] == 1
+
+
+def test_the_alert_payload_is_telegram_sendable(conn, monkeypatch):
+    """The live e2e caught what no fake did: Telegram rejects a `reply_markup`
+    that is a Python dict — 'can't parse reply keyboard markup JSON object'
+    (HTTP 400) — and the ingest swallows the send error as non-fatal, so the
+    alert silently never arrived. tg_call urlencodes its params, so the
+    keyboard must be a JSON STRING on the wire."""
+    ingest, ch, sent = _ingest(monkeypatch)
+    ingest._maybe_page_new_contact(conn, ch, _update(), None)
+    conn.commit()
+
+    assert sent, "no alert was sent"
+    _, payload = sent[0]
+    markup = payload["reply_markup"]
+    assert isinstance(markup, str), f"reply_markup must be a JSON string, got {type(markup)}"
+    buttons = [b for row in json.loads(markup)["inline_keyboard"] for b in row]
+    assert [b["text"] for b in buttons] == ["✅ Approve", "✋ Ignore"]
+    assert all(b["callback_data"].startswith("pc:") for b in buttons)
 
 
 # ── Finding 2: expiry re-alerts against the real partial unique index ──────
