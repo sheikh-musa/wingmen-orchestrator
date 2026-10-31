@@ -144,6 +144,19 @@ def _density_corpus() -> str:
     return (line + "\n") * 8000
 
 
+# Ceiling for both cost tests. This asserts BOUNDEDNESS, not a performance target: the
+# shipped quadratic needs >20s on this corpus (see the module docstring), while the
+# linearized scan measured 2.13s / 2.56s / 2.78s on cc-quality's review machine
+# (PR#763 review, 2026-10-31) and ~0.7s where it was developed. A 2.5s bound sat inside
+# that spread and flaked on slower hardware -- a real flake, reported by cc-quality, whose
+# only failure mode is to train people to ignore a RED security test.
+# 8s keeps a >2x margin over the slowest observed healthy run and still sits well under
+# the >20s quadratic, so restoring the old pattern turns this RED with room to spare. If
+# this ever flakes again, the right next step is a machine-independent ratio (compare a
+# 1x and a 4x density scan; linear ~4x, quadratic ~16x), not a larger flat number.
+_MAX_SCAN_S = 8.0
+
+
 def test_scan_cost_stays_bounded_on_the_density_corpus():
     text = _density_corpus()
     assert len(text) > 5_000_000, "corpus must be the multi-MB density shape"
@@ -151,9 +164,10 @@ def test_scan_cost_stays_bounded_on_the_density_corpus():
     hits = patterns_mod.find_hits(text)
     elapsed = time.perf_counter() - t0
     assert not any(h[0] == CLS for h in hits)
-    assert elapsed < 2.5, (
+    assert elapsed < _MAX_SCAN_S, (
         f"find_hits() on {len(text)} bytes of password-dense filler took {elapsed:.2f}s "
-        "-- the quadratic lookahead is back (pre-fix this is >20s in a PostToolUse hook)"
+        f"(ceiling {_MAX_SCAN_S}s) -- the quadratic lookahead is back; pre-fix this is "
+        ">20s in a PostToolUse hook"
     )
 
 
@@ -165,4 +179,6 @@ def test_scan_cost_stays_bounded_when_a_real_match_is_buried_in_the_density():
     hits = patterns_mod.find_hits(text)
     elapsed = time.perf_counter() - t0
     assert any(h[0] == CLS for h in hits), "the buried conninfo must still be found"
-    assert elapsed < 2.5, f"buried-match scan took {elapsed:.2f}s"
+    assert elapsed < _MAX_SCAN_S, (
+        f"buried-match scan took {elapsed:.2f}s (ceiling {_MAX_SCAN_S}s)"
+    )
