@@ -284,4 +284,41 @@ echo "[boot_nazim] $(date '+%H:%M:%S') launching $CLAUDE_BIN as ${ORCH_AGENT_ID:
 # + marks offline, this script returns, the pane command ends, the tmux session closes,
 # and the launchd waiter (boot_nazim_session.sh) restarts Nazim — same restart semantics
 # as before, just with a bash parent owning the liveness loop.
+
+# CROSS-PROVIDER RESUME GUARD (bus #87276, P0 Musa op 36795): the passthrough args
+# may carry `--resume <id>` / `--continue` (a console restart). Those replay the
+# whole prior conversation to this boot's provider — fine when the provider is
+# unchanged or the transcript scans clean, an export when it is not. On refusal the
+# flags are dropped here, so the body comes up FRESH with a handoff note rather
+# than replaying.
+if [ "$#" -gt 0 ] && [ -r "$ORCH_DIR/scripts/lib/session_provider_guard.sh" ]; then
+    _NAZIM_ARGS=("$@")
+    _SPG_WANT=0
+    _SPG_SESSION=""
+    for _a in "${_NAZIM_ARGS[@]}"; do
+        case "$_a" in
+            --resume) _SPG_WANT=1 ;;
+            --resume=*) _SPG_WANT=1; _SPG_SESSION="${_a#--resume=}" ;;
+            --continue|-c) _SPG_WANT=1 ;;
+        esac
+    done
+    if [ "$_SPG_WANT" -eq 1 ]; then
+        # shellcheck source=scripts/lib/session_provider_guard.sh
+        . "$ORCH_DIR/scripts/lib/session_provider_guard.sh"
+        _SPG_RC=0
+        if [ -n "$_SPG_SESSION" ]; then
+            _SPG_OUT="$(spg_check "$NAZIM_MODEL" --session "$_SPG_SESSION" 2>&1)" || _SPG_RC=$?
+        else
+            _SPG_OUT="$(spg_check "$NAZIM_MODEL" --continue --cwd "$ORCH_DIR" 2>&1)" || _SPG_RC=$?
+        fi
+        if [ "$_SPG_RC" -ne 0 ]; then
+            spg_strip_resume_flags _NAZIM_ARGS
+            set -- "${_NAZIM_ARGS[@]+"${_NAZIM_ARGS[@]}"}"
+            echo "[boot_nazim] REFUSING cross-provider resume — starting FRESH: $_SPG_OUT" >&2
+        else
+            echo "[boot_nazim] resume guard: ${_SPG_OUT%%$'\n'*}"
+        fi
+    fi
+fi
+
 "$CLAUDE_BIN" --dangerously-skip-permissions --model "$NAZIM_MODEL" "$@"

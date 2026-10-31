@@ -56,6 +56,20 @@ hooks already enforce — it's 🟢, included so a lane knows WHY the guard refu
   `--from-env` / `--from-file`, out to the vault, and the only thing printed is
   `sha256[:8]` + length.
 
+- **A resume is an export (2026-11-01, bus #87276):** `claude --resume <id>` /
+  `--continue` replays the WHOLE prior conversation to this run's provider on every
+  turn. Switching a lane's token or model to a DIFFERENT provider and resuming is
+  therefore a data export, not a convenience (31 Oct: a DeepSeek transcript resumed
+  on an Anthropic model). `scripts/lib/session_provider_guard.py` (called by
+  `launch_dangerous_cc.sh` — and so by `launch_lane_as.sh` and `switch_lane_token.sh`
+  — plus `boot_orch.sh`, `boot_mirror.sh`, `boot_nazim.sh`) refuses the resume when
+  the provider changed and the transcript carries any secret-shaped value, and boots
+  FRESH with a handoff note instead. A changed provider with a CLEAN transcript
+  resumes (the decision records the transcript's `sha256` prefix). Measured: 12 of 25
+  real fleet transcripts carry such a value, so in practice a provider switch usually
+  means a fresh start — scrub first with `scripts/secret_hash_sweep.py` if you need
+  the old conversation back. **[hook: launch-path guard]**
+
 - **What it CANNOT enforce (residual — keep this list honest):** a secret a reviewer
   chooses to paste into a *narrative* (not tool output) — human discipline; the DDL
   false-positive above; a store read whose credential row is not identifiable from
