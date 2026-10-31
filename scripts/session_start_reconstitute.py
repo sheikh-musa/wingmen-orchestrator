@@ -43,13 +43,35 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.expanduser("~/wingmen/orchestrator"))
+sys.path.insert(0, os.environ.get("WINGMEN_ORCH_DIR") or os.path.expanduser("~/wingmen/orchestrator"))
 
-ORCH_DIR = os.path.expanduser("~/wingmen/orchestrator")
+# Normally the live checkout. WINGMEN_ORCH_DIR lets a worktree's copy of this
+# hook (and its tests) resolve against that worktree instead of the live repo.
+ORCH_DIR = os.environ.get("WINGMEN_ORCH_DIR") or os.path.expanduser("~/wingmen/orchestrator")
 # Fresh-context events only. resume/compact retain context — don't re-inject.
 RECONSTITUTE_SOURCES = {"startup", "clear"}
 _HANDOFF_GLOB = os.path.join(ORCH_DIR, "reports", "nazim-handoff-*.md")
 _MAX_HANDOFF_CHARS = 24000  # bound the injection; the newest handoff is ~6KB
+
+# Memory 2.0 Part 2 PR B (op#36768). The boot read has a hard budget: the
+# whole hook must stay under 3s, so DB work gets 1.5s (libpq's connect
+# timeout is whole seconds, so 1s connect + 1.5s statement). A boot that
+# waits on memory is worse than a boot without memory.
+_FACTS_TIMEOUT_S = 1.5
+_FACTS_MAX_CHARS = 900  # ~250 tokens; boot context is not a dump
+
+
+def _facts_block() -> str:
+    """Facts already on record that this session should not re-ask about.
+
+    Shared with the global hook (scripts/session_start_facts.py) so there is
+    one budget, one cap and one fail-safe, not two that can drift.
+    """
+    try:
+        from scripts.lib import boot_facts
+        return boot_facts.facts_block()
+    except Exception:
+        return ""
 
 
 def _cc_base_agent_id() -> str:
@@ -194,10 +216,12 @@ def main() -> int:
     base_agent_id = _cc_base_agent_id()
     if base_agent_id:
         instance_agent_id = os.environ.get("CC_AGENT_ID", "").strip()
+        notice = _lane_identity_notice(base_agent_id, instance_agent_id)
+        facts = _facts_block()
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
-                "additionalContext": _lane_identity_notice(base_agent_id, instance_agent_id),
+                "additionalContext": notice + (("\n" + facts) if facts else ""),
             }
         }))
         return 0
@@ -257,10 +281,11 @@ def main() -> int:
             + asks_block
         )
 
+    console_facts = _facts_block()
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": context,
+            "additionalContext": context + (("\n" + console_facts) if console_facts else ""),
         }
     }))
     return 0
