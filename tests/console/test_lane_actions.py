@@ -241,3 +241,41 @@ def test_bridge_arm_helper_untouched_and_fail_closed():
     # the module's own gate still exists and is importable (not stubbed away)
     from scripts.lib import require_verified_authorization as rva
     assert callable(rva.verified_authorization)
+
+
+# ── op#34916: R4 enables on Musa's verified word (no env flag, no cai sign-off) ─
+def _musa_enable(monkeypatch, phrase_ok):
+    from scripts.lib import require_verified_authorization as rva
+    class _A:
+        def __init__(self, ok):
+            self.ok, self.reason, self.row = ok, ("ok" if ok else "none"), ({"id": 77} if ok else None)
+    monkeypatch.setattr(rva, "verified_authorization",
+                        lambda op_id, **kw: _A(phrase_ok(op_id, kw["approval_phrases"])))
+    console_app._R4_ENABLE_CACHE.clear()
+
+
+def test_apply_armed_fires_on_musa_verified_enable_without_env_flag(server, monkeypatch):
+    monkeypatch.setattr(console_app, "_R4_ENABLED", False)
+    monkeypatch.delenv("CONSOLE_R4_ENABLED", raising=False)
+    _musa_enable(monkeypatch, lambda op_id, ph: op_id == "console-r4-enable" and "ENABLE LANE APPLY" in ph)
+    p1, p2, p3 = _armed_patches()
+    ok = MagicMock(returncode=0, stdout="switched\n", stderr="")
+    with p1, p2, p3, patch("subprocess.run", return_value=ok) as run:
+        r = httpx.post(server + "/api/apply-armed", headers=HA(),
+                       json={"session": "cosem-tdu", "kind": "token", "confirm": "cosem-tdu"}, timeout=5)
+    console_app._R4_ENABLE_CACHE.clear()
+    assert r.status_code == 200 and r.json()["ok"] is True
+    run.assert_called_once()
+
+
+def test_apply_armed_still_503_with_no_flag_and_no_musa_enable(server, monkeypatch):
+    monkeypatch.setattr(console_app, "_R4_ENABLED", False)
+    monkeypatch.delenv("CONSOLE_R4_ENABLED", raising=False)
+    _musa_enable(monkeypatch, lambda op_id, ph: False)
+    p1, p2, p3 = _armed_patches()
+    with p1, p2, p3, patch("subprocess.run") as run:
+        r = httpx.post(server + "/api/apply-armed", headers=HA(),
+                       json={"session": "cosem-tdu", "kind": "token", "confirm": "cosem-tdu"}, timeout=5)
+    console_app._R4_ENABLE_CACHE.clear()
+    assert r.status_code == 503 and "ENABLE LANE APPLY" in r.json()["error"]
+    run.assert_not_called()

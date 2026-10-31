@@ -127,3 +127,50 @@ def test_parse_cc_env_normalizes_raw_strings():
     })
     assert s["busy"] is True and s["empty"] is False and s["partial_ok"] is True
     assert s["n"] == 3 and s["capture_ok"] is True
+
+
+# ── Musa op#34916: the probe arms on MUSA's verified word, never on a cai sign ─
+class _Auth:
+    def __init__(self, ok, reason="", row=None):
+        self.ok, self.reason, self.row = ok, reason, row
+
+
+def test_probe_arm_status_true_only_on_a_musa_verified_authorization():
+    seen = {}
+    def verify(op_id, **kw):
+        seen.update(op_id=op_id, **kw)
+        return _Auth(True, "ok", {"id": 4242})
+    armed, why = oracle.probe_arm_status(verify=verify)
+    assert armed is True and "4242" in why
+    assert seen["op_id"] == "oracle-probe-arm"
+    assert oracle.PROBE_ARM_PHRASE in seen["approval_phrases"]
+    assert set(seen["op_tokens"]) >= {"oracle", "probe"}
+
+
+def test_probe_arm_status_false_when_no_verified_authorization():
+    armed, why = oracle.probe_arm_status(verify=lambda op_id, **kw: _Auth(False, "no matching row"))
+    assert armed is False and "no matching row" in why
+
+
+def test_probe_arm_status_fails_closed_on_any_error():
+    def boom(op_id, **kw):
+        raise RuntimeError("db down")
+    armed, why = oracle.probe_arm_status(verify=boom)
+    assert armed is False and "RuntimeError" in why
+
+
+def test_default_probe_consults_the_verified_arm_and_stays_inert_without_it():
+    touched = {"n": 0}
+    v = oracle.probe_confirm_empty("quality", sendkeys=lambda *a, **k: touched.__setitem__("n", 1),
+                                   arm_check=lambda: (False, "no arm"))
+    assert v.state == UNSURE and touched["n"] == 0
+
+
+def test_armed_but_unbuilt_probe_fails_safe_never_raises_never_touches_pane():
+    # Arming is now Musa's call, but the mutating probe itself is still unbuilt:
+    # an arm must NOT crash the oracle or type into a live pane.
+    touched = {"n": 0}
+    v = oracle.probe_confirm_empty("quality", armed=True,
+                                   sendkeys=lambda *a, **k: touched.__setitem__("n", 1))
+    assert v.state == UNSURE and "unbuilt" in v.reason
+    assert touched["n"] == 0
