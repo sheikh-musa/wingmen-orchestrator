@@ -89,6 +89,18 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**22:43Z — 774 MERGED at `d7f0f13b87e3ec8010cfb528b3120f52bacd5ced`** (console's waiter, CI success).
+**Verified in trunk:** `origin/fable/substrate-safe-fixes:scripts/substrate_rotation_executor.py` =
+blob `a7bf4c01…` (exactly the blob cc-quality passed) and defines `_scrub`. **The measured leak is
+closed in trunk as of 22:43Z.** → **All three of the console's 87921 gate conditions are now MET**
+(a: 774 PASS+merged, b: heartbeat, c: sudo gap), seven hours before the window.
+
+**785 head → `580766b`** (rebased onto post-774 base; placeholder replaced with the real
+`d7f0f13b…`). Still one file (+25/-1). cc-quality asked to PASS the new head (88428).
+
+**03:30Z checklist still owed:** (1) re-run the PAT check, (2) confirm 785 landed so step zero is
+live in the doc, (3) confirm base has not moved the executor blob off `a7bf4c01` since 22:43Z.
+
 **22:39Z — 774 PASSed by cc-quality at the rebased head (row 88411)**, verified by object identity
 (both files' blobs identical to `cee1dd4`; dependency `rotate_substrate_dsn.py` blob `f4b64c23`
 unmoved). Console sent the row id + sha (88415). **cc-quality's 88145 read the RUNBOOK ONLY** — their
