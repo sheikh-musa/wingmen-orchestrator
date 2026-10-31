@@ -923,14 +923,19 @@ def _session_exists(target) -> bool:
 def nudge_session(target: str, channel_key: str, n_unread: int, *, urgent: bool = False) -> bool:
     """Count-only nudge. NEVER carries payload (CAI-RESP-357). Best-effort
     signal — delivery is guaranteed by the log + reconciliation, not by this.
+    Sends ONLY the 3-key sequence below (C-u, the nudge line, Enter) — no
+    session ever gets a keystroke beyond that, `urgent` or not.
 
-    `urgent`: when True AND `target` is in ESCAPE_PREEMPT_TARGETS, sends
-    Escape BEFORE the clear+type+Enter sequence below (Musa op#36085/36098)
-    — a busy/mid-tool-call pane otherwise just queues these keystrokes
-    behind whatever it's doing, which is the exact 'URGENT did not interrupt
-    anything' failure this closes. Tested clean on a throwaway pane,
-    2026-10-30 — see ESCAPE_PREEMPT_TARGETS' comment for what was verified
-    and what Escape does NOT do (it doesn't force-kill a running command)."""
+    REMOVED FOR GOOD (op#36509/36510/36515, 2026-10-31): `urgent` used to send
+    Escape first on an allowlisted target, to preempt a busy pane. In
+    production this sent Escape into the live `nazim` console pane on a
+    forced nudge mid-tool-call; Claude Code reads that as a user rejection
+    and reports STOP, which froze the console for ~40 min while the operator
+    was ignored (Musa op#36509, angry). The 2026-10-30 throwaway-pane test
+    that cleared this for ship never covered a pane with a live running tool
+    call — exactly the case that broke. Stopgap was env-only
+    (ESCAPE_PREEMPT_TARGETS emptied); this removes the send-keys call site
+    itself so no env/config state can ever re-arm it."""
     tmux = shutil.which("tmux") or "/opt/homebrew/bin/tmux"
     line = (f"\U0001F4E5 {n_unread} unread on '{channel_key}' — "
             f"reconcile operator_log.unprocessed()")
@@ -943,10 +948,6 @@ def nudge_session(target: str, channel_key: str, n_unread: int, *, urgent: bool 
     try:
         subprocess.run([tmux, "has-session", "-t", f"={target}"],
                        check=True, capture_output=True, timeout=5)
-        if urgent and target in ESCAPE_PREEMPT_TARGETS:
-            subprocess.run([tmux, "send-keys", "-t", f"={target}:0.0", "Escape"],
-                           check=True, capture_output=True, timeout=5)
-            time.sleep(0.5)
         # Clear any leftover unsent text FIRST (C-u). 2026-07-04: the orch idled
         # with an unsent draft ('ping me when...') and the nudge got appended onto
         # it instead of landing — the operator's 'status' was silently swallowed.
@@ -1021,22 +1022,6 @@ OPERATOR_MAX_DEFER_SEC = 120
 # actually doing right now) so it is NOT used here — the most recent outbound
 # agent_messages row is the live signal instead.
 TARGET_TO_AGENT_ID = {"orch": "cc-orchestrator", "nazim": "orch-console"}
-
-# Escape-first hard preemption on URGENT (same op refs). Tested clean on a
-# disposable throwaway tmux pane, 2026-10-30, both required cases: Escape
-# mid-Bash-tool-call returns the pane to an idle, input-ready prompt within
-# ~1s (the underlying shell command is NOT force-killed — it keeps running
-# detached to its own natural completion, which is fine for our purpose:
-# this means "stop waiting, read input now," not "abort what's running");
-# Escape during an active permission-confirmation dialog cleanly rejects that
-# one action and returns to idle, no corruption either case. Per-target
-# ALLOWLIST, not a global flag: 'nazim' ships first (lower blast radius, Musa
-# accepted the risk there, bus #84092); 'orch' (the hub) stays OFF until
-# explicitly ungated — a bad interrupt on the hub's live pane is a different,
-# higher-blast-radius risk than on the console's.
-ESCAPE_PREEMPT_TARGETS = {
-    t.strip() for t in os.environ.get("ESCAPE_PREEMPT_TARGETS", "nazim").split(",") if t.strip()
-}
 
 
 def pane_working(session: str) -> bool:
@@ -1266,8 +1251,8 @@ def drain_stale_deferred(conn, ch: "Channel") -> None:
         return
     ch._last_forced_nudge_id = newest_id
     # Past the (possibly tightened) defer cap is itself the "stop waiting"
-    # signal this exists for — treat it as urgent so an Escape-eligible
-    # target (ESCAPE_PREEMPT_TARGETS) actually preempts, not just queues.
+    # signal this exists for — treat it as urgent (urgent is currently a
+    # no-op inside nudge_session; see its docstring, op#36509).
     if nudge_session(target, ch.key, n, urgent=True):
         _log_line(f"{ch.key}: {n} unhandled past {defer_cap}s — FORCED nudge (max-latency cap)")
     else:

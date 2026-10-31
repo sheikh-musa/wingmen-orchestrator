@@ -1,9 +1,12 @@
 """Musa op#36085/36087/36098, 2026-10-30: 'the console must be always on, always
 snappy.' An operator message got only the canned auto-ack, his URGENT reply did
 not interrupt anything, and no check of the inbox happened for minutes. These
-tests cover the three code-level pieces that close that gap in
-nervous_system/ingest.py: (1) nudge_session's Escape-first preemption on
-urgent=True, scoped to ESCAPE_PREEMPT_TARGETS only; (2) the tighter
+tests cover the code-level pieces that close that gap in nervous_system/ingest.py:
+(1) nudge_session NEVER sends Escape, urgent or not (op#36509/36510/36515,
+2026-10-31: the original Escape-first preemption shipped here sent Escape into
+the LIVE nazim console pane on a forced nudge mid-tool-call, which Claude Code
+reads as a user rejection and reports STOP — froze the console for ~40 min while
+the operator was ignored; removed for good, not just gated off); (2) the tighter
 OPERATOR_ACK_AFTER_SEC/OPERATOR_MAX_DEFER_SEC applied only to
 OPERATOR_CHANNEL_TAGS, leaving client-channel timing untouched; (3)
 _live_status_suffix's best-effort live text, with a hard cutoff so it never
@@ -15,7 +18,7 @@ import pytest
 from nervous_system import ingest
 
 
-# ── nudge_session: Escape-first preemption ──────────────────────────────────
+# ── nudge_session: never sends Escape ───────────────────────────────────────
 
 class _FakeRun:
     """Records every subprocess.run([tmux, ...]) call's argv; always 'succeeds'."""
@@ -33,7 +36,6 @@ def fake_tmux(monkeypatch):
     monkeypatch.setattr(ingest.subprocess, "run", run)
     monkeypatch.setattr(ingest.time, "sleep", lambda *_: None)
     monkeypatch.setattr(ingest.fire_window, "is_held", lambda *_: False)
-    monkeypatch.setattr(ingest, "ESCAPE_PREEMPT_TARGETS", {"nazim"})
     return run
 
 
@@ -42,26 +44,30 @@ def _sent_keys(run, target):
     return [c[-1] for c in run.calls if c[:2] == [ingest.shutil.which("tmux") or "/opt/homebrew/bin/tmux", "send-keys"] and f"={target}:0.0" in c]
 
 
-def test_urgent_on_escape_eligible_target_sends_escape_first(fake_tmux):
-    ok = ingest.nudge_session("nazim", "nazim-console", 2, urgent=True)
+@pytest.mark.parametrize("target,channel,urgent", [
+    ("nazim", "nazim-console", True),
+    ("nazim", "nazim-console", False),
+    ("orch", "orch-channel", True),
+    ("orch", "orch-channel", False),
+])
+def test_nudge_session_never_sends_escape(fake_tmux, target, channel, urgent):
+    ok = ingest.nudge_session(target, channel, 2, urgent=urgent)
     assert ok is True
-    sent = _sent_keys(fake_tmux, "nazim")
-    assert sent[0] == "Escape", f"Escape must be the first key sent, got {sent}"
+    sent = _sent_keys(fake_tmux, target)
+    assert "Escape" not in sent, (
+        f"nudge_session must NEVER send Escape (op#36509) -- got {sent} for "
+        f"target={target!r} urgent={urgent}"
+    )
     assert "C-u" in sent and "Enter" in sent
+    # exactly the 3-key sequence the docstring promises -- no 4th/extra key ever
+    assert len(sent) == 3, f"nudge_session must send exactly 3 keys (C-u, line, Enter), got {sent}"
 
 
-def test_urgent_on_non_eligible_target_does_not_send_escape(fake_tmux):
-    ok = ingest.nudge_session("orch", "orch-channel", 2, urgent=True)
-    assert ok is True
-    sent = _sent_keys(fake_tmux, "orch")
-    assert "Escape" not in sent, "orch is not in ESCAPE_PREEMPT_TARGETS -- must stay gated"
-
-
-def test_non_urgent_on_eligible_target_does_not_send_escape(fake_tmux):
-    ok = ingest.nudge_session("nazim", "nazim-console", 2, urgent=False)
-    assert ok is True
-    sent = _sent_keys(fake_tmux, "nazim")
-    assert "Escape" not in sent, "only urgent=True preempts, never a default-priority nudge"
+def test_nudge_session_escape_preempt_targets_is_gone():
+    # op#36509/36510/36515: the constant that used to gate the (now-removed)
+    # Escape send is gone entirely, not just defaulted empty -- no env var can
+    # ever re-arm this.
+    assert not hasattr(ingest, "ESCAPE_PREEMPT_TARGETS")
 
 
 # ── operator-channel SLA tightening ──────────────────────────────────────────
