@@ -89,6 +89,22 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**21:45Z gate — sent as bus 88223 (P1, requires_response).** Applied the console's own rule from
+87921 (`GO at 22:00Z only if 774 PASS+merged, heartbeat answered, sudo gap closed`). Result: **NO-GO**
+on two of three, so the window moves to **Sunday 2026-11-01 04:00Z**.
+ (a) 774 = PASS at `cee1dd4` (88101) but its CI run has been pending/queued since 20:55Z — the runners
+     are **cubeasht-orchestrator and cubeasht-orchestrator-2** (NOT the Mini, which I had wrongly said
+     earlier in this file), both online, both busy, two branches ahead. Cannot clear before the gate.
+ (b) heartbeat = MET. Premise evidence for (a)-of-87921: in `scripts/boot_nazim.sh` the heartbeat is a
+     function backgrounded at boot (line 178, HB_PID at 179) — a running subshell never re-reads it, so
+     the on-disk fallback could not have avoided restarts. EXIT trap kills HB then stamps
+     `last_heartbeat=now()` with status offline (lines 194/200) — that is *why* recency alone reads alive
+     at the moment of death, and why the ≥330s two-sample recipe is the correct verify.
+ (c) sudo gap = FAILS: both VPS units missing from NOPASSWD, no substitute account (88153).
+
+Left with the console: pin/merge 774 when its check lands (or defer post-window), close or explicitly
+accept the sudo blind spot, confirm Sunday keeps the same order with the console last.
+
 **21:36Z merges.** 761 merged by me at `672d01d` (`merge_pinned`, rebase-confirm 88138). 773 was
 already merged by the console's waiter when I tried — the gate said so plainly. **Residual worth
 reporting, not fixing tonight:** `merge_pinned.sh` prints `MERGED <n> at <sha>` and exits 0 even when
