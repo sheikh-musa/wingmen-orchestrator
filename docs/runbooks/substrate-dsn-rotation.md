@@ -71,8 +71,47 @@ that check is a reason to defer the cleanup, never a reason to widen tonight's r
 
 ## 1. Plan (harmless, do this first, always)
 
+**Step zero — prove the executor in front of you is the hardened one.** The toolchain
+landed in the tree in an awkward order: the runbook's merge (776, `55473ba`) carried an
+earlier copy of the executor, and 774 replaced it with the version that scrubs every
+emitted string. Running the earlier copy is not a style issue — measured against it on
+2026-10-31, three of its eight failure branches printed the credential, and its probe
+exception escaped uncaught with the DSN in the traceback. So check the file, not the
+branch name, and check it before the first step:
+
 ```bash
-cd ~/wingmen/projects/orchestrator.wt-exec      # the worktree carrying the executor
+cd ~/wingmen/orchestrator                # the live checkout, the tree the hooks run from
+git merge-base --is-ancestor d7f0f13b87e3ec8010cfb528b3120f52bacd5ced HEAD && echo "774 present" \
+  || { echo "774 ABSENT — STOP"; exit 1; }
+grep -q "Scrub EVERY string that leaves this process" scripts/substrate_rotation_executor.py \
+  && echo "executor hardened" || { echo "UNHARDENED — STOP"; exit 1; }
+```
+
+`d7f0f13b87e3ec8010cfb528b3120f52bacd5ced` is PR 774's merge commit (2026-10-31 22:43Z).
+If a later PR changes the executor again, that check still passes and the file check below is
+the one that keeps working — which is why both are here. Both must pass; either failure means
+stop before doing anything else. A rotation executed
+by the unhardened copy can print the live password — to a terminal, the journal, or an
+error report — at the exact moment it is changing it.
+
+**The marker is the comment, not `def _scrub`, and that distinction is measured.** Checking
+that the method is *defined* would have passed an executor that still leaked: the head
+cc-quality failed on 2026-10-31 (`e02a0e2c`) has `def _scrub` once and the hardening comment
+zero times, and it printed the credential on its Refusal and exception branches. The leak was
+a missing *call*, not a missing definition. Marker counts, verified against the blobs:
+
+| executor | `def _scrub` | hardening comment | verdict |
+|---|---|---|---|
+| `e02a0e2c` — failed for leaking | 1 | 0 | would falsely pass |
+| `55473ba` — the copy 776 put in trunk | 0 | 0 | correctly stops |
+| `d7f0f13` — in trunk now | 1 | 1 | correctly passes |
+
+So if a future reader wonders why the grep is that specific comment rather than something
+stable-looking, this is why: it is the only one of the two that discriminates.
+
+Then, from the same checkout:
+
+```bash
 PY=~/wingmen/orchestrator/.venv/bin/python3     # the live venv; name it explicitly
 $PY scripts/substrate_rotation_executor.py plan \
     --env-file ~/wingmen/orchestrator/.env \
