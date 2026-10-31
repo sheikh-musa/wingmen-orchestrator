@@ -182,7 +182,12 @@ _SHARED_FEED_TAGS = ("war-room", "hafiz-partner")
 # 'internal', owner_lane='coffeemedia' -- the lane answers and reconciles this tag itself,
 # same as coffeemedia/brandit-coffeemedia; nothing for the console to pick up here.
 _LANE_OWNED_TAGS = ("irsyad-drill", "gazzabyte-irsyad", "hk-editor", "mamadah", "coffeemedia",
-                     "brandit-coffeemedia", "coffeemedia-hamhuskies-test")
+                     "brandit-coffeemedia", "coffeemedia-hamhuskies-test",
+                     "modestyhut")  # 2026-11-01: cc-shipforge lane owns this client channel
+                                    # (inject_target=shipforge, same shape as hk-editor) -- the
+                                    # console must NOT reconcile it (script's auto-lockstep puts
+                                    # audience=client titles in _CONSOLE_POLLED_CLIENT_TAGS;
+                                    # lane-owned placement corrected here).
 
 # Client channels the Mini's nazim-ingest actually POLLS (scripts/boot_nazim_ingest.sh
 # INGEST_CHANNELS) that the CONSOLE body (not a dedicated lane, not the hub) reconciles.
