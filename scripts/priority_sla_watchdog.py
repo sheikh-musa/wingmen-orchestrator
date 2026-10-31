@@ -1423,9 +1423,16 @@ def _fetch_party_update_open_items(conn):
     Reuses build_open_items_query() (Phase 1's SQL, now shared) + the same
     annotate_status_rows() the status board calls, then filters to the
     exact slice this net owns: waiting_party='operator' (Phase 2's explicit
-    scope — a client-channel item is Phase 3), overdue=True, and NOT a
-    commitment the sweeper already escalated (overdue_reason='fired' is its
-    breach-escalation path, not ours to double-chase)."""
+    scope — a client-channel item is Phase 3), overdue=True, and not one
+    already owned by a DIFFERENT net's own escalation path (review-pass,
+    op#34349/34354): a commitment the sweeper already escalated
+    (overdue_reason='fired'), a commitment the sweeper is ABOUT to escalate
+    on its own next pass (status='pending' AND due_at<=now() is exactly
+    commitment_sweeper.py's own fire condition — overdue_reason='past_due'),
+    or an ask already claimed by the EXISTING asks_chase net
+    (status='waiting_on_musa', i.e. waiting_on_operator/needs_operator_decision
+    — that net's whole point is "go chase Musa", the opposite instruction
+    from this net's "the operator is owed a status")."""
     sql, params = build_open_items_query()
     with conn.cursor() as cur:
         cur.execute(sql, params)
@@ -1435,8 +1442,39 @@ def _fetch_party_update_open_items(conn):
         r for r in annotate_status_rows(rows)
         if r.get("waiting_party") == "operator"
         and r.get("overdue")
-        and r.get("overdue_reason") != "fired"
+        and _party_update_eligible(r)
     ]
+
+
+def _party_update_eligible(r: dict) -> bool:
+    """PURE: the exclusions shared by both the fetch filter above and
+    party_update_chase_targets below (defensive — the pure function
+    rechecks these so a caller that hands it unfiltered rows, like this
+    file's own unit tests, still gets correct behavior)."""
+    if r.get("overdue_reason") == "fired":
+        return False
+    if r.get("kind") == "commitment" and r.get("overdue_reason") == "past_due":
+        return False
+    if r.get("status") == "waiting_on_musa":
+        return False
+    return True
+
+
+def _party_update_chase_key(r: dict) -> str:
+    """operator_asks and held_commitments are separate tables with
+    overlapping ids — keying chase_state on the bare numeric id let chasing
+    one silence the other. `source` ("operator_asks#N"/"held_commitments#N",
+    annotate_status_rows' own field) disambiguates; unit tests that build
+    rows by hand without a `source` key fall back to kind+id."""
+    return r.get("source") or f"{r.get('kind')}#{r.get('id')}"
+
+
+def _base_agent_id(owner: Optional[str]) -> str:
+    """all_lane_map() keys by BASE agent id; an owner recorded as a live
+    numbered instance (delegated_to='cc-irsyad-coord-3') looked up directly
+    against it always misses and reads as idle. Same strip resolve_recipient
+    already uses for the down-lane/live-instance check."""
+    return re.sub(r"-\d+$", "", owner or "")
 
 
 def party_update_chase_targets(rows, *, now, chase_state, active_turn_check,
@@ -1445,12 +1483,15 @@ def party_update_chase_targets(rows, *, now, chase_state, active_turn_check,
     """PURE: select which dark operator-facing rows to chase this scan.
 
     Dead-man's-switch dedup (own `chase_state` namespace, `{"last_chase_ts":
-    ts}` per row id) — a row chased within `chase_every_min` of its last
-    chase is skipped. `active_turn_check(owner) -> bool` is INJECTED (never
-    called directly here) so this stays unit-testable without tmux — the
-    stronger pane_busy oracle (the 2026-10-26 near-miss, bus #76991/#76993/
-    #76998), not the weaker 'esc to interrupt' substring check the older
-    chase nets lean on at send time. Rows already arrive darkest-first
+    ts}` per `_party_update_chase_key` — never a bare id) — a row chased
+    within `chase_every_min` of its last chase is skipped. The cadence check
+    runs BEFORE `active_turn_check` (cheap-first — pane_busy is a subprocess
+    call per owner; no need to pay it for a row the backoff would skip
+    anyway). `active_turn_check(owner) -> bool` is INJECTED (never called
+    directly here) so this stays unit-testable without tmux — the stronger
+    pane_busy oracle (the 2026-10-26 near-miss, bus #76991/#76993/#76998),
+    not the weaker 'esc to interrupt' substring check the older chase nets
+    lean on at send time. Rows already arrive darkest-first
     (annotate_status_rows' own sort), so the per-scan cap naturally keeps
     the quietest items. Does NOT mutate chase_state — stamping happens only
     on the caller's later confirmation of a successful send (mirrors
@@ -1459,12 +1500,12 @@ def party_update_chase_targets(rows, *, now, chase_state, active_turn_check,
     for r in rows:
         if r.get("waiting_party") != "operator":
             continue
-        if r.get("overdue_reason") == "fired":
+        if not _party_update_eligible(r):
+            continue
+        last = (chase_state.get(_party_update_chase_key(r), {}) or {}).get("last_chase_ts", 0) or 0
+        if (now - last) < chase_every_min * 60:
             continue
         if active_turn_check(r.get("owner")):
-            continue
-        last = (chase_state.get(str(r.get("id")), {}) or {}).get("last_chase_ts", 0) or 0
-        if (now - last) < chase_every_min * 60:
             continue
         due.append(r)
         if len(due) >= max_targets:
@@ -1491,7 +1532,7 @@ def chase_party_update(targets, *, dry, now, chase_state, send_chase,
             continue
         ok = send_chase(t.get("owner"), t)
         if ok:
-            chase_state[str(t["id"])] = {"last_chase_ts": now}
+            chase_state[_party_update_chase_key(t)] = {"last_chase_ts": now}
             sent += 1
             sent_list.append((t["id"], t.get("owner")))
         else:
@@ -1503,11 +1544,23 @@ def chase_party_update(targets, *, dry, now, chase_state, send_chase,
 _PARTY_UPDATE_UNREACHABLE_OWNERS = frozenset({"musa", "cai"}) | frozenset(HUB_SESSIONS)
 
 
-def _send_party_update_chase(conn, owner: str, target: dict) -> bool:
-    """Impure: post ONE P1 nudge to the owning agent naming the SPECIFIC
-    overdue item (never the generic '_countonly_line' SLA-violation text),
-    so the owner's next turn-start reconcile knows a status PUSH — not an
-    inbox drain — is owed. Returns True only on a committed insert.
+def _send_party_update_chase(conn, owner: str, target: dict, recipient_resolution=None) -> bool:
+    """Impure: post ONE P2+requires_response nudge to the owning agent naming
+    the SPECIFIC overdue item (never the generic '_countonly_line'
+    SLA-violation text), so the owner's next turn-start reconcile knows a
+    status PUSH — not an inbox drain — is owed. Returns True only on a
+    committed insert.
+
+    Posts via post_agent_message() RPC on the EXISTING conn, exactly like
+    _send_asks_chase/_send_client_ask_chase — NEVER bus_send.send(), whose
+    refuse_if_undeliverable raises SystemExit for an owner that is a tmux
+    name rather than a registered agents.id, or 'unassigned'. SystemExit is
+    not an Exception subclass: an uncaught one here would abort the whole
+    scan loop and lose every OTHER net's state for the cycle (final-review
+    finding, op#34349/34354). `recipient_resolution`, when given, resolves
+    `owner` through resolve_recipient() first and skips the insert entirely
+    (same bugs as bus#67757/#67841/#67958) rather than attempting a doomed
+    send.
 
     An owner that is musa/cai/a hub session gets the same unreachable-owner
     treatment renudge() already uses for them (log + skip, never crash the
@@ -1517,15 +1570,31 @@ def _send_party_update_chase(conn, owner: str, target: dict) -> bool:
         log(f"party-update-chase SKIP {target.get('kind')}#{target.get('id')} "
             f"-> unreachable owner {owner!r}")
         return False
+    if recipient_resolution is not None:
+        resolved, reason = resolve_recipient(owner, *recipient_resolution)
+        if resolved is None:
+            log(f"party-update-chase SKIPPED {target.get('kind')}#{target.get('id')} -> {owner}: {reason}")
+            return False
+        owner = resolved
+    if target.get("kind") == "commitment":
+        clears_on = ("touching held_commitments.updated_at for this row — discharge it "
+                     "(scripts/held_commitments discharge path) or any UPDATE that bumps "
+                     "updated_at. A bus message or nazim_send.sh does NOT clear it.")
+    else:
+        clears_on = ("replying IN THIS ASK'S OWN BUS THREAD (not a DM) — that reply is "
+                     "what moves its clock on the next status-board read.")
     subj = (f"[party-update-overdue] {target['kind']}#{target['id']} has been "
             f"quiet — operator is owed a status")
     body = (f"{target['title'][:200]!r} (owner={owner}) has had no update to the "
-            f"operator in over {STATUS_CADENCE_S['operator'] // 3600}h. Post a "
-            f"one-line status to the operator now (bus or nazim_send.sh per "
-            f"channel ownership), then it clears on the next status-board read.")
+            f"operator in over {STATUS_CADENCE_S['operator'] // 3600}h. Clear it by "
+            f"{clears_on}")
     try:
-        bus_send.send(from_agent="sla-watchdog", to=owner, mtype="blocker",
-                       subject=subj, body=body, priority="P2", req=True)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM post_agent_message('sla-watchdog', %s, %s, %s, %s, "
+                "'P2', true, %s, %s, %s, %s)",
+                (owner, PAGE_MESSAGE_TYPE, subj, body, str(uuid.uuid4()), None, False, None))
+        conn.commit()
         log(f"party-update-chase SENT {target.get('kind')}#{target.get('id')} -> {owner}")
         return True
     except Exception as e:
@@ -2433,24 +2502,32 @@ def run(dry: bool, injected: list[dict] | None = None,
         # every net above) until orch-console arms it after reading a
         # dry-run scan.
         party_update_dry = _gated_dry(dry, "SLA_PARTY_UPDATE_CHASE_ENABLED")
+        party_targets, party_sent = [], 0
         try:
             party_chase_state = state.setdefault("party_update_chase", {})
             party_targets = party_update_chase_targets(
                 _fetch_party_update_open_items(conn), now=now, chase_state=party_chase_state,
-                active_turn_check=lambda a: _recipient_active_turn(all_lanes.get(a, [])),
+                active_turn_check=lambda a: _recipient_active_turn(all_lanes.get(_base_agent_id(a), [])),
                 max_targets=MAX_PARTY_UPDATE_CHASE_PER_RUN)
             if party_targets:
                 n, sent_list = chase_party_update(
                     party_targets, dry=party_update_dry, now=now, chase_state=party_chase_state,
-                    send_chase=lambda owner, t: _send_party_update_chase(conn, owner, t),
+                    send_chase=lambda owner, t: _send_party_update_chase(
+                        conn, owner, t, recipient_resolution=recipient_resolution),
                     max_chases=MAX_PARTY_UPDATE_CHASE_PER_RUN)
+                party_sent = n
                 for t in party_targets:
                     actions.append(f"{'[DRY] ' if party_update_dry else ''}PARTY-UPDATE-CHASE "
                                    f"{t['kind']}#{t['id']} -> owner {t.get('owner')}")
                 log(f"party-update-chase [{'DRY/observe' if party_update_dry else 'ARMED'}] "
-                    f"sent={0 if party_update_dry else n}/{len(party_targets)}")
+                    f"sent={0 if party_update_dry else n}/{len(party_targets)} due: "
+                    + ", ".join(f"{t['kind']}#{t['id']}->{t.get('owner')}" for t in party_targets))
         except Exception as e:  # fail LOUD, keep the scan alive
             log(f"party-update-chase ERROR: {e!r}")
+        if not party_update_dry:
+            zero_send_check(state, "party-update-chase",
+                             [dict(t, delegated_to=t.get("owner")) for t in party_targets],
+                             party_sent)
 
         if persist:
             save_state(state)
