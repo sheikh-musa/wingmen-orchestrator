@@ -59,32 +59,56 @@ lane_exists_any_state() {
     "SELECT desired_state FROM fleet_lanes WHERE lane = '${want}' AND launcher = 'launch_dangerous_cc.sh';"
 }
 
-# Resolve lsof's ABSOLUTE path. PATH is tried first so a test/stub bin dir can override it,
-# then the two system locations. `lsof` lives at /usr/sbin/lsof on macOS, and /usr/sbin is
-# NOT on the PATH a launchd job, a cron entry, or a tool shell may hand us. Without this,
-# `command not found` produced EMPTY output, which every caller read as "no lane is running".
-resolve_lsof() {
+# Resolve a required binary to an ABSOLUTE path. PATH is tried first so a test/stub bin dir
+# can override it, then the caller's system fallbacks. Both tools this probe needs live
+# outside the PATH a launchd job, a cron entry, or a reduced tool shell may hand down
+# (`lsof` is /usr/sbin/lsof; /usr/sbin is often absent), and "command not found" used to
+# produce EMPTY output that every caller read as "no lane is running".
+resolve_tool() {
+  local name="$1"; shift
   local c
-  if c="$(command -v lsof 2>/dev/null)" && [ -n "$c" ]; then printf '%s\n' "$c"; return 0; fi
-  for c in /usr/sbin/lsof /usr/bin/lsof; do
+  if c="$(command -v "$name" 2>/dev/null)" && [ -n "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  for c in "$@"; do
     [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
   done
   return 1
 }
+
+resolve_lsof()  { resolve_tool lsof  /usr/sbin/lsof /usr/bin/lsof; }
+resolve_pgrep() { resolve_tool pgrep /usr/bin/pgrep /usr/sbin/pgrep /bin/pgrep; }
 
 # Absolute cwd of every running `claude --dangerously-skip-permissions` process.
 # Returns NON-ZERO when liveness cannot be determined, so callers can fail CLOSED. An
 # empty-but-successful list still means "no claude is running" — the two must not be
 # confused: the first is "I cannot tell", the second is "nobody is there", and only the
 # second may ever authorise starting a second claude in a worktree.
+#
+# BOTH tools are resolved and checked. lsof was the reported hole; pgrep is the same class
+# (an unresolvable pgrep yields an empty pid list, which is indistinguishable from "none
+# running") and is resolved here too so the guarantee is whole rather than half-applied.
 running_cwds() {
-  local lsof_bin
+  local lsof_bin pgrep_bin pids rc
   if ! lsof_bin="$(resolve_lsof)"; then
     echo "lanes.sh: REFUSING — cannot locate lsof (checked PATH, /usr/sbin/lsof, /usr/bin/lsof)." >&2
     echo "lanes.sh: lane liveness is UNKNOWN; a 'down' reading here would be a guess." >&2
     return 3
   fi
-  for pid in $(pgrep -f 'claude --dangerously-skip-permissions' 2>/dev/null); do
+  if ! pgrep_bin="$(resolve_pgrep)"; then
+    echo "lanes.sh: REFUSING — cannot locate pgrep (checked PATH, /usr/bin, /usr/sbin, /bin)." >&2
+    echo "lanes.sh: lane liveness is UNKNOWN; a 'down' reading here would be a guess." >&2
+    return 3
+  fi
+  # pgrep's OWN failure must not read as "no processes": exit 1 is its documented
+  # "nothing matched", anything else (2 = usage/regex error) is an unusable probe.
+  # `|| rc=$?` — NOT a bare assignment followed by `rc=$?`, which would let set -e kill
+  # the script on pgrep's own exit 1 (the "no processes" case) before it could be read.
+  rc=0
+  pids="$("$pgrep_bin" -f 'claude --dangerously-skip-permissions' 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+    echo "lanes.sh: REFUSING — pgrep failed (rc=$rc); lane liveness is UNKNOWN." >&2
+    return 3
+  fi
+  for pid in $pids; do
     "$lsof_bin" -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'
   done
 }

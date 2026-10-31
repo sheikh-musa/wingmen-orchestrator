@@ -127,6 +127,55 @@ def test_boot_one_refuses_when_probe_fails(tmp_path):
     assert r.returncode == 4, f"expected the run to abort with 4, got {r.returncode}"
 
 
+# pgrep is the SAME hole as lsof (cc-quality-2's advisory on PR#769): an unresolvable or
+# failing pgrep yields an empty pid list, which is indistinguishable from "no processes" and
+# therefore reports every lane "down". These pin the second half of the fail-closed guarantee.
+
+def _run_with_stubbed_resolvers(script_body: str, tmp_path: Path) -> subprocess.CompletedProcess:
+    bindir = _make_stubs(tmp_path, _MATCH_DIR)
+    script = f'export PATH="{bindir}:$PATH"\nsource "{_LANES_SH}"\n{script_body}'
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+
+def test_unresolvable_pgrep_is_unknown_not_down(tmp_path):
+    # lsof resolves (stub), pgrep does not → UNKNOWN (2), never "free" (1).
+    r = _run_with_stubbed_resolvers(
+        'resolve_pgrep() { return 1; }\n'
+        'if dir_has_claude "/tmp/wingmen-test/cosem-port-lane"; then echo YES; else echo "rc=$?"; fi\n',
+        tmp_path)
+    assert r.stdout.strip() == "rc=2", f"expected UNKNOWN (2), got {r.stdout!r} / {r.stderr!r}"
+    assert "pgrep" in r.stderr
+
+
+def test_failing_pgrep_is_unknown_not_down(tmp_path):
+    # A pgrep that ERRORS (exit 2) is an unusable probe, not "nothing matched" (exit 1).
+    bindir = _make_stubs(tmp_path, _MATCH_DIR)
+    (bindir / "pgrep").write_text("#!/usr/bin/env bash\nexit 2\n")
+    os.chmod(bindir / "pgrep", 0o755)
+    script = (
+        f'export PATH="{bindir}:$PATH"\nsource "{_LANES_SH}"\n'
+        'if dir_has_claude "/tmp/wingmen-test/cosem-port-lane"; then echo YES; else echo "rc=$?"; fi\n'
+    )
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert r.stdout.strip() == "rc=2", f"expected UNKNOWN (2), got {r.stdout!r} / {r.stderr!r}"
+    assert "pgrep failed" in r.stderr
+
+
+def test_pgrep_exit_1_means_no_match_and_is_a_real_answer(tmp_path):
+    # exit 1 = "nothing matched" is a DETERMINED answer: dir_has_claude must return 1 (free),
+    # and set -e must not kill the script on the way there.
+    bindir = _make_stubs(tmp_path, _MATCH_DIR)
+    (bindir / "pgrep").write_text("#!/usr/bin/env bash\nexit 1\n")
+    os.chmod(bindir / "pgrep", 0o755)
+    script = (
+        f'export PATH="{bindir}:$PATH"\nsource "{_LANES_SH}"\n'
+        'if dir_has_claude "/tmp/wingmen-test/cosem-port-lane"; then echo YES; else echo "rc=$?"; fi\n'
+        'echo REACHED-END\n'
+    )
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert r.stdout.strip().splitlines() == ["rc=1", "REACHED-END"], r.stdout + r.stderr
+
+
 def test_resolve_lsof_prefers_path_then_falls_back_to_system(tmp_path):
     # PATH first, so a stubbed bin dir still wins (the tests above depend on it)...
     bindir = _make_stubs(tmp_path, _MATCH_DIR)
