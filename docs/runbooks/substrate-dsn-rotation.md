@@ -96,8 +96,12 @@ plan: nothing written. Re-run with --execute --confirm rotate-substrate
 ```
 
 `targets=3` here would mean `--env-file` was omitted — **stop and re-run**, do not execute.
-`plan` writes nothing, patches nothing and stages nothing. If it refuses, it now says so as
-`plan: REFUSED — <reason>. Nothing written.` and exits 3 rather than printing a traceback.
+`plan` changes no target file, touches no database, stages nothing and restarts nothing. It
+**does** write one journal line for the preflight it ran (`reports/rotation/<UTC stamp>/
+journal.jsonl`, mode `0600`, counts and verdicts only — `targets`, `daemons`, `remote`), so
+a new directory under `reports/rotation/` after a plan run is expected, not a fault. If it
+refuses, it says so as `plan: REFUSED — <reason>. Nothing written.` and exits **3** rather
+than printing a traceback, and a refusal writes no journal at all.
 
 The interpreter's dependencies are part of this check: `psycopg` and `httpx` are imported
 lazily inside the steps that need them, so a missing one would otherwise first appear at the
