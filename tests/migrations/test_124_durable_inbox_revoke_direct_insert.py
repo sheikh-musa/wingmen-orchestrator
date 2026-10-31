@@ -514,6 +514,73 @@ def _setup_base_123_and_cai_schema(cur):
     cur.execute("GRANT INSERT ON agent_messages TO postgres")
 
 
+def _setup_base_123_only(cur):
+    """123's base schema (agent_messages, bus_writer, the 3 RPCs) with NO CAI
+    schema and NONE of the 5 postgres-owned functions -- reproduces CI's
+    ci_bootstrap_schema.py bootstrap, which replays migrations/*.sql from an
+    empty schema and has never created strategic_decisions/decision_audits/
+    audit_board_digest()/etc. (confirmed: none of them are created by any
+    migration file in this repo -- substrate-only drift). This is the exact
+    scenario that made CI fail on 89be7a90 ("function audit_board_digest()
+    does not exist"), reproduced here as TDD for the schema-drift guard
+    rather than relying on CI itself to prove it."""
+    migration_117 = (MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text()
+    migration_123 = (MIGRATIONS_DIR / "123_durable_inbox_enforce_bus_writer.sql").read_text()
+    migration_122 = (MIGRATIONS_DIR / "122_post_agent_message_optional_params.sql").read_text()
+
+    cur.execute("DROP SCHEMA public CASCADE")
+    cur.execute("CREATE SCHEMA public")
+    cur.execute("GRANT USAGE ON SCHEMA public TO PUBLIC")
+    cur.execute(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "GRANT EXECUTE ON FUNCTIONS TO anon, authenticated, service_role"
+    )
+
+    cur.execute(_AGENT_MESSAGES_SCHEMA)
+    cur.execute("ALTER TABLE agent_messages ENABLE ROW LEVEL SECURITY")
+    cur.execute(
+        "CREATE POLICY agent_messages_service_only ON agent_messages "
+        "FOR ALL TO service_role USING (true) WITH CHECK (true)"
+    )
+    cur.execute(migration_117)
+    cur.execute(migration_122)
+    cur.execute(_WORK_ITEM_MINIMAL)
+    cur.execute("GRANT SELECT, INSERT, UPDATE ON agent_messages TO service_role")
+    cur.execute("GRANT USAGE ON SEQUENCE agent_messages_id_seq TO service_role")
+    cur.execute("GRANT SELECT, INSERT, UPDATE ON work_item TO service_role")
+    cur.execute("GRANT INSERT ON work_item_audit TO service_role")
+    cur.execute(migration_123)
+    cur.execute("GRANT INSERT ON agent_messages TO postgres")
+
+
+@pytest.fixture
+def pre_124_db_no_cai_schema(pg_dsn):
+    """123 only, no CAI schema, no 5 functions at all -- the CI-bootstrap
+    scenario the schema-drift guard (bus #85479) exists for."""
+    with psycopg.connect(pg_dsn, autocommit=True) as super_conn, super_conn.cursor() as super_cur:
+        super_cur.execute("SELECT 1 FROM pg_roles WHERE rolname='live_applier'")
+        if super_cur.fetchone() is None:
+            super_cur.execute("CREATE ROLE live_applier LOGIN NOSUPERUSER CREATEROLE BYPASSRLS")
+        super_cur.execute("ALTER SCHEMA public OWNER TO live_applier")
+        super_cur.execute("GRANT CREATE ON DATABASE postgres TO live_applier")
+        for role in ("anon", "authenticated", "service_role", "postgres"):
+            super_cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+            if super_cur.fetchone() is None:
+                super_cur.execute(f"CREATE ROLE {role}")
+        super_cur.execute(
+            "GRANT anon, authenticated, service_role, postgres TO live_applier "
+            "WITH INHERIT FALSE, SET TRUE"
+        )
+
+    applier_dsn = pg_dsn.replace("user=postgres", "user=live_applier")
+    with psycopg.connect(applier_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        _setup_base_123_only(cur)
+
+    conn = psycopg.connect(applier_dsn)
+    yield conn
+    conn.close()
+
+
 @pytest.fixture
 def pre_124_db(pg_dsn):
     """123 + the CAI schema, all 5 functions still postgres-owned (pre-124
@@ -590,6 +657,71 @@ def test_raw_insert_as_service_role_fails_after_124(post_124_db):
                 "VALUES ('x','y','update','s','b')"
             )
     post_124_db.rollback()
+
+
+def test_124_applies_cleanly_without_cai_schema_present(pre_124_db_no_cai_schema):
+    """The actual CI failure this guard exists for (console bus #85479, CI
+    run 41157339739): ci_bootstrap_schema.py replays migrations/*.sql from an
+    empty schema and has never created audit_board_digest()/
+    strategic_decisions/etc. (substrate-only drift, confirmed absent from
+    every migration file). Before the schema-drift guard, migration 124's
+    first ALTER FUNCTION audit_board_digest() OWNER TO bus_writer failed
+    with UndefinedFunction and aborted the whole transaction -- losing the
+    guard trigger, self-test, and REVOKE too, not just the CAI re-pointing.
+    This reproduces that exact starting schema (no CAI tables/functions at
+    all) and confirms the migration now applies cleanly, and that the parts
+    of it which do NOT depend on the CAI schema (the guard trigger and the
+    in-migration self-test) still ran and still work."""
+    conn = pre_124_db_no_cai_schema
+    migration_124 = (MIGRATIONS_DIR / "124_durable_inbox_revoke_direct_insert.sql").read_text()
+    with conn.cursor() as cur:
+        cur.execute(am.strip_txn_control(am.strip_sql_comments(migration_124)))
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("SET ROLE postgres")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege) as excinfo:
+            cur.execute(
+                "INSERT INTO agent_messages "
+                "(from_agent, to_agent, message_type, subject, body) "
+                "VALUES ('x','y','update','s','b')"
+            )
+        assert "direct INSERT not allowed" in str(excinfo.value)
+    conn.rollback()
+
+    with conn.cursor() as cur:
+        cur.execute("SET ROLE bus_writer")
+        cur.execute(
+            "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body) "
+            "VALUES ('x','y','update','s','b') RETURNING id"
+        )
+        assert cur.fetchone() is not None
+        cur.execute("RESET ROLE")
+    conn.commit()
+
+
+def test_124_fails_closed_on_partial_cai_schema(pre_124_db_no_cai_schema):
+    """Neither a fresh bootstrap (ALL 5 objects absent, the case above) nor
+    the real substrate's normal state (ALL present) -- a genuine anomaly the
+    guard must not silently skip past. Simulated here by creating just
+    audit_board_digest() (one of the 5) on top of the no-CAI-schema fixture,
+    leaving strategic_decisions/decision_audits and the other functions
+    absent."""
+    conn = pre_124_db_no_cai_schema
+    with conn.cursor() as cur:
+        cur.execute(
+            "CREATE FUNCTION audit_board_digest() RETURNS void "
+            "LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$ "
+            "BEGIN END; $$"
+        )
+    conn.commit()
+
+    migration_124 = (MIGRATIONS_DIR / "124_durable_inbox_revoke_direct_insert.sql").read_text()
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.RaiseException) as excinfo:
+            cur.execute(am.strip_txn_control(am.strip_sql_comments(migration_124)))
+        assert "PARTIALLY present" in str(excinfo.value)
+    conn.rollback()
 
 
 def test_post_agent_message_rpc_path_unaffected_by_124(post_124_db):

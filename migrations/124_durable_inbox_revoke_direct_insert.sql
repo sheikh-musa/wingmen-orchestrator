@@ -93,6 +93,75 @@ SET LOCAL lock_timeout = '5s';
 -- their owner, and ALTER FUNCTION ... OWNER TO is the narrower statement for
 -- that -- it does not redefine or touch SECURITY DEFINER/search_path, which
 -- stay exactly as already set.
+--
+-- SCHEMA-DRIFT GUARD (console's ask, bus #85479, after CI failed on exactly
+-- this: "function audit_board_digest() does not exist"): none of these 5
+-- functions, OR the tables they touch (strategic_decisions, decision_audits,
+-- decision_tier_escalations, audit_board_digest_log, notification_log,
+-- decision_audit_state), are created by ANY migration file in this repo --
+-- confirmed by grep across migrations/, supabase/migrations/, and
+-- migrations/infra/ (the one infra/ file that redefines close_decision_by_
+-- audit is explicitly PROPOSE-ONLY, never auto-applied by anything). They
+-- exist only because someone created them directly on the live substrate.
+-- CI's ephemeral bootstrap (scripts/ci_bootstrap_schema.py) replays every
+-- migration from an empty schema and has genuinely never seen any of it.
+--
+-- Rather than infer "is this the real substrate" from connection metadata
+-- (fragile and, it turns out, not actually available: apply_migration.py
+-- does not stamp application_name or any other SQL-visible marker on a real
+-- apply -- confirmed by grep; tests/migrations/test_apply_migration.py's own
+-- application_name=<silo> suffix is a TEST-FIXTURE-ONLY convenience to
+-- satisfy the residency guard's DSN substring check, not something any real
+-- apply ever sets), this checks for a PARTIAL state instead. A consistent
+-- environment is in exactly one of two states: ALL of a representative
+-- sample of these objects exist together (the real substrate, normal case),
+-- or NONE of them do (a fresh/CI bootstrap that has never seen this
+-- subsystem). A genuine defect -- e.g. one of these quietly dropped or
+-- renamed on the real substrate -- would show up as a MIX of present/absent,
+-- which is the one state this treats as fail-closed: RAISE EXCEPTION naming
+-- exactly what's missing and what's present, aborting the whole apply. Only
+-- the uniform-absence case (CI) is skipped, with a RAISE NOTICE naming what
+-- was skipped and why. The uniform-presence case (the real substrate today,
+-- confirmed via live pg_proc/pg_class 2026-10-31) runs the full re-pointing,
+-- grant footprint, and RLS policies exactly as before this guard existed.
+DO $guard124$
+DECLARE
+    v_missing text[] := '{}';
+    v_present text[] := '{}';
+BEGIN
+    IF to_regprocedure('public.audit_board_digest()') IS NULL THEN
+        v_missing := array_append(v_missing, 'audit_board_digest()');
+    ELSE
+        v_present := array_append(v_present, 'audit_board_digest()');
+    END IF;
+    IF to_regprocedure('public.escalate_full_tier_without_auditor(numeric)') IS NULL THEN
+        v_missing := array_append(v_missing, 'escalate_full_tier_without_auditor(numeric)');
+    ELSE
+        v_present := array_append(v_present, 'escalate_full_tier_without_auditor(numeric)');
+    END IF;
+    IF to_regprocedure('public.escalate_stale_decision_audits()') IS NULL THEN
+        v_missing := array_append(v_missing, 'escalate_stale_decision_audits()');
+    ELSE
+        v_present := array_append(v_present, 'escalate_stale_decision_audits()');
+    END IF;
+    IF to_regclass('public.strategic_decisions') IS NULL THEN
+        v_missing := array_append(v_missing, 'strategic_decisions (table)');
+    ELSE
+        v_present := array_append(v_present, 'strategic_decisions (table)');
+    END IF;
+    IF to_regclass('public.decision_audits') IS NULL THEN
+        v_missing := array_append(v_missing, 'decision_audits (table)');
+    ELSE
+        v_present := array_append(v_present, 'decision_audits (table)');
+    END IF;
+
+    IF array_length(v_present, 1) IS NULL THEN
+        RAISE NOTICE 'migration 124: skipping the CAI-governance bus_writer re-pointing section (% not present in this schema -- substrate-only drift, never captured by any migration file; expected on a from-scratch bootstrap)', v_missing;
+        RETURN;
+    ELSIF array_length(v_missing, 1) IS NOT NULL THEN
+        RAISE EXCEPTION 'migration 124: CAI-governance schema is PARTIALLY present -- missing: %; present: %. Refusing to apply (neither a fresh bootstrap nor the expected real-substrate state).', v_missing, v_present;
+    END IF;
+
 ALTER FUNCTION audit_board_digest() OWNER TO bus_writer;
 ALTER FUNCTION escalate_full_tier_without_auditor(numeric) OWNER TO bus_writer;
 ALTER FUNCTION escalate_stale_decision_audits() OWNER TO bus_writer;
@@ -373,8 +442,6 @@ GRANT USAGE ON SEQUENCE notification_log_id_seq TO bus_writer;
 -- policies replicated -- a fixture that skipped this would have made every
 -- "still works after 124" test pass trivially regardless of whether these
 -- policies existed.
-DO $$
-BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_policies
         WHERE schemaname = 'public' AND tablename = 'strategic_decisions'
@@ -431,7 +498,7 @@ BEGIN
         CREATE POLICY bus_writer_insert ON notification_log
             FOR INSERT TO bus_writer WITH CHECK (true);
     END IF;
-END $$;
+END $guard124$;
 
 -- GUARD TRIGGER (this migration's actual headline, replacing a REVOKE that
 -- cc-quality's review proved would be a no-op for postgres -- see header).
@@ -491,6 +558,34 @@ REVOKE INSERT ON agent_messages FROM service_role;
 -- savepoint, so a caught failure here does not abort the outer transaction
 -- -- only an uncaught RAISE (a genuine self-test failure) does.
 --
+-- SIDE-EFFECT CHECK (console's follow-up, bus #85476): does a real INSERT
+-- that is deleted before COMMIT still notify anything externally? Checked
+-- by reading the actual consumer code, not assumed:
+--   - work_item mirror: work_item_mirror_bus_insert_trg only fires `WHEN
+--     (new.requires_response)`. p_requires_response is false below, so no
+--     mirror row is ever created -- verified with an explicit EXISTS check
+--     right after the call, not just inferred from the trigger definition.
+--   - nervous_system/agent_messages_realtime.py (Supabase Realtime ->
+--     Telegram + #111 auto-wake doorbell, INSERT-only channel): its
+--     _on_insert callback does NOT act on the WAL payload directly -- its
+--     very first step is an async re-fetch of the row BY ID from Postgres
+--     (`.eq("id", msg_id)`), specifically because "payload.new may not
+--     include every column after RLS/trigger transformations" (its own
+--     docstring). Since this self-test's INSERT and DELETE both happen
+--     inside this one transaction before COMMIT, no other connection --
+--     including that re-fetch, whenever it runs -- can ever observe the
+--     row in an existing state (standard MVCC: nothing commits until
+--     COMMIT, and by then the row is already gone). The re-fetch finds
+--     zero rows and returns immediately (`if not rows: ... return`,
+--     logged as "not found on re-fetch (deleted?)"), before the is_test
+--     check, before auto-wake, before any Telegram/_format_telegram call.
+--     The same early-return protects agent_wake_subscriber.py's wake-only
+--     mode too (same shared callback, wake_only=True). The regular 5-
+--     minute poll (agent_messages_poll.py) is equally safe by the same
+--     MVCC argument, with or without is_test. p_is_test=true and non-lane
+--     from/to_agent values are kept anyway as defense in depth, in case
+--     this reasoning is ever invalidated by a future change to that
+--     pipeline. Net: nothing is notified anywhere for this self-test.
 -- SET ROLE bus_writer around the post_agent_message call rather than
 -- relying on the applying role's own (possibly inherited, possibly not --
 -- found this the hard way via this file's own TDD) EXECUTE privilege: the
@@ -536,6 +631,20 @@ BEGIN
         RAISE EXCEPTION
             'MIGRATION 124 SELF-TEST FAILED: post_agent_message did not return a row '
             'after the guard trigger was added';
+    END IF;
+
+    -- Side-effect check (console's ask, bus #85476): p_requires_response is
+    -- false above, and work_item_mirror_bus_insert_trg only fires `WHEN
+    -- (new.requires_response)` -- so no work_item mirror row should ever
+    -- have been created for this self-test message in the first place. This
+    -- confirms that, rather than assuming it from reading the trigger
+    -- definition alone.
+    IF EXISTS (
+        SELECT 1 FROM work_item WHERE source_table = 'agent_messages' AND source_id = v_msg_id
+    ) THEN
+        RAISE EXCEPTION
+            'MIGRATION 124 SELF-TEST FAILED: unexpected work_item mirror row for '
+            'self-test message % (requires_response=false should prevent this)', v_msg_id;
     END IF;
 END $$;
 
