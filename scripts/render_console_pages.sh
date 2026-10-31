@@ -30,6 +30,8 @@ curl -s -H "Authorization: Bearer $TOK" "$H/api/asks-board" > "$OUT/_asks.json" 
 curl -s -H "Authorization: Bearer $TOK" "$H/api/status-board" > "$OUT/_status.json" 2>/dev/null || echo '{"items":[],"counts":{}}' > "$OUT/_status.json"
 # fc-v87 (op#34918/34919): the build-status view joins the render set.
 curl -s -H "Authorization: Bearer $TOK" "$H/api/build-status" > "$OUT/_builds.json" 2>/dev/null || echo '{}' > "$OUT/_builds.json"
+# op#36664: the machines-resources view joins the render set.
+curl -s -H "Authorization: Bearer $TOK" "$H/api/resources" > "$OUT/_resources.json" 2>/dev/null || echo '{"hosts":[]}' > "$OUT/_resources.json"
 SWVER=$(grep -oE 'const VERSION = "fc-v[0-9]+"' "$STATIC/sw.js" | grep -oE 'fc-v[0-9]+')
 
 render() { # $1 page-basename (fleet|lanes)  $2 primary-data-json  $3 route
@@ -68,10 +70,11 @@ PY
   echo "  rendered ${page} -> $OUT/${page}.png ($(stat -f%z "$OUT/${page}.png") bytes)"
 }
 
-echo "[render_console_pages] rendering fleet + lanes + asks + status + builds with live data ($SWVER)..."
+echo "[render_console_pages] rendering fleet + lanes + asks + status + builds + resources with live data ($SWVER)..."
 render fleet "$OUT/_fleet.json" "/"      || exit 1
 render lanes "$OUT/_tt.json"    "/lanes" || exit 1
 render asks  "$OUT/_asks.json"  "/asks"  || exit 1
 render status "$OUT/_status.json" "/status" || exit 1
 render builds "$OUT/_builds.json" "/builds" || exit 1
-echo "[render_console_pages] OK — eyeball: $OUT/fleet.png + $OUT/lanes.png + $OUT/asks.png + $OUT/status.png + $OUT/builds.png"
+render resources "$OUT/_resources.json" "/resources" || exit 1
+echo "[render_console_pages] OK — eyeball: $OUT/fleet.png + $OUT/lanes.png + $OUT/asks.png + $OUT/status.png + $OUT/builds.png + $OUT/resources.png"
