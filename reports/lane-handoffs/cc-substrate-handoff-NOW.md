@@ -89,6 +89,14 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**23:01Z — 785 LANDED and verified (squash `f9786dfc881af9c7a7fc453a66f07c852fff6187`, merged
+23:00:36Z).** Base tip == merge commit == **live checkout HEAD** (someone fast-forwarded it already),
+so step zero is live in the doc the 04:00Z operator opens. Executor blob at base tip AND in the live
+checkout = `a7bf4c01`, `def _scrub` 1, hardening comment 1; doc carries the marker. **TRAP: the merge
+was a SQUASH, so `merge-base --is-ancestor 56208a5 HEAD` returns NO even though the content is in
+base — verify by blob/content, never by ancestor, or a landed PR reads as missing.** Console told
+(88455). Remaining tonight: PAT re-check + blob-still-a7bf4c01 at 03:30Z.
+
 **22:55Z — 785 CLEARED: cc-quality PASS at the live head `56208a5` (row 88444), first verdict of the
 night merge_pinned can accept.** Single-line form, emitted 22:55:00Z vs head commit 22:50:00Z, so
 newer-than-head holds. They re-measured all three marker counts themselves and owned the `origin/main`
