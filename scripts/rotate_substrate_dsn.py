@@ -425,28 +425,29 @@ def cmd_stage(args) -> int:
         return 2
     _ensure_database_url_in_process(args.env_file)
     vault = _vault()
+    # THE SUPERSEDED VALUE MUST BE ARCHIVED, NOT "FLAGGED" (cc-quality 87760 N6).
+    # An earlier draft did put(leak_flagged=True) on the current value and then
+    # put(new) — but vault.put UPSERTS one row per name and sets leak_flagged to the
+    # value it was called with, so the second call cleared the flag it had just set
+    # and no trace of the superseded ciphertext survived. Two writes that looked like
+    # a record and left none. vault.rotate() is the vault's own answer: it archives
+    # the superseded ciphertext into vault_secrets_history before installing the new
+    # one, and the reason (which names the leak) goes to the audit log.
     reason = (args.reason or
               "rotation: substrate postgres role leaked into transcripts 26-31 Oct "
               "(bus 87628/87660)")
-    # Mark the SUPERSEDED value as leaked, then land the new one on top of it.
-    # vault.put(leak_flagged=...) is the mechanism the vault already provides for
-    # "this credential is known-compromised"; deleting it would destroy the record.
     current = None
     try:
         current = vault.get(args.name, reason=reason + " (read current before overwrite)")
     except Exception:
         current = None
-    if current is not None and not getattr(current, "leak_flagged", False):
-        try:
-            vault.put(args.name, current.value, reason=reason,
-                      leak_flagged=True,
-                      leak_flagged_reason="live substrate password found in 3 transcript "
-                                          "files (session 6da64adb, 26 Oct pgrep -fl leak)")
-            print(f"stage: flagged superseded value {mask(current.value)} as leaked")
-        except Exception as exc:
-            print(f"stage: WARNING could not set leak flag ({type(exc).__name__}) — "
-                  "continuing; the rotation itself still lands", file=sys.stderr)
-    vault.put(args.name, new, reason=reason)
+    if current is not None and getattr(current, "value", None) == new:
+        print(f"stage: already staged — {args.name} {mask(new)}; nothing changed")
+        return 0
+    if current is not None:
+        vault.rotate(args.name, new, reason=reason)
+    else:
+        vault.put(args.name, new, reason=reason)
     print(f"stage: OK {args.name} {mask(new)}")
     return 0
 

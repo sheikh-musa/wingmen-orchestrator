@@ -153,12 +153,17 @@ class _Vault:
     def __init__(self, value):
         self.value = value
         self.puts = []
+        self.rotations = []
 
     def get(self, name, reason):
         return _Secret(self.value)
 
     def put(self, name, value, reason, leak_flagged=False, leak_flagged_reason=None):
         self.puts.append((name, value, leak_flagged, leak_flagged_reason))
+        self.value = value
+
+    def rotate(self, name, value, reason):
+        self.rotations.append((name, value, reason))
         self.value = value
 
 
@@ -240,16 +245,42 @@ def test_stage_refuses_whitespace_because_it_cannot_survive_env_or_conninfo(
     assert v.puts == []
 
 
-def test_stage_flags_the_superseded_value_then_lands_the_new_one(monkeypatch, capsys):
+def test_stage_archives_the_superseded_value_instead_of_flagging_it(monkeypatch, capsys):
+    """cc-quality 87760 N6: put(leak_flagged=True) then put(new) on the SAME name is
+    an upsert that clears the flag it just set and keeps no trace of the old
+    ciphertext. rotate() archives it, which is the record actually wanted."""
     v = _Vault(OLD_PW)
     monkeypatch.setattr(rot, "_vault", lambda *a, **k: v)
     _stage(monkeypatch, NEW_PW + "\n")
     assert rot.main(["stage"]) == 0
-    assert [p[2] for p in v.puts] == [True, False], "old flagged, new stored"
-    assert v.puts[0][1] == OLD_PW
-    assert v.puts[1][1] == NEW_PW
+    assert v.puts == [], "no flag-then-overwrite dance"
+    assert [(r[0], r[1]) for r in v.rotations] == [("SUBSTRATE_DB_PASSWORD_NEW", NEW_PW)]
+    assert "leaked" in v.rotations[0][2], "the audit reason must name the leak"
     out = capsys.readouterr().out
     assert NEW_PW not in out and OLD_PW not in out
+
+
+def test_stage_uses_put_when_the_secret_does_not_exist_yet(monkeypatch, capsys):
+    v = _Vault(OLD_PW)
+
+    def _missing(name, reason):
+        raise RuntimeError("not found")
+
+    monkeypatch.setattr(v, "get", _missing)
+    monkeypatch.setattr(rot, "_vault", lambda *a, **k: v)
+    _stage(monkeypatch, NEW_PW + "\n")
+    assert rot.main(["stage"]) == 0
+    assert [p[1] for p in v.puts] == [NEW_PW]
+    assert v.rotations == []
+
+
+def test_stage_is_idempotent_when_the_value_is_already_staged(monkeypatch, capsys):
+    v = _Vault(OLD_PW)
+    monkeypatch.setattr(rot, "_vault", lambda *a, **k: v)
+    _stage(monkeypatch, OLD_PW + "\n")
+    assert rot.main(["stage"]) == 0
+    assert v.puts == [] and v.rotations == []
+    assert "nothing changed" in capsys.readouterr().out
 
 
 # ── verify ─────────────────────────────────────────────────────────────────────
