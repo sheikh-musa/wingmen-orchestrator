@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.musa-deepseek-syed-switch</string>
+  <!-- cc-fleet-health Musa spend switch (Musa op#36560/36562; orch-console #86307/#86319).
+       Every 5 min runs musa_deepseek_syed_switch.py --apply via the wrapper: Musa 7d >=90%
+       => move every worker lane on Musa's token to DeepSeek (provider_policy-gated,
+       excludes mamadah/irsyad, membership re-derived live from auth_fp); Musa 7d >=95%
+       => ALSO move the brains (cc-fleet-health, orch-console, cc-quality) + mamadah to
+       Syed. Never switches back. Supersedes glm_overflow_switch.py's old op#33932 90%
+       PAGE-only brains rule. No secrets here: the wrapper sources .env. -->
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/run_musa_deepseek_syed_switch.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/musa-deepseek-syed-switch.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/musa-deepseek-syed-switch.err.log</string>
+</dict>
+</plist>
