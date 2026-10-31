@@ -60,11 +60,20 @@ def reaper_dsn(pg_dsn, monkeypatch):
         cur.execute("DROP SCHEMA public CASCADE")
         cur.execute("CREATE SCHEMA public")
         cur.execute("GRANT USAGE ON SCHEMA public TO PUBLIC")
-        cur.execute("SELECT 1 FROM pg_roles WHERE rolname='service_role'")
-        if cur.fetchone() is None:
-            cur.execute("CREATE ROLE service_role")
+        # Migrations 117/122 GRANT to the Supabase web roles. CI's bootstrap
+        # creates them; a bare local ephemeral cluster does not, and the whole
+        # fixture used to die on `role "anon" does not exist` — which silently
+        # cost this file ALL of its coverage outside CI.
+        for role in ("anon", "authenticated", "service_role"):
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+            if cur.fetchone() is None:
+                cur.execute(f'CREATE ROLE "{role}" NOLOGIN')
         for ddl in _DDL:
             cur.execute(ddl)
+        # migration 140's CHECK, so the reaper's UPDATE to 'unrecoverable' is
+        # validated by the real constraint here (held_commitment #964).
+        cur.execute((MIGRATIONS_DIR /
+                     "140_operator_messages_media_status_unrecoverable.sql").read_text())
         cur.execute("INSERT INTO agents (id, display_name, status) "
                     "VALUES ('media-reaper', 'reaper', 'active'), "
                     "('orch-console', 'console', 'active')")
@@ -265,3 +274,92 @@ def test_media_reaper_channels_resolving_to_no_known_channel_refuses_loudly(reap
     monkeypatch.setenv("MEDIA_REAPER_CHANNELS", "no-such-channel-key")
     assert media_reaper.reap(fire=False) == 2
     assert "MEDIA_REAPER_CHANNELS" in capsys.readouterr().err
+
+
+# ── TERMINAL failures (held_commitment #964, migration 140) ─────────────────
+# A getFile answer that no retry can fix must flip the row to the TERMINAL
+# 'unrecoverable' (leaving RETRYABLE_STATUSES, so the loop stops) AND tell the
+# operator ONCE (so "terminal" never means "silently dropped").
+
+def _telegram_http_error(code, description):
+    import json as _json
+    from io import BytesIO
+    from urllib.error import HTTPError
+    body = _json.dumps({"ok": False, "error_code": code,
+                        "description": description}).encode()
+    return HTTPError("https://api.telegram.org/botTOK/getFile", code,
+                     description, {}, BytesIO(body))
+
+
+def _console_pages(dsn, subject_like="%"):
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT subject, body FROM agent_messages "
+                    "WHERE to_agent='orch-console' AND from_agent='media-reaper' "
+                    "AND subject LIKE %s", (subject_like,))
+        return cur.fetchall()
+
+
+def test_permanent_getfile_error_marks_the_row_unrecoverable(reaper_dsn, monkeypatch):
+    _seed_channel(reaper_dsn, "nazim-console", "nazim-console")
+    monkeypatch.setenv("FAKE_BOT_TOKEN", "tok")
+    msg_id = _seed_message(
+        reaper_dsn, tag="nazim-console", text="sent a FILE (download failed: boom)",
+        file_id="F8", file_unique_id="U8", media_kind="document", media_status="failed")
+
+    def _too_big(*a, **k):
+        raise _telegram_http_error(400, "Bad Request: file is too big")
+    monkeypatch.setattr(_ingest, "_download_media", _too_big)
+
+    assert media_reaper.reap(fire=True) == 0
+
+    assert _row(reaper_dsn, msg_id)["media_status"] == "unrecoverable"
+    pages = _console_pages(reaper_dsn, "%UNRECOVERABLE%")
+    assert len(pages) == 1
+    assert "resend" in pages[0][1].lower(), "the operator must be told WHAT to do"
+    assert "20 MB" in pages[0][1]
+
+
+def test_an_unrecoverable_row_is_never_selected_again(reaper_dsn, monkeypatch):
+    """The whole point: the terminal state must actually terminate the loop.
+    If 'unrecoverable' leaked back into the retry set, this daemon would keep
+    hitting Telegram forever and re-paging every 2h."""
+    _seed_channel(reaper_dsn, "nazim-console", "nazim-console")
+    monkeypatch.setenv("FAKE_BOT_TOKEN", "tok")
+    msg_id = _seed_message(
+        reaper_dsn, tag="nazim-console", text="sent a FILE (download failed: boom)",
+        file_id="F9", file_unique_id="U9", media_kind="document",
+        media_status="failed", age=_dt.timedelta(hours=5))
+
+    def _too_big(*a, **k):
+        raise _telegram_http_error(400, "Bad Request: file is too big")
+    monkeypatch.setattr(_ingest, "_download_media", _too_big)
+    assert media_reaper.reap(fire=True) == 0
+    assert _row(reaper_dsn, msg_id)["media_status"] == "unrecoverable"
+    assert len(_console_pages(reaper_dsn)) == 1
+
+    # Second tick: the row is out of scope. Any network attempt here is a bug.
+    monkeypatch.setattr(_ingest, "_download_media",
+                        lambda *a, **k: pytest.fail("terminal row must not be retried"))
+    assert media_reaper.reap(fire=True) == 0
+
+    assert _row(reaper_dsn, msg_id)["media_status"] == "unrecoverable"
+    assert len(_console_pages(reaper_dsn)) == 1, "exactly one page, ever"
+
+
+def test_a_transient_failure_is_NOT_marked_terminal(reaper_dsn, monkeypatch):
+    """The expensive mistake is the opposite one: calling a recoverable file
+    dead. An Errno 54 reset must keep its retry."""
+    _seed_channel(reaper_dsn, "nazim-console", "nazim-console")
+    monkeypatch.setenv("FAKE_BOT_TOKEN", "tok")
+    msg_id = _seed_message(
+        reaper_dsn, tag="nazim-console", text="sent a photo (download failed: boom)",
+        file_id="F10", file_unique_id="U10", media_kind="photo", media_status="failed")
+
+    def _reset(*a, **k):
+        raise ConnectionResetError(54, "Connection reset by peer")
+    monkeypatch.setattr(_ingest, "_download_media", _reset)
+
+    assert media_reaper.reap(fire=True) == 0
+
+    assert _row(reaper_dsn, msg_id)["media_status"] == "failed"
+    assert _console_pages(reaper_dsn) == []      # too fresh for the 2h floor
