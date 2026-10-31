@@ -600,7 +600,14 @@ def renudge(agent: str, n: int, lanes: dict[str, str], dry: bool, conn=None, row
     # nudge (the exact bottleneck the SRE exists to remove). Exact match still wins;
     # the base strip is a fallback only (same _base_agent_id the party-update chase
     # and the liveness check in this module already use).
-    lane = lanes.get(agent) or lanes.get(_base_agent_id(agent))
+    #
+    # The INSTANCE's own recorded session beats the base lane when we can trust it:
+    # fleet_lanes collapses a multi-lane base to ONE arbitrary session, so for
+    # cc-cosem-platform (six lanes on 2026-10-31) the base lookup can wake a body
+    # that was never addressed. Order is precise-first, then the old fallback.
+    lane = (lanes.get(agent)
+            or _instance_tmux_session(conn, agent)
+            or lanes.get(_base_agent_id(agent)))
     if lane:
         if dry:
             return (f"lane_nudge.sh:{lane}", True)
@@ -1482,6 +1489,47 @@ def _base_agent_id(owner: Optional[str]) -> str:
     against it always misses and reads as idle. Same strip resolve_recipient
     already uses for the down-lane/live-instance check."""
     return re.sub(r"-\d+$", "", owner or "")
+
+
+INSTANCE_SESSION_MAX_HB_MIN = 30
+
+
+def _instance_tmux_session(conn, agent: str) -> Optional[str]:
+    """The tmux session a live numbered INSTANCE actually runs in, or None.
+
+    fleet_lanes keys by base id and lane_map() collapses a multi-lane base to ONE
+    arbitrary session, so resolving an instance to its base lane can deliver the
+    nudge to the wrong body. Measured on 2026-10-31: cc-cosem-platform-2 runs in
+    tmux session cosem-platform-calendar while five sibling lanes share the same
+    base, so the base lookup was a coin flip.
+
+    agent_status records the session each instance really runs in, so prefer it --
+    but only while the row still describes a LIVE instance (status working, fresh
+    heartbeat). A stale session name can point at a DIFFERENT live lane, and a
+    misdelivered nudge is worse than a refused one: the addressed body never wakes
+    and an unrelated one is interrupted. Anything doubtful returns None and the
+    caller falls back to the base lane, i.e. exactly the pre-existing behaviour.
+    """
+    if conn is None or not agent:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT tmux_session FROM agent_status "
+                "WHERE agent_id = %s "
+                "  AND base_agent_id IS NOT NULL "
+                "  AND agent_id <> base_agent_id "
+                "  AND status = 'working' "
+                "  AND tmux_session IS NOT NULL AND tmux_session <> '' "
+                "  AND last_heartbeat > now() - (%s * interval '1 minute')",
+                (agent, INSTANCE_SESSION_MAX_HB_MIN))
+            row = cur.fetchone()
+    except Exception as e:
+        # Never let this lookup break the re-nudge path: a failure here is the
+        # pre-existing "unreachable" fallback, not a new failure mode.
+        log(f"instance session lookup failed ({agent}): {type(e).__name__}: {e}")
+        return None
+    return row[0] if row else None
 
 
 def party_update_chase_targets(rows, *, now, chase_state, active_turn_check,
