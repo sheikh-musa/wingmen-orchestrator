@@ -62,18 +62,17 @@ def _fake_http(calls, body=BALANCE_OK):
 # ---- key grouping -----------------------------------------------------------
 
 def test_distinct_key_rows_groups_families_sharing_a_key():
-    # Interim state (bus #84011, 2026-10-30): no per-client vault key exists
-    # yet, so every family maps explicitly to the shared DEEPSEEK_CODING_KEY
-    # -- one row, every family grouped onto it. Will split back into
-    # per-client rows once real keys are provisioned and the map updates.
-    # Derived from the real map file (op#36531/36535, bus #86506) rather than
-    # hardcoded, so the next family added there can't silently break this.
+    # One row per distinct vault key name in the shipped map. That map is
+    # mid-migration from the shared DEEPSEEK_CODING_KEY to one key per family
+    # (orch-console bus #87091/#87110), so the expected grouping is DERIVED
+    # from the file (op#36531/36535, bus #86506) rather than written out: the
+    # test is about grouping, not about how far the split has got this week.
     expected = {}
     for family, key_name in ds._key_map().items():
         expected.setdefault(key_name, []).append(family)
     rows = {r["key_name"]: sorted(r["families"]) for r in ds.distinct_key_rows()}
     assert rows == {k: sorted(v) for k, v in expected.items()}
-    assert rows["DEEPSEEK_CODING_KEY"]  # sanity: the shared row is non-empty
+    assert all(v for v in rows.values())  # sanity: no row with zero families
     assert len(rows) == len(set(rows))   # one row per distinct key name, no dupes
 
 
@@ -332,10 +331,10 @@ def test_api_fleet_carries_deepseek_shared_row_per_client_rows_lanes_never_a_key
     du = body["deepseek_usage"]
     assert du["shared"]["available"] is True and du["shared"]["balance_usd"] == 46.68
     assert du["shared"]["lanes"] == ["bariq"]
-    # Interim state (bus #84011, 2026-10-30): every family maps to the shared
-    # DEEPSEEK_CODING_KEY, so there is now ONE grouped per-client row, not a
-    # distinct DEEPSEEK_KEY_BARIQ row.
-    bariq = next(k for k in du["keys"] if k["key_name"] == "DEEPSEEK_CODING_KEY")
+    # bariq's row is whatever key the shipped map names for its family -- the
+    # split is one row per PR (orch-console bus #87091/#87110), so pinning
+    # "bariq is on the shared key" would go red on bariq's own flip PR.
+    bariq = next(k for k in du["keys"] if k["key_name"] == ds._key_map()["bariq"])
     assert bariq["available"] is True and bariq["balance_usd"] == 46.87
     assert bariq["lanes"] == ["bariq"]
     assert FAKE_KEY not in r.text
@@ -361,17 +360,17 @@ def test_api_fleet_deepseek_per_client_key_not_provisioned_is_distinct_from_shar
     r = httpx.get(base + "/api/fleet", headers=AUTH, timeout=10)
     du = r.json()["deepseek_usage"]
     assert du["shared"]["available"] is True and du["shared"]["balance_usd"] == 46.68
-    # Interim state (bus #84011, 2026-10-30): the grouped row's name/families
-    # reflect every family now explicitly mapped to the shared key. Families
-    # derived from the real map file (op#36531/36535, bus #86506) rather than
-    # hardcoded, so the next family added there can't silently break this.
+    # The row's name/families come from the shipped map (op#36531/36535, bus
+    # #86506) rather than a literal, so neither a newly added family nor one
+    # family's move to its own key can silently break this.
+    bariq_key = ds._key_map()["bariq"]
     expected_families = sorted(
-        fam for fam, key_name in ds._key_map().items() if key_name == "DEEPSEEK_CODING_KEY"
+        fam for fam, key_name in ds._key_map().items() if key_name == bariq_key
     )
-    bariq = next(k for k in du["keys"] if k["key_name"] == "DEEPSEEK_CODING_KEY")
+    bariq = next(k for k in du["keys"] if k["key_name"] == bariq_key)
     assert bariq == {"available": False, "balance_usd": None, "delta_usd": None,
                       "reason": "key not created yet", "fetched_at": bariq["fetched_at"],
-                      "key_name": "DEEPSEEK_CODING_KEY",
+                      "key_name": bariq_key,
                       "families": expected_families,
                       "age_s": None, "lanes": ["bariq"]}
 
