@@ -311,6 +311,35 @@ def test_parse_export_zip_groups_per_key_per_day_and_sums_cost():
     assert meta["keys"] == ["bariq", "cosem"]
 
 
+def test_parse_export_zip_sums_usage_split_across_rows_for_the_same_bucket():
+    """The real export writes >1 row per (day, key, model, type) -- split by
+    wallet/user, a dimension the parser drops on purpose. Observed live on
+    2026-11-01: the same 10-29 window read output_tokens=994456 on one run and
+    170949 on the next, cost identical to 10 dp each time. Assigning the last
+    row silently undercounts; only summing is order-independent."""
+    mod = _load_module()
+    rows = [
+        f"{_USER},2026-10-29T00:00:00+08:00,2026-10-30T00:00:00+08:00,deepseek-flash,"
+        f"deepseek-flash,substrate,sk-MASKED*****aa,output_tokens,0.0000012,{n}"
+        for n in (994456, 170949)
+    ]
+    zip_bytes = _build_export_zip(
+        rows,
+        [f"{_USER},2026-10-29T00:00:00+08:00,2026-10-30T00:00:00+08:00,deepseek-flash,"
+         f"deepseek-flash,Paid,{round((994456 + 170949) * 1.2e-6, 10)},USD"],
+    )
+    records, meta = mod.parse_export_zip(zip_bytes)
+    assert len(records) == 1
+    assert records[0]["usage"]["output_tokens"] == 994456 + 170949
+    assert records[0]["cost_usd"] == round(994456 * 0.0000012 + 170949 * 0.0000012, 10)
+    assert meta["max_abs_diff_usd"] <= mod._COST_CROSS_CHECK_TOLERANCE_USD
+
+    # order must not matter -- that was the whole defect
+    reversed_records, _ = mod.parse_export_zip(
+        _build_export_zip(rows[::-1], []), since=None)
+    assert reversed_records[0]["usage"] == records[0]["usage"]
+
+
 def test_parse_export_zip_never_emits_key_material_or_user_id():
     mod = _load_module()
     zip_bytes = _build_export_zip(
