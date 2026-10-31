@@ -144,9 +144,18 @@ below.
 1. **Restart the singletons.** Costs the live console session — and the console is the
    executor of this rotation, so this one is ruled out for the console body regardless.
 2. **Do not restart.** Their `last_heartbeat` rows freeze from the patch until each body
-   is recycled, and a watchdog reads live bodies as dead. Defensible only if written down
-   first and bounded; a frozen row discovered later as an outage is how a scheduled
-   decision becomes a night of false alarms.
+   is recycled. **This is not the false-alarm case it looks like** — the SRE measured its
+   own detectors (bus 87965) and none of the three can be flipped offline or reported
+   stalled: all three are in `protected_agents`, and `fleet_stall_watch` needs a
+   `fleet_lanes` row with `desired_state` up, which none of them has. The real cost is
+   **blindness, not noise**: `context_health_watchdog` builds its live-agent set from
+   `last_heartbeat` within 30 minutes, so a frozen row removes the console — the body
+   driving the rotation — from the gauge that catches a bloated context, silently, at the
+   exact moment the fleet is being changed under it. That is the window the SRE wants
+   declared and bounded, on their terms (a durable bus row at GO time, absolute expiry of
+   at most four hours, fail-closed read, and a substitute signal: bus rows or a live pane
+   must still hold or the SRE pages anyway). A declared gap is acceptable; a fabricated
+   heartbeat is not, which is why suppression was refused.
 3. **Replace only the loop.** Kill the recorded loop pid after the files hold the new
    value and fork a fresh loop on the patched code and fresh env — no session lost. This
    is the only one of the three that keeps every signal honest, **but only with its own
