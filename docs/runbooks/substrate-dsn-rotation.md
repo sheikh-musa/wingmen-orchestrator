@@ -260,6 +260,45 @@ design is now three parts and contains **no new lifeline code**:
 The SRE confirms from their own side and says so on the bus, so the declaration closes on
 evidence rather than on a launch message.
 
+**The two bodies, concretely** (measured on this host 2026-10-31 ~21:00Z, not assumed):
+
+| | cc-fleet-health | console (`orch-console`) |
+|---|---|---|
+| tmux session | `fleet-health` | `nazim` |
+| boot script | `~/wingmen/fleet-health/boot_fleet_health.sh` | `~/wingmen/orchestrator/scripts/boot_nazim.sh` |
+| claude's cwd | `~/wingmen/fleet-health` | `~/wingmen/orchestrator` (the live checkout) |
+| launchd waiter | `dev.wingmen.fleet-health-session` | `dev.wingmen.nazim-session` |
+| `agent_status` row | `cc-fleet-health` | `orch-console` |
+| guard | `~/wingmen/fleet-health/ops/sre_relaunch_guard.sh` | none — run the two probes below |
+
+Both were verified live: each pane's `pane_pid` is the **boot script**, whose children are
+the heartbeat subshell and the `claude` process. That is the shape that makes "kill the
+session" correct and "kill the loop" wrong.
+
+fleet-health is guarded by the SRE's script — run it, and read its exit code rather than its
+prose: `0` FREE (boot or let launchd boot), `1` OCCUPIED (do **not**), `2` UNKNOWN (do
+**not**; an unanswerable probe is not a clean bill).
+
+For the console there is no guard script, so run both probes; **both must read free**, and a
+probe that cannot run counts as UNKNOWN:
+
+```bash
+# session gone? -t prefix-matches, so compare the list exactly
+/usr/local/bin/tmux list-sessions -F '#{session_name}' | grep -qx nazim \
+  && echo "OCCUPIED: session still exists" || echo "free: no session"
+# no claude process holding the live checkout as its cwd?
+/usr/sbin/lsof -a -c claude -d cwd -Fn 2>/dev/null \
+  | grep -qx 'n/Users/sheikhmusa/wingmen/orchestrator' \
+  && echo "OCCUPIED: a claude process has that cwd" || echo "free: no body"
+```
+`lsof` is **not on this shell's PATH** (measured) — call it by absolute path, and treat
+"command not found" as UNKNOWN rather than as free.
+
+Kill with an exact session match, never a prefix: `tmux kill-session -t =nazim` /
+`-t =fleet-health`. launchd then re-runs the wrapper, which re-sources the env file and
+creates a fresh session — normally nobody needs to boot anything by hand. Verify with §2 step
+e against the `agent_status` row named above.
+
 `cai` is out of scope: it has no session on this host and has read `offline` since
 13 October (bus 87965/87978). Its absence is an ownership question for another body, not
 a rotation problem.
