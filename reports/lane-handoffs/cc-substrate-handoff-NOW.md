@@ -83,11 +83,18 @@ runbook as step 7 plus a dedicated section.
 | 771 | `cc-substrate/verify-no-argv-dsn` | `511c587` | **MERGED as `05f2797`** |
 | 765 | `cc-substrate/substrate-dsn-rotation` | — | **CLOSED as superseded** |
 | 774 | `cc-substrate/rotation-executor` | `cee1dd40` | **PASS 88101** at this head; merge blocked on CI queue only. **HEAD FROZEN.** |
-| 773 | `cc-substrate/merge-signoff` | `079e9eb9` | cc-quality **PASS** 87946; CI queued; console's waiter may merge — coordinate |
+| 773 | `cc-substrate/merge-signoff` | `079e9eb9` | **MERGED** (console's waiter got it first; my merge_pinned then reported 'already merged' — see residual note) |
 | 762 | `cc-substrate/credguard-bypass-followup` | `d3b71dd` | **MERGED `d3b71ddeb5fc`** |
 | 766 | `cc-substrate/sweep-multi-scan` | `61f3dce` | **MERGED `61f3dcef2084`** |
-| 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **rebased** (was unmergeable vs base); branch-owned 8 files byte-identical to PASSed `675c2e7`; rebase-confirm requested 88124 |
+| 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
+
+**21:36Z merges.** 761 merged by me at `672d01d` (`merge_pinned`, rebase-confirm 88138). 773 was
+already merged by the console's waiter when I tried — the gate said so plainly. **Residual worth
+reporting, not fixing tonight:** `merge_pinned.sh` prints `MERGED <n> at <sha>` and exits 0 even when
+the PR was already merged by someone else (it echoes gh's success), so the log attributes a merge it
+did not perform. Harmless here, misleading if two bodies race; belongs to cc-quality/console, in the
+file that PR 773 itself just landed.
 
 **21:18Z: every open PR now carries a PASS on its AND ONLY ITS current head** — 774 `cee1dd4`
 (88101), 761 `672d01d` rebase-confirm (88138), 773 `079e9eb` (87946), 776 `1888a79` (88145).
