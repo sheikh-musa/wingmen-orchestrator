@@ -3,18 +3,30 @@
 per-client key provisioning + usage export stop being a manual Musa chore
 (op#35851, bus #82526; scale-to-N refinement bus #82540/op#35853).
 
-PHASE 1 (this commit): scaffold only. The persistent-context profile dir,
-CLI shape, allowlist/fail-closed/no-capture guardrails, and the
-deepseek_key_map.json read/write path are real and tested. The CSS
-SELECTORS in _SEL below are PLACEHOLDERS -- nobody has driven a real
-authenticated session against the live DeepSeek console yet, so they are
-best-guess only and WILL need correcting against the real DOM.
+PHASE 2 (op#36768): the selectors in _SEL are now the REAL DOM, verified
+against the live authenticated console on 2026-10-31. Two findings drove the
+shape of this file and are worth knowing before editing it:
 
-PHASE 2 (next, after Musa's one-time login): run `--headed login` once so
-Musa signs in by hand into the persistent profile at ~/.wingmen/deepseek_browser/
-(created 0700). Every subsequent invocation (including launchd/cron calls)
-reuses that saved session headlessly -- no credential ever touches this
-script, the vault, or any bus row.
+  1. Every "button" on the console is a `div.ds-button` with role=button --
+     not a <button>. Text-based `:has-text()` still works on them (it
+     searches descendants); a `button:` selector silently matches nothing.
+     Filter triggers carry a CSS-module hash class (`d215a2f1`) that changes
+     between builds -- never key off it.
+
+  2. /usage has NO per-day table to scrape (summary tiles + two charts only).
+     Per-key daily usage comes from the page's own Export button, which
+     downloads a zip containing amount-<from>_<to>.csv with one row per
+     (day, api_key_name, model, usage type). usage-export drives that
+     download, parses the zip IN MEMORY, and emits JSONL. That is deliberately
+     NOT an API reconstruction: the console's JSON endpoints require an
+     Authorization token injected by the SPA, and /auth-api/v0/users/current
+     hands that token back in its response body -- this script must never
+     call that endpoint, so it never holds a session token at all.
+
+Session: Musa's one-time headed login lives in the persistent profile at
+~/.wingmen/deepseek_browser/ (created 0700). Verified 2026-10-31 that it
+reopens HEADLESS with no re-login, so no headed pass is needed for routine
+reads. No credential ever touches this script, the vault, or any bus row.
 
 Hard constraints (console #82526, binding, enforced in code below, not just
 documented):
@@ -37,13 +49,20 @@ Usage:
     deepseek_console.py login --headed
     deepseek_console.py add-client <slug>
     deepseek_console.py list-clients
-    deepseek_console.py usage-export [--since YYYY-MM-DD]
+    deepseek_console.py usage-export [--since YYYY-MM-DD] [--out PATH]
 """
+from __future__ import annotations
+
 import argparse
+import csv
+import io
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
+import zipfile
 from datetime import datetime, timezone
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -54,27 +73,55 @@ from scripts.lib.lane_token_resolver import family_of  # noqa: E402
 
 _MAP_FILE = os.path.join(_SCRIPT_DIR, "lib", "deepseek_key_map.json")
 _PROFILE_DIR = os.path.expanduser("~/.wingmen/deepseek_browser")
+_USAGE_JSONL_DEFAULT = os.path.expanduser(
+    "~/wingmen/fleet-health/state/deepseek_usage_by_key.jsonl"
+)
 
 _CONSOLE_URL = "https://platform.deepseek.com"
 
 # --- allowlist: exactly the pages/actions this script may ever visit. Every
 # action function below checks its own entry's marker before doing anything,
-# and navigates to nothing outside this dict. PLACEHOLDER selectors (Phase 1).
+# and navigates to nothing outside this dict. Selectors verified against the
+# live console 2026-10-31 (op#36768) -- see the module docstring for the two
+# markup facts that matter (div.ds-button, and no per-day table on /usage).
 _SEL = {
     "api_keys_page": {
         "url": f"{_CONSOLE_URL}/api_keys",
-        "logged_in_marker": "text=API Keys",
-        "create_button": "button:has-text('Create new API key')",
-        "name_input": "input[placeholder='Name']",
-        "confirm_create": "button:has-text('Create')",
-        # DeepSeek shows the raw key exactly once, in a copy field, on creation.
-        "revealed_key_value": "[data-testid='api-key-value'], code.api-key-value",
-        "dialog_done": "button:has-text('Done'), button:has-text('Close')",
+        # The introductory paragraph is stable page copy and only renders for
+        # a signed-in user; the nav item "API keys" renders even logged out.
+        "logged_in_marker": "text=Your API keys are listed below",
+        "keys_table": "table",
+        "create_button": "div.ds-button:has-text('Create new API key')",
+        "dialog_title": "div.ds-modal-content__title",
+        "name_input": "input.ds-input__input[placeholder='Name of the API key']",
+        # The footer primary is rendered --disabled until the name field has
+        # content, so waiting on the non-disabled form doubles as "the form
+        # actually accepted the name".
+        "confirm_create": (
+            "div.ds-modal-content__footer "
+            "div[role='button'].ds-button--primary:not(.ds-button--disabled)"
+        ),
+        # DeepSeek shows the raw key exactly once, as text in the dialog.
+        # Matched by pattern rather than by a class/testid because there is no
+        # stable attribute on the node; a miss here fails closed before any
+        # vault write.
+        "revealed_key_value": "text=/^sk-[A-Za-z0-9]{20,}$/",
+        # Dismissal text is not pinned by a stable attribute either; tried in
+        # order, then Escape as the last resort.
+        "dialog_done_candidates": (
+            "div.ds-modal-content div[role='button']:has-text('Done')",
+            "div.ds-modal-content div[role='button']:has-text('OK')",
+            "div.ds-modal-content div[role='button']:has-text('Close')",
+            "div.ds-modal-content div[role='button']:has-text('Got it')",
+        ),
     },
     "usage_page": {
         "url": f"{_CONSOLE_URL}/usage",
-        "logged_in_marker": "text=Usage",
-        "table_rows": "table tbody tr",
+        # Console copy states the display timezone inline; a signed-out
+        # visitor never reaches /usage and sees neither this nor the tiles.
+        "logged_in_marker": "text=All dates and times are GMT+8",
+        # aria-label is stable where the visible text is nested/spans.
+        "export_button": "div.ds-button[aria-label='Export']",
     },
     "login_page": {
         "url": f"{_CONSOLE_URL}/sign_in",
@@ -93,7 +140,7 @@ class LoggedOut(RuntimeError):
     """No session cookie survived in the persistent profile. Fail closed."""
 
 
-def _context(playwright, headed: bool):
+def _context(playwright, headed: bool, accept_downloads: bool = False):
     os.makedirs(_PROFILE_DIR, exist_ok=True, mode=0o700)
     os.chmod(_PROFILE_DIR, 0o700)
     return playwright.chromium.launch_persistent_context(
@@ -110,6 +157,10 @@ def _context(playwright, headed: bool):
         channel="chrome",
         ignore_default_args=["--enable-automation"],
         args=["--disable-blink-features=AutomationControlled"],
+        # Only the usage export needs this; a download is never a capture of
+        # credential material (the exported zip strips nothing on its own, so
+        # the parser below is what keeps masked key values out of our output).
+        accept_downloads=accept_downloads,
         # Deliberately no record_video_dir / no tracing.start() anywhere in
         # this module -- see the no-capture constraint in the module docstring.
     )
@@ -222,11 +273,22 @@ def cmd_add_client(args) -> int:
         _require_logged_in(page, sel)
 
         page.click(sel["create_button"])
-        page.fill(sel["name_input"], slug)
+        try:
+            page.wait_for_selector(sel["dialog_title"], timeout=8000)
+            page.fill(sel["name_input"], slug)
+            # Doubles as the form-accepted-the-name check: the footer primary
+            # stays --disabled until the input has content.
+            page.wait_for_selector(sel["confirm_create"], timeout=8000)
+        except Exception as exc:
+            raise LayoutMismatch(
+                "create-key dialog did not appear in the expected shape "
+                "(title / name input / enabled confirm button) -- aborting "
+                "before anything is created or written"
+            ) from exc
         page.click(sel["confirm_create"])
 
         try:
-            page.wait_for_selector(sel["revealed_key_value"], timeout=10000)
+            page.wait_for_selector(sel["revealed_key_value"], timeout=15000)
         except Exception as exc:
             raise LayoutMismatch(
                 "key-created dialog didn't show the expected revealed-value "
@@ -237,8 +299,12 @@ def cmd_add_client(args) -> int:
         key_value = page.locator(sel["revealed_key_value"]).first.inner_text().strip()
         # Dismiss the dialog BEFORE releasing key_value from scope -- no
         # screenshot, no further read of key_value past the vault.put below.
-        if page.locator(sel["dialog_done"]).count() > 0:
-            page.click(sel["dialog_done"])
+        for candidate in sel["dialog_done_candidates"]:
+            if page.locator(candidate).count() > 0:
+                page.click(candidate)
+                break
+        else:
+            page.keyboard.press("Escape")
         ctx.close()
 
     if not key_value:
@@ -283,33 +349,217 @@ def cmd_list_clients(args) -> int:
     return 0
 
 
+def parse_export_zip(zip_bytes: bytes, since: str | None = None):
+    """Turn the console's usage export into per-(day, key, model) records.
+
+    Source of truth is amount-<from>_<to>.csv, whose columns are
+    user_id,start_time_iso,end_time_iso,model,name,api_key_name,api_key,type,
+    price,amount -- one row per usage type. `api_key` (masked) and `user_id`
+    are DROPPED on the way in: neither is needed to attribute spend, and
+    keeping a key-shaped string out of the artifact is the point.
+
+    Cost is amount x price, summed per record. cost-<from>_<to>.csv is the
+    console's own per-(day, model) total and carries the currency, so it is
+    read both for the currency label and as a CROSS-CHECK -- its delta is
+    reported in the summary rather than silently trusted, because a mismatch
+    means either the export shape changed or the per-key split double-counts.
+    """
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        members = zf.namelist()
+        amount_name = next(
+            (n for n in members if os.path.basename(n).startswith("amount-")), None
+        )
+        cost_name = next(
+            (n for n in members if os.path.basename(n).startswith("cost-")), None
+        )
+        if not amount_name:
+            raise LayoutMismatch(
+                f"usage export has no amount-*.csv (members: {sorted(members)}) -- "
+                "the export format may have changed. Refusing to guess; aborting."
+            )
+        amount_rows = list(
+            csv.DictReader(io.StringIO(zf.read(amount_name).decode("utf-8-sig")))
+        )
+        cost_rows = (
+            list(csv.DictReader(io.StringIO(zf.read(cost_name).decode("utf-8-sig"))))
+            if cost_name
+            else []
+        )
+
+    agg: dict = {}
+    for row in amount_rows:
+        day = (row.get("start_time_iso") or "")[:10]
+        key_name = (row.get("api_key_name") or "").strip()
+        model = (row.get("model") or "").strip()
+        usage_type = (row.get("type") or "").strip()
+        if not day or not key_name or not usage_type:
+            continue
+        try:
+            amount = float(row.get("amount") or 0)
+            price = float(row.get("price") or 0)
+        except ValueError:
+            continue
+        rec = agg.setdefault(
+            (day, key_name, model),
+            {
+                "date": day,
+                "api_key_name": key_name,
+                "model": model,
+                "usage": {},
+                "cost_usd": 0.0,
+            },
+        )
+        rec["usage"][usage_type] = int(amount)
+        rec["cost_usd"] = round(rec["cost_usd"] + amount * price, 10)
+
+    console_cost: dict = {}
+    currency = None
+    for row in cost_rows:
+        day = (row.get("start_time_iso") or "")[:10]
+        model = (row.get("model") or "").strip()
+        currency = row.get("currency") or currency
+        try:
+            console_cost[(day, model)] = (
+                console_cost.get((day, model), 0.0) + float(row.get("cost") or 0)
+            )
+        except ValueError:
+            continue
+
+    our_cost: dict = {}
+    for (day, _key, model), rec in agg.items():
+        our_cost[(day, model)] = our_cost.get((day, model), 0.0) + rec["cost_usd"]
+    max_abs_diff = max(
+        (abs(our_cost.get(k, 0.0) - v) for k, v in console_cost.items()), default=0.0
+    )
+
+    if since:
+        _validate_iso_date(since)
+        agg = {k: v for k, v in agg.items() if v["date"] >= since}
+
+    records = sorted(agg.values(), key=lambda r: (r["date"], r["api_key_name"], r["model"]))
+    for rec in records:
+        rec["currency"] = currency or "USD"
+        rec["source"] = "console_export"
+
+    dates = sorted({r["date"] for r in agg.values()}) or sorted(
+        (row.get("start_time_iso") or "")[:10] for row in amount_rows
+    )
+    meta = {
+        "currency": currency or "USD",
+        "data_range": {"from": dates[0] if dates else None, "to": dates[-1] if dates else None},
+        "amount_rows": len(amount_rows),
+        "keys": sorted({r["api_key_name"] for r in records}),
+        "max_abs_diff_usd": round(max_abs_diff, 10),
+    }
+    return records, meta
+
+
+def _validate_iso_date(value: str) -> None:
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise LayoutMismatch(
+            f"--since {value!r} is not a YYYY-MM-DD date"
+        ) from exc
+
+
+def merge_jsonl(path: str, records: list, currency: str) -> dict:
+    """Upsert records into the append-only-visible JSONL keyed by
+    (date, api_key_name, model). Re-running an overlapping export window must
+    never duplicate a row: a later run simply refreshes the same key, keeping
+    the original first_seen_at. Rewritten atomically (tmp + os.replace) so a
+    reader never sees a half-written file."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    existing: dict = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                existing[(rec.get("date"), rec.get("api_key_name"), rec.get("model"))] = rec
+
+    added = updated = 0
+    for rec in records:
+        ident = (rec["date"], rec["api_key_name"], rec["model"])
+        if ident in existing:
+            rec["first_seen_at"] = existing[ident].get("first_seen_at", now)
+            updated += 1
+        else:
+            rec["first_seen_at"] = now
+            added += 1
+        rec["updated_at"] = now
+        existing[ident] = rec
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        for ident in sorted(existing):
+            f.write(json.dumps(existing[ident], sort_keys=True) + "\n")
+    os.replace(tmp, path)
+    return {"records_added": added, "records_updated": updated, "records_total": len(existing)}
+
+
 def cmd_usage_export(args) -> int:
-    """Phase 1: scaffold only, left for Phase 2's live selector correction.
+    """Download the console's own usage export and write per-key daily usage.
+
     Reads ALL mapped keys from the live map file each call (bus #82540's
-    explicit "not a hardcoded list of 5" requirement) -- just not wired to a
-    real page yet."""
+    explicit "not a hardcoded list of 5" requirement) -- though in practice the
+    export reports whatever keys the console has, which is the honest source of
+    truth: a key in the map that the console doesn't know simply has no rows.
+    """
     mapping = _load_map()
     sel = _SEL["usage_page"]
+    out_path = os.path.expanduser(args.out or _USAGE_JSONL_DEFAULT)
 
     from playwright.sync_api import sync_playwright
 
-    rows = []
     with sync_playwright() as p:
-        ctx = _context(p, headed=args.headed)
+        ctx = _context(p, headed=args.headed, accept_downloads=True)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto(sel["url"])
         _require_logged_in(page, sel)
+        try:
+            with page.expect_download(timeout=90000) as dl_info:
+                page.click(sel["export_button"])
+            download = dl_info.value
+        except Exception as exc:
+            raise LayoutMismatch(
+                "the Export button produced no download -- the usage page "
+                "layout may have changed. Refusing to guess; aborting."
+            ) from exc
 
-        for tr in page.locator(sel["table_rows"]).all():
-            rows.append(tr.inner_text())
+        # Saved only long enough to read the bytes; the zip carries a masked
+        # api_key column and an internal user_id that must not reach either
+        # the JSONL or this process's leftovers on disk.
+        tmpdir = tempfile.mkdtemp(prefix="deepseek_usage_")
+        try:
+            zpath = os.path.join(tmpdir, download.suggested_filename or "usage.zip")
+            download.save_as(zpath)
+            with open(zpath, "rb") as f:
+                zip_bytes = f.read()
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
         ctx.close()
 
-    out = {
-        "exported_at": datetime.now(timezone.utc).isoformat(),
-        "clients_known": sorted(mapping.keys()),
-        "raw_rows": rows,
-    }
-    print(json.dumps(out, indent=2))
+    records, meta = parse_export_zip(zip_bytes, since=args.since)
+    summary = merge_jsonl(out_path, records, currency=meta["currency"])
+    summary.update(
+        {
+            "jsonl": out_path,
+            "data_range": meta["data_range"],
+            "records_in_export": len(records),
+            "amount_rows_parsed": meta["amount_rows"],
+            "keys_in_export": meta["keys"],
+            "clients_mapped": len(mapping),
+            "cost_cross_check_max_abs_diff_usd": meta["max_abs_diff_usd"],
+        }
+    )
+    print(json.dumps(summary, indent=2))
     return 0
 
 
@@ -329,8 +579,16 @@ def main(argv) -> int:
     p_list = sub.add_parser("list-clients", help="list mapped clients: slug, vault key NAME, created_at (no values)")
     p_list.set_defaults(func=cmd_list_clients)
 
-    p_usage = sub.add_parser("usage-export", help="export usage across every mapped key (Phase 1 scaffold)")
-    p_usage.add_argument("--since", default=None)
+    p_usage = sub.add_parser(
+        "usage-export",
+        help="export per-key DAILY usage to a JSONL (drives the console's own Export download)",
+    )
+    p_usage.add_argument("--since", default=None, help="only write days on/after YYYY-MM-DD")
+    p_usage.add_argument(
+        "--out",
+        default=None,
+        help="JSONL path (default ~/wingmen/fleet-health/state/deepseek_usage_by_key.jsonl)",
+    )
     p_usage.add_argument("--headed", action="store_true")
     p_usage.set_defaults(func=cmd_usage_export)
 
