@@ -1462,6 +1462,31 @@ def fetch_inbox_backlog() -> List[dict]:
 # read-only.
 
 
+def build_resources_query() -> Tuple[str, list]:
+    """op#36664: machines-resources panel (/api/resources) — the latest sample
+    per fleet host from host_metrics (migration 096), written every 5 min by
+    cc-fleet-health's mini_monitor.py/gzb_monitor.py/cubeasht_monitor.py. This
+    module adds no new collector — it only reads what those three already
+    write. age_s is computed server-side (never trust a client clock for
+    staleness) so the page can grey a sample out itself; it never substitutes
+    for a live reading. metrics/error pass through as-is — each collector
+    documents its own field names (mem_real_used_pct, cpu_temp_c, wsl{...},
+    etc.) in its own module docstring; this layer does not re-interpret them."""
+    sql = (
+        "SELECT DISTINCT ON (host) "
+        "  host, ok, error, metrics, "
+        "  round(extract(epoch FROM (now() - ts)))::int AS age_s "
+        "FROM host_metrics "
+        "ORDER BY host, ts DESC"
+    )
+    return sql, []
+
+
+def fetch_resources() -> List[dict]:
+    sql, params = build_resources_query()
+    return _query(sql, params)
+
+
 def build_context_bloat_query() -> Tuple[str, list]:
     """Latest current-context size per always-on agent (window fill).
 

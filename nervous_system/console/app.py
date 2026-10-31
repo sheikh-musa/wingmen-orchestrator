@@ -2184,6 +2184,14 @@ def _make_handler(feedloop: "_FeedLoop"):
             if path in ("/builds", "/builds/"):
                 return self._serve_static("builds.html", path)
 
+            # MACHINES RESOURCES (op#36664): read-only CPU/RAM/temp/swap panel
+            # for the Mini, gzbai and cubeasht, sourced from host_metrics
+            # (migration 096) — no new collectors. Same open-SPA-shell tier
+            # as /status + /builds; the page fetches /api/resources with the
+            # stored bearer token.
+            if path in ("/resources", "/resources/"):
+                return self._serve_static("resources.html", path)
+
             if path.startswith("/static/"):
                 name = path[len("/static/"):]
                 return self._serve_static(name, path)
@@ -2365,6 +2373,16 @@ def _make_handler(feedloop: "_FeedLoop"):
                         "items": rows,
                         "counts": counts,
                     }))
+
+                if path == "/api/resources":
+                    # op#36664: machines-resources panel. db.fetch_resources()
+                    # is a straight passthrough of host_metrics' latest row
+                    # per host (no new collector, no server-side
+                    # reinterpretation) plus a server-computed age_s so a
+                    # stale sample can never be painted as live.
+                    rows = db.fetch_resources()
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, _jsonable({"hosts": rows}))
 
                 if path == "/api/docs":
                     # Catalog of all fleet docs, grouped by repo/vertical.

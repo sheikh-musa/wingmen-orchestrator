@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="robots" content="noindex,nofollow" />
+<meta name="color-scheme" content="dark" />
+<title>Machines</title>
+<link rel="manifest" href="/manifest.json" />
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico" />
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
+<style>
+  /* op#36664: machines-resources panel joins the Calm Command system — same
+     tokens/header/card language as status/builds. DOM/ids follow the same
+     pattern (resources.js owns token/connect/main). */
+  :root{
+    --bg:#090b10; --bg-2:#0c0f16;
+    --surface:#12161e; --surface-2:#171c26; --surface-3:#1d2430;
+    --hair:rgba(255,255,255,.06); --hair-2:rgba(255,255,255,.10);
+    --txt:#e8ebf1; --dim:#949cac; --faint:#5c6472;
+    --jade:#37d39a; --jade-soft:rgba(55,211,154,.13);
+    --indigo:#8aa6ff; --indigo-soft:rgba(138,166,255,.14);
+    --amber:#f5b942; --amber-soft:rgba(245,185,66,.12);
+    --red:#ff7a6e; --red-soft:rgba(255,122,110,.10);
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+    --r-lg:18px; --r:14px; --r-sm:10px;
+    --shadow:0 1px 0 rgba(255,255,255,.045) inset, 0 10px 30px -12px rgba(0,0,0,.7);
+    --tap:44px;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html, body { height: 100%; }
+  body {
+    margin: 0; color: var(--txt);
+    font:15px/1.5 var(--sans); letter-spacing:-.01em;
+    -webkit-font-smoothing:antialiased;
+    background:
+      radial-gradient(120% 60% at 50% -8%, rgba(55,211,154,.06), transparent 60%),
+      radial-gradient(90% 50% at 50% 0%, rgba(138,166,255,.05), transparent 55%),
+      linear-gradient(180deg,var(--bg-2),var(--bg) 40%);
+    background-attachment:fixed;
+    display: flex; flex-direction: column;
+    height: 100vh; height: 100dvh;
+    -webkit-text-size-adjust: 100%;
+    padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);
+  }
+  header {
+    flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    padding: 11px 16px 13px;
+    background:linear-gradient(180deg,rgba(12,15,22,.92),rgba(9,11,16,.72));
+    backdrop-filter:saturate(140%) blur(14px);-webkit-backdrop-filter:saturate(140%) blur(14px);
+    border-bottom: 1px solid var(--hair);
+  }
+  header h1 { font-size:19px; margin:0; font-weight:700; letter-spacing:-.02em; }
+  header .navlink { font:600 15px/1 var(--sans); color:var(--dim); text-decoration:none; }
+  header .navlink:active { color:var(--txt); }
+  .build { margin-left:auto; font:11px/1 var(--mono); color:var(--faint);
+    padding:5px 9px; border-radius:999px; background:var(--surface); border:1px solid var(--hair); white-space:nowrap }
+  .build .d{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--jade);
+    margin-right:5px;box-shadow:0 0 6px var(--jade);vertical-align:middle}
+  .token-row { width: 100%; display: flex; gap: 8px; align-items: center; }
+  .token-row input {
+    flex: 1; min-width: 0; background: var(--surface-2); border: 1px solid var(--hair);
+    color: var(--txt); border-radius: var(--r); padding: 0 12px; height: 38px;
+    font: 13px var(--mono);
+  }
+  button {
+    background: var(--surface-2); border: 1px solid var(--hair); color: var(--txt);
+    border-radius: var(--r); padding: 0 16px; height: 38px;
+    font: 600 12px/1 var(--mono); cursor: pointer; white-space: nowrap; flex: none;
+  }
+  button:active { background: var(--surface-3); }
+
+  main { flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch; }
+  .empty { padding: 40px 16px; color: var(--faint); font:13px var(--mono); text-align: center; }
+
+  .items { padding: 14px 14px 16px; }
+  .item {
+    background: var(--surface); border: 1px solid var(--hair-2);
+    border-radius: var(--r); box-shadow: var(--shadow);
+    padding: 14px 16px; margin: 10px 0;
+  }
+  .item.dark { border-left: 3px solid var(--amber); }
+  .item .t { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
+  .item .ttl { font:600 15px/1.4 var(--sans); color:var(--txt); }
+  .item .age { font:11px/1.5 var(--mono); color:var(--faint); margin-top:2px; }
+  .pill {
+    flex:none; font:700 10px/1 var(--mono); letter-spacing:.06em; text-transform:uppercase;
+    padding:4px 8px; border-radius:999px; background:var(--amber-soft); color:var(--amber);
+    border:1px solid rgba(245,185,66,.25); white-space:nowrap;
+  }
+  .pill.err { background:var(--red-soft); color:var(--red); border-color:rgba(255,122,110,.3); }
+  .pill.na { background:var(--surface-2); color:var(--faint); border-color:var(--hair-2); }
+
+  .sub {
+    margin-top:12px; padding-top:8px; border-top:1px solid var(--hair);
+    font:700 10px/1 var(--mono); text-transform:uppercase; letter-spacing:.1em;
+    color:var(--faint);
+  }
+  .sub:first-of-type { margin-top: 10px; }
+  .row {
+    display:flex; align-items:baseline; justify-content:space-between; gap:10px;
+    padding: 5px 0; font:12.5px/1.5 var(--mono);
+  }
+  .row .rl { color: var(--dim); }
+  .row .rv { color: var(--txt); font-weight:600; }
+  .row .na { color: var(--faint); font-weight:400; font-style:italic; }
+  .item.dark .row .rv { color: var(--dim); }
+  .note { margin-top:8px; font:12px/1.5 var(--mono); color:var(--red); overflow-wrap:anywhere; }
+
+  @media (min-width: 760px) {
+    .token-row { width: auto; margin-left: auto; }
+    .token-row input { width: 240px; flex: none; height: 34px; }
+    button { height: 34px; }
+    .items { max-width: 860px; margin: 0 auto; width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Machines</h1>
+  <a class="navlink" href="/">&larr; Console</a>
+  <a class="navlink" href="/status">Status</a>
+  <a class="navlink" href="/builds">Building</a>
+  <span id="build" class="build"><span class="d"></span>fc-v94</span>
+  <div class="token-row">
+    <input id="token" type="password" inputmode="text" placeholder="operator token" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+    <button id="connect">Connect</button>
+  </div>
+</header>
+
+<main id="main">
+  <div class="empty">Enter the operator token and Connect.</div>
+</main>
+
+<script src="/static/resources.js"></script>
+</body>
+</html>
