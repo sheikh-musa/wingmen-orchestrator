@@ -64,7 +64,7 @@ def test_no_screenshot_or_trace_cli_flags_exist():
     """Per-subcommand help (not the top-level --help, which also prints the
     module docstring that names --screenshot/--trace in prose while
     describing the ban) -- this checks the actual argparse option strings."""
-    for sub in ("add-client", "usage-export", "split-key"):
+    for sub in ("add-client", "usage-export", "split-key", "rename-key"):
         rc, out, err = _run([sub, "--help"])
         assert rc == 0
         assert "--screenshot" not in out
@@ -109,10 +109,11 @@ def test_context_launches_real_chrome_and_strips_automation_tells(tmp_path):
 
 # --- CLI wiring --------------------------------------------------------
 
-def test_help_lists_all_five_subcommands():
+def test_help_lists_every_subcommand():
     rc, out, err = _run(["--help"])
     assert rc == 0
-    for sub in ("login", "add-client", "split-key", "list-clients", "usage-export"):
+    for sub in ("login", "add-client", "split-key", "list-clients", "usage-export",
+                "rename-key"):
         assert sub in out
 
 
@@ -770,6 +771,295 @@ def test_the_console_allowlist_still_has_no_delete_or_revoke_action():
     blob = json.dumps(mod._SEL).lower()
     for forbidden in ("delete", "revoke", "remove"):
         assert forbidden not in blob
+
+
+# --- rename-key: ONE key, its NAME, nothing else (bus #87201 / #87881) ------
+# The shared console key is itself named `substrate`, and usage-export
+# attributes spend by that name, so it must be renamed before that family is
+# split. These tests cover everything that is checkable without a live
+# session: input validation, the second confirmation gate, and the pure
+# before/after table comparison that makes "renamed exactly one row"
+# verifiable rather than intended.
+
+def _rename_mod():
+    return _load_module(name="deepseek_rename")
+
+
+def test_rename_key_dry_run_prints_the_plan_without_touching_anything():
+    rc, out, err = _run(
+        ["rename-key", "substrate", "shared-legacy", "--confirm", "substrate", "--dry-run"]
+    )
+    assert rc == 0, err
+    assert "would rename" in out
+    assert "substrate" in out and "shared-legacy" in out
+
+
+def test_rename_key_refuses_when_confirm_does_not_repeat_the_old_name():
+    """The gate that stops a mistyped target. Fires before any browser work."""
+    rc, out, err = _run(["rename-key", "substrate", "shared-legacy", "--confirm", "substrat"])
+    assert rc == 1
+    assert out == ""
+    assert "repeat the current name exactly" in err
+
+
+def test_rename_key_confirm_is_required():
+    rc, out, err = _run(["rename-key", "substrate", "shared-legacy"])
+    assert rc != 0
+    assert out == ""
+
+
+def test_rename_key_refuses_to_rename_a_key_onto_its_own_name():
+    rc, out, err = _run(
+        ["rename-key", "substrate", "substrate", "--confirm", "substrate", "--dry-run"]
+    )
+    assert rc == 1
+    assert "identical" in err
+
+
+def test_rename_key_rejects_anything_that_is_not_a_plain_key_name():
+    # "-leading" is covered by the pure test below instead: argparse would
+    # read it as an option and fail before our validation ever runs, which
+    # would make this assertion pass for the wrong reason.
+    for bad in ("", "bad name", "with/slash", "a" * 65, "tab\tname"):
+        rc, out, err = _run(["rename-key", bad, "ok-name", "--confirm", bad])
+        assert rc == 1, bad
+        assert out == "", bad
+        assert "rename-key:" in err, bad
+
+
+def test_validate_rename_rejects_a_leading_punctuation_name():
+    mod = _rename_mod()
+    for bad in ("-leading", ".dot", "_under"):
+        try:
+            mod._validate_rename(bad, "ok-name")
+        except ValueError as exc:
+            assert "not a plain key name" in str(exc)
+        else:
+            raise AssertionError(f"{bad!r} must be rejected")
+    # and the shape we actually intend to use is accepted
+    mod._validate_rename("substrate", "substrate-shared-legacy")
+
+
+def _verify_raises(names_before, names_after, old, new, needle):
+    mod = _rename_mod()
+    try:
+        mod._verify_rename(names_before, names_after, old, new)
+    except mod.LayoutMismatch as exc:
+        assert needle in str(exc), str(exc)
+    else:
+        raise AssertionError(f"expected LayoutMismatch containing {needle!r}")
+
+
+def test_verify_rename_accepts_exactly_one_name_change():
+    _rename_mod()._verify_rename(
+        ["substrate", "bariq", "oeh"], ["shared-legacy", "bariq", "oeh"],
+        "substrate", "shared-legacy",
+    )
+
+
+def test_verify_rename_refuses_a_target_that_is_not_there():
+    _verify_raises(["bariq"], ["bariq"], "substrate", "shared-legacy", "no key named")
+
+
+def test_verify_rename_refuses_a_name_collision():
+    """Renaming onto an existing name is the exact failure this action exists
+    to prevent -- two different spend buckets collapsing onto one label."""
+    _verify_raises(["substrate", "shared-legacy"], ["substrate", "shared-legacy"],
+                   "substrate", "shared-legacy", "ALREADY EXISTS")
+
+
+def test_verify_rename_refuses_a_duplicated_target():
+    _verify_raises(["substrate", "substrate"], ["shared-legacy", "substrate"],
+                   "substrate", "shared-legacy", "refusing to guess")
+
+
+def test_verify_rename_refuses_when_the_old_name_survives():
+    """A save that ADDED the new name without dropping the old one would look
+    like a success from the dialog and leave two rows claiming one key."""
+    _verify_raises(["substrate"], ["substrate", "shared-legacy"],
+                   "substrate", "shared-legacy", "STILL named")
+
+
+def test_verify_rename_refuses_when_the_new_name_never_appeared():
+    _verify_raises(["substrate"], ["something-else"], "substrate", "shared-legacy",
+                   "did not take")
+
+
+def test_verify_rename_refuses_when_another_row_changed_too():
+    """The 'touch no other field' guarantee, expressed as something that can
+    actually be checked: the after-list must be the before-list with exactly
+    one substitution."""
+    _verify_raises(["substrate", "bariq"], ["shared-legacy", "oeh"],
+                   "substrate", "shared-legacy", "more than the one key")
+
+
+class _FakeNode:
+    """Enough of a Playwright Locator for _read_key_table: children-as-text."""
+
+    def __init__(self, text="", children=None):
+        self.text = text
+        self.children = children or []
+
+    def all_inner_texts(self):
+        return [c.text for c in self.children]
+
+    def count(self):
+        return len(self.children)
+
+    def nth(self, i):
+        return self.children[i]
+
+    def inner_text(self):
+        return self.text
+
+    @property
+    def first(self):
+        return self.children[0] if self.children else self
+
+    def locator(self, _sel):
+        return _FakeNode(children=self.children)
+
+
+class _FakePage:
+    """Serves successive table states, because the real page renders <table>
+    before it fills the rows -- the bug that made a first probe read a
+    19-row table as 4 empty rows."""
+
+    def __init__(self, header, frames):
+        self.header = header
+        self.frames = list(frames)
+        self.waits = 0
+
+    def locator(self, sel):
+        if sel == "table th":
+            return _FakeNode(children=[_FakeNode(text=h) for h in self.header])
+        if sel == "table tr":
+            frame = self.frames.pop(0) if len(self.frames) > 1 else self.frames[0]
+            return _FakeNode(children=frame)
+        raise AssertionError(sel)
+
+    def wait_for_timeout(self, _ms):
+        self.waits += 1
+
+
+_HEADER = ["Name", "Tracking ID", "Key", "Created", "Last used"]
+
+
+def _row(name):
+    return _FakeNode(children=[] if name is None else [_FakeNode(text=name)])
+
+
+def test_read_key_table_waits_for_an_empty_table_to_populate():
+    mod = _rename_mod()
+    empty = [_row(None)]
+    filled = [_row(None), _row("substrate"), _row("bariq")]
+    page = _FakePage(_HEADER, [empty, filled, filled])
+    assert mod._read_key_table(page) == ["substrate", "bariq"]
+    assert page.waits >= 1, "must have polled instead of returning an empty shell"
+
+
+def test_read_key_table_does_not_trust_a_partially_filled_table():
+    """The rehearsal failure, pinned: the first live run read 3 keys off an
+    18-key account because a non-empty table is not a finished one."""
+    mod = _rename_mod()
+    partial = [_row(None), _row("a"), _row("b")]
+    full = [_row(None), _row("a"), _row("b"), _row("substrate")]
+    page = _FakePage(_HEADER, [partial, full, full])
+    assert mod._read_key_table(page) == ["a", "b", "substrate"]
+
+
+def test_read_key_table_fails_closed_on_a_reordered_or_renamed_column():
+    mod = _rename_mod()
+    page = _FakePage(["Name", "Tracking ID", "Key value", "Created", "Last used"],
+                     [[_row(None), _row("substrate")]])
+    try:
+        mod._read_key_table(page)
+    except mod.LayoutMismatch as exc:
+        assert "table never populated" in str(exc) or "header" in str(exc)
+    else:
+        raise AssertionError("a changed header must not be read as a key list")
+
+
+def test_the_only_row_action_the_script_knows_how_to_find_is_edit():
+    """rename-key added the first mutating row action. Its label is pinned and
+    nothing in the allowlist names the destructive one, so a later edit cannot
+    quietly point this at Revoke."""
+    page = _load_module(name="deepseek_allowlist_rename")._SEL["api_keys_page"]
+    assert page["edit_action_label"] == "edit api key"
+    assert not any("revoke" in str(v).lower() for v in page.values())
+
+
+class _FakeDialogPage:
+    """Just enough page for _assert_edit_dialog: a count and a title text.
+
+    `titles` is the inner_text of every node the selector matches, so 0, 1 or
+    2 ents all behave like the real locator would.
+    """
+
+    def __init__(self, titles, title_sel="div.ds-modal-content__title"):
+        self.titles = list(titles)
+        self.title_sel = title_sel
+
+    def wait_for_selector(self, sel, timeout=None, state=None):
+        if sel == self.title_sel and not self.titles:
+            raise TimeoutError(sel)
+
+    def locator(self, sel):
+        assert sel == self.title_sel, sel
+        return _FakeNode(children=[_FakeNode(text=t) for t in self.titles])
+
+
+def test_assert_edit_dialog_accepts_the_live_dialog_shape():
+    """The live DOM on 2026-11-01: one div.ds-modal-content__title reading
+    'Edit API key'."""
+    mod = _rename_mod()
+    sel = mod._SEL["api_keys_page"]
+    mod._assert_edit_dialog(_FakeDialogPage(["Edit API key"]), sel)
+
+
+def test_assert_edit_dialog_fails_closed_when_the_title_text_is_not_edit():
+    """The rehearsal bug in reverse: a dialog opened, but not the one meant."""
+    mod = _rename_mod()
+    sel = mod._SEL["api_keys_page"]
+    try:
+        mod._assert_edit_dialog(_FakeDialogPage(["Revoke API key"]), sel)
+    except mod.LayoutMismatch as exc:
+        assert "wrong dialog" in str(exc)
+    else:
+        raise AssertionError("a differently-titled dialog must abort before typing")
+
+
+def test_assert_edit_dialog_reports_no_dialog_when_no_title_matches():
+    mod = _rename_mod()
+    sel = mod._SEL["api_keys_page"]
+    try:
+        mod._assert_edit_dialog(_FakeDialogPage([]), sel)
+    except mod.LayoutMismatch as exc:
+        assert "did not open a dialog" in str(exc)
+    else:
+        raise AssertionError("a missing dialog must abort")
+
+
+def test_assert_edit_dialog_refuses_when_two_dialogs_are_open():
+    mod = _rename_mod()
+    sel = mod._SEL["api_keys_page"]
+    try:
+        mod._assert_edit_dialog(_FakeDialogPage(["Edit API key", "Edit API key"]), sel)
+    except mod.LayoutMismatch as exc:
+        assert "expected exactly 1" in str(exc)
+    else:
+        raise AssertionError("ambiguity must abort rather than pick the first")
+
+
+def test_the_title_selector_is_never_confused_for_the_title_text():
+    """Pins the exact bug that failed the first live rehearsal: the expected
+    title string had been stored where the selector belonged.
+    """
+    sel = _load_module(name="deepseek_title_split")._SEL["api_keys_page"]
+    assert sel["edit_dialog_title_text"] == "Edit API key"
+    assert "edit_dialog_title" not in sel, "the conflated key must stay deleted"
+    assert sel["dialog_title"].endswith("ds-modal-content__title"), sel["dialog_title"]
+    assert "Edit API key" not in sel["dialog_title"]
 
 
 # --- F1 (cc-quality, PR#744): the cost cross-check must ENFORCE, not print ---
