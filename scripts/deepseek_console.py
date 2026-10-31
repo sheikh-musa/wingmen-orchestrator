@@ -522,8 +522,10 @@ def budget_status(path: str, day: str | None = None) -> dict:
     CALENDAR DAY ONLY, deliberately. A trailing-24h figure cannot be derived
     from this artifact: the console export is daily granularity per key, so any
     24h number computed here would just be the same partial day relabelled --
-    a fabricated number that reads as measured. The honest trailing-24h source
-    is a balance delta from the balance poll, not this file.
+    a fabricated number that reads as measured. orch-console ruled to drop the
+    trailing-24h half entirely (bus #87284): calendar-day WARN 5 / ALERT 7 is
+    the whole feature. Do not re-add a 24h figure from these rows; if a real
+    one is ever wanted it has to come from a balance delta, not this file.
     """
     day = day or datetime.now(_CONSOLE_TZ).date().isoformat()
     per_key: dict = {}
