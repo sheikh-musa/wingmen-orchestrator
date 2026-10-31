@@ -254,8 +254,14 @@ def test_scan_cost_stays_bounded_on_a_multi_megabyte_transcript(tmp_path):
     assert not any(cls == "postgres-dsn-kv" for cls, _ in findings)
 
 
-def test_bounded_conninfo_check_agrees_with_the_shared_pattern():
-    """The substitution must not change the ANSWER, only the cost."""
+def test_bounded_conninfo_check_matches_the_shared_pattern_on_a_corpus():
+    """A CONSERVATIVE SUPERSET verified on a corpus — not a proof of equivalence.
+
+    cc-quality 87538 F1 found the one fail-OPEN divergence: three or more bare
+    `password=` tokens and no other libpq key score 3 in the shared pattern and
+    used to score 1 here. That case is now in this corpus. The remaining known
+    divergences are over-reports (fail-closed) and are stated in the function
+    docstring rather than silently assumed away by a test name."""
     sys.path.insert(0, str(REPO / "scripts" / "hooks"))
     from secret_shape_patterns import SECRET_VALUE_PATTERNS
 
@@ -268,6 +274,10 @@ def test_bounded_conninfo_check_agrees_with_the_shared_pattern():
         " ".join(["host=a", "port=b", "dbname=c"]),          # no password field
         f"{PW}=abc",                                          # one token only
         f"the {PW}= is unset, host=x port=y",                 # no value after =
+        # three BARE password tokens, no other libpq key — the case F1 found
+        f"{PW}=a {PW}=b {PW}=c",
+        # not a password token at all: no word boundary before the keyword
+        "mypass" + f"{PW}=abc host=a port=b",
     ]
     for case in cases:
         assert spg._conninfo_hit(case) == bool(shared.search(case)), case
