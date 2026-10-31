@@ -137,21 +137,45 @@ def test_locator_returns_a_real_re_match():
 
 
 def _density_corpus() -> str:
-    """The exact shape that reproduced the hang: many password-anchored filler fields
-    per line. Anchor DENSITY per line is the variable that matters -- a sparse corpus a
-    third this size runs in ~3s and hides the problem completely."""
+    """The shape that reproduced the hang: many password-anchored filler fields per line,
+    and no line can ever match. The value after `=` is a SPACE followed by "filler", so
+    `\\S+` in the lookahead fails at every password position -- which is what makes the
+    cost quadratic: the lookahead rescans the rest of the line from every start position
+    and fails every time. (Measured 2026-10-31 against the live module: 5.46 MB takes
+    61.4s on the raw pattern and 0.50s on the linearized locator.)
+
+    Density alone is NOT the trigger, and a corpus where the body MATCHES at the first
+    position does not stress this pattern at all -- there the lookahead never retries
+    (cc-substrate, bus #88274: 5.5 MB at 40 password fields per line, 0.15s raw). The
+    two cost tests below pin the two distinct triggers that do cost: this one (lookahead
+    FAILS at every start) and `_failed_candidate_corpus` (lookahead SUCCEEDS at every
+    start, three-token body fails)."""
     line = '"' + (PW_KEY + "= filler ") * 40 + '"'
     return (line + "\n") * 8000
 
 
+def _failed_candidate_corpus() -> str:
+    """The OTHER quadratic trigger, pinned because the density corpus does not cover it
+    (cc-substrate, bus #88274). One very long line: the lookahead SUCCEEDS from every
+    start position -- a single password field sits at the very end of the line -- so the
+    engine never bails, while the three-token body FAILS at every start, because each
+    unit is two key=value tokens followed by a non-key token that breaks the chain.
+    Measured against the live module 2026-10-31: 600 KB takes 73.6s on the raw pattern
+    and 0.07s on the linearized locator."""
+    unit = "host=db1 port=5432 zz=7 "  # two tokens, then a chain-breaker
+    return unit * 25000 + "user=u " + PW_KEY + "=s3cr3t" + "\n"
+
+
 # Ceiling for both cost tests. This asserts BOUNDEDNESS, not a performance target: the
-# shipped quadratic needs >20s on this corpus (see the module docstring), while the
+# raw quadratic needs 61.4s on the density corpus and 73.6s on the failed-candidate
+# corpus (measured 2026-10-31 against the live module), while the
 # linearized scan measured 2.13s / 2.56s / 2.78s on cc-quality's review machine
 # (PR#763 review, 2026-10-31) and ~0.7s where it was developed. A 2.5s bound sat inside
 # that spread and flaked on slower hardware -- a real flake, reported by cc-quality, whose
 # only failure mode is to train people to ignore a RED security test.
 # 8s keeps a >2x margin over the slowest observed healthy run and still sits well under
-# the >20s quadratic, so restoring the old pattern turns this RED with room to spare. If
+# both quadratic timings, so restoring the old pattern turns this RED with room to
+# spare. If
 # this ever flakes again, the right next step is a machine-independent ratio (compare a
 # 1x and a 4x density scan; linear ~4x, quadratic ~16x), not a larger flat number.
 _MAX_SCAN_S = 8.0
@@ -166,8 +190,8 @@ def test_scan_cost_stays_bounded_on_the_density_corpus():
     assert not any(h[0] == CLS for h in hits)
     assert elapsed < _MAX_SCAN_S, (
         f"find_hits() on {len(text)} bytes of password-dense filler took {elapsed:.2f}s "
-        f"(ceiling {_MAX_SCAN_S}s) -- the quadratic lookahead is back; pre-fix this is "
-        ">20s in a PostToolUse hook"
+        f"(ceiling {_MAX_SCAN_S}s) -- the quadratic lookahead is back; the raw pattern "
+        "measures 61.4s on this corpus, a PostToolUse stall"
     )
 
 
@@ -181,4 +205,23 @@ def test_scan_cost_stays_bounded_when_a_real_match_is_buried_in_the_density():
     assert any(h[0] == CLS for h in hits), "the buried conninfo must still be found"
     assert elapsed < _MAX_SCAN_S, (
         f"buried-match scan took {elapsed:.2f}s (ceiling {_MAX_SCAN_S}s)"
+    )
+
+
+def test_scan_cost_stays_bounded_when_the_lookahead_succeeds_and_the_body_fails():
+    # A different trigger from the density corpus, and it is not implied by it: here the
+    # lookahead SUCCEEDS everywhere (it is cheap to satisfy, expensive to fail) while the
+    # body fails everywhere. Restoring the raw pattern turns this RED (~74s) just as it
+    # does there (~61s), so both are pinned: a future rewrite of the locator cannot pass
+    # by handling only one of them.
+    text = _failed_candidate_corpus()
+    assert len(text) > 500_000, "corpus must be the large single-line failed-candidate shape"
+    t0 = time.perf_counter()
+    hits = patterns_mod.find_hits(text)
+    elapsed = time.perf_counter() - t0
+    assert not any(h[0] == CLS for h in hits)
+    assert elapsed < _MAX_SCAN_S, (
+        f"find_hits() on {len(text)} bytes of failed candidates took {elapsed:.2f}s "
+        f"(ceiling {_MAX_SCAN_S}s) -- the quadratic lookahead is back; the raw pattern "
+        "measures 73.6s on this corpus"
     )
