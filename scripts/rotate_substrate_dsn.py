@@ -120,8 +120,14 @@ def rewrite_env(path: Path, old_sha8: str, new_password: str,
     """Replace the password inside URL values whose password hashes to old_sha8.
 
     Returns (changed_keys, backup_path). Writes atomically, preserving mode.
+
+    SYMLINKS: several hosts keep the live `.env` as a link to a shared copy. Writing
+    through `os.replace` on the LINK PATH would swap the symlink for a regular file
+    and silently detach the host from its shared env — so every filesystem operation
+    below happens on the resolved target while the link stays a link.
     """
-    text = path.read_text()
+    target = Path(os.path.realpath(path))
+    text = target.read_text()
     changed = []
 
     def _sub(match: "re.Match") -> str:
@@ -147,17 +153,17 @@ def rewrite_env(path: Path, old_sha8: str, new_password: str,
     backup_path = None
     if backup:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        backup_path = path.with_name(path.name + f".bak.{stamp}")
-        shutil.copy2(path, backup_path)
+        backup_path = target.with_name(target.name + f".bak.{stamp}")
+        shutil.copy2(target, backup_path)
         os.chmod(backup_path, 0o600)
 
-    mode = path.stat().st_mode & 0o777
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".env.rot.")
+    mode = target.stat().st_mode & 0o777
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".env.rot.")
     try:
         with os.fdopen(fd, "w") as fh:
             fh.writelines(lines)
         os.chmod(tmp, mode)
-        os.replace(tmp, path)
+        os.replace(tmp, target)
     except BaseException:
         try:
             os.unlink(tmp)

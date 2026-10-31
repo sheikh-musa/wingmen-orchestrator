@@ -324,3 +324,23 @@ def test_restart_consumers_dry_run_restarts_nothing(monkeypatch, capsys):
     assert calls == []
     out = capsys.readouterr().out
     assert "dev.wingmen.ingest" in out and "dev.wingmen.tg-out" in out
+
+
+def test_rewrite_writes_through_a_symlink_and_keeps_it_a_symlink(tmp_path):
+    """Several hosts keep the live .env as a link to a shared copy. os.replace on
+    the LINK path would swap the link for a regular file and silently detach the
+    host from its shared env — a rotation that appears to work and does not."""
+    shared = tmp_path / "shared.env"
+    shared.write_text(_env_body())
+    os.chmod(shared, 0o600)
+    link = tmp_path / ".env"
+    link.symlink_to(shared)
+
+    changed, backup = rot.rewrite_env(link, OLD_SHA, NEW_PW)
+
+    assert changed == ["DATABASE_URL", "BUS_DATABASE_URL"]
+    assert link.is_symlink(), "the symlink must survive the rotation"
+    assert os.path.realpath(link) == os.path.realpath(shared)
+    assert NEW_PW in shared.read_text()
+    assert OLD_PW not in shared.read_text()
+    assert backup is not None and backup.parent == tmp_path
