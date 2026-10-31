@@ -485,6 +485,8 @@ def render_migration(args, number: int, phase: str) -> tuple[str, str]:
             "-- assert: no_table_privilege authenticated public.bot_channel_invites UPDATE",
             "-- assert: no_table_privilege authenticated public.bot_channel_invites DELETE",
             "-- assert: no_table_privilege authenticated public.bot_channel_invites TRUNCATE",
+            "-- assert: no_sequence_privilege anon public.bot_channel_invites_id_seq USAGE",
+            "-- assert: no_sequence_privilege authenticated public.bot_channel_invites_id_seq USAGE",
         ]
     comment_lines.append(
         f"-- REVERT: DELETE FROM public.bot_channels WHERE channel_key = '{key}';")
@@ -542,6 +544,13 @@ def render_migration(args, number: int, phase: str) -> tuple[str, str]:
             "  END IF;\n"
             "END $$;\n"
             "REVOKE ALL ON public.bot_channel_invites FROM PUBLIC, anon, authenticated;\n"
+            "-- The identity sequence is a SEPARATE object with its own default-ACL\n"
+            "-- grants (cc-quality LOW on PR#758, bus #87650: the table REVOKE alone\n"
+            "-- left anon USAGE/SELECT/UPDATE + authenticated USAGE/UPDATE on the\n"
+            "-- sequence created at bariq). REVOKE it too, and assert USAGE is gone\n"
+            "-- (the nextval() gate) -- see the no_sequence_privilege lines above.\n"
+            "REVOKE ALL ON SEQUENCE public.bot_channel_invites_id_seq\n"
+            "  FROM PUBLIC, anon, authenticated;\n"
             "\n"
             "INSERT INTO public.bot_channel_invites\n"
             "  (channel_key, token_hash, expires_at, created_by)\n"
