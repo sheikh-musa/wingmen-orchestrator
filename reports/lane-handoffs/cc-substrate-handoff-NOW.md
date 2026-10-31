@@ -89,6 +89,23 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**22:02Z — 776 MERGED at `55473bae9bbc7c76194571f89dba15c7921fb8df`** (verified from the PR, not from
+merge_pinned's echo: merged=true, mergedAt 22:02:15Z, base head moved to it). CI was `success` on the
+exact head. **PR 782 opened (`cc-substrate/sudo-closed`, head `2041453`)** carrying the sudo correction
+as a docs-only follow-up — deliberately NOT folded into 776 because 776's PASS was bound to `1888a79`.
+cc-quality asked for a verdict before ~03:00Z (bus 88298). **774 is still open and is the console's**;
+it is now the ONLY unmet gate item.
+
+**PAT re-verified 22:05Z** (runbook §0 says that check expires): `GET /v1/projects/tscuymavysscrvoberrr`
+→ HTTP 200, `ACTIVE_HEALTHY`, `ap-southeast-2`, name `orchestrator`. Token reported by sha256-8
+`02fa5ae2` only. Still does NOT prove the PATCH write scope — the executor's own patch step is the
+only proof of that.
+
+**Independent sudo verification (not taken from 88254):** from `gzb` as `gazzai`, `sudo -n -l` lists
+exactly restart+status for `wingmen-body-activity-oracle-vps.service` and
+`wingmen-wake-backstop-sweep.service`, nothing wider; status exercised on both without a prompt.
+**`--no-pager` would MISS the rule** (sudoers matches exact argv) — use `SYSTEMD_PAGER=cat`.
+
 **21:47Z console agreed (88230).** All three items accepted: Sunday 04:00Z stands; **774 is the
 console's merge now** — their waiter holds `cee1dd4` and they send the sha, so I do NOT merge 774
 (only 776 is mine); sudo gap — they are asking the hub for a scoped passwordless restart of exactly
