@@ -10,6 +10,11 @@ prod provenance is not machine-verifiable:
                              word, not metadata."
   ALERT PROD_SHA_DRIFT     — live-prod githubCommitSha != the linked repo's prod-branch
                              HEAD → prod is behind/ahead of main.
+  INFO  CI_ONLY_DRIFT      — prod sha != HEAD, but EVERY file changed between them is
+                             under NON_DEPLOY_PATH_PREFIXES (e.g. `.github/` workflows)
+                             → nothing deployable changed; quiet, not an alert. If the
+                             changed-file list cannot be read, PROD_SHA_DRIFT fires as
+                             before (fail SAFE) and says the list was unreadable.
   WARN  PROD_NOT_READY     — live-prod deploy readyState != READY.
 
 DEAD-MAN'S SWITCH: any Vercel/GitHub call that fails makes this exit non-zero and
@@ -46,6 +51,14 @@ SETTLE_RUNS = 2                            # only alert once a silo's NO-GIT/dri
                                            # signal is naturally transient during a normal
                                            # cli-deploy -> promote-to-git window, so an
                                            # instantaneous alert would cry wolf on routine deploys.
+# Repo paths whose changes never need a production deploy. When EVERY file changed
+# between the live-prod sha and the prod-branch HEAD starts with one of these prefixes,
+# the sha mismatch is reported as INFO CI_ONLY_DRIFT instead of ALERT PROD_SHA_DRIFT.
+# A documented constant (the Vercel project config exposes no machine-readable
+# ignored-paths list to derive it from). Applies to every silo; no repo names here.
+NON_DEPLOY_PATH_PREFIXES = (".github/",)
+COMPARE_FILE_CAP = 300                     # GitHub compare API truncates .files at 300 —
+                                           # a list that long is treated as unreadable (fail safe).
 
 
 def _die(msg):
@@ -81,15 +94,58 @@ def _github_head(org, repo, branch):
     return out.stdout.strip()
 
 
-def evaluate(silo, live_sha, ready_state, expected_head):
-    """Pure detection logic (unit-testable). Returns a list of alert dicts."""
+def _github_changed_files(org, repo, base, head):
+    """Files changed from the live-prod sha (base) to HEAD, via the GitHub compare API.
+
+    Returns a list of paths, or None when the list cannot be determined (gh failure,
+    HEAD not strictly ahead of base, or a truncated list). None is NOT fatal: the
+    caller keeps today's PROD_SHA_DRIFT alert (fail SAFE) — missing data must never
+    suppress an alert."""
+    try:
+        out = subprocess.run(
+            ["gh", "api", "repos/%s/%s/compare/%s...%s" % (org, repo, base, head),
+             "--jq", "{status: .status, files: [.files[].filename]}"],
+            capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            return None
+        data = json.loads(out.stdout)
+    except Exception:
+        return None
+    files = data.get("files")
+    if data.get("status") != "ahead" or not isinstance(files, list) or not files \
+            or len(files) >= COMPARE_FILE_CAP:
+        return None
+    return files
+
+
+def is_ci_only(changed_files):
+    """True only when the changed-file list is known, non-empty, and EVERY path is
+    under NON_DEPLOY_PATH_PREFIXES. Unknown (None) or empty -> False (fail safe)."""
+    if not changed_files:
+        return False
+    return all(any(f.startswith(p) for p in NON_DEPLOY_PATH_PREFIXES) for f in changed_files)
+
+
+def evaluate(silo, live_sha, ready_state, expected_head, changed_files=None, info=None):
+    """Pure detection logic (unit-testable). Returns a list of alert dicts.
+
+    changed_files: paths changed live_sha..HEAD, or None if unknown/unreadable.
+    info: optional list; a non-alert CI_ONLY_DRIFT note is appended to it."""
     alerts = []
     if not live_sha:
         alerts.append({"silo": silo, "sev": "ALERT", "code": "NO_GIT_PROVENANCE",
                        "detail": "live-prod deploy carries no githubCommitSha (manual CLI deploy) — provenance not machine-verifiable"})
     elif not (live_sha.startswith(expected_head) or expected_head.startswith(live_sha)):
-        alerts.append({"silo": silo, "sev": "ALERT", "code": "PROD_SHA_DRIFT",
-                       "detail": "live-prod sha %s != prod-branch HEAD %s" % (live_sha[:8], expected_head[:8])})
+        if is_ci_only(changed_files):
+            if info is not None:
+                info.append({"silo": silo, "sev": "INFO", "code": "CI_ONLY_DRIFT",
+                             "detail": "live-prod sha %s != prod-branch HEAD %s, but only non-deploy paths changed (%s)"
+                                       % (live_sha[:8], expected_head[:8], ", ".join(changed_files))})
+        else:
+            detail = "live-prod sha %s != prod-branch HEAD %s" % (live_sha[:8], expected_head[:8])
+            if changed_files is None:
+                detail += " (changed-file list could not be read — alerting fail-safe)"
+            alerts.append({"silo": silo, "sev": "ALERT", "code": "PROD_SHA_DRIFT", "detail": detail})
     if ready_state and ready_state != "READY":
         alerts.append({"silo": silo, "sev": "WARN", "code": "PROD_NOT_READY",
                        "detail": "live-prod deploy readyState=%s" % ready_state})
@@ -145,13 +201,17 @@ def collect():
         if not (org and repo):
             _die("project %s has no linked git repo (link=%s)" % (app, link))
         expected = _github_head(org, repo, branch)
-        alerts = evaluate(app, live_sha, ready, expected)
+        changed = None
+        if live_sha and not (live_sha.startswith(expected) or expected.startswith(live_sha)):
+            changed = _github_changed_files(org, repo, live_sha, expected)
+        info = []
+        alerts = evaluate(app, live_sha, ready, expected, changed, info)
         results.append({
             "silo": app, "repo": "%s/%s" % (org, repo), "branch": branch,
             "live_sha": live_sha or None, "expected_head": expected,
             "verifiable": bool(live_sha) and (live_sha.startswith(expected) or expected.startswith(live_sha)),
             "ready_state": ready, "creator": creator, "deploy_id": dep_id, "url": url,
-            "alerts": alerts,
+            "alerts": alerts, "info": info,
         })
     return results
 
@@ -187,6 +247,8 @@ def _selftest():
         ("clean",    evaluate("s", "abc123def", "READY", "abc123def"), None),
         ("prefix-ok",evaluate("s", "abc123", "READY", "abc123def456"), None),
         ("not-ready",evaluate("s", "abc123", "BUILDING", "abc123"), "PROD_NOT_READY"),
+        ("ci-only",  evaluate("s", "deadbeef", "READY", "abc123", [".github/workflows/x.yml"]), None),
+        ("ci+app",   evaluate("s", "deadbeef", "READY", "abc123", [".github/workflows/x.yml", "app/page.tsx"]), "PROD_SHA_DRIFT"),
     ]
     ok = True
     for name, alerts, expect in cases:
@@ -234,7 +296,7 @@ def main():
             print("%s%-15s prod=%s (%s) sha=%s head=%s verifiable=%s ready=%s by=%s" % (
                 tag, r["silo"], r["deploy_id"], r["url"],
                 (r["live_sha"] or "NO-GIT")[:8], r["expected_head"][:8], r["verifiable"], r["ready_state"], r["creator"]))
-            for a in r["alerts"]:
+            for a in r["alerts"] + r.get("info", []):
                 print("     %s %s: %s" % (a["sev"], a["code"], a["detail"]))
         print("\n%d alert(s) firing." % len(firing))
 
