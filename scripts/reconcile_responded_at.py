@@ -164,17 +164,42 @@ def match_via_thread(candidate: dict, thread_index: dict) -> "Match | None":
 
 _BACKREF_TOKEN_RE = re.compile(r"(?<!\d)#(\d+)(?!\d)")
 
+# Second shape, SUBJECT-ANCHORED only: the fleet writes replies as `Re 88366: …`,
+# `Re #88366 …` and `88366: …`. None of those carries the `#` the token regex
+# above requires, so they were invisible to the backref tier and the asks they
+# answered stayed marked unanswered (owed fix, handoff 8).
+#
+# Deliberately narrow, because a false positive here STAMPS a live ask as
+# answered -- the exact silent lie this tool exists to prevent. Three guards:
+#   (a) anchored at the START of the subject, never scanned in the body, so prose
+#       like "re 900 duplicates" cannot match;
+#   (b) `re` must be a whole word, so "Reconciliation 88366" does not match;
+#   (c) the id must be followed by a terminator (: ; , -) or end of string, so a
+#       subject opening with a bare number for another reason ("2026 enrollment
+#       plan", "2026-11-01 rollout" -> dash still qualifies, but the caller's
+#       id/agent/time checks apply) does not silently claim an id.
+_ID_SUBJECT_RE = re.compile(r"^\s*(?:re\b[\s:.\-]*)?#?(\d{1,9})\s*(?=[:;,\-]|$)",
+                            re.IGNORECASE)
+
 
 def index_backreferences(replies: list[dict]) -> dict[int, list[dict]]:
     """One pass over every reply, extracting every '#<id>' token it cites, so
     matching a candidate is an O(1) dict lookup instead of re-scanning every
     reply from that recipient per candidate (the naive version was O(candidates
-    x replies-per-agent) and visibly thrashed CPU on the ~2300-row live backlog)."""
+    x replies-per-agent) and visibly thrashed CPU on the ~2300-row live backlog).
+
+    Also indexes the subject-anchored `Re <id>:` / `<id>:` shapes (_ID_SUBJECT_RE).
+    A reply whose subject carries both forms is indexed ONCE (dedupe by set)."""
     idx: dict[int, list[dict]] = defaultdict(list)
     for r in replies:
-        text = f"{r.get('subject') or ''} {r.get('body') or ''}"
-        for tok in _BACKREF_TOKEN_RE.finditer(text):
-            idx[int(tok.group(1))].append(r)
+        subject = r.get("subject") or ""
+        text = f"{subject} {r.get('body') or ''}"
+        toks = {int(tok.group(1)) for tok in _BACKREF_TOKEN_RE.finditer(text)}
+        m = _ID_SUBJECT_RE.match(subject)
+        if m:
+            toks.add(int(m.group(1)))
+        for tok in toks:
+            idx[tok].append(r)
     for k in idx:
         idx[k].sort(key=lambda r: r["created_at"])
     return idx
@@ -188,7 +213,7 @@ def match_via_backreference(candidate: dict, backref_index: dict) -> "Match | No
             continue
         return Match(
             candidate["id"], str(r["id"]), "backref", r["id"],
-            f"explicit #{candidate['id']} backreference from {candidate['to_agent']} (id={r['id']})",
+            f"explicit backreference to {candidate['id']} from {candidate['to_agent']} (id={r['id']})",
         )
     return None
 

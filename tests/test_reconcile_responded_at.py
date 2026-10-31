@@ -108,6 +108,50 @@ def test_backreference_ignores_reply_from_wrong_agent():
     assert rra.match_via_backreference(candidate, idx) is None
 
 
+def test_backreference_matches_re_prefix_without_hash():
+    """The fleet answers as `Re <id>: …` far more often than `#<id>`."""
+    candidate = _row(88366, to_agent="cc-finance", created_at=T0)
+    reply = _row(88390, thread_id="other", from_agent="cc-finance",
+                 subject="Re 88366: nit taken, new head c0770b9",
+                 created_at=T0 + timedelta(minutes=5))
+    m = rra.match_via_backreference(candidate, rra.index_backreferences([reply]))
+    assert m is not None and m.response_ref == "88390"
+
+
+def test_backreference_matches_re_hash_and_leading_id_forms():
+    candidate = _row(42, to_agent="cc-finance", created_at=T0)
+    later = T0 + timedelta(minutes=5)
+    for subj in ("Re: #42", "Re #42", "42: both deltas stand"):
+        reply = _row(99, thread_id="other", from_agent="cc-finance",
+                     subject=subj, created_at=later)
+        m = rra.match_via_backreference(candidate, rra.index_backreferences([reply]))
+        assert m is not None, subj
+
+
+def test_backreference_does_not_index_re_shaped_prose_in_the_BODY():
+    """Subject-anchored on purpose: a body sentence must never stamp a row."""
+    candidate = _row(42, to_agent="cc-finance", created_at=T0)
+    reply = _row(99, thread_id="other", from_agent="cc-finance", subject="status",
+                 body="re 42 duplicates were reverted; re 42 again later",
+                 created_at=T0 + timedelta(hours=1))
+    assert rra.match_via_backreference(candidate, rra.index_backreferences([reply])) is None
+
+
+def test_backreference_ignores_re_prefixed_word_and_unterminated_number():
+    candidate = _row(42, to_agent="cc-finance", created_at=T0)
+    later = T0 + timedelta(hours=1)
+    for subj in ("Reconciliation 42: done", "Re 42 people still affected"):
+        reply = _row(99, thread_id="other", from_agent="cc-finance",
+                     subject=subj, created_at=later)
+        assert rra.match_via_backreference(candidate, rra.index_backreferences([reply])) is None, subj
+
+
+def test_backreference_indexes_a_dual_form_subject_only_once():
+    reply = _row(99, from_agent="cc-finance", subject="Re #42: ack", created_at=T0)
+    idx = rra.index_backreferences([reply])
+    assert len(idx[42]) == 1
+
+
 def test_backreference_ignores_reply_before_candidate():
     candidate = _row(42, to_agent="cc-cosem-exams", created_at=T0)
     reply = _row(99, from_agent="cc-cosem-exams", subject="closing #42",
