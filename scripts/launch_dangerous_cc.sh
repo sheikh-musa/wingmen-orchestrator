@@ -1007,6 +1007,12 @@ fi
 # existing user-global wiring. Best-effort + fail-loud, same as the deny above.
 "$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_secrets_guard.py" --cwd "$CALLER_DIR" || true
 
+# TG2.0 section 3 Phase A: a lane may only act on the POWERS its client channels
+# grant (bot_channels.group_routing->'powers', default ['reply_text'], fail-closed).
+# Same delivery contract as the secrets guard above — wired here so no lane
+# launches unguarded because someone forgot a dotfile.
+"$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_client_powers_guard.py" --cwd "$CALLER_DIR" || true
+
 echo -e "${BOLD}${TEAL}▶ Launching claude --dangerously-skip-permissions in: ${CALLER_DIR}${RESET}"
 echo -e "${DIM}  Heartbeat loop: PID ${HEARTBEAT_PID} (5-min intervals)${RESET}"
 echo ""
