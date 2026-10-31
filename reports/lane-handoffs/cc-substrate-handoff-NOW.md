@@ -89,6 +89,17 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**22:39Z — 774 PASSed by cc-quality at the rebased head (row 88411)**, verified by object identity
+(both files' blobs identical to `cee1dd4`; dependency `rotate_substrate_dsn.py` blob `f4b64c23`
+unmoved). Console sent the row id + sha (88415). **cc-quality's 88145 read the RUNBOOK ONLY** — their
+own answer (88418), with their method failure owned: they scoped from a `$NEW~4` commit window and
+every commit in it was docs. They then reviewed 776's other files post-hoc: `dsn_at_use.py` + boot
+wirings **sound** (file-first, OSError→fallback, read-only; boot import wrapped in try/except). So the
+88397 residual closes when 774 lands: nothing unreviewed stays in trunk. **Their process fix = mine:
+scope from `git diff <merge-base> <head> --stat`, never a commit window, never the author's label.**
+Two non-blocking `dsn_at_use` nits deferred post-window: trailing inline comment mis-parses; an
+explicit-but-unreadable `env_file` falls back silently instead of failing loudly.
+
 **22:36Z — PR 785 opened (`cc-substrate/executor-preflight`, head `f25b109`), docs-only (file list
 CHECKED: one file).** Runbook §1 now opens with *step zero*: `git merge-base --is-ancestor
 <774-merge-sha> HEAD` + `grep -q "def _scrub" scripts/substrate_rotation_executor.py`, both mandatory,
