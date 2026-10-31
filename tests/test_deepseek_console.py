@@ -785,6 +785,72 @@ def _rename_mod():
     return _load_module(name="deepseek_rename")
 
 
+# --- create-key name read-back (bus #87201 follow-up) -----------------------
+#
+# _create_console_key captures the revealed VALUE from a dialog. It never
+# checked that the key was created under the NAME that was typed, and
+# usage-export attributes spend by name -- so a normalised or truncated name
+# would move a family's spend into a bucket no map row mentions.
+
+def test_a_name_already_in_the_console_is_never_created_again():
+    mod = _rename_mod()
+    try:
+        mod._require_name_absent(["substrate", "second"], "substrate")
+    except mod.LayoutMismatch as exc:
+        assert "ALREADY EXISTS" in str(exc)
+    else:
+        raise AssertionError("a second key with the same name must be refused")
+
+
+def test_two_existing_keys_with_the_name_are_named_as_the_reason():
+    mod = _rename_mod()
+    try:
+        mod._require_name_absent(["substrate", "substrate"], "substrate")
+    except mod.LayoutMismatch as exc:
+        assert "refusing to add a third" in str(exc)
+    else:
+        raise AssertionError("a duplicated name must be refused outright")
+
+
+def test_a_free_name_passes_the_pre_condition():
+    mod = _rename_mod()
+    mod._require_name_absent(["second", "bariq"], "substrate")
+
+
+def _created_raises(before, after, slug, needle):
+    mod = _rename_mod()
+    try:
+        mod._require_created_name(before, after, slug)
+    except mod.LayoutMismatch as exc:
+        assert needle in str(exc), str(exc)
+    else:
+        raise AssertionError(f"{before} -> {after} should not have passed")
+
+
+def test_created_name_read_back_accepts_exactly_one_new_matching_name():
+    mod = _rename_mod()
+    mod._require_created_name(["second", "bariq"], ["second", "bariq", "substrate"], "substrate")
+
+
+def test_created_name_read_back_refuses_when_the_name_never_appeared():
+    """The console normalised what was typed: a key exists, but not under the
+    name that was asked for, so its spend would land somewhere unmapped."""
+    _created_raises(["second"], ["second", "substrate2"], "substrate",
+                    "expected exactly 1")
+
+
+def test_created_name_read_back_refuses_a_duplicate():
+    _created_raises(["second"], ["second", "substrate", "substrate"], "substrate",
+                    "expected exactly 1")
+
+
+def test_created_name_read_back_refuses_when_another_key_appeared_too():
+    """A create that also brought a different name into existence means the
+    run did something other than what it was asked to do."""
+    _created_raises(["second"], ["second", "substrate", "mystery"], "substrate",
+                    "expected exactly that one new name")
+
+
 def test_rename_key_dry_run_prints_the_plan_without_touching_anything():
     rc, out, err = _run(
         ["rename-key", "substrate", "shared-legacy", "--confirm", "substrate", "--dry-run"]
