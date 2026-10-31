@@ -88,3 +88,60 @@ def test_remote_row_with_a_foreign_path_has_no_disagreement_note():
                                worktree_path="/home/gazzai/wingmen/projects/ai-scholar")
     assert kind == "remote"
     assert "host/path disagree" not in line
+
+
+# --- load_lane_paths: tolerate a missing table, shout about everything else ---------------
+# cc-quality-2's two advisories on #775 (bus #87886): a blanket `except Exception` downgraded
+# a transient or programming fault to a NOTE, and the aborted-transaction state was left
+# implicit. Both are now explicit: only UndefinedTable/UndefinedColumn degrade, and the
+# rollback is called by name.
+
+import psycopg
+import pytest
+
+from scripts.fleet_health import load_lane_paths
+
+
+class _Cur:
+    def __init__(self, exc=None, rows=None):
+        self.exc, self.rows = exc, rows or []
+
+    def execute(self, *_a, **_k):
+        if self.exc:
+            raise self.exc
+
+    def fetchall(self):
+        return self.rows
+
+
+class _Conn:
+    def __init__(self):
+        self.rolled = 0
+
+    def rollback(self):
+        self.rolled += 1
+
+
+def test_missing_table_degrades_annotation_and_rolls_back_explicitly():
+    conn = _Conn()
+    assert load_lane_paths(_Cur(exc=psycopg.errors.UndefinedTable("no fleet_lanes")), conn) == {}
+    assert conn.rolled == 1
+
+
+def test_missing_column_also_degrades():
+    conn = _Conn()
+    assert load_lane_paths(_Cur(exc=psycopg.errors.UndefinedColumn("no worktree_path")), conn) == {}
+    assert conn.rolled == 1
+
+
+def test_any_other_error_propagates_loudly():
+    # A lost connection, or a bug in this file, must NOT become a one-line NOTE: the sweep
+    # would then report "no drift" from data it never read.
+    conn = _Conn()
+    with pytest.raises(psycopg.errors.OperationalError):
+        load_lane_paths(_Cur(exc=psycopg.errors.OperationalError("connection lost")), conn)
+    assert conn.rolled == 0
+
+
+def test_healthy_query_returns_the_mapping():
+    assert load_lane_paths(_Cur(rows=[("a", "/x"), ("b", "/y")]), _Conn()) == {"a": "/x", "b": "/y"}

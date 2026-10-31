@@ -148,6 +148,25 @@ def drift_for_row(aid, status, host, tmux, live_sessions, protected, local_host_
     return ("gone", f"  ! {aid}: 'working' but tmux '{tmux}' is GONE (crashed?)")
 
 
+def load_lane_paths(cur, conn):
+    """lane -> registered worktree_path, for the host/path cross-check (bus #87832).
+
+    A missing table or column is tolerated: it only removes an ANNOTATION, and the verdict
+    never depends on it (drift_for_row works with worktree_path=None). Every OTHER error
+    propagates on purpose — a connection fault or a programming error must fail LOUD rather
+    than be downgraded to a NOTE (charter §2.1: never swallow an exception on a path that
+    reports state). cc-quality-2's two advisories on #775, folded in rather than deferred.
+    """
+    try:
+        cur.execute("SELECT lane, worktree_path FROM fleet_lanes WHERE worktree_path IS NOT NULL")
+        return dict(cur.fetchall())
+    except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as e:
+        # The query just aborted the surrounding transaction; make that state explicit
+        # instead of relying on `with conn:` to convert it at exit.
+        conn.rollback()
+        print(f"NOTE: fleet_lanes unavailable for host/path cross-check: {e}", file=sys.stderr)
+        return {}
+
 
 def observed_activity(recent_bus, tmux_session, live_sessions):
     """OBSERVED-ACTIVITY gate before offline-marking (cc-fleet-health, re-derived from #23952,
@@ -839,14 +858,9 @@ def main():
         rows = cur.fetchall()
 
         # lane -> registered worktree_path, so a row whose host and path disagree can say
-        # so instead of picking one (bus #87832). Best-effort: a missing table/column must
-        # not take the sweep down, it just means no mismatch annotation.
-        try:
-            cur.execute("SELECT lane, worktree_path FROM fleet_lanes WHERE worktree_path IS NOT NULL")
-            lane_paths = dict(cur.fetchall())
-        except Exception as e:
-            print(f"NOTE: fleet_lanes unavailable for host/path cross-check: {e}", file=sys.stderr)
-            lane_paths = {}
+        # so instead of picking one (bus #87832). See load_lane_paths() for why only the
+        # missing-table/column case is tolerated here.
+        lane_paths = load_lane_paths(cur, conn)
 
     # reconcile against ground truth
     drift = []
