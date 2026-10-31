@@ -31,7 +31,14 @@ the embedded password of any postgres DSN value. Trivial values are skipped by t
 Usage:
   secret_hash_sweep.py --env <envfile>... --scan <jsonl>... --dry-run
   secret_hash_sweep.py --env <envfile>... --scan <jsonl|txt>... --execute --ledger <file>
+  secret_hash_sweep.py --secrets-stdin --scan <jsonl|txt>... --execute --ledger <file>
   (globs are accepted for --env and --scan)
+
+--secrets-stdin (bus #87241) is the value source for a real credential that is in NO .env and
+is not sk-ant-shaped — e.g. a client's Facebook/WooCommerce feed or bot token. Values arrive on
+stdin, never argv (argv is visible in `ps`). An --execute run writes the spans, READS THEM BACK
+and asserts each one actually changed, and only then appends the ledger — so a ledger row can
+never claim a redaction that did not land.
 """
 from __future__ import annotations
 
@@ -131,6 +138,37 @@ def _is_public_value(key: str, val: str) -> bool:
 
 def hash8(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()[:8]
+
+
+def add_stdin_secrets(secrets: Dict[bytes, str], stream) -> int:
+    """Merge secret VALUES read from *stream* (one per line) into *secrets*; return how many
+    are new.
+
+    bus #87241: the manifest used to be "values in this host's .env files" only, so a real
+    credential that lives in neither a .env nor the sk-ant shape (a client's Facebook/
+    WooCommerce feed or bot token, say) was invisible to the sweep — it was never attempted,
+    which looks identical to "nothing to do". This is that value source. Values arrive on
+    STDIN, never argv: argv is world-readable in `ps`. Same eligibility gates as env values
+    (too short, or public/identifier/path-shaped, is skipped)."""
+    added = 0
+    for line in stream:
+        val = line.rstrip("\n").strip()
+        if not val:
+            continue
+        b = val.encode("utf-8")
+        # MIN_SECRET_LEN, not MIN_DSN_PW_LEN (cc-quality N2, bus #87327). The 8-byte DSN
+        # floor is justified because that value is EXTRACTED FROM A DSN STRUCTURE — high
+        # confidence it is a password. A bare stdin line carries no such evidence, so it is
+        # the least-confident input and must not get the most permissive floor: a short
+        # value redacts by pure equality, so an 8-15 byte line can clobber benign transcript
+        # text of the same length. Intended feeds (Facebook/WooCommerce/bot tokens) are far
+        # longer, so 16 does not bite the real use case.
+        if len(b) < MIN_SECRET_LEN or _is_public_value("", val):
+            continue
+        if b not in secrets:
+            secrets[b] = hash8(b)
+            added += 1
+    return added
 
 
 def _strip_env_value(v: str) -> str:
@@ -411,6 +449,47 @@ def sweep_file(path: str, secrets: Dict[bytes, str], execute: bool,
         return rep
 
     if changes:
+        # in-place, at existing offsets — never rewrite the whole file (live-append safe)
+        with open(path, "r+b") as fh:
+            for off, new in changes:
+                fh.seek(off)
+                fh.write(new)
+            fh.flush()
+            os.fsync(fh.fileno())
+
+        # READ BACK + ASSERT **before** the ledger (bus #87241/#87232). Ledger-first made a
+        # failed or killed write indistinguishable from a landed one: the audit trail said
+        # "redacted" while the raw value was still on disk. A ledger row must never exist
+        # for a span that did not actually change.
+        with open(path, "rb") as fh:
+            written = fh.read()
+        stale = [rec for rec in ledger
+                 if written[rec["offset"]:rec["offset"] + rec["length"]]
+                 == data[rec["offset"]:rec["offset"] + rec["length"]]]
+        # POSITIVE assertion (cc-quality N1, bus #87327): the span must equal the bytes we
+        # INTENDED to write, not merely differ from the original. fsync is page-granular
+        # (4KB) while writes are per-line, so a kill during fsync can leave a straddling
+        # span partly-placeholder/partly-original: it differs from `data` (so the `stale`
+        # check above passes) yet still carries secret residue. The whole-secret re-scan
+        # below would also miss it (the torn write splits the match), so the sweep would
+        # report a clean redaction that did not happen — the exact failure this readback
+        # exists to prevent. `changes` already holds the intended bytes, so this is free.
+        torn = [new for (s, new) in changes if written[s:s + len(new)] != new]
+        if stale or torn:
+            if stale:
+                why = ("%d of %d redacted span(s) did not take on read-back"
+                       % (len(stale), len(ledger)))
+            else:
+                why = ("%d of %d line(s) did not match the intended redaction on read-back "
+                       "(torn/partial write)" % (len(torn), len(changes)))
+            rep["error"] = (why + " — NO ledger rows written; the recurring sweep re-scans "
+                            "this file next cycle")
+            rep["spans_redacted"] = 0
+            rep["lines_changed"] = 0
+            rep["size_after"] = len(written)
+            rep["size_preserved"] = (rep["size_after"] == rep["size_before"])
+            return rep
+
         if ledger_path:
             os.makedirs(os.path.dirname(os.path.abspath(ledger_path)), exist_ok=True)
             # append audit records; create 0600 if new
@@ -420,13 +499,6 @@ def sweep_file(path: str, secrets: Dict[bytes, str], execute: bool,
                     lf.write(json.dumps(rec) + "\n")
             if newfile:
                 os.chmod(ledger_path, stat.S_IRUSR | stat.S_IWUSR)   # 0600 (offsets+hash only)
-        # in-place, at existing offsets — never rewrite the whole file (live-append safe)
-        with open(path, "r+b") as fh:
-            for off, new in changes:
-                fh.seek(off)
-                fh.write(new)
-            fh.flush()
-            os.fsync(fh.fileno())
 
     # re-read + re-scan to verify 0 remain and size held
     with open(path, "rb") as fh:
@@ -640,6 +712,10 @@ def main(argv=None) -> int:
     ap.add_argument("--report-json", action="store_true", help="emit the per-file report as JSON")
     ap.add_argument("--no-shape-match", action="store_true",
                     help="manifest values only; skip the any-real-length sk-ant- token matcher")
+    ap.add_argument("--secrets-stdin", action="store_true",
+                    help="read ADDITIONAL secret values from stdin, one per line — for credentials "
+                         "that are in no .env and are not sk-ant-shaped (e.g. a client feed/bot "
+                         "token). Never pass a secret on the command line: argv is visible in ps.")
     args = ap.parse_args(argv)
 
     if args.reverse:
@@ -649,8 +725,13 @@ def main(argv=None) -> int:
             return 2
         return _main_reverse(args)
 
-    if not args.env or not args.scan:
-        print("secret_hash_sweep: --env and --scan are required outside --reverse mode", file=sys.stderr)
+    if not args.scan:
+        print("secret_hash_sweep: --scan is required outside --reverse mode", file=sys.stderr)
+        return 2
+
+    if not args.env and not args.secrets_stdin:
+        print("secret_hash_sweep: one value source is required — --env, or --secrets-stdin "
+              "(or both)", file=sys.stderr)
         return 2
 
     if args.execute and not args.ledger:
@@ -658,10 +739,13 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 2
 
-    env_files = _expand(args.env)
+    env_files = _expand(args.env or [])
     secrets = build_secret_set(env_files)
+    if getattr(args, "secrets_stdin", False):
+        added = add_stdin_secrets(secrets, sys.stdin)
+        print("secret_hash_sweep: --secrets-stdin added %d value(s)" % added, file=sys.stderr)
     if not secrets:
-        print("secret_hash_sweep: REFUSE — built 0 secret values from %d env file(s); "
+        print("secret_hash_sweep: REFUSE — built 0 secret values from %d env file(s) and stdin; "
               "cannot run a sweep with an empty manifest" % len(env_files), file=sys.stderr)
         return 3
 

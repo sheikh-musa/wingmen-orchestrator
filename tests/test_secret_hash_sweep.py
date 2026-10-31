@@ -658,3 +658,159 @@ def test_reverse_file_verify_only_does_not_write(tmp_path):
     rep = s.reverse_file(str(tr), [(offset, len(value))], value, h8, execute=False)
     assert rep["restored"] == 1   # reports what WOULD happen
     assert tr.read_bytes() == before, "verify-only must never write"
+
+
+# ── bus #87241: write-then-verify-then-ledger, and a value source for non-env tokens ──
+
+def test_ledger_is_not_written_when_the_write_does_not_take(tmp_path, monkeypatch):
+    """Ledger-first made a failed/killed write indistinguishable from a landed redaction:
+    the audit trail claimed the span was redacted while the raw value was still on disk
+    (caught live in the shipforge-1 transcript, bus #87219/#87232)."""
+    env = tmp_path / ".env"
+    _write(env, "ANTHROPIC_API_KEY=%s\n" % FAKE_KEY)
+    secrets = s.build_secret_set([str(env)])
+
+    tr = tmp_path / "t.jsonl"
+    _write(tr, json.dumps({"o": FAKE_KEY}) + "\n")
+    ledger = tmp_path / "ledger.jsonl"
+
+    real_open = open
+
+    class _Swallow:                      # accepts the write, changes nothing
+        def __init__(self, fh):
+            self._fh = fh
+        def seek(self, *a):
+            return self._fh.seek(*a)
+        def write(self, b):
+            return len(b)
+        def flush(self):
+            pass
+        def fileno(self):
+            return self._fh.fileno()
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            self._fh.close()
+
+    def fake_open(path, mode="r", *a, **k):
+        fh = real_open(path, mode, *a, **k)
+        return _Swallow(fh) if "r+b" in str(mode) else fh
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    rep = s.sweep_file(str(tr), secrets, execute=True, ledger_path=str(ledger))
+
+    assert rep["error"] and "read-back" in rep["error"]
+    assert rep["spans_redacted"] == 0
+    assert not ledger.exists(), "no audit row may exist for a span that did not actually change"
+
+
+def test_secrets_stdin_covers_a_value_that_is_neither_env_nor_skant(tmp_path, monkeypatch):
+    """A real credential living in no .env and not sk-ant-shaped was invisible to the sweep
+    (the shipforge-1 wc_facebook tokens, bus #87219). --secrets-stdin is that value source;
+    values must arrive on stdin, never argv."""
+    import io
+
+    value = "EAABfabricatedfeedtoken0000000000000000000000000000000000"
+    tr = tmp_path / "t.jsonl"
+    _write(tr, json.dumps({"o": value}) + "\n")
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(value + "\n"))
+    rc = s.main(["--scan", str(tr), "--secrets-stdin", "--dry-run"])
+    assert rc == 0
+    assert value in tr.read_text(), "dry-run must not write"
+
+    ledger = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(value + "\n"))
+    rc = s.main(["--scan", str(tr), "--secrets-stdin", "--execute", "--ledger", str(ledger)])
+    assert rc == 0
+    assert value not in tr.read_text()
+    assert ledger.exists()
+    rows = [json.loads(l) for l in ledger.read_text().splitlines() if l.strip()]
+    assert rows and rows[0]["hash8"] == s.hash8(value.encode())
+    assert value not in ledger.read_text(), "the audit ledger must never hold a value"
+
+
+def test_secrets_stdin_alone_needs_no_env_file(tmp_path, monkeypatch):
+    """--env is now optional when stdin supplies the values; without either, refuse."""
+    import io
+
+    tr = tmp_path / "t.jsonl"
+    _write(tr, json.dumps({"o": "nothing secret here"}) + "\n")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert s.main(["--scan", str(tr)]) == 2, "no value source at all must refuse, not sweep empty"
+
+
+def test_every_credential_named_value_is_covered_regardless_of_shape(tmp_path, monkeypatch):
+    """bus #87241/#87257: the live miss was that only the EAA-prefixed tokens were handed to
+    the sweep, so the 32-hex wc_facebook_feed_url_secret in the SAME dump stayed raw. A sweep
+    fed the full set of credential-named values must redact all of them — no shape or prefix
+    dependence, and no key left behind."""
+    import io
+
+    values = [
+        "EAABfabricatedfeedtoken0000000000000000000000000000000000",   # Facebook-shaped
+        "9f8e7d6c5b4a39281706f5e4d3c2b1a0",                            # 32-hex secret
+        "Zm9vYmFyLXNob3Atc2VjcmV0LWtleQ0000000000",                    # generic base64ish key
+    ]
+    tr = tmp_path / "dump.jsonl"
+    _write(tr, "\n".join(json.dumps({"k%d" % i: v}) for i, v in enumerate(values)) + "\n")
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("\n".join(values) + "\n"))
+    ledger = tmp_path / "ledger.jsonl"
+    rc = s.main(["--scan", str(tr), "--secrets-stdin", "--execute", "--ledger", str(ledger)])
+    assert rc == 0
+
+    after = tr.read_text()
+    for v in values:
+        assert v not in after, "a credential-named value survived the sweep"
+        assert "[REDACTED:%s]" % s.hash8(v.encode()) in after
+    assert len(ledger.read_text().splitlines()) == len(values)
+
+
+def test_sweep_file_aborts_when_readback_is_torn_not_merely_stale(tmp_path, monkeypatch):
+    """cc-quality N1 (bus #87327): the readback must assert the span EQUALS the intended
+    redacted bytes, not merely that it DIFFERS from the original. A torn write (kill during
+    a page-granular fsync) leaves partly-placeholder/partly-original bytes: they differ from
+    the original, so the stale check passes, yet secret residue survives and the whole-secret
+    re-scan misses it because the match is split. That must abort with NO ledger row."""
+    env = tmp_path / ".env"
+    _write(env, "ANTHROPIC_API_KEY=%s\n" % FAKE_KEY)
+    secrets = s.build_secret_set([str(env)])
+
+    tr = tmp_path / "t.jsonl"
+    _write(tr, json.dumps({"o": FAKE_KEY}) + "\n")
+
+    real_fsync = os.fsync
+
+    def torn_fsync(fd):
+        real_fsync(fd)
+        # the redacted line has landed; splice a fragment of the original secret back in,
+        # producing bytes matching NEITHER the original nor the intended redaction.
+        with open(tr, "r+b") as fh:
+            blob = fh.read()
+            fh.seek(len(blob) // 2)
+            fh.write(FAKE_KEY.encode()[:8])
+            fh.flush()
+
+    monkeypatch.setattr(s.os, "fsync", torn_fsync)
+
+    rep = s.sweep_file(str(tr), secrets, execute=True, ledger_path=str(tmp_path / "ledger.jsonl"))
+
+    assert rep["error"] is not None, "a torn readback must set an error"
+    assert "read-back" in rep["error"]
+    assert rep["spans_redacted"] == 0, "no span may be claimed redacted"
+    assert not (tmp_path / "ledger.jsonl").exists(), "no ledger row for a span that did not land"
+
+
+def test_stdin_values_must_clear_the_credential_floor_not_the_dsn_floor():
+    """cc-quality N2 (bus #87327): a bare stdin line has no key/structure context, so it is
+    the LEAST-confident input and must not get the most permissive (8-byte DSN) floor —
+    over-redaction of same-length benign text is the harm. 16 bytes still accepted."""
+    import io
+
+    secrets = {}
+    added = s.add_stdin_secrets(secrets, io.StringIO("abcdefgh\nabcdefghijklmnop\n"))  # 8 then 16
+
+    assert added == 1, "only the 16-byte value may be accepted"
+    assert b"abcdefghijklmnop" in secrets
+    assert b"abcdefgh" not in secrets
