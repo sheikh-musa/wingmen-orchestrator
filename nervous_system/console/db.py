@@ -514,7 +514,15 @@ def fetch_coordinator_peek(agent_id: str, limit: int = _COORD_PEEK_LIMIT) -> str
 # health checks + a single transparent reconnect-and-retry make a server-side
 # idle disconnect (the pooler culls idle sessions) invisible to callers: the
 # first request after an idle gap pays one reconnect, the rest stay warm.
-_POOL_MAX = max(1, int(os.environ.get("CONSOLE_DB_POOL", "6")))
+#
+# Default lowered 6 -> 3 (orch-console #86539, after cc-console-revamp-1's
+# pooler investigation #86533): console_readonly's Supavisor session-mode pool
+# is a scarce, shared, per-role 15-slot ceiling that hit 15/15 -- the live app
+# was already well-behaved (capped exactly at its own setting), but a lower
+# ceiling here caps this process's worst-case contribution on every future
+# restart. Does not by itself clear already-accumulated stale backends
+# (fleet-health's one-time reap handles those); this only slows re-growth.
+_POOL_MAX = max(1, int(os.environ.get("CONSOLE_DB_POOL", "3")))
 _idle: "queue.LifoQueue[psycopg.Connection]" = queue.LifoQueue()
 _pool_lock = threading.Lock()
 _pool_size = 0  # live connections that exist (idle + checked-out), guarded by lock
