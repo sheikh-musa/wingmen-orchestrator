@@ -31,6 +31,12 @@ until step 3. It does **not** prove the token carries the write scope the PATCH 
 it is a verification with an expiry: re-run the same GET before the window rather than
 trusting this line.
 
+**The recovery path is real, not assumed.** The vault tables exist in the substrate
+database (`vault_secrets`, `vault_secrets_history`, `vault_secret_host_wraps`,
+`vault_access_log`, checked 2026-10-31 20:47Z). Step 1's "stage in the vault while the old
+value still works" therefore has somewhere to land; if those tables are ever absent, the
+executor's stage step must refuse rather than proceed into the patch with no recovery path.
+
 If any of those is false, preflight refuses and nothing is written. That refusal is the
 correct outcome, not an obstacle: a rotation against a state you cannot describe is how
 you lose a database.
@@ -210,10 +216,27 @@ design is now three parts and contains **no new lifeline code**:
 - **d. One run** of the canonical boot script from outside, with the new env in place. One.
   The lease take is CAS so a racing second copy would lose, but that is a backstop, not a
   licence to double-start.
-- **e. Verify, do not trust the launch.** Watch `last_heartbeat` advance within one beat
-  interval in `agent_status` **and** confirm `fleet_health_lease` names the body as holder
-  again. A launched pane is not proof; a moving heartbeat and a re-taken lease are. Report
-  the actual heartbeat timestamp, not "it is up".
+- **e. Verify, do not trust the launch.** Take **two samples ≥330 seconds apart** — one beat
+  interval is 300s, so anything closer samples the same beat and reports "frozen" on a
+  healthy body:
+
+  ```sql
+  SELECT agent_id, status, tmux_session, last_heartbeat, updated_at
+  FROM agent_status WHERE agent_id = '<body>';
+  ```
+
+  **PASS = both samples are `status = 'working'` AND sample B's `last_heartbeat` is strictly
+  later than sample A's.** Wait up to ~10 minutes, then treat it as a **failed relaunch** and
+  say so; do not round it up to success.
+  **Do not pass on** any one of these alone (SRE, bus 88036 — my original 60s/timestamp-moved
+  recipe was wrong for exactly these reasons): a recent `last_heartbeat`, because the EXIT
+  trap itself writes `last_heartbeat = now()` when it stamps the row `offline`, so recency
+  right after a clean exit proves the *opposite* of life; `status` alone, because the boot
+  writes `working` at startup before the loop has proven it can connect; or a launched pane.
+  The moved timestamp across a beat is the only proof the **loop** — the thing that lost the
+  credentials — is alive again rather than the boot's one-shot write. Then confirm
+  `fleet_health_lease` names the body as holder again, and report the actual heartbeat
+  timestamps, not "it is up".
 
 The SRE confirms from their own side and says so on the bus, so the declaration closes on
 evidence rather than on a launch message.
@@ -313,8 +336,10 @@ do not retry blindly — check the API response in the journal first.
 - The journal shows a restart entry for every daemon.
 - The vault holds the new value with the previous one archived in `vault_secrets_history`.
 - **Both singletons were relaunched, not reset**, and their `last_heartbeat` rows are
-  advancing again on the new credential — checked in the rows, not inferred from "the
-  restart command returned 0". A reset leaves the frozen loop alive (87991).
+  advancing **across a beat** (two samples ≥330s apart, §2 step e) on the new credential —
+  checked in the rows, not inferred from "the restart command returned 0". A reset leaves the
+  frozen loop alive (87991), and a single fresh-looking timestamp proves nothing because the
+  EXIT trap writes one (88036).
 - The declaration has expired or been superseded by a restart, and nothing in a later
   reader's view suggests the gap is still open.
 - A 10-minute watch shows no new authentication failures.
