@@ -113,26 +113,49 @@ heartbeat loops in `boot_nazim.sh`, `boot_cai.sh` and `boot_fleet_health.sh` rea
 from `os.environ` inside a bash subshell forked when the singleton booted. A rewritten
 file and a `tmux set-environment` change nothing for that already-running process: every
 beat after the patch fails, silently (the connect is wrapped in discard-stderr-or-true),
-and `last_heartbeat` freezes on the three singleton rows — a live body read as dead,
-exactly when the console is watching.
+and `last_heartbeat` freezes on the singleton rows — a live body read as dead, exactly
+when the console is watching.
+
+**Measured, not assumed (2026-10-31, bus 87964) — the scope is smaller than the plan says.**
+Only **two** loops exist tonight. `cai` has no tmux session on this host and its
+`agent_status` row has read `offline` since 13 October, so there is no cai body to keep
+alive; if it is meant to be up that is a separate outage, not a rotation problem.
+
+Both live loops are **children of their boot shell**, not detached orphans reparented to
+pid 1: the nazim pane is `boot_nazim.sh`, alive, with the loop and the claude body as its
+two children, and the fleet-health pane is the same shape. That matters because the boot
+shell owns the EXIT trap and the trap does exactly one thing to the loop — `kill` the pid
+it recorded at boot. Kill the loop and fork a replacement, and that kill lands on a dead
+pid forever after: the trap still stamps the row `offline` on exit while the replacement
+keeps stamping `working` over it. A dead body then reads alive indefinitely, which is
+worse than a frozen row — a frozen row is a false alarm, this is a false all-clear.
 
 `scripts/lib/dsn_at_use.py` makes every **future** fork immune by reading the file at the
 moment of use. It does **not** retrofit the running loops, and neither does editing the
 boot script: measured on this machine (bus 87909), a running bash loop whose heredoc is
 changed — by full-file replacement *and* by in-place overwrite of the same inode — keeps
 printing the OLD body, five beats out of five. Bash parses the function once. **There is
-no no-restart fallback.** Re-forking means restarting the three singleton boot scripts,
-which costs the console its live session and is therefore the console's decision, not the
-operator of this tool. Do not start a detached replacement loop to dodge it — that is
-`nohup`-shaped and forbidden.
+no no-restart fallback.** Getting fresh code into a loop means one of the three outcomes
+below.
 
-That leaves exactly two outcomes, and the console picks one (bus 87921 asked for the
-premise check, 87929 answers it): **restart** console, cai and fleet-health inside the
-window, paying with the live console session and losing nothing else; or **do not
-restart**, and their `last_heartbeat` rows freeze from the patch until each body is
-recycled, so a watchdog will read three live bodies as dead. The second is defensible
-only if it is written down first — a frozen row read as an outage later is how a
-scheduled decision turns into a night of false alarms.
+**The three outcomes, and who picks.** The console asked for the premise check (bus
+87921) and has since proposed a third option (87940); 87929 and 87964 answer both.
+
+1. **Restart the singletons.** Costs the live console session — and the console is the
+   executor of this rotation, so this one is ruled out for the console body regardless.
+2. **Do not restart.** Their `last_heartbeat` rows freeze from the patch until each body
+   is recycled, and a watchdog reads live bodies as dead. Defensible only if written down
+   first and bounded; a frozen row discovered later as an outage is how a scheduled
+   decision becomes a night of false alarms.
+3. **Replace only the loop.** Kill the recorded loop pid after the files hold the new
+   value and fork a fresh loop on the patched code and fresh env — no session lost. This
+   is the only one of the three that keeps every signal honest, **but only with its own
+   dead-man's switch**: the replacement must check each beat that the boot-shell pid it
+   was born under is still alive, and stamp `offline` once and exit when it is not. Without
+   that check the replacement outlives its body and the fleet is told a dead console is
+   working. That is not a stylistic preference; it is the specific failure the boot script
+   was written to prevent, and no post-window report repairs it. Option 3 is new code on a
+   lifeline path and therefore needs the same review as the executor itself.
 
 **The Supavisor cache.** The pooler keeps a credential cache that can hold the old value
 for roughly 15 seconds while connections are active. An idle pool may refresh only on a
