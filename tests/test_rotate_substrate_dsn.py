@@ -494,3 +494,128 @@ def test_apply_names_the_escape_hatch_when_the_vault_read_fails(env_file, monkey
     err = capsys.readouterr().err
     assert rc == 2
     assert "--from-stdin" in err, "the refusal must tell the operator how to recover"
+
+
+# ── apply --remote (the core-side bundle the VPS hub pulls) ────────────────────
+
+class _FakeRemote:
+    """Stands in for ssh: one host with one env file, and a record of every argv.
+
+    The argv record is the point of these tests — the secret must be absent from it
+    on BOTH ends, so the assertion is over every argument of every call, not just
+    the one the value was expected to travel in.
+    """
+
+    def __init__(self, text, read_rc=0, write_rc=0):
+        self.text = text
+        self.read_rc = read_rc
+        self.write_rc = write_rc
+        self.argvs = []
+        self.stdin_payloads = []
+        self.backup_path = None
+
+    def __call__(self, host, argv, stdin_bytes=None):
+        self.argvs.append(list(argv))
+        self.stdin_payloads.append(stdin_bytes)
+        if argv[:2] == ["cat", "--"]:
+            return types.SimpleNamespace(
+                returncode=self.read_rc,
+                stdout=self.text.encode() if self.read_rc == 0 else b"",
+                stderr=b"cat: permission denied" if self.read_rc else b"")
+        # the write snippet
+        if self.write_rc != 0:
+            return types.SimpleNamespace(returncode=self.write_rc, stdout=b"",
+                                         stderr=b"python3: not found")
+        self.text = (stdin_bytes or b"").decode()
+        self.backup_path = f"{argv[-1]}.bak.20261101T000000Z"
+        return types.SimpleNamespace(returncode=0,
+                                     stdout=(self.backup_path + "\n").encode(),
+                                     stderr=b"")
+
+    def assert_no_secret_in_any_argv(self, *values):
+        for argv in self.argvs:
+            joined = " ".join(argv)
+            for value in values:
+                assert value not in joined, f"a secret reached an ssh argv: {argv[0]}"
+
+
+REMOTE_PATH = "/etc/wingmen/secrets.env"   # never exists on the test box
+
+
+def _remote_apply(monkeypatch, fake, *extra, stdin_text=NEW_PW + "\n"):
+    monkeypatch.setattr(rot, "_ssh", fake)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(stdin_text))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+    return rot.main(["--env-file", REMOTE_PATH, "apply", "--old-sha8", OLD_SHA,
+                     "--remote", "hub.example.invalid", *extra])
+
+
+def test_apply_remote_rewrites_the_file_on_the_other_host(monkeypatch, capsys):
+    fake = _FakeRemote(_env_body())
+    rc = _remote_apply(monkeypatch, fake, "--execute", "--from-stdin")
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert NEW_PW in fake.text and OLD_PW not in fake.text
+    assert "on hub.example.invalid" in out
+    assert NEW_PW not in out and OLD_PW not in out
+    assert fake.backup_path in out
+
+
+def test_apply_remote_never_puts_the_secret_in_an_ssh_argv(monkeypatch):
+    fake = _FakeRemote(_env_body())
+    assert _remote_apply(monkeypatch, fake, "--execute", "--from-stdin") == 0
+    fake.assert_no_secret_in_any_argv(NEW_PW, OLD_PW)
+    # it DID travel on stdin — that is the only channel it is allowed to use
+    assert any(p and NEW_PW.encode() in p for p in fake.stdin_payloads)
+
+
+def test_apply_remote_refuses_when_the_remote_file_cannot_be_read(monkeypatch, capsys):
+    fake = _FakeRemote(_env_body(), read_rc=255)
+    rc = _remote_apply(monkeypatch, fake, "--execute", "--from-stdin")
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "REFUSED" in err and "hub.example.invalid" in err
+    assert fake.text == _env_body(), "nothing may be written after a failed read"
+
+
+def test_apply_remote_refuses_when_the_remote_write_fails(monkeypatch, capsys):
+    fake = _FakeRemote(_env_body(), write_rc=1)
+    rc = _remote_apply(monkeypatch, fake, "--execute", "--from-stdin")
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "REFUSED" in err
+    assert NEW_PW not in fake.text
+
+
+def test_apply_remote_dry_run_writes_nothing(monkeypatch, capsys):
+    fake = _FakeRemote(_env_body())
+    rc = _remote_apply(monkeypatch, fake, "--from-stdin")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "DRY-RUN" in out
+    assert fake.text == _env_body()
+    assert len(fake.argvs) == 1, "a dry run must only read"
+
+
+def test_apply_remote_refuses_when_no_remote_key_matches(monkeypatch, capsys):
+    fake = _FakeRemote("UNRELATED=keep-me\n")
+    rc = _remote_apply(monkeypatch, fake, "--execute", "--from-stdin")
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "no key in" in err
+    assert fake.text == "UNRELATED=keep-me\n"
+
+
+def test_ssh_command_is_batchmode_and_quotes_every_argument(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, input=None, capture_output=True, check=False):
+        captured["cmd"] = cmd
+        return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rot.subprocess, "run", fake_run)
+    rot._ssh("hub.example.invalid", ["python3", "-c", "print(1)", "/a b/c"])
+    cmd = captured["cmd"]
+    assert cmd[:2] == ["ssh", "-o"] and "BatchMode=yes" in cmd
+    assert cmd[-1] == "'/a b/c'", "a spaced path must survive the remote shell"

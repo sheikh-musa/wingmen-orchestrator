@@ -21,7 +21,9 @@ SUBCOMMANDS
                         the vault is the only place the value is written.
   apply [--dry-run]     rewrite every `.env` key whose URL embeds the OLD password so
                         it embeds the vault's staged password instead. Atomic write,
-                        0600 backup, prints old/new sha8 only.
+                        0600 backup, prints old/new sha8 only. `--remote HOST` does the
+                        same to a path on another host over ssh — for the core-side
+                        secrets bundle the VPS hub pulls into its tmpfs.
   verify                prove the new DSN authenticates AND the old one no longer does
                         (old value read from the backup file, never printed). Prints
                         PASS/FAIL per probe.
@@ -90,6 +92,7 @@ import argparse
 import hashlib
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -137,16 +140,20 @@ def _unquote(raw: str) -> Tuple[str, str]:
     return "", raw
 
 
-def read_env_keys(path: Path) -> list:
+def env_keys_in_text(text: str) -> list:
     """[(key, value)] for every parseable KEY=VALUE line. Values never printed."""
     out = []
-    for line in path.read_text(errors="replace").splitlines():
+    for line in text.splitlines():
         m = ENV_LINE_RE.match(line)
         if not m:
             continue
         _q, inner = _unquote(m.group(4))
         out.append((m.group(2), inner))
     return out
+
+
+def read_env_keys(path: Path) -> list:
+    return env_keys_in_text(path.read_text(errors="replace"))
 
 
 def sha_prefix_matches(password: str, prefix: str) -> bool:
@@ -164,14 +171,19 @@ def sha_prefix_matches(password: str, prefix: str) -> bool:
     return hashlib.sha256(password.encode()).hexdigest().startswith(needle)
 
 
-def keys_embedding_password(path: Path, password_prefix: str) -> list:
+def keys_embedding_password_in_text(text: str, password_prefix: str) -> list:
     """Keys whose URL value carries a password matching this sha256 prefix."""
     found = []
-    for key, value in read_env_keys(path):
+    for key, value in env_keys_in_text(text):
         m = URL_WITH_PASSWORD_RE.search(value)
         if m and sha_prefix_matches(m.group(2), password_prefix):
             found.append(key)
     return found
+
+
+def keys_embedding_password(path: Path, password_prefix: str) -> list:
+    return keys_embedding_password_in_text(path.read_text(errors="replace"),
+                                           password_prefix)
 
 
 def database_url(path: Path) -> Optional[str]:
@@ -209,19 +221,13 @@ def latest_backup(env_file: Path) -> Optional[Path]:
     return backups[-1] if backups else None
 
 
-def rewrite_env(path: Path, old_sha8: str, new_password: str,
-                backup: bool = True) -> Tuple[list, Optional[Path]]:
-    """Replace the password inside URL values whose password hashes to old_sha8.
+def rewrite_text(text: str, old_sha8: str, new_password: str) -> Tuple[list, list]:
+    """(new_lines, changed_keys) — the pure half of the rewrite.
 
-    Returns (changed_keys, backup_path). Writes atomically, preserving mode.
-
-    SYMLINKS: several hosts keep the live `.env` as a link to a shared copy. Writing
-    through `os.replace` on the LINK PATH would swap the symlink for a regular file
-    and silently detach the host from its shared env — so every filesystem operation
-    below happens on the resolved target while the link stays a link.
+    Split out so a REMOTE env file (the core-side secrets bundle the hub pulls) goes
+    through exactly the same substitution as a local one; there is one rewrite rule,
+    not one per transport.
     """
-    target = Path(os.path.realpath(path))
-    text = target.read_text()
     changed = []
 
     def _sub(match: "re.Match") -> str:
@@ -240,6 +246,22 @@ def rewrite_env(path: Path, old_sha8: str, new_password: str,
         if new_line != line:
             changed.append(m.group(2))
         lines.append(new_line)
+    return lines, changed
+
+
+def rewrite_env(path: Path, old_sha8: str, new_password: str,
+                backup: bool = True) -> Tuple[list, Optional[Path]]:
+    """Replace the password inside URL values whose password hashes to old_sha8.
+
+    Returns (changed_keys, backup_path). Writes atomically, preserving mode.
+
+    SYMLINKS: several hosts keep the live `.env` as a link to a shared copy. Writing
+    through `os.replace` on the LINK PATH would swap the symlink for a regular file
+    and silently detach the host from its shared env — so every filesystem operation
+    below happens on the resolved target while the link stays a link.
+    """
+    target = Path(os.path.realpath(path))
+    lines, changed = rewrite_text(target.read_text(), old_sha8, new_password)
 
     if not changed:
         return [], None
@@ -267,6 +289,69 @@ def rewrite_env(path: Path, old_sha8: str, new_password: str,
     return changed, backup_path
 
 
+# ── remote env files ───────────────────────────────────────────────────────────
+
+# Runs ON THE REMOTE HOST with the new file content on ITS stdin. The secret is in
+# the byte stream, never in the command line — on either end. Backs up beside the
+# resolved target (so a symlinked env stays a link), then atomic-replace preserving
+# mode. Prints only the backup path.
+REMOTE_WRITE_SNIPPET = r"""
+import os, shutil, sys, tempfile
+from datetime import datetime, timezone
+path = sys.argv[1]
+target = os.path.realpath(path)
+data = sys.stdin.buffer.read()
+stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+backup = target + ".bak." + stamp
+shutil.copy2(target, backup)
+os.chmod(backup, 0o600)
+mode = os.stat(target).st_mode & 0o777
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".env.rot.")
+with os.fdopen(fd, "wb") as fh:
+    fh.write(data)
+os.chmod(tmp, mode)
+os.replace(tmp, target)
+print(backup)
+"""
+
+
+def _ssh(host: str, argv: list, stdin_bytes: Optional[bytes] = None):
+    """Run one command on `host` with every argument shell-quoted.
+
+    BatchMode: a host that would prompt for a password must FAIL, not hang, in the
+    middle of a rotation window. The caller treats a nonzero exit as a refusal.
+    """
+    cmd = ["ssh", "-o", "BatchMode=yes", host, "--"] + [shlex.quote(a) for a in argv]
+    return subprocess.run(cmd, input=stdin_bytes, capture_output=True, check=False)
+
+
+def read_remote_env(host: str, path: str) -> Optional[str]:
+    """The remote env file's text, or None (with a printed refusal)."""
+    proc = _ssh(host, ["cat", "--", path])
+    if proc.returncode != 0:
+        detail = proc.stderr.decode(errors="replace").strip().splitlines()
+        print(f"apply: REFUSED — cannot read {path} on {host} "
+              f"(ssh exit {proc.returncode}{': ' + detail[-1] if detail else ''}). "
+              "Nothing written.", file=sys.stderr)
+        return None
+    return proc.stdout.decode(errors="replace")
+
+
+def write_remote_env(host: str, path: str, content: str) -> Optional[str]:
+    """Atomically replace the remote env file. Returns the remote backup path."""
+    proc = _ssh(host, ["python3", "-c", REMOTE_WRITE_SNIPPET, path],
+                stdin_bytes=content.encode())
+    if proc.returncode != 0:
+        detail = proc.stderr.decode(errors="replace").strip().splitlines()
+        print(f"apply: REFUSED — the remote write to {path} on {host} failed "
+              f"(exit {proc.returncode}{': ' + detail[-1] if detail else ''}). "
+              "The remote file is unchanged unless the snippet reached os.replace.",
+              file=sys.stderr)
+        return None
+    out = proc.stdout.decode(errors="replace").strip().splitlines()
+    return out[-1] if out else None
+
+
 # ── vault ──────────────────────────────────────────────────────────────────────
 
 def _vault(marker: Optional[Path] = None):
@@ -277,15 +362,21 @@ def _vault(marker: Optional[Path] = None):
     return Vault()
 
 
+def _ensure_database_url_from_text(text: str) -> None:
+    if os.environ.get("DATABASE_URL"):
+        return
+    for key, value in env_keys_in_text(text):
+        if key == "DATABASE_URL":
+            os.environ["DATABASE_URL"] = value
+            return
+
+
 def _ensure_database_url_in_process(env_file: Path) -> None:
     """The vault's own connection comes from DATABASE_URL; when a rotation script
     is run outside a sourced shell it is not set."""
     if os.environ.get("DATABASE_URL"):
         return
-    for key, value in read_env_keys(env_file):
-        if key == "DATABASE_URL":
-            os.environ["DATABASE_URL"] = value
-            return
+    _ensure_database_url_from_text(env_file.read_text(errors="replace"))
 
 
 # ── subcommands ────────────────────────────────────────────────────────────────
@@ -362,9 +453,7 @@ def cmd_stage(args) -> int:
 
 def cmd_apply(args) -> int:
     env_file = args.env_file
-    if not env_file.exists():
-        print(f"apply: REFUSED — {env_file} does not exist", file=sys.stderr)
-        return 2
+    remote = getattr(args, "remote", None)
     # Validate the selector BEFORE reading any secret: a bad prefix (empty matches
     # everything) must never get as far as a stdin read or a vault call.
     needle = (args.old_sha8 or "").strip().lower()
@@ -372,6 +461,18 @@ def cmd_apply(args) -> int:
         print("apply: REFUSED — --old-sha8 must be 8 to 64 hex characters of the sha256 "
               "of the CURRENT password. Nothing written.", file=sys.stderr)
         return 2
+    if remote:
+        # The core-side secrets bundle the hub pulls into its tmpfs is the fourth
+        # place this credential lives (hub 87776, console 87781). Same rule as every
+        # other target: the value travels on stdin, and only its sha8 is printed.
+        text = read_remote_env(remote, str(env_file))
+        if text is None:
+            return 2
+    else:
+        if not env_file.exists():
+            print(f"apply: REFUSED — {env_file} does not exist", file=sys.stderr)
+            return 2
+        text = Path(os.path.realpath(env_file)).read_text()
     if args.from_stdin:
         # Escape hatch for the case the runbook exists to avoid: the dashboard reset
         # already landed before `apply` ran, so DATABASE_URL is dead and the vault —
@@ -382,7 +483,12 @@ def cmd_apply(args) -> int:
             return 2
         secret = _Secret(value)
     else:
-        _ensure_database_url_in_process(env_file)
+        if remote:
+            # In remote mode the local default path does not exist; the vault still
+            # needs SOME working DSN in this process, and the remote file has one.
+            _ensure_database_url_from_text(text)
+        else:
+            _ensure_database_url_in_process(env_file)
         vault = _vault()
         try:
             secret = vault.get(args.name,
@@ -395,22 +501,35 @@ def cmd_apply(args) -> int:
                   "value.", file=sys.stderr)
             return 2
 
-    olds = keys_embedding_password(env_file, needle)
+    olds = keys_embedding_password_in_text(text, needle)
     if not olds:
         # Conservative: require an explicit --old-sha8 rather than guessing which
         # credential to replace.
-        print("apply: REFUSED — no key's password matches --old-sha8. Pass the hash "
+        where = f"{env_file} on {remote}" if remote else str(env_file)
+        print(f"apply: REFUSED — no key in {where} matches --old-sha8. Pass the hash "
               "prefix of the password currently in .env (from `keys`, which prints 16 "
               "hex chars; a shorter prefix is accepted). Nothing written.",
               file=sys.stderr)
         return 2
 
+    where = f"{env_file} on {remote}" if remote else str(env_file)
     if not args.execute:
         for key in olds:
-            print(f"apply DRY-RUN: would rewrite {key} in {env_file}: "
+            print(f"apply DRY-RUN: would rewrite {key} in {where}: "
                   f"{args.old_sha8} -> {mask(secret.value)}")
         print("apply DRY-RUN: nothing written. Re-run with --execute.")
         return 0
+
+    if remote:
+        lines, changed = rewrite_text(text, args.old_sha8, secret.value)
+        backup = write_remote_env(remote, str(env_file), "".join(lines))
+        if backup is None:
+            return 2
+        for key in changed:
+            print(f"apply: rewrote {key} in {where}: {args.old_sha8} -> {mask(secret.value)}")
+        print(f"apply: backup at {backup} on {remote} (holds the OLD value — delete it "
+              "after the remote consumers re-pull and reconnect)")
+        return 0 if changed else 2
 
     changed, backup = rewrite_env(env_file, args.old_sha8, secret.value)
     for key in changed:
@@ -578,6 +697,10 @@ def main(argv: Optional[list] = None) -> int:
                    help="read the new password from stdin instead of the vault — only "
                         "for the case where the dashboard reset already landed and the "
                         "vault is unreachable through the dead DSN")
+    p.add_argument("--remote", default=None, metavar="HOST",
+                   help="--env-file names a path on HOST, reached over ssh: read it, "
+                        "rewrite it, and atomically replace it there. The value travels "
+                        "on stdin to both ends; nothing secret enters an ssh argv")
     p.set_defaults(func=cmd_apply)
 
     p = sub.add_parser(
