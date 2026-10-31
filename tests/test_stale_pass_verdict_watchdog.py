@@ -726,3 +726,98 @@ def test_run_only_calls_checkrun_status_when_otherwise_stale(monkeypatch):
     spw.run(conn, dry=False)
     assert calls == []
     assert cur.inserts == []
+
+
+# ── snooze (bus #85840: a batched/deliberate deploy stall still PASSes
+# cc-quality but should not re-page until the batch window closes) ───────────
+def test_snooze_key_shape():
+    assert spw.snooze_key("sheikh-musa", "cosem-platform", "639") == "sheikh-musa/cosem-platform#639"
+    assert spw.snooze_key("sheikh-musa", "cosem-platform", 639) == "sheikh-musa/cosem-platform#639"
+
+
+def test_parse_snooze_arg_valid():
+    assert spw.parse_snooze_arg("sheikh-musa/cosem-platform#639") == ("sheikh-musa", "cosem-platform", 639)
+
+
+def test_parse_snooze_arg_malformed_returns_none():
+    assert spw.parse_snooze_arg("cosem-platform#639") is None  # missing owner
+    assert spw.parse_snooze_arg("sheikh-musa/cosem-platform") is None  # missing #pr
+    assert spw.parse_snooze_arg("sheikh-musa/cosem-platform#abc") is None  # non-numeric pr
+
+
+def test_parse_until_arg_accepts_trailing_z():
+    epoch_z = spw.parse_until_arg("2026-10-31T09:00:00Z")
+    epoch_offset = spw.parse_until_arg("2026-10-31T09:00:00+00:00")
+    assert epoch_z == epoch_offset
+
+
+def test_parse_until_arg_naive_timestamp_is_treated_as_utc():
+    naive = spw.parse_until_arg("2026-10-31T09:00:00")
+    aware = spw.parse_until_arg("2026-10-31T09:00:00Z")
+    assert naive == aware
+
+
+def test_parse_until_arg_malformed_returns_none():
+    assert spw.parse_until_arg("not-a-date") is None
+
+
+def test_prune_expired_snoozes_drops_past_keeps_future():
+    state = {"snoozed": {"a/b#1": 100, "a/b#2": 200}}
+    pruned = spw.prune_expired_snoozes(state, now=150)
+    assert pruned["snoozed"] == {"a/b#2": 200}
+
+
+def test_prune_expired_snoozes_does_not_mutate_input():
+    state = {"snoozed": {"a/b#1": 100}}
+    spw.prune_expired_snoozes(state, now=150)
+    assert state["snoozed"] == {"a/b#1": 100}  # original untouched
+
+
+def test_is_snoozed_true_when_active():
+    state = {"snoozed": {"sheikh-musa/cosem-platform#639": 200}}
+    assert spw.is_snoozed(state, "sheikh-musa", "cosem-platform", "639", now=100) is True
+
+
+def test_is_snoozed_false_when_expired():
+    state = {"snoozed": {"sheikh-musa/cosem-platform#639": 100}}
+    assert spw.is_snoozed(state, "sheikh-musa", "cosem-platform", "639", now=200) is False
+
+
+def test_is_snoozed_false_when_absent():
+    assert spw.is_snoozed({}, "sheikh-musa", "cosem-platform", "639", now=100) is False
+
+
+def test_run_skips_a_snoozed_pr_even_though_it_is_stale(monkeypatch):
+    saved = {}
+    now_epoch = 10_000
+    verdicts = [(1, "cc-cosem-platform-1", "cosem-platform PR#639 -- PASS", now_epoch - THRESHOLD - 10)]
+    resolved = {"639": ("sheikh-musa", "cosem-platform", {"state": "OPEN", "mergedAt": None, "commits": []})}
+    state = {"snoozed": {"sheikh-musa/cosem-platform#639": now_epoch + 1000}}
+    cur, conn = _wire(monkeypatch, verdicts, resolved_by_pr=resolved, state=state, saved=saved)
+    monkeypatch.setattr(spw.time, "time", lambda: now_epoch)
+    spw.run(conn, dry=False)
+    assert cur.inserts == []
+
+
+def test_run_alerts_once_a_snooze_has_expired(monkeypatch):
+    saved = {}
+    now_epoch = 10_000
+    verdicts = [(1, "cc-cosem-platform-1", "cosem-platform PR#639 -- PASS", now_epoch - THRESHOLD - 10)]
+    resolved = {"639": ("sheikh-musa", "cosem-platform", {"state": "OPEN", "mergedAt": None, "commits": []})}
+    state = {"snoozed": {"sheikh-musa/cosem-platform#639": now_epoch - 1}}
+    cur, conn = _wire(monkeypatch, verdicts, resolved_by_pr=resolved, state=state, saved=saved)
+    monkeypatch.setattr(spw.time, "time", lambda: now_epoch)
+    spw.run(conn, dry=False)
+    assert len(cur.inserts) == 1
+
+
+def test_run_a_different_pr_in_the_same_repo_is_not_snoozed(monkeypatch):
+    saved = {}
+    now_epoch = 10_000
+    verdicts = [(1, "cc-cosem-platform-1", "cosem-platform PR#640 -- PASS", now_epoch - THRESHOLD - 10)]
+    resolved = {"640": ("sheikh-musa", "cosem-platform", {"state": "OPEN", "mergedAt": None, "commits": []})}
+    state = {"snoozed": {"sheikh-musa/cosem-platform#639": now_epoch + 1000}}
+    cur, conn = _wire(monkeypatch, verdicts, resolved_by_pr=resolved, state=state, saved=saved)
+    monkeypatch.setattr(spw.time, "time", lambda: now_epoch)
+    spw.run(conn, dry=False)
+    assert len(cur.inserts) == 1
