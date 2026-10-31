@@ -56,11 +56,21 @@ hooks already enforce — it's 🟢, included so a lane knows WHY the guard refu
   `--from-env` / `--from-file`, out to the vault, and the only thing printed is
   `sha256[:8]` + length.
 
-- **What it CANNOT enforce (residual):** a secret a reviewer chooses to paste into a
-  *narrative* (not tool output) — human discipline; the DDL false-positive above; and
-  a store read whose credential row is not identifiable from the command text (a
-  `SELECT option_value` filtered by a numeric option_id, say). The hash-matched
-  transcript sweep (`scripts/secret_hash_sweep.py`) is the backstop for those.
+- **What it CANNOT enforce (residual — keep this list honest):** a secret a reviewer
+  chooses to paste into a *narrative* (not tool output) — human discipline; the DDL
+  false-positive above; a store read whose credential row is not identifiable from
+  the command text (a `SELECT option_value` filtered by a numeric option_id, say);
+  **cross-stage dataflow** — `echo wp-config.php | xargs cat` puts the store name in
+  one pipeline stage and the printing verb in the next, so neither stage matches
+  (pinned as a known-allow test); and **Rule 2 recognises a client SITE by
+  WordPress markers**, so a non-WP store's bare table names (`select * from
+  stripe_events` against an unnamed DSN) are not refused — its DSN *env var*
+  (`$STRIPE_DSN`) is, and Rule 1 covers the platform's files. The guard stops the
+  careless 30 Oct dump and its obvious variants with near-zero false positives
+  (measured: 0 new denials across 36,931 real fleet commands after the cc-quality
+  hardening); it is not bypass-proof against a shell-literate agent. The
+  hash-matched transcript sweep (`scripts/secret_hash_sweep.py`) is the backstop
+  for all of the above.
 
 
 ### 5. DISCOVERY
