@@ -29,11 +29,24 @@ SUBCOMMANDS
                         in dependency order. `--dry-run` lists them.
 
 ORDER OF OPERATIONS (the runbook this encodes)
-  1. dashboard: reset the DB password for the substrate project
-  2. this tool: `stage`   (paste the new value on stdin)
-  3. this tool: `apply`   then `restart-consumers`
-  4. this tool: `verify`
-  5. scrub the old value out of the transcripts (scripts/secret_hash_sweep.py)
+  1. this tool: `stage`   (paste the new value on stdin; the vault write needs a
+                          connection, so this happens while the OLD password works)
+  2. this tool: `apply --execute`   (.env now holds the new value)
+  3. dashboard: reset the DB password for the substrate project
+  4. this tool: `restart-consumers`  (new connections must carry the new value)
+  5. this tool: `verify`   (new DSN connects, old one is rejected)
+  6. scrub the old value out of the transcripts (scripts/secret_hash_sweep.py)
+
+WHY APPLY COMES BEFORE THE RESET. The vault is reached through DATABASE_URL, the
+same credential being rotated, so after the reset `apply` could no longer read the
+value it is supposed to write — a chicken-and-egg that strands the fleet with a
+dead password in .env and no tool that can fix it. Running apply first removes it:
+stage and apply both talk to a still-working DSN, and the reset (step 3) is a
+single click away from a .env that already holds the new value. Existing
+connections survive a password change — Postgres authenticates at connect time —
+so nothing actually breaks until new connections are attempted, which is step 4.
+Do steps 2-4 in one sitting; a long gap leaves .env holding a password the
+database does not accept yet.
 
 SAFETY
   * refuses to write a value shorter than MIN_PASSWORD_LEN
@@ -196,6 +209,33 @@ def _ensure_database_url_in_process(env_file: Path) -> None:
 
 # ── subcommands ────────────────────────────────────────────────────────────────
 
+class _Secret:
+    """Minimal stand-in for VaultSecret when the value did not come from the vault."""
+
+    def __init__(self, value: str):
+        self.value = value
+        self.leak_flagged = False
+        self.leak_reason = None
+
+
+def _read_password_from_stdin() -> Optional[str]:
+    if sys.stdin.isatty():
+        import getpass
+        value = getpass.getpass("new substrate DB password (not echoed): ")
+    else:
+        value = sys.stdin.readline()
+    value = value.rstrip("\n")
+    if len(value) < MIN_PASSWORD_LEN:
+        print(f"apply: REFUSED — the value on stdin is {len(value)} chars, below the "
+              f"{MIN_PASSWORD_LEN}-char floor. Nothing written.", file=sys.stderr)
+        return None
+    if any(c.isspace() for c in value):
+        print("apply: REFUSED — the value on stdin contains whitespace. Nothing written.",
+              file=sys.stderr)
+        return None
+    return value
+
+
 def cmd_stage(args) -> int:
     if sys.stdin.isatty():
         import getpass
@@ -244,15 +284,28 @@ def cmd_apply(args) -> int:
     if not env_file.exists():
         print(f"apply: REFUSED — {env_file} does not exist", file=sys.stderr)
         return 2
-    _ensure_database_url_in_process(env_file)
-    vault = _vault()
-    try:
-        secret = vault.get(args.name,
-                           reason="rotation: read staged substrate password to rewrite .env")
-    except Exception as exc:
-        print(f"apply: REFUSED — cannot read {args.name} from the vault "
-              f"({type(exc).__name__}). Nothing written.", file=sys.stderr)
-        return 2
+    if args.from_stdin:
+        # Escape hatch for the case the runbook exists to avoid: the dashboard reset
+        # already landed before `apply` ran, so DATABASE_URL is dead and the vault —
+        # which is reached THROUGH it — cannot be read. Same no-print guarantee: the
+        # value arrives on stdin and only its sha8 leaves.
+        value = _read_password_from_stdin()
+        if value is None:
+            return 2
+        secret = _Secret(value)
+    else:
+        _ensure_database_url_in_process(env_file)
+        vault = _vault()
+        try:
+            secret = vault.get(args.name,
+                               reason="rotation: read staged substrate password to rewrite .env")
+        except Exception as exc:
+            print(f"apply: REFUSED — cannot read {args.name} from the vault "
+                  f"({type(exc).__name__}). Nothing written. If the dashboard reset "
+                  "already happened, DATABASE_URL is dead and the vault cannot be "
+                  "reached through it — re-run with --from-stdin and paste the new "
+                  "value.", file=sys.stderr)
+            return 2
 
     olds = keys_embedding_password(env_file, args.old_sha8) if args.old_sha8 else []
     if not olds:
@@ -357,6 +410,10 @@ def main(argv: Optional[list] = None) -> int:
                    help="sha256[:8] of the password currently in .env")
     p.add_argument("--execute", action="store_true",
                    help="actually write (default is a dry run)")
+    p.add_argument("--from-stdin", action="store_true",
+                   help="read the new password from stdin instead of the vault — only "
+                        "for the case where the dashboard reset already landed and the "
+                        "vault is unreachable through the dead DSN")
     p.set_defaults(func=cmd_apply)
 
     p = sub.add_parser("verify", help="new DSN connects; old DSN is rejected")

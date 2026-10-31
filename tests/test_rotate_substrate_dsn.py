@@ -344,3 +344,48 @@ def test_rewrite_writes_through_a_symlink_and_keeps_it_a_symlink(tmp_path):
     assert NEW_PW in shared.read_text()
     assert OLD_PW not in shared.read_text()
     assert backup is not None and backup.parent == tmp_path
+
+
+# ── the chicken-and-egg escape hatch ───────────────────────────────────────────
+# The vault is reached THROUGH DATABASE_URL. If the dashboard reset lands before
+# `apply` runs, the vault is unreachable by definition — so `apply` must still be
+# able to finish without the vault, or the fleet is stranded with a dead password.
+
+def test_apply_from_stdin_works_when_the_vault_is_unreachable(env_file, monkeypatch, capsys):
+    class _Dead:
+        def get(self, *a, **k):
+            raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(rot, "_vault", lambda *a, **k: _Dead())
+    monkeypatch.setattr(sys, "stdin", io.StringIO(NEW_PW + "\n"))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+
+    rc = rot.main(["--env-file", str(env_file), "apply", "--old-sha8", OLD_SHA,
+                   "--execute", "--from-stdin"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert NEW_PW in env_file.read_text()
+    assert NEW_PW not in out
+
+
+def test_apply_from_stdin_still_refuses_a_bad_value(env_file, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO("short\n"))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+    before = env_file.read_text()
+    rc = rot.main(["--env-file", str(env_file), "apply", "--old-sha8", OLD_SHA,
+                   "--execute", "--from-stdin"])
+    assert rc == 2
+    assert env_file.read_text() == before
+
+
+def test_apply_names_the_escape_hatch_when_the_vault_read_fails(env_file, monkeypatch, capsys):
+    class _Dead:
+        def get(self, *a, **k):
+            raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(rot, "_vault", lambda *a, **k: _Dead())
+    rc = rot.main(["--env-file", str(env_file), "apply", "--old-sha8", OLD_SHA,
+                   "--execute"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--from-stdin" in err, "the refusal must tell the operator how to recover"
