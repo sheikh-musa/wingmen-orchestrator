@@ -58,6 +58,14 @@ REPLY_SCRIPT = "lane_reply.sh"
 _SEPARATORS = re.compile(r"&&|\|\||;|\||\n")
 # Interpreters that may be used to run the script explicitly.
 _INTERPRETERS = ("bash", "sh", "zsh", "python", "python3")
+# Wrappers that run a command unchanged. They are skipped, with their own
+# arguments, so the REAL command still gets recognised (cc-quality PR #725
+# review, bus #86290: `env FOO=bar lane_reply.sh ...` and `timeout 5
+# lane_reply.sh ...` reached the send path ungated). Same class as PR#322's
+# leading-VAR=val bypass fix.
+_WRAPPERS = ("env", "command", "timeout", "nohup", "nice", "stdbuf", "xargs",
+             "sudo", "exec", "time", "builtin")
+_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def lane_base_agent_id():
@@ -142,22 +150,57 @@ def _tokens(seg):
         return seg.split()
 
 
-def _reply_argv(cmd):
+def _skip_wrapper_args(toks, i):
+    """Advance past a wrapper's own options/values (env assignments, `-n 5`,
+    `-oL`, a bare number) to the command it wraps."""
+    while i < len(toks):
+        t = toks[i]
+        if _ASSIGN_RE.match(t) or t.isdigit() or t.startswith("-") or t.startswith("+"):
+            i += 1
+            continue
+        break
+    return i
+
+
+def _strip_prefix(toks):
+    """Drop leading NAME=VALUE assignments and wrapper invocations."""
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if _ASSIGN_RE.match(t):
+            i += 1
+            continue
+        if os.path.basename(t) in _WRAPPERS:
+            i = _skip_wrapper_args(toks, i + 1)
+            continue
+        break
+    return toks[i:]
+
+
+def _reply_argv(cmd, _depth=0):
     """Tokens after the script name when lane_reply.sh is in COMMAND position.
 
     Returns None when the script is not being run (only mentioned, grepped,
     echoed, committed), and () when it is run with no argument at all.
+    Prefixes (`FOO=bar`), wrappers (`env`, `timeout 5`, ...) and the
+    interpreter `-c "<string>"` form are all seen through, so an ordinary
+    shell spelling cannot slip past the guard.
     """
     for seg in _segments(cmd):
-        toks = _tokens(seg)
+        toks = _strip_prefix(_tokens(seg))
         if not toks:
             continue
         head = os.path.basename(toks[0])
         if head == REPLY_SCRIPT:
             return tuple(toks[1:])
-        if head in _INTERPRETERS and len(toks) > 1 \
-                and os.path.basename(toks[1]) == REPLY_SCRIPT:
-            return tuple(toks[2:])
+        if head in _INTERPRETERS:
+            if _depth < 3 and len(toks) > 2 and toks[1] in ("-c", "--command"):
+                inner = _reply_argv(toks[2], _depth + 1)
+                if inner is not None:
+                    return inner
+                continue
+            if len(toks) > 1 and os.path.basename(toks[1]) == REPLY_SCRIPT:
+                return tuple(toks[2:])
     return None
 
 

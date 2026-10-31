@@ -259,3 +259,57 @@ def test_extract_reply_channel_parses_the_boundary():
     assert g.extract_reply_channel("scripts/lane_reply.sh") is None
     assert g.extract_reply_channel('echo "lane_reply.sh"') is None
     assert g.extract_reply_channel("git status") is None
+
+
+# ── recognition must not be bypassable by ordinary shell prefixes ───────────
+# cc-quality PR #725 review (bus #86290): the DECISION was fail-closed but the
+# RECOGNITION was not — a leading VAR=val, a common wrapper (env/command/
+# timeout/nohup/nice/stdbuf/xargs/sudo/exec/time), or the interpreter `-c`
+# form all reached the send path ungated. Same class as PR#322's fleet fix.
+
+_BYPASS_SHAPES = [
+    'FOO=bar scripts/lane_reply.sh faizul "hi"',
+    'FOO=bar BAZ=1 scripts/lane_reply.sh faizul "hi"',
+    'env scripts/lane_reply.sh faizul "hi"',
+    'env FOO=bar scripts/lane_reply.sh faizul "hi"',
+    'command scripts/lane_reply.sh faizul "hi"',
+    'timeout 5 scripts/lane_reply.sh faizul "hi"',
+    'nice -n 5 scripts/lane_reply.sh faizul "hi"',
+    'nohup scripts/lane_reply.sh faizul "hi"',
+    'stdbuf -oL scripts/lane_reply.sh faizul "hi"',
+    'sudo scripts/lane_reply.sh faizul "hi"',
+    'exec scripts/lane_reply.sh faizul "hi"',
+    'bash -c "scripts/lane_reply.sh faizul hi"',
+    'sh -c "scripts/lane_reply.sh faizul hi"',
+    'FOO=bar bash -c "scripts/lane_reply.sh faizul hi"',
+]
+
+
+def test_prefixed_and_wrapped_invocations_are_still_gated():
+    """A lane whose grant lacks reply_text must be REFUSED through every one of
+    these shapes, not just the bare one."""
+    for cmd in _BYPASS_SHAPES:
+        r = run_hook("Bash", {"command": cmd}, env={
+            "CC_BASE_AGENT_ID": "cc-coffeemedia",
+            **seam({"cc-coffeemedia": {"faizul": ["publish_site"]}}),
+        })
+        assert r.returncode == 2, (cmd, r.stdout + r.stderr)
+        assert MARKER in r.stderr, cmd
+
+
+def test_prefixed_and_wrapped_invocations_still_allow_a_granted_lane():
+    """The same shapes must not over-refuse when the grant DOES include reply_text."""
+    for cmd in _BYPASS_SHAPES:
+        r = run_hook("Bash", {"command": cmd}, env={
+            "CC_BASE_AGENT_ID": "cc-coffeemedia",
+            **seam({"cc-coffeemedia": {"faizul": ["reply_text"]}}),
+        })
+        assert r.returncode == 0, (cmd, r.stderr)
+
+
+def test_wrapped_forms_still_yield_the_channel():
+    g = _load_module()
+    for cmd in _BYPASS_SHAPES:
+        assert g.extract_reply_channel(cmd) == "faizul", cmd
+    assert g.extract_reply_channel('timeout 5 scripts/lane_reply.sh') is None
+    assert g.extract_reply_channel('bash -c "git status"') is None
