@@ -127,10 +127,12 @@ The order **is** the safety property. This is not a preference.
    they get step 7 below.
 6. **verify** — the new value must connect, and the old value must **fail**. Both halves
    matter; a rotation where the old password still works did not happen.
-7. **singleton restart (operator-driven, not by this tool)** — once verify has shown the
-   old value refused, fleet-health restarts first and the console last (see the decided
-   design below). The executor does not do this: restarting the console is the one action
-   that ends the session running the operation.
+7. **singleton restart (run from OUTSIDE the singletons, not by this tool)** — once verify
+   has shown the old value refused, fleet-health restarts first and the console last (see the
+   decided design and the staged procedure below). The executor cannot do this: restarting the
+   console is the one action that ends the session running the operation, so the actor is
+   cc-substrate from its own process — never the singleton itself, and never a reset
+   (`reset_*.sh` keeps the frozen loop alive).
 8. **watch** — re-probe for the configured window.
 
 **Why the vault write comes before the patch.** The vault lives *inside* the substrate
