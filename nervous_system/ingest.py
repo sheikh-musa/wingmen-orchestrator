@@ -56,6 +56,7 @@ from dotenv import load_dotenv
 from nervous_system import triage  # PASSIVE CoS triage annotation (read-only; no routing)
 from nervous_system import operator_log  # op#22669 asks-ledger reply-match (maybe_track_ask)
 from nervous_system import personal_routing  # bus #47837: private-family content routing
+from nervous_system import pending_contacts  # TG2.0 s6: new-contact alert + one-tap approve
 from scripts.lib import fire_window  # quiesce keystrokes during a recycle's fire window
 from scripts.lib import pane_busy  # footer-scoped busy check (one implementation)
 
@@ -1391,6 +1392,26 @@ def _handle_callback(conn, ch: "Channel", cb: dict, upd_id: int) -> bool:
         _log_line(f"{ch.key}: REFUSED button '{action}' from {presser!r} (not the operator)")
         _answer_callback(ch.token, cb.get("id", ""), "Not authorised.")
         return True
+    # TG2.0 section 6: new-contact Approve / Ignore. Handled BEFORE the
+    # BUTTON_ACTIONS allowlist because its data carries an opaque pending id,
+    # not a fixed action name. The operator check above is already the
+    # deny-by-default gate for the reviewer's own chat; handle_button re-checks
+    # it and then verifies the pending row is live before touching anything.
+    if action.startswith("pc:"):
+        res = pending_contacts.handle_button(
+            conn, data=action, presser=presser, reviewer_chat=operator,
+            file_gate_request=pending_contacts.file_gate_request_via_bus)
+        _log_line(f"{ch.key}: new-contact button {action!r} from {presser!r} -> {res}")
+        if res.get("ok") and res.get("action") == "approve":
+            note = "Approved — gate request filed."
+        elif res.get("ok"):
+            note = "Ignored."
+        elif res.get("reason") == "gate_not_filed":
+            note = "Could not file the gate request — the contact is still pending, try again."
+        else:
+            note = "Nothing to do."
+        _answer_callback(ch.token, cb.get("id", ""), note)
+        return True
     if action not in BUTTON_ACTIONS:
         _log_line(f"{ch.key}: REFUSED unknown button action {action!r}")
         _answer_callback(ch.token, cb.get("id", ""), "Unknown action.")
@@ -1739,6 +1760,42 @@ def process_update(conn, ch: Channel, upd: dict,
     return True
 
 
+def _maybe_page_new_contact(conn, ch: "Channel", upd: dict, matched) -> None:
+    """TG2.0 s6: an inbound from a chat no row claims pages the reviewer ONCE.
+
+    Deny-by-default is unchanged: the message is still logged and gated exactly
+    as before, nothing is enabled, and this only tells the reviewer a stranger
+    turned up. Best-effort — an alert failure must never block routing.
+    """
+    if matched is not None:
+        return
+    msg = upd.get("message") or upd.get("edited_message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    reviewer = (os.environ.get("MUSA_TELEGRAM_ID") or "").strip()
+    if chat_id is None or not reviewer:
+        return
+    frm = msg.get("from") or {}
+    try:
+        # Savepoint: a failure here (e.g. the gated migration not yet applied)
+        # must not abort the caller's transaction — that would silently break
+        # the GATE step that follows and turn a cosmetic alert into a routing
+        # defect.
+        with conn.transaction():
+            note = pending_contacts.record_unmatched(
+                conn, bot=ch.token_env_key, chat_id=chat_id, channel_tag=ch.channel_tag,
+                first_name=frm.get("first_name"), username=frm.get("username"))
+        if not note:
+            return                      # already pending and already alerted
+        text, keyboard = pending_contacts.alert(
+            bot=ch.token_env_key, chat_id=note["chat_id"], first_name=note["first_name"],
+            username=note["username"], channel_tag=note["channel_tag"],
+            pending_id=note["pending_id"])
+        tg_call(ch.token, "sendMessage",
+                {"chat_id": reviewer, "text": text, "reply_markup": keyboard})
+    except Exception as e:                                        # noqa: BLE001
+        _log_line(f"{ch.key}: new-contact alert raised ({type(e).__name__}: {e}) — non-fatal")
+
+
 def unread_count(conn, ch: Channel) -> int:
     with conn.cursor() as cur:
         cur.execute(
@@ -1822,6 +1879,7 @@ async def _run_token_cycle(token_env_key: str, channels: dict[str, Channel],
                 # "random stranger messages the bot" case (logged, then gated,
                 # never routed). group[0] is deterministic (sorted by key).
                 process_update(conn, matched or group[0], upd, channels)
+                _maybe_page_new_contact(conn, matched or group[0], upd, matched)
             if updates:
                 # Offset fail-safe: ack ONLY after the whole batch is durable.
                 new_off = updates[-1]["update_id"]
