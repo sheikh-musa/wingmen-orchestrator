@@ -19,10 +19,12 @@ TRIGGER RULE (orch-console #58028, implemented exactly):
   * NEVER switch back automatically (switch-back is orch-console's call). Each run only
     acts while the trigger condition holds NOW; lanes are only ever moved GLM -> Musa.
 
-SEPARATE STANDING CHECK (Musa op#33932, bus #76071): independent of the GLM logic above --
-Musa 7d >= 90% -> PAGE orch-console at P1+RR so they execute the brain/singleton lanes'
-move from Musa's token to SYED's (switch_singleton_token.sh), not GLM. Detect-only, no
-token switch from this script for that move.
+RETIRED (2026-10-31, orch-console #86307/#86319, Musa op#36562): the old standing check
+here used to PAGE orch-console at Musa 7d >= 90% to execute the brain/singleton lanes'
+move to Syed by hand. That rule is SUPERSEDED — op#36562 moved the threshold to 95% and
+made it an ACTION, not a page: scripts/musa_deepseek_syed_switch.py now performs the
+brains(+mamadah)-to-Syed move itself at 95%, alongside the 90% workers-to-DeepSeek move.
+See that script's docstring. This module stays GLM-only.
 
 FAIL LOUD: an unreadable GLM or Musa reading raises (non-zero exit). A monitor that
 silently reads "fine" because its probe failed is worse than none. --dry-run (the
@@ -47,13 +49,6 @@ WK_SWITCH = 95.0
 FIVE_H_SWITCH = 95.0
 FIVE_H_NEEDS_WK = 90.0
 MUSA_MAX = 90.0
-# Musa op#33932 (bus #76071, 2026-10-25): independent of the GLM-overflow logic above, the
-# brain/singleton lanes stay on Musa's Claude token until Musa 7d hits this, then they ALL
-# move to SYED (not GLM) -- orch-console executes the move via switch_singleton_token.sh,
-# this script only detects + pages. Separate constant from MUSA_MAX even though the value
-# currently matches: the two policies (GLM-switch headroom vs. brains-to-Syed) are tunable
-# independently.
-MUSA_SYED_MOVE_PCT = 90.0
 MUSA_TOKEN = str(Path.home() / ".wingmen" / "keys" / "musa-oauth-token")
 STATE_FILE = Path.home() / "wingmen" / "fleet-health" / "state" / "glm_overflow_switch.json"
 PAGE_COOLDOWN_S = 3600
@@ -222,44 +217,6 @@ def stamp_lane_note(session: str, text: str) -> None:
                     (f" | {text}", session))
 
 
-# op#33932 (bus #76389/#76399, 2026-10-25): the standing Musa>=90% page above has NO
-# awareness of whether the move it asks for has already happened -- just a 1h cooldown
-# -- so once the move IS done it keeps re-paging every hour until Musa's weekly reset,
-# purely because the >=90% CONDITION outlives the ACTION (orch-console #76399: "the
-# condition is not the same as the action being undone"). Ground-truth check instead of
-# a sticky "executed" flag on purpose: a flag can go stale exactly the way op#13183's did
-# (status stayed 'executed' from August while .fleet-health_default_token had quietly
-# drifted back to Musa) -- reading the actual current state self-corrects if the move
-# is ever genuinely undone, with no one having to remember to re-arm anything.
-OP33932_SYED_FP = "582043088eae"
-OP33932_DB_TARGETS = ("cc-fleet-health", "orch-console", "cc-quality")
-OP33932_CAI_POINTER = ORCH_DIR / ".cai_default_token"
-
-
-def _op33932_already_moved() -> bool:
-    """True iff the op#33932 singleton targets are confirmed on Syed right now. Fails
-    SAFE on any read error (DB down, file missing, etc.) -> False, so an unreadable
-    ground truth can never silently swallow a real still-pending move; the caller's
-    existing cooldown-gated page is the fallback."""
-    try:
-        import psycopg2
-        from dotenv import load_dotenv
-        load_dotenv(ORCH_DIR / ".env")
-        with psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=5) as c, c.cursor() as cur:
-            cur.execute(
-                "SELECT agent_id FROM agent_status WHERE agent_id = ANY(%s) AND auth_fp = %s",
-                (list(OP33932_DB_TARGETS), OP33932_SYED_FP))
-            moved = {r[0] for r in cur.fetchall()}
-        if moved != set(OP33932_DB_TARGETS):
-            return False
-    except Exception:
-        return False
-    try:
-        return Path(OP33932_CAI_POINTER.read_text().strip()).name == "syed-oauth-token"
-    except OSError:
-        return False
-
-
 def page(subject: str, body: str, apply: bool) -> None:
     if not apply:
         print(f"[DRY] would page orch-console: {subject}")
@@ -305,26 +262,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     state = load_state()
 
-    # Musa op#33932: standing check, independent of the GLM-overflow decision above. Does
-    # NOT act (no token switch here) -- pages orch-console at P1+RR to execute the
-    # brains-to-Syed move via switch_singleton_token.sh. Own cooldown key so it never
-    # double-fires every 5min once Musa is over the line.
-    if musa["7d"] >= MUSA_SYED_MOVE_PCT and _op33932_already_moved():
-        print(f"  musa-syed-move: Musa 7d {musa['7d']:.0f}% >= {MUSA_SYED_MOVE_PCT:.0f}% "
-              f"but already executed (ground-truth verified on Syed) -- standing down, not paging")
-    elif musa["7d"] >= MUSA_SYED_MOVE_PCT:
-        last_syed_page = state.get("page_musa_syed_move", 0)
-        if now.timestamp() - last_syed_page >= PAGE_COOLDOWN_S:
-            print(f"  musa-syed-move: Musa 7d {musa['7d']:.0f}% >= {MUSA_SYED_MOVE_PCT:.0f}% -- paging")
-            page(f"Musa 7d at {musa['7d']:.0f}% -- move brains/singleton lanes to Syed (op#33932)",
-                 f"TL;DR: Musa 7-day usage is {musa['7d']:.0f}% (>= {MUSA_SYED_MOVE_PCT:.0f}%). Per Musa's "
-                 f"directive (op#33932), the brain/singleton lanes move off Musa's Claude token onto "
-                 f"SYED's (not GLM) -- execute via switch_singleton_token.sh onto the syed-oauth-token. "
-                 f"Musa 5h is currently {musa['5h']:.0f}%. This page is detect-only; no token was switched "
-                 f"by this script.", a.apply)
-            if a.apply:
-                state["page_musa_syed_move"] = now.timestamp()
-                save_state(state)
+    # op#33932's standing Musa>=90% brains-to-Syed PAGE used to live here. RETIRED
+    # 2026-10-31 (orch-console #86307/#86319, Musa op#36562): superseded by
+    # scripts/musa_deepseek_syed_switch.py, which ACTS (not just pages) at 95%.
     if d["action"] in ("page_5h_only", "page_musa_high"):
         if not lanes:
             # orch-console #61687: GLM is over its threshold but ZERO lanes are on GLM,
