@@ -63,9 +63,28 @@ COMMENT ON COLUMN fleet_memory.created_by IS
 
 -- Backfill before the NOT NULL lands: created_at is the only honest value
 -- we hold for rows written before this column existed.
+--
+-- BOTH triggers must stand down for this one statement, not just the
+-- immutability one (found on the live dry run 2026-11-01, console bus #87228;
+-- the tests here had only ever migrated an EMPTY table, so they never fired
+-- it). fleet_memory_audit_trg is AFTER INSERT OR UPDATE and treats every
+-- UPDATE as a retire: it writes NEW.retired_op_ref into
+-- fleet_memory_audit.op_ref, which is NOT NULL. 135 made that assumption safe
+-- by having fleet_memory_immutable_trg reject any UPDATE that is not a
+-- retire, so the audit trigger could never see a non-retire update. This
+-- backfill is the first such update, and with rows present it raised
+-- NotNullViolation and rolled the whole migration back.
+--
+-- The backfill deliberately leaves NO audit row: the audit table records fact
+-- lifecycle (created/retired), and a metadata backfill is neither. Logging it
+-- as 'retired' would be a falsehood in an append-only table. DDL is
+-- transactional, so a failure between these statements rolls the DISABLE back
+-- too -- the triggers cannot be left off.
 ALTER TABLE fleet_memory DISABLE TRIGGER fleet_memory_immutable_trg;
+ALTER TABLE fleet_memory DISABLE TRIGGER fleet_memory_audit_trg;
 UPDATE fleet_memory SET verified_at = created_at WHERE verified_at IS NULL;
 ALTER TABLE fleet_memory ENABLE TRIGGER fleet_memory_immutable_trg;
+ALTER TABLE fleet_memory ENABLE TRIGGER fleet_memory_audit_trg;
 
 ALTER TABLE fleet_memory
     ALTER COLUMN verified_at SET NOT NULL,
@@ -152,6 +171,10 @@ COMMIT;
 -- Verify post-apply:
 --   SELECT id, fact, verified_at, expires_at FROM fleet_memory ORDER BY id;
 --   -- every pre-existing row must show verified_at = created_at, not now().
+--
+--   SELECT count(*) FROM fleet_memory_audit;
+--   -- on the 2 smoke rows this stays 2 ('created' only). The backfill is
+--   -- metadata, not a lifecycle event, and must not masquerade as a retire.
 --
 -- The hole this closes, proven live-shaped:
 --   UPDATE fleet_memory SET expires_at = now() WHERE id = <any>;
