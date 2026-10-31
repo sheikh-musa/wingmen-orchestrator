@@ -46,39 +46,55 @@ def test_the_real_map_file_has_every_client_console_named():
 
 def test_resolves_known_families():
     for agent_id, expected in [
-        ("cc-bariq-1", "DEEPSEEK_CODING_KEY"),
-        ("cc-oeh-1", "DEEPSEEK_CODING_KEY"),
-        ("cc-ffsfulfilment-1", "DEEPSEEK_CODING_KEY"),
-        ("cc-cosem-exams-1", "DEEPSEEK_CODING_KEY"),
-        ("cc-cosem-platform-author", "DEEPSEEK_CODING_KEY"),
-        ("cc-hc95-broker-1", "DEEPSEEK_CODING_KEY"),
-        ("cc-fleet-health", "DEEPSEEK_CODING_KEY"),
-        ("cc-loop-1", "DEEPSEEK_CODING_KEY"),
-        ("cc-angullia", "DEEPSEEK_CODING_KEY"),
-        ("cc-coffeemedia", "DEEPSEEK_CODING_KEY"),
-        ("cc-finance", "DEEPSEEK_CODING_KEY"),
+        ("cc-bariq-1", "DEEPSEEK_KEY_BARIQ"),
+        ("cc-oeh-1", "DEEPSEEK_KEY_OEH"),
+        ("cc-ffsfulfilment-1", "DEEPSEEK_KEY_FFSFULFILMENT"),
+        ("cc-cosem-exams-1", "DEEPSEEK_KEY_COSEM"),
+        ("cc-cosem-platform-author", "DEEPSEEK_KEY_COSEM"),
+        ("cc-hc95-broker-1", "DEEPSEEK_KEY_HC95"),
+        ("cc-fleet-health", "DEEPSEEK_KEY_FLEET"),
+        ("cc-loop-1", "DEEPSEEK_KEY_LOOP"),
+        ("cc-angullia", "DEEPSEEK_KEY_ANGULLIA"),
+        ("cc-coffeemedia", "DEEPSEEK_KEY_COFFEEMEDIA"),
+        ("cc-finance", "DEEPSEEK_KEY_FINANCE"),
         ("cc-second-brain", "DEEPSEEK_KEY_SECOND"),
-        ("cc-shipforge", "DEEPSEEK_CODING_KEY"),
+        ("cc-shipforge", "DEEPSEEK_KEY_SHIPFORGE"),
+        # substrate is deliberately still on the shared key: its family slug
+        # collides with the shared key's own console name, so it is last and
+        # waits for the shared key to be renamed (bus #87201).
         ("cc-substrate", "DEEPSEEK_CODING_KEY"),
-        ("cc-wingmen-sites", "DEEPSEEK_CODING_KEY"),
-        ("cc-paperclip-spike", "DEEPSEEK_CODING_KEY"),
-        ("cc-scholar", "DEEPSEEK_CODING_KEY"),
-        ("cc-scholar-1", "DEEPSEEK_CODING_KEY"),
+        ("cc-wingmen-sites", "DEEPSEEK_KEY_WINGMEN"),
+        ("cc-paperclip-spike", "DEEPSEEK_KEY_PAPERCLIP"),
+        ("cc-scholar", "DEEPSEEK_KEY_SCHOLAR"),
+        ("cc-scholar-1", "DEEPSEEK_KEY_SCHOLAR"),
     ]:
         rc, stdout, stderr = _run(agent_id)
         assert rc == 0, (agent_id, stderr)
         assert stdout == expected, (agent_id, stdout)
 
 
-def test_compound_family_cosem_tdu_shares_the_cosem_key():
-    """cosem-tdu-coord's family is the COMPOUND 'cosem-tdu' (lane_token_resolver's
-    own _COMPOUND_FAMILIES), a DIFFERENT string from 'cosem' — but Musa's plan
-    is one shared key across the whole cosem family, so both map rows must
-    point at the SAME vault key name."""
+def test_compound_family_cosem_tdu_gets_its_own_key_not_the_cosem_one():
+    """cosem-tdu-coord's family is the COMPOUND 'cosem-tdu'
+    (lane_token_resolver's own _COMPOUND_FAMILIES), a DIFFERENT string from
+    'cosem'.
+
+    This test used to assert the OPPOSITE -- that both rows shared one key,
+    under an earlier "one key across the whole cosem family" plan. The
+    standing direction is now one console key per family slug, named exactly
+    the slug (orch-console bus #87091/#87165), and separate keys are what make
+    per-client spend attributable at all: under a shared key the export cannot
+    tell COSEM from COSEM-TDU, which is the entire point of the split.
+
+    What must NOT silently happen either way: the two rows resolving to the
+    same vault key name. If someone later decides they should share, this test
+    fails and forces that decision back through a human rather than decaying.
+    """
     rc1, out1, _ = _run("cc-cosem-tdu-coord")
     rc2, out2, _ = _run("cc-cosem-exams-1")
     assert rc1 == 0 and rc2 == 0
-    assert out1 == out2 == "DEEPSEEK_CODING_KEY"
+    assert out1 == "DEEPSEEK_KEY_COSEM_TDU", out1
+    assert out2 == "DEEPSEEK_KEY_COSEM", out2
+    assert out1 != out2
 
 
 def test_unmapped_family_fails_closed_nothing_on_stdout():
