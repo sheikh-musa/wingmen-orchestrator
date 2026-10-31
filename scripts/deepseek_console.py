@@ -30,9 +30,12 @@ reads. No credential ever touches this script, the vault, or any bus row.
 
 Hard constraints (console #82526, binding, enforced in code below, not just
 documented):
-  - NO top-up, NO settings changes, NO key deletion. This script's allowlist
-    of pages/actions is the enforcement: it simply has no code path to reach
-    those pages. Musa revokes/tops-up himself in the real console.
+  - NO top-up, NO key deletion, and NO setting changed other than the NAME of
+    the single key rename-key is pointed at (bus #87201: the shared key is
+    itself named `substrate`, which would collide with that family's key).
+    This script's allowlist of pages/actions is the enforcement: it simply has
+    no code path to reach those pages. Musa revokes/tops-up himself in the
+    real console.
   - A created key's VALUE is never printed, logged, or screenshotted. It is
     read from the page into a local Python variable and piped straight into
     vault.put() in the same process; the variable is not referenced again
@@ -53,10 +56,20 @@ vault-before-map is what keeps every crash point bootable. It never revokes
 the shared key; that is a separate step gated on orch-console's explicit go
 after every family is verified.
 
+rename-key (bus #87201/#87881) exists for ONE reason: the shared console key is
+itself named `substrate`, which collides with the family slug `substrate`. The
+export attributes spend by console key NAME, so splitting that family before
+renaming the shared key would silently merge the two. It edits exactly one
+field -- the name of one key named on the command line -- asserts the new name
+reads back and that no OTHER row name changed, and cannot reach top-up,
+billing, permission, or revocation controls. Console credentials are still
+never read: the session lives in the browser profile, not in this process.
+
 Usage:
     deepseek_console.py login --headed
     deepseek_console.py add-client <slug>
     deepseek_console.py split-key <slug> [--flip-only] [--dry-run]
+    deepseek_console.py rename-key <old-name> <new-name> --confirm <old-name> [--dry-run]
     deepseek_console.py list-clients
     deepseek_console.py usage-export [--since YYYY-MM-DD] [--out PATH]
 """
@@ -136,6 +149,36 @@ _SEL = {
             "div.ds-modal-content div[role='button']:has-text('Close')",
             "div.ds-modal-content div[role='button']:has-text('Got it')",
         ),
+        # --- rename-key (bus #87201/#87881), verified live 2026-11-01 ---
+        # Columns are asserted before anything is read, so a shape change
+        # fails closed instead of being read as "no keys" or, worse, as a
+        # different column silently standing in for Name.
+        "table_header": ("Name", "Tracking ID", "Key", "Created", "Last used"),
+        # The two row actions are icons in the LAST cell with identical class
+        # lists and no per-action attribute -- they are told apart ONLY by the
+        # tooltip that appears on hover ("Edit API key" / "Revoke API key").
+        # Never by position: the wrong slot is the destructive one.
+        "row_buttons": "div.ds-button",
+        "tooltip_candidates": ("div.ds-tooltip", "div[role='tooltip']", ".ds-tooltip__content"),
+        "row_actions_cell": 5,
+        "edit_action_label": "edit api key",
+        # The dialog TITLE is matched by the same node the create flow already
+        # waits on (`dialog_title` above), plus an expected text. Selector and
+        # text are kept in separate places on purpose: an earlier revision put
+        # the text where the selector belonged, matched nothing, and reported
+        # "the dialog did not open" while the dialog was open the whole time.
+        "edit_dialog_title_text": "Edit API key",
+        # The edit dialog has exactly ONE input, prefilled with the current
+        # name. Scoped to the modal so it can never match the CREATE dialog's
+        # same-placeholder input on a page that somehow shows both.
+        "edit_name_input": (
+            "div.ds-modal-content input.ds-input__input[placeholder='Name of the API key']"
+        ),
+        "edit_save": (
+            "div.ds-modal-content__footer "
+            "div[role='button'].ds-button--primary:not(.ds-button--disabled)"
+        ),
+        "edit_cancel": "div.ds-modal-content__footer div[role='button']:has-text('Cancel')",
     },
     "usage_page": {
         "url": f"{_CONSOLE_URL}/usage",
@@ -640,6 +683,305 @@ def cmd_split_key(args) -> int:
     return 0
 
 
+# ── rename-key (bus #87201 / orch-console #87881) ─────────────────────────
+#
+# The shared console key is itself named `substrate`, which is also a family
+# slug. Usage-export attributes spend by console key NAME, so creating the
+# substrate family key before renaming the shared one would either be refused
+# or silently merge two very different spend buckets. This action renames
+# exactly ONE key, and only its name.
+#
+# Everything here is deliberately narrow: the name must be provided twice
+# (positional + --confirm), the dialog's prefilled value must equal the old
+# name before anything is typed, and afterwards the full name list is read
+# back and compared to what a single-row rename would produce. A change to any
+# OTHER row aborts, which is what makes "touch no other field" checkable
+# instead of merely intended.
+
+_RENAME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _validate_rename(old: str, new: str) -> None:
+    """Pure input validation. Raises ValueError with something the operator
+    can act on -- never a browser round-trip for a typo."""
+    for value, flag in ((old, "old-name"), (new, "new-name")):
+        if not value:
+            raise ValueError(f"{flag} is empty")
+        if not _RENAME_NAME_RE.match(value):
+            raise ValueError(
+                f"{flag} {value!r} is not a plain key name "
+                "(letters, digits, dot, underscore, hyphen; max 64; must not "
+                "start with punctuation)"
+            )
+    if old == new:
+        raise ValueError("old-name and new-name are identical -- nothing to rename")
+
+
+def _verify_rename(names_before, names_after, old: str, new: str) -> None:
+    """Pure post-condition check on two readings of the key list.
+
+    Deliberately expressible as a comparison of name lists rather than as
+    "the dialog said OK": the dialog closing is not evidence that the table
+    changed, and only the table is what usage-export reads.
+    """
+    if old not in names_before:
+        raise LayoutMismatch(
+            f"no key named {old!r} in the console before renaming "
+            f"(found {len(names_before)} key(s)). If a previous run already "
+            "renamed it, re-read the table rather than re-running this."
+        )
+    if names_before.count(old) > 1:
+        raise LayoutMismatch(
+            f"{names_before.count(old)} keys are named {old!r} -- refusing to "
+            "guess which one to rename"
+        )
+    if new in names_before:
+        raise LayoutMismatch(
+            f"a key named {new!r} ALREADY EXISTS. Renaming onto an existing "
+            "name is exactly the collision this action exists to avoid; "
+            "nothing was changed."
+        )
+    if new not in names_after:
+        raise LayoutMismatch(
+            f"after saving, no key is named {new!r} -- the rename did not take"
+        )
+    if old in names_after:
+        raise LayoutMismatch(
+            f"after saving, a key is STILL named {old!r} -- either the save "
+            "did not apply or the table was read before it refreshed"
+        )
+    expected = sorted(new if n == old else n for n in names_before)
+    if sorted(names_after) != expected:
+        gained = sorted(set(names_after) - set(expected))
+        lost = sorted(set(expected) - set(names_after))
+        raise LayoutMismatch(
+            "the rename changed more than the one key it was pointed at "
+            f"(unexpected after: {gained or 'none'}; missing after: {lost or 'none'})"
+        )
+
+
+def _read_key_table(page) -> list:
+    """Every key NAME in /api_keys, once the table has STOPPED growing.
+
+    Two separate rendering races were observed live on 2026-11-01, both found
+    by running this against the console rather than by reasoning about it:
+
+      1. the <table> element renders before its rows do, so waiting for
+         'table' returns an empty shell;
+      2. it then fills PROGRESSIVELY -- the first run of rename-key read 3
+         keys off a 18-key account and refused to find its target. A
+         non-empty read is therefore not a complete read.
+
+    So the table is considered ready only when two consecutive samples agree.
+    The column header is asserted on every sample, so a reordered or renamed
+    column fails closed instead of having some other column read as the name.
+    """
+    sel = _SEL["api_keys_page"]
+    wanted = tuple(sel["table_header"])
+    previous = None
+    for _ in range(60):  # ~36s at 600ms; well inside the 60s pytest timeout
+        header = tuple(t.strip() for t in page.locator("table th").all_inner_texts()[: len(wanted)])
+        names = []
+        if header == wanted:
+            rows = page.locator("table tr")
+            for i in range(rows.count()):
+                cells = rows.nth(i).locator("td")
+                if cells.count() == 0:  # the <th> header row
+                    continue
+                names.append((cells.nth(0).inner_text() or "").strip())
+        if names and names == previous:
+            return names
+        previous = names or None
+        page.wait_for_timeout(600)
+    raise LayoutMismatch(
+        "the API-keys table never settled (empty, still growing, or its header "
+        f"is not {list(wanted)}) within 36s -- refusing to read it. Nothing changed."
+    )
+
+
+def _find_row_action(page, row, label: str):
+    """The row's action button whose hover tooltip is `label`.
+
+    The buttons share one class list and carry no per-action attribute, so
+    position is the only alternative -- and the other slot is Revoke. An
+    unresolved label aborts instead of falling back to a guess."""
+    sel = _SEL["api_keys_page"]
+    buttons = row.locator("td").nth(sel["row_actions_cell"]).locator(sel["row_buttons"])
+    if buttons.count() == 0:
+        raise LayoutMismatch("the key row shows no action buttons at all -- layout changed")
+    for i in range(buttons.count()):
+        button = buttons.nth(i)
+        try:
+            button.hover(timeout=4000)
+            page.wait_for_timeout(600)
+        except Exception:
+            continue
+        for tip in sel["tooltip_candidates"]:
+            loc = page.locator(tip)
+            if loc.count() > 0:
+                text = (loc.first.inner_text() or "").strip().lower()
+                if label in text:
+                    return button
+    raise LayoutMismatch(
+        f"no row action whose tooltip reads {label!r} was found -- refusing to "
+        "pick a button by position, because the other one revokes the key"
+    )
+
+
+def _assert_edit_dialog(page, sel) -> None:
+    """Fail closed unless exactly one dialog is open AND it is the edit dialog.
+
+    Split out of `_rename_console_key` because this is where the only live
+    failure so far happened: the title TEXT had been put where the title
+    SELECTOR belonged, so the locator matched nothing and the report said
+    "no dialog" while the dialog was open. Keeping the check small means it
+    can be pinned by a test that would have caught that.
+    """
+    try:
+        page.wait_for_selector(sel["dialog_title"], timeout=8000)
+        titles = page.locator(sel["dialog_title"])
+        if titles.count() != 1:
+            raise LayoutMismatch(
+                f"the page shows {titles.count()} dialog titles, expected exactly 1"
+            )
+        title = (titles.first.inner_text() or "").strip()
+    except LayoutMismatch:
+        raise
+    except Exception as exc:
+        raise LayoutMismatch(
+            "the Edit action did not open a dialog in the expected shape"
+        ) from exc
+    if title != sel["edit_dialog_title_text"]:
+        raise LayoutMismatch(
+            f"the dialog that opened is titled {title!r}, not "
+            f"{sel['edit_dialog_title_text']!r} -- wrong dialog, nothing typed"
+        )
+
+
+def _rename_console_key(old: str, new: str, headed: bool) -> list:
+    """Drive the edit dialog for exactly one key; returns (names_before, names_after)."""
+    from playwright.sync_api import sync_playwright
+
+    sel = _SEL["api_keys_page"]
+    with sync_playwright() as p:
+        ctx = _context(p, headed=headed)
+        try:
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            page.goto(sel["url"])
+            _require_logged_in(page, sel)
+
+            names_before = _read_key_table(page)
+            # Pre-conditions are checked BEFORE the dialog opens, so a
+            # collision or a missing target costs nothing.
+            if old not in names_before:
+                raise LayoutMismatch(
+                    f"no key named {old!r} in the console (found {len(names_before)} key(s))"
+                )
+            if new in names_before:
+                raise LayoutMismatch(
+                    f"a key named {new!r} ALREADY EXISTS -- nothing was changed"
+                )
+
+            # Located by NAME among the body rows, not by names_before's index
+            # +1 -- that would bake in "the first <tr> is the header".
+            row = None
+            rows = page.locator("table tr")
+            for i in range(rows.count()):
+                cells = rows.nth(i).locator("td")
+                if cells.count() == 0:
+                    continue
+                if (cells.nth(0).inner_text() or "").strip() == old:
+                    row = rows.nth(i)
+                    break
+            if row is None:
+                raise LayoutMismatch(
+                    f"row named {old!r} vanished between reading the table and "
+                    "acting on it -- nothing was changed"
+                )
+            _find_row_action(page, row, sel["edit_action_label"]).click()
+
+            _assert_edit_dialog(page, sel)
+
+            field = page.locator(sel["edit_name_input"])
+            if field.count() != 1:
+                raise LayoutMismatch(
+                    f"the edit dialog has {field.count()} name inputs, expected exactly 1"
+                )
+            current = (field.input_value() or "").strip()
+            if current != old:
+                raise LayoutMismatch(
+                    f"the dialog's name field reads {current!r}, not {old!r} -- this "
+                    "is not the row we meant to rename; nothing typed"
+                )
+
+            try:
+                field.fill(new)
+                page.click(sel["edit_save"])
+            except Exception as exc:
+                # The save button is only targeted when it is NOT disabled, so
+                # a miss here means it was disabled (name unchanged) or the
+                # dialog changed shape. Either way the operator must re-read
+                # the table rather than re-run blind.
+                raise LayoutMismatch(
+                    "could not fill the name field and press Save -- no save was "
+                    "confirmed; re-read the key table before retrying"
+                ) from exc
+            try:
+                page.wait_for_selector("div.ds-modal-content", state="detached", timeout=15000)
+            except Exception as exc:
+                raise LayoutMismatch(
+                    "the edit dialog did not close after Save -- the rename may "
+                    "not have applied; re-read the table before retrying"
+                ) from exc
+
+            page.goto(sel["url"])
+            _require_logged_in(page, sel)
+            names_after = _read_key_table(page)
+        finally:
+            ctx.close()
+
+    _verify_rename(names_before, names_after, old, new)
+    return names_before, names_after
+
+
+def cmd_rename_key(args) -> int:
+    old = (args.old_name or "").strip()
+    new = (args.new_name or "").strip()
+    try:
+        _validate_rename(old, new)
+    except ValueError as exc:
+        print(f"rename-key: {exc}", file=sys.stderr)
+        return 1
+
+    if args.confirm != args.old_name:
+        print(
+            "rename-key: --confirm must repeat the current name exactly "
+            f"({args.old_name!r}); got {args.confirm!r}. Nothing changed.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.dry_run:
+        print(f"would rename console key {old!r} -> {new!r}")
+        print("nothing else is touched: no other key, no permission, no top-up, no revoke")
+        return 0
+
+    try:
+        names_before, names_after = _rename_console_key(old, new, headed=args.headed)
+    except (LayoutMismatch, LoggedOut) as exc:
+        print(f"rename-key FAILED: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"renamed console key {old!r} -> {new!r}")
+    print(f"keys before: {len(names_before)}; after: {len(names_after)} (unchanged count)")
+    print(
+        "spend from now on is attributed to the new name; rows already written "
+        "under the old name keep it, so the two are a rename boundary and not "
+        "a correction of history."
+    )
+    return 0
+
+
 def cmd_list_clients(args) -> int:
     import psycopg
 
@@ -1070,6 +1412,23 @@ def main(argv) -> int:
              "(default: restore it, so the family keeps booting)",
     )
     p_split.set_defaults(func=cmd_split_key, rollback_on_failure=True)
+
+    p_rename = sub.add_parser(
+        "rename-key",
+        help="rename ONE console API key (its name field only), with a "
+             "collision check, a read-back assertion, and no other control touched",
+    )
+    p_rename.add_argument("old_name")
+    p_rename.add_argument("new_name")
+    p_rename.add_argument(
+        "--confirm",
+        required=True,
+        help="repeat old_name exactly; a second, deliberate gate so a mistyped "
+             "target cannot be renamed by accident",
+    )
+    p_rename.add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
+    p_rename.add_argument("--headed", action="store_true", help="show the browser (debugging only)")
+    p_rename.set_defaults(func=cmd_rename_key)
 
     p_list = sub.add_parser("list-clients", help="list mapped clients: slug, vault key NAME, created_at (no values)")
     p_list.set_defaults(func=cmd_list_clients)
