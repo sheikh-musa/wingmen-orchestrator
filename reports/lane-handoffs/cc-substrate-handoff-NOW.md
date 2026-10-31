@@ -89,6 +89,15 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**22:36Z — PR 785 opened (`cc-substrate/executor-preflight`, head `f25b109`), docs-only (file list
+CHECKED: one file).** Runbook §1 now opens with *step zero*: `git merge-base --is-ancestor
+<774-merge-sha> HEAD` + `grep -q "def _scrub" scripts/substrate_rotation_executor.py`, both mandatory,
+abort on either failure; plan step moved from wt-exec to the live checkout so the checked tree IS the
+executed tree. **`<774-merge-sha>` is a deliberate placeholder** — fill it in once the console's
+waiter merges 774 (follow-up commit on 785 if open, else its own tiny PR). Console asked for the rule
+(88406). **Sweep fixture deferred to post-window** per the console; it still lives at
+`/tmp/sweep_scrub.py` and must become a test in the repo afterwards.
+
 **22:40Z — 774 was CONFLICTING, and the cause is the biggest thing found tonight.**
 **PR 776 was NOT docs-only.** API file list: runbook +470, boot_cai +12/-3, boot_fleet_health +12/-3,
 boot_nazim +49/-3, lib/dsn_at_use +68, rotate_substrate_dsn +726, **substrate_rotation_executor +440**,
