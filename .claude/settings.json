@@ -53,6 +53,16 @@
         ]
       },
       {
+        "matcher": "Bash|Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.venv/bin/python3 \"$CLAUDE_PROJECT_DIR\"/scripts/hooks/credential_store_guard.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "Bash|Read",
         "hooks": [
           {
