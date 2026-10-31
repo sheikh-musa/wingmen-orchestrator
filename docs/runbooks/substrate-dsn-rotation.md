@@ -185,6 +185,31 @@ design is now three parts and contains **no new lifeline code**:
    fleet-status pens (87991). That is the dead-man's switch working as designed on a body
    that cannot prove it is alive — not the SRE dying.
 
+**The staged relaunch procedure (SRE, bus 88003 — run it, do not improvise it at 04:00Z).**
+
+- **a. Precondition.** The new value is applied and `verify` has shown the old one refused.
+  Nothing below starts before that.
+- **b. Clean exit of the launcher.** The boot script's EXIT trap kills the heartbeat
+  subshell first and then marks the row offline, and that order is deliberate. So kill the
+  **launcher shell**, never the CC process directly, and never `SIGKILL` — a hard kill skips
+  the trap and leaves the row claiming the body is still there. If the row does not go
+  `offline`, **stop**: the trap did not run, and booting over it is how two bodies end up on
+  one directory.
+- **c. Confirm the body is gone** before re-running anything, with both checks: no claude
+  process whose cwd is that directory, and the tmux session no longer listed. If either
+  check can only say *unknown*, **do not boot** — treating unknown as absent is the one
+  failure here that loses work.
+- **d. One run** of the canonical boot script from outside, with the new env in place. One.
+  The lease take is CAS so a racing second copy would lose, but that is a backstop, not a
+  licence to double-start.
+- **e. Verify, do not trust the launch.** Watch `last_heartbeat` advance within one beat
+  interval in `agent_status` **and** confirm `fleet_health_lease` names the body as holder
+  again. A launched pane is not proof; a moving heartbeat and a re-taken lease are. Report
+  the actual heartbeat timestamp, not "it is up".
+
+The SRE confirms from their own side and says so on the bus, so the declaration closes on
+evidence rather than on a launch message.
+
 `cai` is out of scope: it has no session on this host and has read `offline` since
 13 October (bus 87965/87978). Its absence is an ownership question for another body, not
 a rotation problem.
