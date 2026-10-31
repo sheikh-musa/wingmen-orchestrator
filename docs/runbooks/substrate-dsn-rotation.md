@@ -23,6 +23,14 @@ anyone who reads it.
 | The Management API PAT is in the environment | preflight, step 1 below |
 | The old credential still connects | preflight, step 1 below |
 
+**Checked ahead of the window, and it expires (2026-10-31 20:44Z):** the PAT in the live
+env file reads the project — `GET /v1/projects/<ref>` returned **HTTP 200**,
+`status=ACTIVE_HEALTHY`, region `ap-southeast-2`. That proves the token is valid and can
+see the project, which is the failure mode a 401/403 at patch time would otherwise hide
+until step 3. It does **not** prove the token carries the write scope the PATCH needs, and
+it is a verification with an expiry: re-run the same GET before the window rather than
+trusting this line.
+
 If any of those is false, preflight refuses and nothing is written. That refusal is the
 correct outcome, not an obstacle: a rotation against a state you cannot describe is how
 you lose a database.
