@@ -126,6 +126,14 @@ which costs the console its live session and is therefore the console's decision
 operator of this tool. Do not start a detached replacement loop to dodge it — that is
 `nohup`-shaped and forbidden.
 
+That leaves exactly two outcomes, and the console picks one (bus 87921 asked for the
+premise check, 87929 answers it): **restart** console, cai and fleet-health inside the
+window, paying with the live console session and losing nothing else; or **do not
+restart**, and their `last_heartbeat` rows freeze from the patch until each body is
+recycled, so a watchdog will read three live bodies as dead. The second is defensible
+only if it is written down first — a frozen row read as an outage later is how a
+scheduled decision turns into a night of false alarms.
+
 **The Supavisor cache.** The pooler keeps a credential cache that can hold the old value
 for roughly 15 seconds while connections are active. An idle pool may refresh only on a
 real reconnect. The verify step retries for this reason. Do not "fix" a failing verify
@@ -225,3 +233,39 @@ Anything less is "in progress", and the console should hear that word rather tha
   pulls. It re-runs `fetch-secrets` in the same window and restarts its groups — the
   auto-respawning ones and the manual ones, per the hub's own list (bus 87827). Until it
   does, the hub holds a dead value, which is why it must act in the same window.
+
+---
+
+## 7. The hub host half (settled 2026-10-31, bus 87827/87834)
+
+The hub did a live `/proc` scan (hash only) rather than reasoning from a list, and it
+corrected the plan in four ways. All four are accepted; three of them mean **less** work,
+not more, which is why they are recorded rather than absorbed silently.
+
+- **Skip the tmux global on the hub host.** Its tmux session-environment table and the
+  server's inherited env are already stale orphans from an earlier secrets split, and no
+  live process reads `DATABASE_URL` by inheriting it — they source the tmpfs file
+  themselves. The executor's propagate step records this as a TODO for the hub, so the
+  value being set on the Mini's tmux server does not imply the hub is done.
+- **Timer-fired oneshots self-heal.** `wingmen-orch-lease-renew`,
+  `wingmen-hub-self-recovery` and `wingmen-media-reaper` re-source the env on every tick
+  (4, 2 and 10 minutes), and `coordinator-pane-publisher` / `hub-ctx-publish` never
+  inherit the DSN at all. No restart needed for any of them.
+- **The paperclip canary serve process holds the credential** and was not on the original
+  list. It is now.
+- **Restart groups differ by how each process comes back.** Signal-safe ones (systemd
+  restarts and relaunches them): `wingmen-ingest`, `wingmen-tg-out`,
+  `wingmen-agent-wake-subscriber`, `wingmen-irsyad-coord`,
+  `wingmen-irsyad-tabung-jumaat`, `wingmen-body-activity-oracle-vps`,
+  `wingmen-wake-backstop-sweep`, paperclip canary, and the hub itself last. No
+  auto-respawn (killing the tmux session is not enough; the original boot command must be
+  re-issued immediately): bayanqa, encoder, scholar's lane, the three irsyad pool workers,
+  and cosem-convergence. The hub has the exact relaunch command staged for each.
+
+**The sudo gap is a gate, not a footnote.** The hub has passwordless sudo for every unit
+on that list except `wingmen-body-activity-oracle-vps` and
+`wingmen-wake-backstop-sweep`. Both held the current password at scan time and both need
+a password the hub does not have. Until that is closed — by adding the two labels to the
+hub's NOPASSWD line, or by restarting those two from another account — the hub cannot
+complete its half, and a rotation that leaves a live holder on the dead value is worse
+than a rotation deferred by a day. The console owns closing it (bus 87834).
