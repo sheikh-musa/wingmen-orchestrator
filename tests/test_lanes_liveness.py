@@ -78,5 +78,72 @@ def test_nested_worktree_cwd_counts_as_up(tmp_path):
     assert _dir_has_claude(tmp_path, "/tmp/wingmen-test") == 0
 
 
+# --- fail-CLOSED when lsof cannot be found -------------------------------------
+#
+# `lsof` lives at /usr/sbin/lsof and /usr/sbin is absent from the PATH a launchd job, a
+# cron entry, or a reduced tool shell hands down. The old code shelled out to bare `lsof`,
+# got "command not found" on stderr, captured an EMPTY stdout, and returned "no claude
+# running" for EVERY lane — so `boot_one`'s guard passed and a SECOND dangerous-CC could be
+# launched onto a live worktree. An unanswerable probe must say UNKNOWN, never "free".
+
+_NO_LSOF_PATH = "/nonexistent-bin:/usr/bin:/bin"
+
+
+def _probe_without_lsof(target: str) -> subprocess.CompletedProcess:
+    """Run dir_has_claude under a PATH with no lsof AND no system fallback... which cannot
+    be done where /usr/sbin/lsof exists, so resolve_lsof is stubbed out instead: the probe
+    is forced to fail exactly as a missing binary would."""
+    script = (
+        f'source "{_LANES_SH}"\n'
+        "resolve_lsof() { return 1; }\n"        # simulate: no lsof anywhere
+        f'if dir_has_claude "{target}"; then echo YES; else echo "rc=$?"; fi\n'
+    )
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+
+def test_unresolvable_lsof_is_unknown_not_down():
+    r = _probe_without_lsof("/tmp/wingmen-test/cosem-port-lane")
+    # dir_has_claude's own rc must be 2 (UNKNOWN) — not 1 (free to boot).
+    assert r.stdout.strip() == "rc=2", f"expected UNKNOWN (2), got {r.stdout!r} / {r.stderr!r}"
+    assert "UNKNOWN" in r.stderr  # and it must say so out loud
+
+
+def test_boot_one_refuses_when_probe_fails(tmp_path):
+    # The guard that actually matters: a lane dir that EXISTS, an unanswerable liveness
+    # probe → boot_one must REFUSE, not fall through to `tmux new-session`.
+    lane = tmp_path / "lane"
+    lane.mkdir()
+    script = (
+        f'source "{_LANES_SH}"\n'
+        "resolve_lsof() { return 1; }\n"
+        'tmux() { echo "TMUX-CALLED $*"; return 0; }\n'   # any boot attempt calls this
+        f'boot_one "test-lane" "{lane}" ""; echo "rc=$?"\n'
+    )
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert "TMUX-CALLED" not in r.stdout, f"boot_one BOOTED despite an unknown probe: {r.stdout}"
+    assert "REFUSE" in r.stdout + r.stderr
+    # Under the script's own `set -e`, boot_one's non-zero return aborts the caller, so the
+    # shell exits 4 before the `echo` — the loud non-zero exit IS the assertion.
+    assert r.returncode == 4, f"expected the run to abort with 4, got {r.returncode}"
+
+
+def test_resolve_lsof_prefers_path_then_falls_back_to_system(tmp_path):
+    # PATH first, so a stubbed bin dir still wins (the tests above depend on it)...
+    bindir = _make_stubs(tmp_path, _MATCH_DIR)
+    script = f'export PATH="{bindir}:$PATH"\nsource "{_LANES_SH}"\nresolve_lsof\n'
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert r.stdout.strip() == str(bindir / "lsof")
+    # ...and with no lsof on PATH it still finds a system one where one exists.
+    script = (
+        f'export PATH="{_NO_LSOF_PATH}"\nsource "{_LANES_SH}"\n'
+        'if out="$(resolve_lsof)"; then echo "FOUND $out"; else echo NONE; fi\n'
+    )
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    if os.path.exists("/usr/sbin/lsof") or os.path.exists("/usr/bin/lsof"):
+        assert r.stdout.startswith("FOUND /"), r.stdout
+    else:
+        assert r.stdout.strip() == "NONE"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
