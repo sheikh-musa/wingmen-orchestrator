@@ -393,6 +393,43 @@ def test_strip_helper_drops_the_flag_and_its_session_id(tmp_path):
     assert r.stdout.strip() == "--a --b --model glm-5.3"
 
 
+def test_strip_helper_does_not_eat_the_next_flag_of_a_bare_resume():
+    """`--resume --model x` (picker mode) must lose only --resume."""
+    script = (
+        'source "$1" || exit 9; '
+        'CLAUDE_PASSTHROUGH=(--resume --model glm-5.3); '
+        'spg_strip_resume_flags CLAUDE_PASSTHROUGH; '
+        'printf "%s " "${CLAUDE_PASSTHROUGH[@]}"'
+    )
+    r = subprocess.run(["bash", "-c", script, "_", str(SHIM)], text=True,
+                       capture_output=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "--model glm-5.3"
+
+
+def test_a_bare_resume_is_judged_like_continue(tmp_path):
+    """A bare --resume opens the picker on the newest conversation in the dir —
+    the same transcript --continue would take — so it must not skip the guard."""
+    block = _guard_block()
+    script = ("TEAL=\"\"; RED=\"\"; YELLOW=\"\"; BOLD=\"\"; RESET=\"\"\n"
+              "CLAUDE_PASSTHROUGH=(--resume --model glm-5.3)\n" + block +
+              "\nprintf 'RESULT:%s\\n' \"${CLAUDE_PASSTHROUGH[*]}\"\n")
+    home = tmp_path / "home"
+    root = home / ".claude" / "projects"
+    cwd = "/srv/lane"
+    (root / spg._project_slug(cwd)).mkdir(parents=True, exist_ok=True)
+    (root / spg._project_slug(cwd) / "newest.jsonl").write_text(
+        "\n".join(json.dumps(x) for x in UNCLEAN) + "\n")
+    r = subprocess.run(["bash", "-c", script], text=True, capture_output=True,
+                       env={**os.environ, "HOME": str(home), "ORCH_DIR": str(REPO),
+                            "SPG_LOG_DIR": str(tmp_path / "h"),
+                            "RESOLVED_MODEL": "claude-opus-4-8",
+                            "CALLER_DIR": cwd})
+    assert r.returncode == 0, r.stderr
+    line = [ln for ln in r.stdout.splitlines() if ln.startswith("RESULT:")][0]
+    assert line.strip() == "RESULT:--model glm-5.3", line
+
+
 def test_shim_end_to_end(tmp_path):
     root = tmp_path / "projects"
     write_session(root, "/srv/lane", "sess-shim", "deepseek-v4-pro",
