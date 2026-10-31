@@ -89,6 +89,20 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**22:50Z — 785 head `56208a5`; cc-quality's PASS (88433) names a STALE head `f25b109` — do not merge on it.**
+Their verdict also checked **origin/main** (9dc89b7, lags by design) instead of this PR's base
+`fable/substrate-safe-fixes`, so it reported the base executor as unhardened and "no 774 merge" —
+both false since 22:43Z. Told them directly (88435) and warned the console not to merge on it (88436).
+
+**Adopted their good catch:** `def _scrub` tests DEFINITION, but the leak was a missing CALL — `e02a0e2c`
+has def=1/comment=0 and still leaked. Gate now greps the hardening comment
+("Scrub EVERY string that leaves this process"). **Verified counts myself:** e02a0e2c 1/0, 55473ba 0/0,
+d7f0f13 1/1. Doc carries the table so it isn't "simplified" back.
+
+**zsh trap worth keeping:** `git rev-parse "$c:$path"` in a zsh for-loop silently mangles via the `:s`
+history modifier — `$c` must be braced as `${c}`. It made three blob checks return the commit sha and
+report def=0 for a file that has def=1.
+
 **22:43Z — 774 MERGED at `d7f0f13b87e3ec8010cfb528b3120f52bacd5ced`** (console's waiter, CI success).
 **Verified in trunk:** `origin/fable/substrate-safe-fixes:scripts/substrate_rotation_executor.py` =
 blob `a7bf4c01…` (exactly the blob cc-quality passed) and defines `_scrub`. **The measured leak is
