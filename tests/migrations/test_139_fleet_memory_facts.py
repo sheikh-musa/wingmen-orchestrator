@@ -286,6 +286,32 @@ def test_assert_not_pending_allows_unrelated_ask(schema):
         "Musa to approve the Stripe keys", dsn=schema) is None
 
 
+def test_assert_not_pending_ignores_generic_domain_overlap(schema):
+    """cc-quality F1 on PR#743: two shared GENERIC fleet nouns are not a match.
+
+    'console' and 'deploy' recur in every lane's prose; a two-token fact made
+    only of them must not halt an unrelated ask about a different subject.
+    A spurious refusal is the expensive error here -- it blocks a genuinely
+    pending ask -- so the tripwire stays quiet unless the overlap is
+    substantive relative to the ask, not just a raw count of 2.
+    """
+    _insert(schema, "fleet", "console deploy done", "op#36768")
+    assert fleet_memory.assert_not_pending(
+        "console deploy blocked on vault key", dsn=schema) is None
+
+
+def test_assert_not_pending_catches_long_phrased_real_match(schema):
+    """The F1 fix must not cost recall: the same fact still trips on a
+    differently-worded ask that really is about it."""
+    _insert(schema, "fleet",
+            "DeepSeek console login done 30 Oct, profile ~/.wingmen/deepseek_browser",
+            "op#36768")
+    with pytest.raises(fleet_memory.FactConflict):
+        fleet_memory.assert_not_pending(
+            "Musa has not yet completed the DeepSeek login still pending",
+            dsn=schema)
+
+
 def test_assert_not_pending_ignores_expired_fact(schema):
     _insert(schema, "fleet", "DeepSeek console login done", "op#36768",
             expires_at=datetime.now(timezone.utc) - timedelta(days=1))

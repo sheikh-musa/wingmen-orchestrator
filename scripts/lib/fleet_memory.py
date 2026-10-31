@@ -35,10 +35,29 @@ _SELECT = (
 # fleet already recorded, not a semantic matcher. Two shared distinctive
 # tokens is enough to catch "DeepSeek console login ... pending" against
 # "DeepSeek console login done", while an unrelated ask shares none.
+#
+# Fleet-domain nouns are excluded on purpose (cc-quality F1 on PR#743).
+# "console deploy done" and "console deploy blocked on vault key" share two
+# tokens and nothing else -- two generic words that appear in every lane's
+# prose. Counting them produced a spurious refusal, and a spurious refusal
+# is the expensive error here: it halts a genuinely pending ask. An
+# overlap-coefficient floor was rejected as the fix because realistic asks
+# ("Musa has not yet completed the DeepSeek login still pending") score ~2/6
+# against their own fact and would stop matching -- trading a false positive
+# for a false negative on the case this check exists for. Dropping the
+# generic nouns fixes the collision without costing that recall.
+#
+# This remains a TRIPWIRE, not a judgement: a refusal names the exact facts
+# it matched, and the caller is expected to read them before trusting it.
 _STOPWORDS = frozenset({
     "the", "and", "for", "with", "that", "this", "from", "into", "still",
     "was", "were", "has", "have", "had", "are", "his", "her", "its", "our",
     "you", "your", "not", "but", "any", "all", "can", "now", "done",
+}) | frozenset({
+    # recurring fleet-domain nouns -- present in almost every fact and ask,
+    # so they carry no distinguishing signal
+    "console", "deploy", "deployment", "gate", "review", "migration",
+    "fleet", "bus", "lane", "agent", "phase", "ticket", "task",
 })
 
 
@@ -139,7 +158,14 @@ def facts_matching(
     min_shared: int = 2,
     dsn: str | None = None,
 ) -> list[Fact]:
-    """Facts sharing at least `min_shared` distinctive tokens with `query`."""
+    """Facts sharing at least `min_shared` distinctive tokens with `query`.
+
+    Advisory, not authoritative: this is a lexical tripwire. It catches the
+    fact being phrased differently from the ask ("login done" vs "login
+    pending") and deliberately misses paraphrases that share no wording.
+    Every caller must read the facts it names before treating a match as
+    truth -- callers pass `min_shared` up when they want a louder tripwire.
+    """
     wanted = _tokens(query)
     if not wanted:
         return []
