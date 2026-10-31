@@ -257,6 +257,14 @@ def test_render_migration_invite_hash_never_plaintext():
     assert "ENABLE ROW LEVEL SECURITY" in sql_text
     assert "REVOKE ALL ON public.bot_channel_invites FROM PUBLIC, anon, authenticated" in sql_text
     assert "-- assert: no_table_privilege anon public.bot_channel_invites SELECT" in sql_text
+    # cc-quality LOW on PR#758 (bus #87650): the identity SEQUENCE keeps the
+    # default-ACL grants the table REVOKE does not cover -- revoke it too and
+    # assert the nextval() gate (USAGE) is closed for both hosted roles.
+    assert ("REVOKE ALL ON SEQUENCE public.bot_channel_invites_id_seq"
+            " FROM PUBLIC, anon, authenticated") in sql_text.replace("\n  ", " ")
+    assert "-- assert: no_sequence_privilege anon public.bot_channel_invites_id_seq USAGE" in sql_text
+    assert ("-- assert: no_sequence_privilege authenticated "
+            "public.bot_channel_invites_id_seq USAGE") in sql_text
 
 
 def test_render_migration_without_invite_has_no_invite_block():
@@ -315,7 +323,7 @@ def test_render_migration_invite_block_applies_cleanly_for_a_second_channel(pg_d
             )
             """
         )
-        for key, token in (("bariq", "bariq-secret"), ("faizul", "faizul-secret")):
+        for idx, (key, token) in enumerate((("bariq", "bariq-secret"), ("faizul", "faizul-secret"))):
             args = make_args(
                 channel_key=key, audience="client", token_env_key="WINGMENDEVBOT_TOKEN",
                 invite=True, invite_token=token, chat_ids=[], owner_lane="coffeemedia",
@@ -323,6 +331,21 @@ def test_render_migration_invite_block_applies_cleanly_for_a_second_channel(pg_d
             )
             _, sql_text = tool.render_migration(args, 200, "supervised")
             cur.execute(sql_text)  # the SECOND channel's apply must not raise
+            if idx == 0:
+                # Replicate the bariq-era live baseline cc-quality flagged on
+                # PR#758 (#87650): the identity sequence's default-ACL grants
+                # survive because the table REVOKE never covered the sequence.
+                # The second render's sequence REVOKE must defeat them.
+                cur.execute("GRANT ALL ON SEQUENCE public.bot_channel_invites_id_seq "
+                            "TO anon, authenticated")
+                cur.execute("SELECT has_sequence_privilege('anon', "
+                            "'public.bot_channel_invites_id_seq', 'USAGE')")
+                assert cur.fetchone()[0] is True
+
+        for role in ("anon", "authenticated"):
+            cur.execute("SELECT has_sequence_privilege(%s, "
+                        "'public.bot_channel_invites_id_seq', 'USAGE')", (role,))
+            assert cur.fetchone()[0] is False, f"{role} can still use the invite sequence"
 
         cur.execute(
             "SELECT count(*) FROM pg_policies WHERE schemaname='public' "
