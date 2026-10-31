@@ -75,6 +75,15 @@ PY="$ORCH_DIR/.venv/bin/python3"; [ -x "$PY" ] || PY="$HOME/wingmen/orchestrator
 # shellcheck source=lib/composer_capture.sh
 . "$_LIB/composer_capture.sh" || { echo "ERROR: composer_capture.sh missing" >&2; exit 9; }
 
+# SETTLE WAITS ARE INJECTABLE (CI cost, orch-console #88092). Each `settle N` below
+# pauses so the LIVE tmux TUI can repaint after a keystroke before the next one or
+# before the capture that verifies it; the test STUB returns a fixture instantly, so
+# under test those pauses are pure dead wall-clock (~10s per happy-path run, and this
+# file's happy path runs 10x in CI). RESET_AUDITOR_SETTLE_S overrides ALL of them at
+# once with one value; when it is unset every site keeps its historical N, so live
+# timing is unchanged. Tests set 0 — the keystroke sequence they assert is identical.
+settle() { sleep "${RESET_AUDITOR_SETTLE_S:-$1}"; }
+
 ARMED_DEFAULT=1   # STANDING ARMED since cai's arm-sign (bus #49648, 2026-10-02, CAI-RESP-1442 closed)
 REPORTS_DIR="${RESET_AUDITOR_REPORTS_DIR:-$ORCH_DIR/reports}"
 MAX_AGE="${RESET_AUDITOR_HANDOFF_MAX_AGE:-900}"
@@ -305,7 +314,7 @@ fi
 WIPE=$(( ${CC_BYTES:-0} + 80 )); [ "$WIPE" -lt 200 ] && WIPE=200; [ "$WIPE" -gt 20000 ] && WIPE=20000
 CC_BEFORE_WIPE="$CC_FLAT"   # the wipe is also the ghost probe — keep its input
 echo "[reset_auditor] clearing composer (${WIPE} BSpace) + /clear on '$SESS' ..."
-"$TM" send-keys -t "$PANE" -N "$WIPE" BSpace; sleep 1
+"$TM" send-keys -t "$PANE" -N "$WIPE" BSpace; settle 1
 
 composer_parse_pane "$TM" "$PANE"
 if [ "$CC_EMPTY" != 1 ] && [ "${CC_GHOST:-0}" != 1 ]; then
@@ -321,8 +330,8 @@ if [ "$CC_EMPTY" != 1 ] && [ "${CC_GHOST:-0}" != 1 ]; then
   fi
 fi
 
-"$TM" send-keys -t "$PANE" -l "/clear"; sleep 1
-"$TM" send-keys -t "$PANE" Enter; sleep 4
+"$TM" send-keys -t "$PANE" -l "/clear"; settle 1
+"$TM" send-keys -t "$PANE" Enter; settle 4
 
 # LAYER-2 DEAD-MAN VERIFY: confirm the /clear actually ran before booting; a boot onto a
 # still-bloated context is a false 'done'. Live composer empty on a readable capture, or the
@@ -332,7 +341,7 @@ for _i in 1 2 3 4; do
   composer_parse_pane "$TM" "$PANE"
   if [ "$CC_EMPTY" = 1 ] && [ "$CC_PARTIAL" = 'ok' ]; then _cleared=1; break; fi
   if "$TM" capture-pane -t "$PANE" -p 2>/dev/null | grep -E 'Claude Code v[0-9]' >/dev/null; then _cleared=1; break; fi
-  sleep 2
+  settle 2
 done
 if [ "$_cleared" != 1 ]; then
   echo "[reset_auditor] LAYER-2 VERIFY: FAIL — /clear did NOT execute on $BASE. NOT sending boot." >&2
@@ -365,7 +374,7 @@ echo "[reset_auditor] LAYER-2 VERIFY: PASS — /clear executed."
 
 BOOT="You are $BASE, an auditor singleton (CAI-500), freshly reset IN-PLACE by ${RESET_BY} at $(date -u +%Y-%m-%dT%H:%MZ) via reset_auditor.sh — same process, so your token and model are unchanged. Read your handoff at ${HANDOFF} IN FULL FIRST (absolute path — not your cwd's reports/); it is the authority over this message. Then reconcile agent_messages where to_agent='${BASE}' (and your instance id) and read_at is null; re-claim any open review it lists before taking new work. DB: source ~/wingmen/orchestrator/.env (file-first) before any DB command — your process env may hold a pre-rotation DSN. ${STAGED_NOTE} STANDING: verify-not-assert; a measurement whose tooling failed reports 'could not measure', never a finding; when a premise falls, RE-DERIVE. Reply to orch-console once you are up."
 echo "[reset_auditor] booting '$SESS' ..."
-"$TM" send-keys -t "$PANE" -l "$BOOT"; sleep 1
-"$TM" send-keys -t "$PANE" Enter; sleep 3
+"$TM" send-keys -t "$PANE" -l "$BOOT"; settle 1
+"$TM" send-keys -t "$PANE" Enter; settle 3
 echo "[reset_auditor] done — $BASE booting from $HANDOFF. Pane tail:"
 "$TM" capture-pane -t "$PANE" -p | grep -vE '^\s*$' | tail -5

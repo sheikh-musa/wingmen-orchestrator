@@ -11,6 +11,7 @@ These tests use a FAKE tmux on PATH: capture-pane returns a fixture; send-keys i
 recorded. The core assertion is ZERO send-keys on a menu pane."""
 import os
 import subprocess
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -119,7 +120,12 @@ def test_pane_is_menu_returns_1_on_readable_non_menu(tmp_path):
 
 def _run_lane_nudge(tmp_path, capture_text, env_extra=None):
     _fake_tmux(tmp_path, capture_text)
-    env = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}")
+    # The delivery loop's settle waits exist for a LIVE TUI to repaint; this fake tmux
+    # repaints instantly, so they are dead wall-clock here (~9s x 3 tries on a
+    # delivering run). The knob changes only their duration — the send-keys sequence
+    # every test asserts on is unchanged.
+    env = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}",
+               LANE_NUDGE_SETTLE_S="0")
     if env_extra:
         env.update({k: str(v) for k, v in env_extra.items()})
     r = subprocess.run(["bash", str(LANE_NUDGE), "somesess", "wake up and drain your inbox"],
@@ -185,6 +191,20 @@ def test_lane_nudge_does_send_keys_on_a_non_menu_pane(tmp_path):
     typed into (so real nudges are not silently swallowed). We only assert send-keys DID
     happen and the exit is not the menu-refusal code."""
     r, sends = _run_lane_nudge(tmp_path, IDLE_PANE)
+    assert r.returncode != 5, "idle pane must not hit the menu-refusal path"
+    assert sends != "", "a non-menu pane must still receive the nudge send-keys"
+
+
+def test_settle_waits_are_env_injectable_so_tests_do_not_really_wait(tmp_path):
+    """The settle waits in the delivery loop exist so a LIVE tmux TUI can repaint before
+    the next keystroke and before the working/queued probe; the fake tmux here repaints
+    instantly, so under test they are pure dead wall-clock (3 tries x ~9s). The knob
+    overrides those waits ONLY — the production default is unchanged, and the delivery
+    keystrokes must stay identical."""
+    t0 = time.monotonic()
+    r, sends = _run_lane_nudge(tmp_path, IDLE_PANE, env_extra={"LANE_NUDGE_SETTLE_S": "0"})
+    elapsed = time.monotonic() - t0
+    assert elapsed < 5, f"settle waits were not injected: {elapsed:.1f}s (expected ~0)"
     assert r.returncode != 5, "idle pane must not hit the menu-refusal path"
     assert sends != "", "a non-menu pane must still receive the nudge send-keys"
 

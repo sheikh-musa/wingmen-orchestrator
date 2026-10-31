@@ -24,6 +24,15 @@
 #       discriminator — only the presence/absence of "esc to interrupt" is (fixed 2026-09-07).
 set -uo pipefail
 
+# SETTLE WAITS ARE INJECTABLE (CI cost, orch-console #88092). Each `_ln_settle N` in
+# the delivery loop pauses so the LIVE tmux TUI can repaint after a keystroke before
+# the next one and before the working/queued probe that verifies it. The test fake
+# tmux repaints instantly, so under test those pauses are pure dead wall-clock — the
+# loop pays them on EVERY try (~9s x 3 tries = ~26s per asserting test). The knob
+# overrides all of them at once; when it is unset each site keeps its historical N,
+# so live delivery timing is unchanged. Tests set 0.
+_ln_settle() { sleep "${LANE_NUDGE_SETTLE_S:-$1}"; }
+
 ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Shared, SGR-aware composer extraction — the fleet's ONE definition of "dim ghost
 # vs real staged text" (reset_lane.sh sources the same lib; lane_wedge_watchdog.py
@@ -510,10 +519,10 @@ fi
 
 for try in $(seq 1 "$MAX_TRIES"); do
   # clear any stale/unsent input, then type fresh, then submit
-  tmux send-keys -t "$SESSION" C-u; sleep 0.4
-  tmux send-keys -t "$SESSION" C-u; sleep 0.4
-  tmux send-keys -t "$SESSION" -l "$MSG"; sleep 1
-  tmux send-keys -t "$SESSION" Enter; sleep 4
+  tmux send-keys -t "$SESSION" C-u; _ln_settle 0.4
+  tmux send-keys -t "$SESSION" C-u; _ln_settle 0.4
+  tmux send-keys -t "$SESSION" -l "$MSG"; _ln_settle 1
+  tmux send-keys -t "$SESSION" Enter; _ln_settle 4
   if pane_working; then
     _row_deliver_ok
     echo "lane_nudge: '$SESSION' submitted + working (try $try)"; exit 0
@@ -524,7 +533,7 @@ for try in $(seq 1 "$MAX_TRIES"); do
     exit 0
   fi
   # one extra Enter in case the TUI consumed the first as focus
-  tmux send-keys -t "$SESSION" Enter; sleep 3
+  tmux send-keys -t "$SESSION" Enter; _ln_settle 3
   if pane_working; then
     _row_deliver_ok
     echo "lane_nudge: '$SESSION' submitted + working (try $try, 2nd Enter)"; exit 0
