@@ -192,11 +192,30 @@ def provider_policy_rows():
     return policy_rows, override_rows
 
 
-def deepseek_cleared(session: str, policy_rows, override_rows) -> bool:
-    """Read-only PREVIEW of the same gate switch_lane_token.sh --model-apply enforces
-    at flip time (scripts.lib.provider_policy). Never the enforcement itself — just
-    lets this script report a SKIP up front instead of attempting a flip it knows
-    will be refused."""
+def deepseek_key_mapped(session: str) -> bool:
+    """Read-only PREVIEW of the OTHER gate a deepseek-* launch hits at flip time:
+    provider_routing.sh calling scripts/lib/deepseek_key_for_family.py, which fails
+    closed if the lane's family has no row in deepseek_key_map.json (no silent
+    fallback to the shared key). provider_policy clearance alone does NOT imply a
+    key-map row exists — a lane can be policy-cleared for deepseek yet still refuse
+    to boot because its family was never added to the map (exactly what happened to
+    the 7 families parked on Syed at op#36727 instead of moved to DeepSeek)."""
+    from scripts.lib.deepseek_key_for_family import _MAP_FILE
+    from scripts.lib.lane_token_resolver import family_of
+    family = family_of(session)
+    if not family:
+        return False
+    try:
+        with open(_MAP_FILE) as f:
+            mapping = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return bool(mapping.get(family))
+
+
+def deepseek_skip_reason(session: str, policy_rows, override_rows) -> Optional[str]:
+    """None if `session` clears both deepseek gates; otherwise the specific reason
+    (so a caller can report an accurate SKIP instead of a generic one)."""
     from scripts.lib.provider_policy import (is_narrower_or_equal, lookup_lane_override,
                                               resolve_client_key, resolve_policy)
     keys = [r.get("client_key") for r in policy_rows]
@@ -206,7 +225,19 @@ def deepseek_cleared(session: str, policy_rows, override_rows) -> bool:
     effective = client_level
     if override is not None and is_narrower_or_equal(override, client_level):
         effective = override
-    return "deepseek" in effective["allowed_providers"]
+    if "deepseek" not in effective["allowed_providers"]:
+        return "no provider_policy clearance for deepseek"
+    if not deepseek_key_mapped(session):
+        return "no deepseek_key_map.json row for this lane's family"
+    return None
+
+
+def deepseek_cleared(session: str, policy_rows, override_rows) -> bool:
+    """Read-only PREVIEW of the same gates switch_lane_token.sh --model-apply enforces
+    at flip time (scripts.lib.provider_policy AND the deepseek_key_map.json family
+    lookup). Never the enforcement itself — just lets this script report a SKIP up
+    front instead of attempting a flip it knows will be refused."""
+    return deepseek_skip_reason(session, policy_rows, override_rows) is None
 
 
 # ── tmux / argv helpers (self-contained; mirrors glm_overflow_switch.py's) ────
@@ -454,8 +485,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         for agent_id, session in candidates:
             if session in held or agent_id in held:
                 skipped.append((agent_id, session, "HELD (--exclude)"))
-            elif not deepseek_cleared(session, policy_rows, override_rows):
-                skipped.append((agent_id, session, "no provider_policy clearance for deepseek"))
+            elif (reason := deepseek_skip_reason(session, policy_rows, override_rows)) is not None:
+                skipped.append((agent_id, session, reason))
             else:
                 to_switch.append((agent_id, session))
         for agent_id, session in to_switch:
