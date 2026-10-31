@@ -307,9 +307,11 @@ execute: rotation COMPLETE — journal at …/journal.jsonl
 ```
 
 `verdict=rejected` on the old half and the final COMPLETE line. "New password connects"
-on its own is half a rotation, which is why the old half is not optional: with no backup
-holding the old value the executor refuses outright rather than recording a pass it did
-not earn.
+on its own is half a rotation, which is why the old half is not optional: the old value
+probed is the one **preflight captured and proved live** in this run — never a `.bak` file,
+which could hold an already-dead password from an earlier rotation and answer "rejected"
+for a reason that has nothing to do with tonight. If no old value was captured, the
+executor refuses outright rather than recording a pass it did not earn.
 
 `COMPLETE` from the executor is **not** the end of the operation. The singleton restart
 (step 7) and the declaration closing are still owed — see the decided design above — and
