@@ -130,6 +130,7 @@ import hashlib
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import zipfile
@@ -665,6 +666,25 @@ def is_nested_archive_name(name: str) -> bool:
     return any(lower.endswith(ext) for ext in _NESTED_ARCHIVE_EXTS)
 
 
+def is_symlink_zip_member(info: zipfile.ZipInfo) -> bool:
+    """True if *info* was archived as a Unix symlink (cc-quality bus #86132,
+    #85982 checklist: refuse, don't just defang). ZipInfo.external_attr's
+    upper 16 bits carry the Unix st_mode when the archive was created on a
+    Unix system -- stat.S_ISLNK on that mode is the standard, zipfile-
+    recommended way to detect it (there is no dedicated is_symlink() on
+    ZipInfo). A zip made on a non-Unix system leaves external_attr's mode
+    bits zero, so S_ISLNK is simply False there -- never a false positive,
+    only a check that has nothing to look at. This stager byte-copies a
+    member's content via zf.open() rather than zf.extract()/extractall(), so
+    a symlink member today only ever becomes an inert regular file holding
+    the link-target TEXT, never an actual filesystem symlink -- but refusing
+    it here (rather than relying on that happening to stay true) means a
+    future switch to zf.extract() can't silently reintroduce a real
+    symlink-write vulnerability."""
+    mode = info.external_attr >> 16
+    return stat.S_ISLNK(mode)
+
+
 @dataclass
 class ZipSafetyCheck:
     ok: bool
@@ -693,6 +713,9 @@ def scan_zip_safety(zf: zipfile.ZipFile) -> ZipSafetyCheck:
             continue
         if is_nested_archive_name(info.filename):
             reasons.append(f"member {info.filename!r} is a nested archive — not allowed")
+            continue
+        if is_symlink_zip_member(info):
+            reasons.append(f"member {info.filename!r} is a symlink — not allowed")
             continue
         size_mb = info.file_size / (1024 * 1024)
         if size_mb > _ZIP_MAX_MEMBER_UNCOMPRESSED_MB:

@@ -1110,11 +1110,12 @@ class _FakeZipInfo:
     """Duck-typed stand-in for zipfile.ZipInfo -- scan_zip_safety only reads
     these four attributes/method, never extracts bytes, so a fake lets the
     size/ratio/count caps be tested directly without writing huge real data."""
-    def __init__(self, filename, file_size=0, compress_size=1, is_dir=False):
+    def __init__(self, filename, file_size=0, compress_size=1, is_dir=False, external_attr=0):
         self.filename = filename
         self.file_size = file_size
         self.compress_size = compress_size
         self._is_dir = is_dir
+        self.external_attr = external_attr
 
     def is_dir(self):
         return self._is_dir
@@ -1155,6 +1156,27 @@ def test_is_nested_archive_name_detects_common_archive_exts(name):
 @pytest.mark.parametrize("name", ["sheet.csv", "report.xlsx", "doc.docx", "scan.pdf"])
 def test_is_nested_archive_name_false_for_supported_kinds(name):
     assert scf.is_nested_archive_name(name) is False
+
+
+# -- is_symlink_zip_member (cc-quality bus #86132) ---------------------------
+
+def test_is_symlink_zip_member_true_for_unix_symlink_mode():
+    import stat as _stat
+    info = _FakeZipInfo("link.csv", external_attr=(_stat.S_IFLNK | 0o777) << 16)
+    assert scf.is_symlink_zip_member(info) is True
+
+
+def test_is_symlink_zip_member_false_for_regular_file_mode():
+    import stat as _stat
+    info = _FakeZipInfo("ok.csv", external_attr=(_stat.S_IFREG | 0o644) << 16)
+    assert scf.is_symlink_zip_member(info) is False
+
+
+def test_is_symlink_zip_member_false_when_external_attr_unset():
+    # a zip made on a non-Unix system leaves the mode bits zero -- never a
+    # false positive, just nothing to detect.
+    info = _FakeZipInfo("ok.csv", external_attr=0)
+    assert scf.is_symlink_zip_member(info) is False
 
 
 # -- scan_zip_safety: unit-level, duck-typed ZipInfo doubles -----------------
@@ -1198,6 +1220,17 @@ def test_scan_zip_safety_rejects_nested_archive_member():
     result = scf.scan_zip_safety(_FakeZipFile(infos))
     assert result.ok is False
     assert any("nested archive" in r for r in result.reasons)
+
+
+def test_scan_zip_safety_rejects_symlink_member():
+    import stat as _stat
+    infos = [_FakeZipInfo("ok.csv", file_size=10, compress_size=8),
+              _FakeZipInfo("link.csv", file_size=10, compress_size=8,
+                            external_attr=(_stat.S_IFLNK | 0o777) << 16)]
+    result = scf.scan_zip_safety(_FakeZipFile(infos))
+    assert result.ok is False
+    assert result.members == []
+    assert any("symlink" in r for r in result.reasons)
 
 
 def test_scan_zip_safety_rejects_oversized_member():
@@ -1301,6 +1334,26 @@ def test_main_zip_refuses_whole_zip_on_nested_archive_member(tmp_path, monkeypat
     assert rc == 2
     assert "REFUSED" in out
     assert "nested archive" in out
+    assert not (tmp_path / "reports").exists()
+
+
+def test_main_zip_refuses_whole_zip_on_symlink_member_before_extraction(tmp_path, monkeypatch, capsys):
+    # cc-quality bus #86132: a symlink member must be REFUSED, not just
+    # defanged by the byte-copy path -- asserted at the scan stage, i.e.
+    # BEFORE stage_zip_members ever extracts anything.
+    import stat as _stat
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / "bundle.zip"
+    with _zipfile_mod.ZipFile(p, "w") as zf:
+        zf.writestr("clean.csv", "Screen,Label\nhome,Welcome\n")
+        link_info = _zipfile_mod.ZipInfo("link.csv")
+        link_info.external_attr = (_stat.S_IFLNK | 0o777) << 16
+        zf.writestr(link_info, "../../etc/passwd")  # the "link target" text
+    rc = scf.main([str(p), "op36085", "--export"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "REFUSED" in out
+    assert "symlink" in out
     assert not (tmp_path / "reports").exists()
 
 
