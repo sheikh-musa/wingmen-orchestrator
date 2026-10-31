@@ -593,8 +593,15 @@ def renudge(agent: str, n: int, lanes: dict[str, str], dry: bool, conn=None, row
         except Exception as e:
             log("hub bus-wake failed (%s): %s" % (agent, e))
             return ("bus-wake:%s" % agent, False)
-    if agent in lanes:
-        lane = lanes[agent]
+    # fleet_lanes keys by BASE agent id, but a violation can be addressed to a live
+    # numbered instance (cc-substrate-1) whose base (cc-substrate) is the key. An
+    # exact-only lookup misses and falls through to "unreachable" — so EVERY re-nudge
+    # of an instance lane silently became a console escalation instead of a lane
+    # nudge (the exact bottleneck the SRE exists to remove). Exact match still wins;
+    # the base strip is a fallback only (same _base_agent_id the party-update chase
+    # and the liveness check in this module already use).
+    lane = lanes.get(agent) or lanes.get(_base_agent_id(agent))
+    if lane:
         if dry:
             return (f"lane_nudge.sh:{lane}", True)
         try:
@@ -2182,7 +2189,12 @@ def run(dry: bool, injected: list[dict] | None = None,
             # operator page can't help until the pool resets. Suppress the SLA action (log it),
             # self-clears at reset (Nazim #25930). Fail-toward-action: unknown session -> not
             # skipped, so a real stall is never hidden.
-            sess = lanes.get(agent)
+            # Resolve the violation's recipient to its BASE lane (fleet_lanes keys by
+            # base_agent_id). Without this an instance-addressed row (cc-substrate-1)
+            # misses both gates below AND the renudge() lookup, so the row can never be
+            # handled at the lane and always escalates to console.
+            base = _base_agent_id(agent)
+            sess = lanes.get(agent) or lanes.get(base)
             if sess is not None:
                 if agent not in capped_cache:
                     capped_cache[agent] = _recipient_capped(sess)
@@ -2198,9 +2210,9 @@ def run(dry: bool, injected: list[dict] | None = None,
             # the SLA action (log it); un-suppresses the next scan once no lane is mid-turn (Nazim
             # #25999/#26004). Fail-toward-action: unknown agent / all-idle -> not skipped, so a
             # genuine idle stall is never hidden (same fail-direction as the cap-gate above).
-            if agent in all_lanes:
+            if base in all_lanes:
                 if agent not in active_turn_cache:
-                    active_turn_cache[agent] = _recipient_active_turn(all_lanes[agent])
+                    active_turn_cache[agent] = _recipient_active_turn(all_lanes[base])
                 if active_turn_cache[agent]:
                     actions.append(f"SKIP #{mid} ({pr}) — recipient '{agent}' ACTIVE-TURN "
                                    f"(a lane is mid-turn per pane_busy: esc-to-interrupt / thinking-spinner / "
