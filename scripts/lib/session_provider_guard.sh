@@ -53,9 +53,13 @@ spg_strip_resume_flags() {
     while [ "$i" -lt "${#src[@]}" ]; do
         case "${src[$i]}" in
             --resume|-r)
-                # drop the flag AND its session id (a bare --resume opens the
-                # interactive picker — equally a cross-provider resume)
-                i=$((i + 2))
+                # drop the flag AND its session id — but only when the next token
+                # really IS an id: a bare `--resume --model x` (picker mode) must
+                # not take `--model` down with it.
+                case "${src[$((i + 1))]:-}" in
+                    ""|-*) i=$((i + 1)) ;;
+                    *)     i=$((i + 2)) ;;
+                esac
                 ;;
             --resume=*)
                 i=$((i + 1))

@@ -1163,7 +1163,14 @@ _SPG_RESUME_ID=""
 _SPG_CONTINUE=0
 for _spg_i in "${!CLAUDE_PASSTHROUGH[@]}"; do
     case "${CLAUDE_PASSTHROUGH[$_spg_i]}" in
-        --resume|-r)   _SPG_RESUME_ID="${CLAUDE_PASSTHROUGH[$((_spg_i + 1))]:-}" ;;
+        --resume|-r)
+            _spg_next="${CLAUDE_PASSTHROUGH[$((_spg_i + 1))]:-}"
+            case "$_spg_next" in
+                ""|-*) _SPG_CONTINUE=1 ;;   # a BARE --resume opens the picker:
+                                            # equally a resume, judge the newest one
+                *)     _SPG_RESUME_ID="$_spg_next" ;;
+            esac
+            ;;
         --resume=*)    _SPG_RESUME_ID="${CLAUDE_PASSTHROUGH[$_spg_i]#--resume=}" ;;
         --continue|-c) _SPG_CONTINUE=1 ;;
     esac
