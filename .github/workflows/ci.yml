@@ -6,6 +6,20 @@ on:
   pull_request:
     branches: [main, fable/substrate-safe-fixes]
 
+# A newer run of the SAME ref replaces its own older run (orch-console #87540,
+# op#36768). Without this, re-pushing a branch stacks a full 12-36 min suite per
+# push behind the 2 runners, and PRs wait hours for work that is already obsolete
+# (2026-10-31: 20 queued runs, 8 of them superseded duplicates cancelled by hand).
+#
+# Keyed on workflow + ref, which is what keeps the two event kinds apart rather
+# than cancelling each other: a pull_request run carries refs/pull/<N>/merge and a
+# branch push carries refs/heads/<branch>, so a trunk push can never cancel a PR
+# run and a PR update can never cancel trunk. Only a re-push to the same ref
+# supersedes its own predecessor -- which is exactly the duplicate-stacking above.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality:
     name: Lint & Test
