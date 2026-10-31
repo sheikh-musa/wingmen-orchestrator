@@ -59,10 +59,57 @@ lane_exists_any_state() {
     "SELECT desired_state FROM fleet_lanes WHERE lane = '${want}' AND launcher = 'launch_dangerous_cc.sh';"
 }
 
+# Resolve a required binary to an ABSOLUTE path. PATH is tried first so a test/stub bin dir
+# can override it, then the caller's system fallbacks. Both tools this probe needs live
+# outside the PATH a launchd job, a cron entry, or a reduced tool shell may hand down
+# (`lsof` is /usr/sbin/lsof; /usr/sbin is often absent), and "command not found" used to
+# produce EMPTY output that every caller read as "no lane is running".
+resolve_tool() {
+  local name="$1"; shift
+  local c
+  if c="$(command -v "$name" 2>/dev/null)" && [ -n "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  for c in "$@"; do
+    [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
+
+resolve_lsof()  { resolve_tool lsof  /usr/sbin/lsof /usr/bin/lsof; }
+resolve_pgrep() { resolve_tool pgrep /usr/bin/pgrep /usr/sbin/pgrep /bin/pgrep; }
+
 # Absolute cwd of every running `claude --dangerously-skip-permissions` process.
+# Returns NON-ZERO when liveness cannot be determined, so callers can fail CLOSED. An
+# empty-but-successful list still means "no claude is running" — the two must not be
+# confused: the first is "I cannot tell", the second is "nobody is there", and only the
+# second may ever authorise starting a second claude in a worktree.
+#
+# BOTH tools are resolved and checked. lsof was the reported hole; pgrep is the same class
+# (an unresolvable pgrep yields an empty pid list, which is indistinguishable from "none
+# running") and is resolved here too so the guarantee is whole rather than half-applied.
 running_cwds() {
-  for pid in $(pgrep -f 'claude --dangerously-skip-permissions' 2>/dev/null); do
-    lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'
+  local lsof_bin pgrep_bin pids rc
+  if ! lsof_bin="$(resolve_lsof)"; then
+    echo "lanes.sh: REFUSING — cannot locate lsof (checked PATH, /usr/sbin/lsof, /usr/bin/lsof)." >&2
+    echo "lanes.sh: lane liveness is UNKNOWN; a 'down' reading here would be a guess." >&2
+    return 3
+  fi
+  if ! pgrep_bin="$(resolve_pgrep)"; then
+    echo "lanes.sh: REFUSING — cannot locate pgrep (checked PATH, /usr/bin, /usr/sbin, /bin)." >&2
+    echo "lanes.sh: lane liveness is UNKNOWN; a 'down' reading here would be a guess." >&2
+    return 3
+  fi
+  # pgrep's OWN failure must not read as "no processes": exit 1 is its documented
+  # "nothing matched", anything else (2 = usage/regex error) is an unusable probe.
+  # `|| rc=$?` — NOT a bare assignment followed by `rc=$?`, which would let set -e kill
+  # the script on pgrep's own exit 1 (the "no processes" case) before it could be read.
+  rc=0
+  pids="$("$pgrep_bin" -f 'claude --dangerously-skip-permissions' 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+    echo "lanes.sh: REFUSING — pgrep failed (rc=$rc); lane liveness is UNKNOWN." >&2
+    return 3
+  fi
+  for pid in $pids; do
+    "$lsof_bin" -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'
   done
 }
 
@@ -86,15 +133,31 @@ _cwd_matches_any() {
 
 # True if a live dangerous-CC has $1 (or a dir nested under it) as its cwd.
 # Snapshots running_cwds ONCE into a variable before matching (pipefail-safe).
+#
+# Exit codes are THREE-VALUED and callers must respect that:
+#   0 = a claude is running in (or under) $1        → occupied, do not boot
+#   1 = liveness WAS determined and nothing matches → free, booting is safe
+#   2 = liveness could NOT be determined            → UNKNOWN, never treat as free
+# Returning 1 (or, via `|| true`, nothing at all) for the third case is precisely how a
+# missing `lsof` turns this double-boot guard into a silent pass.
 dir_has_claude() {
   local snap
-  snap="$(running_cwds)"
+  if ! snap="$(running_cwds)"; then
+    echo "lanes.sh: liveness UNKNOWN (probe failed) — must not be read as 'no claude running'." >&2
+    return 2
+  fi
   _cwd_matches_any "$1" <<< "$snap"
 }
 
 cmd_ls() {
   local snap
-  snap="$(running_cwds)"   # one snapshot for the whole listing (correct + O(pids), not O(rows*pids))
+  # one snapshot for the whole listing (correct + O(pids), not O(rows*pids)).
+  # If the probe cannot run, print NOTHING and exit NON-ZERO: a table of "down" rows built
+  # from a failed probe is worse than no table — it reads as fact.
+  if ! snap="$(running_cwds)"; then
+    echo "lanes.sh ls: REFUSING to report — lane liveness is unknown (see above)." >&2
+    exit 4
+  fi
   printf '%-24s %-8s %-8s %s\n' LANE DESIRED STATUS DIR
   while IFS=$'\t' read -r name desired dir; do
     [ -z "$name" ] && continue
@@ -106,9 +169,17 @@ cmd_ls() {
 }
 
 boot_one() {
-  local name="$1" dir="$2" base_agent_id="${3:-}"
+  local name="$1" dir="$2" base_agent_id="${3:-}" rc=0
   if [ ! -d "$dir" ]; then echo "SKIP $name — dir missing: $dir"; return; fi
-  if dir_has_claude "$dir"; then echo "SKIP $name — claude already running in $dir"; return; fi
+  # FAIL CLOSED: 0 = occupied (skip), 1 = free (proceed), anything else = UNKNOWN (refuse).
+  dir_has_claude "$dir" || rc=$?
+  case "$rc" in
+    0) echo "SKIP $name — claude already running in $dir"; return ;;
+    1) : ;;
+    *) echo "REFUSE $name — cannot determine whether claude is already running in $dir (rc=$rc)." >&2
+       echo "REFUSE $name — NOT booting: a second dangerous-CC on a live worktree is the one failure that loses work." >&2
+       return 4 ;;
+  esac
   # '=' forces tmux's EXACT target match (bus #56370): a bare -t "$name" does
   # PREFIX matching, so e.g. 'cosem-tdu' matched the running 'cosem-tdu-coord'
   # session and this guard false-positived SKIP, permanently blocking the
