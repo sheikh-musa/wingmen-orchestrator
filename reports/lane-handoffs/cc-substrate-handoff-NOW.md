@@ -89,6 +89,21 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**21:47Z console agreed (88230).** All three items accepted: Sunday 04:00Z stands; **774 is the
+console's merge now** — their waiter holds `cee1dd4` and they send the sha, so I do NOT merge 774
+(only 776 is mine); sudo gap — they are asking the hub for a scoped passwordless restart of exactly
+those two units before **03:30Z**, and **if it is not closed and verified by then the run defers
+again, no partial run**; order unchanged, console last. They also asked me to route the
+`merge_pinned` mis-attribution to cc-quality — **done, bus 88234** (finding: `scripts/merge_pinned.sh`
+line 73 echoes `MERGEED` unconditionally after `gh pr merge`, which exits 0 on an already-merged PR).
+
+**CI observation worth keeping:** the runners are the cubeasht WSL distro `ci-orchestrator`
+(`actions-runner-orchestrator`, `-2`), reachable over ssh; both were `busy=true` with four jobs
+`queued` and none `in_progress` for a stretch, which looks like a wedge but was not one — worker
+processes were live (`ps` on the distro showed start times matching real jobs) and the queue drained
+afterwards. 774's job sat queued 52 min; 776 was picked first despite being newer. If a body reports
+"CI wedged", check `pgrep -af Runner.Worker` on that distro before restarting anything.
+
 **21:45Z gate — sent as bus 88223 (P1, requires_response).** Applied the console's own rule from
 87921 (`GO at 22:00Z only if 774 PASS+merged, heartbeat answered, sudo gap closed`). Result: **NO-GO**
 on two of three, so the window moves to **Sunday 2026-11-01 04:00Z**.
