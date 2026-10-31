@@ -1,5 +1,5 @@
 # PB-05 — Secrets & transcript hygiene
-`version:` 1  ·  `owner:` cc-quality  ·  `last-reviewed:` 2026-10-22  ·  `risk:` P1
+`version:` 2  ·  `owner:` cc-quality  ·  `last-reviewed:` 2026-11-01  ·  `risk:` P1
 
 ### 1. WHEN THIS FIRES
 You are about to run a command that could surface a secret: reading/echoing a token
@@ -29,6 +29,16 @@ hooks already enforce — it's 🟢, included so a lane knows WHY the guard refu
    `echo`/comment string of an otherwise read-only command — drop the DDL-looking
    words from the echo text; do NOT restructure to evade the real secret checks.
    **[manual]**
+5. **Never pull a client credential out of the store it lives in** (the 30 Oct
+   WooCommerce leak): no `SELECT *` on `wp_*` tables, no `option_name LIKE '…%'`
+   sweeps, no `mysqldump`/`pg_dump`/`COPY … TO STDOUT`/`wp db export` of a client
+   site database, no `cat wp-config.php`, no `firebase functions:secrets:access`
+   left unredirected. A narrow, explicitly-named NON-secret option is still fine
+   (`SELECT option_value FROM wp_options WHERE option_name = 'woocommerce_currency'`).
+   To move a credential, pipe it into the vault so it is never displayed:
+   `… | scripts/put_client_secret.py NAME --reason 'why'` (or `| sha256sum` /
+   `| wc -c` when you only need to compare or measure).
+   **[hook: credential_store_guard (pre)]**
 
 ### 4. ENFORCING HOOK
 - **Hooks (EXISTING, 🟢):** `scripts/hooks/secrets_transcript_guard.py` (PreToolUse —
@@ -37,11 +47,21 @@ hooks already enforce — it's 🟢, included so a lane knows WHY the guard refu
   secret shapes), `scripts/hooks/secret_shape_patterns.py` (shared patterns),
   `scripts/secret_hash_sweep.py`. Registered GLOBALLY (`~/.claude/settings.json`) →
   fire in every session, fleet-wide.
+- **New layer (2026-11-01, bus #87265):** `scripts/hooks/credential_store_guard.py`
+  (PreToolUse) refuses *client-store* reads — the WordPress/WooCommerce options and
+  users tables, `wp-config.php`, non-dotfile `.env` files, store settings exports,
+  token/netrc caches, and secret-reading CLIs. It deliberately does NOT re-implement
+  this playbook's file/inline-literal rules: `secrets_transcript_guard` owns those.
+  `scripts/put_client_secret.py` is the sanctioned way through: value in via stdin /
+  `--from-env` / `--from-file`, out to the vault, and the only thing printed is
+  `sha256[:8]` + length.
+
 - **What it CANNOT enforce (residual):** a secret a reviewer chooses to paste into a
-  *narrative* (not tool output) — human discipline; and the DDL false-positive above.
-- **No new hook needed** — this row is already enforced; the playbook's job is to
-  explain the contract + the false-positive workaround so the guard teaches rather
-  than merely blocks.
+  *narrative* (not tool output) — human discipline; the DDL false-positive above; and
+  a store read whose credential row is not identifiable from the command text (a
+  `SELECT option_value` filtered by a numeric option_id, say). The hash-matched
+  transcript sweep (`scripts/secret_hash_sweep.py`) is the backstop for those.
+
 
 ### 5. DISCOVERY
 Index row; `secrets_transcript_guard`/`secrets_output_scanner` refuse messages cite
