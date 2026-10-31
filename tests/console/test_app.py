@@ -120,6 +120,29 @@ def server(monkeypatch, tmp_path):
              "source": "operator_asks#12"},
         ],
     )
+    # Machines-resources panel (op#36664): latest host_metrics row per host.
+    # age_s is server-computed (never trust a client clock for staleness);
+    # gzb here is a failed sample (ok=False, error set, no metrics) to pin
+    # the "could not measure" path, not a frozen stale number.
+    monkeypatch.setattr(
+        db, "fetch_resources",
+        lambda: [
+            {"host": "cubeasht", "ok": True, "error": None, "age_s": 90,
+             "metrics": {
+                 "cpu_load_pct": 12.5, "ram_used_pct": 38.0,
+                 "cpu_temp_c": None, "cpu_temp_source": "unavailable",
+                 "wsl": {"mem_used_pct": 55.0, "runner_service": "active"},
+             }},
+            {"host": "gzb", "ok": False, "error": "ssh timeout", "age_s": 920,
+             "metrics": {}},
+            {"host": "mini", "ok": True, "error": None, "age_s": 30,
+             "metrics": {
+                 "cpu_load_pct": 22.1, "mem_real_used_pct": 41.2,
+                 "swap_used_pct": 0.0,
+                 "thermal": {"recorded_fields": {}, "throttled": False},
+             }},
+        ],
+    )
     srv = console_app.make_server(host="127.0.0.1", port=0)
     port = srv.server_address[1]
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -279,6 +302,44 @@ def test_builds_page_serves(server):
     assert r.status_code == 200
     assert "Building" in r.text
     r2 = httpx.get(server + "/static/builds.js", timeout=5)
+    assert r2.status_code == 200
+
+
+def test_api_resources_requires_auth(server):
+    r = httpx.get(server + "/api/resources", timeout=5)
+    assert r.status_code == 401
+
+
+def test_api_resources_shape(server):
+    # op#36664: machines-resources panel — read-only view of host_metrics'
+    # latest sample per host. No server-side reinterpretation of the
+    # collectors' own fields; this test pins the passthrough + age_s shape.
+    r = httpx.get(server + "/api/resources", headers=H(), timeout=5)
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"hosts"}
+    hosts = {h["host"]: h for h in body["hosts"]}
+    assert set(hosts) == {"mini", "gzb", "cubeasht"}
+    assert hosts["mini"]["ok"] is True
+    assert hosts["mini"]["age_s"] == 30
+    assert hosts["mini"]["metrics"]["mem_real_used_pct"] == 41.2
+    # a failed sample carries ok=False + error, never a frozen number
+    # presented as live.
+    assert hosts["gzb"]["ok"] is False
+    assert hosts["gzb"]["error"] == "ssh timeout"
+    # cubeasht's Windows-host fields are top-level; WSL is a nested sub-dict
+    # — the panel must label which is which, never conflate them.
+    assert hosts["cubeasht"]["metrics"]["cpu_load_pct"] == 12.5
+    assert hosts["cubeasht"]["metrics"]["wsl"]["mem_used_pct"] == 55.0
+
+
+def test_resources_page_serves(server):
+    # Same open-SPA-shell tier as /status, /builds: page shell pre-auth,
+    # bearer only in the /api/resources header.
+    r = httpx.get(server + "/resources", timeout=5)
+    assert r.status_code == 200
+    assert "Machines" in r.text
+    r2 = httpx.get(server + "/static/resources.js", timeout=5)
     assert r2.status_code == 200
 
 
@@ -473,7 +534,8 @@ def test_console_build_id_lockstep():
     # fc-v87: every badge-carrying page joins the lockstep assert (deploy gate 1
     # compares eight surfaces; this test holds the same set to the same bar).
     badges = {}
-    for page in ("lanes.html", "asks.html", "docs.html", "media.html", "status.html", "builds.html"):
+    for page in ("lanes.html", "asks.html", "docs.html", "media.html", "status.html", "builds.html",
+                 "resources.html"):
         lines = [ln for ln in (static / page).read_text().splitlines() if 'id="build"' in ln]
         assert lines, page + " must carry the id=build badge"
         badges[page] = re.findall(r"fc-v\d+", lines[-1])[-1]
