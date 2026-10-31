@@ -1472,6 +1472,72 @@ def party_update_chase_targets(rows, *, now, chase_state, active_turn_check,
     return due
 
 
+def chase_party_update(targets, *, dry, now, chase_state, send_chase,
+                        max_chases=MAX_PARTY_UPDATE_CHASE_PER_RUN):
+    """Same dead-man's-switch/cap shape as chase_client_asks. `send_chase`
+    nudges the owning agent only — no console CC, no operator page (the
+    dead-agent fallback into the existing escalation ladder is a separate,
+    later concern than this scan; this function only sends or doesn't).
+    Returns (sent_count, sent_list) where sent_list is [(id, owner), ...]
+    for every successful send this scan."""
+    sent = 0
+    sent_list = []
+    for t in targets:
+        if sent >= max_chases:
+            log(f"party-update-chase HELD (per-scan cap {max_chases}) "
+                f"{t.get('kind')}#{t.get('id')} -> {t.get('owner')}")
+            continue
+        if dry:
+            continue
+        ok = send_chase(t.get("owner"), t)
+        if ok:
+            chase_state[str(t["id"])] = {"last_chase_ts": now}
+            sent += 1
+            sent_list.append((t["id"], t.get("owner")))
+        else:
+            log(f"party-update-chase SEND FAILED {t.get('kind')}#{t.get('id')} "
+                f"(left UNSTAMPED for retry)")
+    return sent, sent_list
+
+
+_PARTY_UPDATE_UNREACHABLE_OWNERS = frozenset({"musa", "cai"}) | frozenset(HUB_SESSIONS)
+
+
+def _send_party_update_chase(conn, owner: str, target: dict) -> bool:
+    """Impure: post ONE P1 nudge to the owning agent naming the SPECIFIC
+    overdue item (never the generic '_countonly_line' SLA-violation text),
+    so the owner's next turn-start reconcile knows a status PUSH — not an
+    inbox drain — is owed. Returns True only on a committed insert.
+
+    An owner that is musa/cai/a hub session gets the same unreachable-owner
+    treatment renudge() already uses for them (log + skip, never crash the
+    scan) — an operator-facing item should essentially never be owned by one
+    of these, but fail safely if it is."""
+    if not owner or owner in _PARTY_UPDATE_UNREACHABLE_OWNERS:
+        log(f"party-update-chase SKIP {target.get('kind')}#{target.get('id')} "
+            f"-> unreachable owner {owner!r}")
+        return False
+    subj = (f"[party-update-overdue] {target['kind']}#{target['id']} has been "
+            f"quiet — operator is owed a status")
+    body = (f"{target['title'][:200]!r} (owner={owner}) has had no update to the "
+            f"operator in over {STATUS_CADENCE_S['operator'] // 3600}h. Post a "
+            f"one-line status to the operator now (bus or nazim_send.sh per "
+            f"channel ownership), then it clears on the next status-board read.")
+    try:
+        bus_send.send(from_agent="sla-watchdog", to=owner, mtype="blocker",
+                       subject=subj, body=body, priority="P2", req=True)
+        log(f"party-update-chase SENT {target.get('kind')}#{target.get('id')} -> {owner}")
+        return True
+    except Exception as e:
+        log(f"party-update-chase INSERT failed {target.get('kind')}#{target.get('id')} "
+            f"-> {owner}: {e!r}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
 def _fetch_waiting_asks(conn):
     """Impure: OPEN operator_asks rows with waiting_on_operator=true, plus epoch
     timestamps (extract(epoch FROM ...) done in SQL) so the pure due-check above
@@ -2361,6 +2427,31 @@ def run(dry: bool, injected: list[dict] | None = None,
         except Exception as e:  # fail LOUD, keep the scan alive
             log(f"captured-triage ERROR: {e!r}")
 
+        # "Nothing goes dark" Phase 2 (op#34349/34354, bus #86475): an OPEN
+        # operator-facing item nothing_goes_dark.derive_overdue() already
+        # flags dark gets its owner chased. Observe-first (same doctrine as
+        # every net above) until orch-console arms it after reading a
+        # dry-run scan.
+        party_update_dry = _gated_dry(dry, "SLA_PARTY_UPDATE_CHASE_ENABLED")
+        try:
+            party_chase_state = state.setdefault("party_update_chase", {})
+            party_targets = party_update_chase_targets(
+                _fetch_party_update_open_items(conn), now=now, chase_state=party_chase_state,
+                active_turn_check=lambda a: _recipient_active_turn(all_lanes.get(a, [])),
+                max_targets=MAX_PARTY_UPDATE_CHASE_PER_RUN)
+            if party_targets:
+                n, sent_list = chase_party_update(
+                    party_targets, dry=party_update_dry, now=now, chase_state=party_chase_state,
+                    send_chase=lambda owner, t: _send_party_update_chase(conn, owner, t),
+                    max_chases=MAX_PARTY_UPDATE_CHASE_PER_RUN)
+                for t in party_targets:
+                    actions.append(f"{'[DRY] ' if party_update_dry else ''}PARTY-UPDATE-CHASE "
+                                   f"{t['kind']}#{t['id']} -> owner {t.get('owner')}")
+                log(f"party-update-chase [{'DRY/observe' if party_update_dry else 'ARMED'}] "
+                    f"sent={0 if party_update_dry else n}/{len(party_targets)}")
+        except Exception as e:  # fail LOUD, keep the scan alive
+            log(f"party-update-chase ERROR: {e!r}")
+
         if persist:
             save_state(state)
     finally:
@@ -2469,6 +2560,21 @@ def self_test() -> int:
               "_recipient_active_turn -> False when a base has no lanes (fail-toward-action)")
         check(_session_active_turn("nonexistent-session-xyz-000") is False,
               "delegates to pane_busy oracle but still fails-toward-action on a gone session")
+
+        print("Party-update-chase (Phase 2, op#34349/34354) — deterministic, no DB")
+        pu_now = 1_800_000_000.0
+        pu_rows = [
+            dict(id=901, kind="ask", waiting_party="client", overdue=True,
+                 overdue_reason="quiet", owner="cc-irsyad-coord"),
+            dict(id=902, kind="commitment", waiting_party="operator", overdue=True,
+                 overdue_reason="fired", owner="orch-console"),
+            dict(id=903, kind="ask", waiting_party="operator", overdue=True,
+                 overdue_reason="quiet", owner="cc-scholar"),
+        ]
+        pu_out = party_update_chase_targets(
+            pu_rows, now=pu_now, chase_state={}, active_turn_check=lambda a: False)
+        check([t["id"] for t in pu_out] == [903],
+              "party_update_chase_targets excludes client-waiting and fired rows, keeps the quiet operator one")
 
     print()
     if failures:

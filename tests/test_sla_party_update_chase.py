@@ -70,3 +70,39 @@ def test_chase_is_capped_per_scan():
                                       active_turn_check=lambda a: False,
                                       max_targets=MAX_PARTY_UPDATE_CHASE_PER_RUN)
     assert len(out) == MAX_PARTY_UPDATE_CHASE_PER_RUN
+
+
+# ---- chase_party_update: the action (Task 3) --------------------------------
+
+def test_chase_dry_run_sends_nothing_and_stamps_nothing():
+    calls = []
+    n, sent = w.chase_party_update(
+        [dict(id=5, owner="cc-scholar", title="x")], dry=True, now=NOW,
+        chase_state={}, send_chase=lambda o, t: calls.append((o, t)) or True,
+        max_chases=3)
+    assert n == 0 and calls == [] and sent == []
+
+
+def test_chase_stamps_state_only_on_successful_send():
+    state = {}
+    n, sent = w.chase_party_update(
+        [dict(id=6, owner="cc-scholar", title="x")], dry=False, now=NOW,
+        chase_state=state, send_chase=lambda o, t: False, max_chases=3)
+    assert n == 0 and "6" not in state
+
+
+def test_chase_targets_owner_never_operator_or_console_fallback():
+    seen = []
+    w.chase_party_update(
+        [dict(id=7, owner="cc-scholar", title="x")], dry=False, now=NOW,
+        chase_state={}, send_chase=lambda o, t: seen.append(o) or True, max_chases=3)
+    assert seen == ["cc-scholar"]
+
+
+def test_party_update_chase_message_type_is_constraint_valid():
+    # same guard as test_asks_chase_message_type_is_constraint_valid —
+    # the bus message_type used by _send_party_update_chase must be one of
+    # the agent_messages_message_type_check allowed values, never 'escalation'
+    import inspect
+    src = inspect.getsource(w._send_party_update_chase)
+    assert "mtype=\"blocker\"" in src or "mtype='blocker'" in src
