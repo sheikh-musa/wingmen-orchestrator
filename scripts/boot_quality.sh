@@ -120,6 +120,24 @@ if [ -z "$DSN" ]; then
     exit 1
 fi
 
+# ── Resolve the claude binary BEFORE anything below that depends on this body
+#    actually being able to launch (bus #86258/#86793/#86939 — same class of
+#    bug cc-fleet-health hit: under launchd's minimal PATH, no ~/.local/bin,
+#    `claude` resolved to nothing and the boot ran on past that failure
+#    regardless). Mirrors boot_fleet_health.sh's CLAUDE_BIN resolution. Fail
+#    LOUD and exit before going any further if claude can't be found.
+CLAUDE_BIN="$(command -v claude || true)"
+if [ -z "$CLAUDE_BIN" ]; then
+    for _c in "$HOME/.local/bin/claude" /usr/local/bin/claude /opt/homebrew/bin/claude; do
+        [ -x "$_c" ] && CLAUDE_BIN="$_c" && break
+    done
+fi
+if [ -z "$CLAUDE_BIN" ] || [ ! -x "$CLAUDE_BIN" ]; then
+    echo "FATAL: claude binary not found on PATH ($PATH) or known fallback locations — refusing to boot" >&2
+    exit 1
+fi
+echo "[boot_quality] claude resolved: $CLAUDE_BIN" >&2
+
 _sql() { "$VENV_PY" - "$@" <<'PY'
 import os, sys, psycopg
 dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
@@ -230,7 +248,7 @@ elif [ ! -e "$Q_DIR/scripts/self_recycle.sh" ]; then
   echo "⚠ $Q_DIR/scripts exists but has no self_recycle.sh — use an ABSOLUTE path" >&2
 fi
 
-echo "▶ Launching claude --dangerously-skip-permissions --model $MODEL in $Q_DIR"
+echo "▶ Launching $CLAUDE_BIN --dangerously-skip-permissions --model $MODEL in $Q_DIR"
 # NO-HUMAN-AT-KEYBOARD guard (Nazim #43143): enforce the AskUserQuestion deny + suppress the
 # prompt-suggestion widget (the singleton boots historically skipped ensure_lane_deny).
 "$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_deny.py" --cwd "$Q_DIR" || true
@@ -238,4 +256,4 @@ cd "$Q_DIR"
 # Pin this singleton's tmux window to 200x50 before claude starts (orch-console #79940): an 80x24
 # window lets stale render residue sit on the composer border and lane_nudge refuses every nudge.
 source "$ORCH_DIR/scripts/lib/pin_singleton_window_size.sh"
-claude --dangerously-skip-permissions --model "$MODEL"
+"$CLAUDE_BIN" --dangerously-skip-permissions --model "$MODEL"

@@ -32,7 +32,7 @@
     <key>HOME</key>
     <string>/Users/sheikhmusa</string>
     <key>PATH</key>
-    <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    <string>/Users/sheikhmusa/.local/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
     <key>TERM</key>
     <string>xterm-256color</string>
   </dict>

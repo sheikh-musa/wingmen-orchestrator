@@ -73,3 +73,58 @@ def test_plists_point_at_the_tracked_wrapper_scripts():
         assert "boot_fleet_health_launchd.sh" in plistlib.load(f)["ProgramArguments"][0]
     with q_plist.open("rb") as f:
         assert "boot_quality_launchd.sh" in plistlib.load(f)["ProgramArguments"][0]
+
+
+def test_plists_path_includes_local_bin():
+    # bus #86258/#86793/#86939: launchd's own minimal PATH lacked ~/.local/bin,
+    # where `claude` actually lives (a versions symlink) on the Mini -- a
+    # crash-loop that kept re-acquiring cc-fleet-health's watchdog lease
+    # ("false healthy") while no SRE process was actually up.
+    for p in _PLISTS:
+        with p.open("rb") as f:
+            env = plistlib.load(f).get("EnvironmentVariables", {})
+        path = env.get("PATH", "")
+        assert ".local/bin" in path, f"{p} PATH is missing ~/.local/bin: {path!r}"
+
+
+def test_claude_bin_resolution_snippet_actually_resolves(tmp_path):
+    # Wet-prove the CLAUDE_BIN resolution logic both boot scripts now carry
+    # (not just grep for it): extract each script's resolution snippet and
+    # run it for real against a FAKE claude placed only under a fake
+    # ~/.local/bin, with every OTHER PATH dir empty -- same shape as the
+    # plists' own PATH (searched last, after /usr/local/bin etc, so this
+    # also proves the fallback loop is reachable when `command -v` alone
+    # would miss it). Host-independent: CI runs on a Linux self-hosted
+    # runner with no real /Users/sheikhmusa, so this never depends on the
+    # plists' literal real-machine PATH actually resolving anything.
+    fake_home = tmp_path / "fakehome"
+    fake_local_bin = fake_home / ".local" / "bin"
+    fake_local_bin.mkdir(parents=True)
+    fake_claude = fake_local_bin / "claude"
+    fake_claude.write_text("#!/bin/sh\necho fake-claude\n")
+    fake_claude.chmod(0o755)
+    empty_bin = tmp_path / "empty_bin"
+    empty_bin.mkdir()
+
+    snippets = {
+        "boot_fleet_health.sh": (_ROOT / "scripts" / "boot_fleet_health.sh").read_text(),
+        "boot_quality.sh": (_ROOT / "scripts" / "boot_quality.sh").read_text(),
+    }
+    failures = []
+    for name, src in snippets.items():
+        start = src.index("CLAUDE_BIN=")
+        resolved_line_pos = src.index("claude resolved", start)
+        end = src.index("\n", resolved_line_pos) + 1
+        snippet = src[start:end]
+        script = f'HOME="{fake_home}"\n{snippet}\necho "RESOLVED=$CLAUDE_BIN"\n'
+        result = subprocess.run(
+            ["/bin/bash", "-c", script],
+            env={"PATH": str(empty_bin), "HOME": str(fake_home)},
+            capture_output=True, text=True, timeout=10,
+        )
+        if f"RESOLVED={fake_claude}" not in result.stdout:
+            failures.append(f"{name}: stdout={result.stdout!r} stderr={result.stderr!r}")
+    assert not failures, (
+        "these scripts' REAL CLAUDE_BIN-resolution snippet did not resolve a "
+        "claude binary that exists only under $HOME/.local/bin: " + "; ".join(failures)
+    )
