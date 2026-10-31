@@ -48,6 +48,42 @@ AGENT_ID="cc-fleet-health"   # exact — singleton SRE node, never a sub-tag
 # session), and silently misattributed as orch-console -- caught live when it
 # posted bus row #85124 under that identity instead of cc-fleet-health's own.
 export AGENT_ID
+# CC_BASE_AGENT_ID (bus #86164, 2026-10-31): AGENT_ID alone fixed bus_send/
+# resolve_agent_id (it already falls back to AGENT_ID -- rule 2, see
+# scripts/lib/agent_identity.py), but a family of PreToolUse guards' own
+# is_console() checks ONLY `ORCH_BODY_ROLE=='console' AND not CC_BASE_AGENT_ID`
+# (console_irsyad_guard.py, consult_governance_floor_guard.py,
+# client_media_read_guard.py, live_checkout_edit_guard.py) -- AGENT_ID never
+# entered that check, so a process whose claude pid predates this line (an
+# in-place /clear never re-runs this script) still reads as console to those 4
+# hooks even with AGENT_ID exported. Verified from outside (console, bus
+# #86164): no other body reads as console; safe to export unconditionally.
+# Audited every CC_BASE_AGENT_ID reader in the repo before adding this export
+# (grep -rl CC_BASE_AGENT_ID, ~70 hits) for anything that would now treat this
+# body as a disposable lane (wedge sweep / auto-reset / lane registry):
+#   - lane_prod_key_guard.py's is_worker_lane() (CC_BASE_AGENT_ID present AND
+#     base != 'orch-console') now reads TRUE for this body -- cc-fleet-health
+#     has no legitimate reason to touch the cosem prod SA key or gcloud ADC
+#     anyway (ops-not-governance, residency-conservative), so this is a new
+#     guardrail, not a blocked legitimate path.
+#   - stage_client_file.py's attest-read requires CC_BASE_AGENT_ID ==
+#     'cc-irsyad-coord' exactly; 'cc-fleet-health' fails that compare exactly
+#     as '(unset)' did before -- fail-closed either way, no behavior change.
+#   - lane_gcloud_isolation.sh / lane_env_allowlist.sh are only invoked from
+#     launch_dangerous_cc.sh (the disposable-client-lane launcher), which this
+#     boot script never calls -- unreachable from here regardless of this var.
+#   - sre_lane_recycle.py / mamadah_reconcile.py / lane_operator_reconcile.py /
+#     my_inbox.py / vault.py read it only as an identity-resolution fallback,
+#     same shape as agent_identity.py's rule 1 -- resolves to 'cc-fleet-health'
+#     either way (AGENT_ID already supplied that value via rule 2).
+#   - session_start_reconstitute.py uses CC_BASE_AGENT_ID presence to EXEMPT a
+#     session from the console-handoff injection it only fires for
+#     ORCH_BODY_ROLE=console sessions -- this export makes that exemption
+#     correct for us too, if the hook ever reaches an off-tree cwd at all.
+# Do NOT unset ORCH_BODY_ROLE to "fix" this instead -- unset means hub doctrine
+# in orch_lease elsewhere; this body legitimately carries it ambiently from the
+# shared .env and the fix is CC_BASE_AGENT_ID, not removing that.
+export CC_BASE_AGENT_ID="$AGENT_ID"
 
 # .env (DSN, OAuth token) lives in the orchestrator; the SRE shares the substrate.
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
