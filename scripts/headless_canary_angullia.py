@@ -17,6 +17,9 @@ from scripts.lib.headless_supervisor import Supervisor  # noqa: E402
 from scripts.lib.substrate_dsn import dsn_from_env_file  # noqa: E402
 
 _STATE_DIR = _ORCH_DIR / "state"
+# Moving this canary again? Carry state/canary_angullia_session_id.txt (and
+# the log file) to the new location BEFORE the first restart from there, or
+# the supervisor starts a fresh session instead of resuming (bus #88136/#88144).
 
 dsn = os.environ.get("DATABASE_URL") or dsn_from_env_file()
 
