@@ -60,6 +60,16 @@ samples `status='working'` **and** B's timestamp strictly later than A's. The ge
 is now in the runbook's residuals: any shutdown handler that writes telemetry inverts every
 freshness check.
 
+**Restart mechanics verified independently (21:00Z, plist read not relayed):**
+`dev.wingmen.nazim-session` = KeepAlive 1, RunAtLoad 1, ThrottleInterval 15,
+ProgramArguments `boot_nazim_session.sh`, WorkingDirectory = the live checkout. So killing
+the `nazim` session is genuinely the trigger and the fresh boot re-sources the env file.
+Measured tree (both bodies): `pane_pid` = the **boot script**, children = heartbeat subshell
++ `claude`. `agent_status` rows: `cc-fleet-health` and **`orch-console`** (not "nazim").
+`lsof` is NOT on this shell's PATH — call `/usr/sbin/lsof`; a missing probe is UNKNOWN, not
+free. Runbook now carries the both-bodies table and the console's two hand-run probes
+(`1888a79`); the SRE's guard covers fleet-health only.
+
 **Decided design (console 87978, no new lifeline code):** at GO, a bounded declaration
 row to cc-fleet-health (two ids, T0, absolute expiry ≤4h, owner, never a surrogate
 heartbeat), then after verify the two bodies restart on their real boot scripts —
