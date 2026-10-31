@@ -46,9 +46,11 @@ thing that exposes an outside party):
     grants it (same two-step pattern migrations 110->111->112 proved out).
 
 Still open / NOT enforced here (flagged, not hidden):
-  - Section 3's PreToolUse `powers` guard does not exist yet -- `powers` is
-    recorded in group_routing as the correct least-privilege value for when
-    it ships, but nothing reads/enforces it today.
+  - Section 3's PreToolUse `powers` guard is Phase A now: it reads
+    group_routing->'powers' at the lane_reply.sh outbound boundary
+    (scripts/hooks/client_powers_guard.py, wired by
+    scripts/lib/ensure_client_powers_guard.py). `--powers` still records the
+    least-privilege value here; the guard is the thing that enforces it.
   - Section 6's auto-notify + one-tap-approve flow is separate, unbuilt.
   - Refinement #2's audit-log requirement for --override-to-direct is
     satisfied here via --override-gate-citation baked into the rendered
