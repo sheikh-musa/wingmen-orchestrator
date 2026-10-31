@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import timedelta, timezone
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SCRIPT = os.path.join(_ROOT, "scripts", "deepseek_console.py")
@@ -387,6 +388,107 @@ def test_merge_jsonl_is_idempotent_and_keeps_first_seen_at(tmp_path):
     row = json.loads(open(out).read().strip())
     assert row["first_seen_at"] == original_first_seen
     assert row["usage"]["output_tokens"] == 1000
+
+
+def _budget_jsonl(tmp_path, rows):
+    path = str(tmp_path / "usage.jsonl")
+    with open(path, "w") as f:
+        for day, key, usd in rows:
+            f.write(
+                json.dumps(
+                    {"date": day, "api_key_name": key, "model": "deepseek-flash", "cost_usd": usd}
+                )
+                + "\n"
+            )
+    return path
+
+
+def test_budget_status_is_ok_warn_alert_on_the_calendar_day(tmp_path):
+    """bus #87142 / Musa op#36779: WARN 5 USD, ALERT 7 USD, per calendar day."""
+    mod = _load_module()
+    rows = [
+        ("2026-11-01", "cosem", 2.0),
+        ("2026-11-01", "bariq", 2.99),  # 4.99 -> still ok
+        ("2026-11-01", "fleet", 0.01),  # 5.00 -> warn exactly on the line
+        ("2026-11-02", "cosem", 3.0),   # 7.00 -> alert exactly on the line
+        ("2026-11-02", "bariq", 4.0),
+        ("2026-10-31", "cosem", 99.0),  # a different day must not leak in
+    ]
+    path = _budget_jsonl(tmp_path, rows)
+    assert mod.budget_status(path, day="2026-11-01")["level"] == "warn"
+    assert mod.budget_status(path, day="2026-11-02")["level"] == "alert"
+    assert mod.budget_status(path, day="2026-10-30")["level"] == "ok"
+
+
+def test_budget_status_reports_the_top_three_keys_by_spend(tmp_path):
+    mod = _load_module()
+    path = _budget_jsonl(
+        tmp_path,
+        [
+            ("2026-11-01", "a", 1.0),
+            ("2026-11-01", "b", 4.0),
+            ("2026-11-01", "c", 2.0),
+            ("2026-11-01", "d", 0.5),
+        ],
+    )
+    st = mod.budget_status(path, day="2026-11-01")
+    assert [t["key"] for t in st["top_keys"]] == ["b", "c", "a"]
+    assert st["total_usd"] == 7.5 and st["level"] == "alert"
+
+
+def test_budget_status_on_a_missing_file_is_ok_not_a_crash(tmp_path):
+    mod = _load_module()
+    st = mod.budget_status(str(tmp_path / "nope.jsonl"), day="2026-11-01")
+    assert st["level"] == "ok" and st["total_usd"] == 0.0
+
+
+def test_budget_defaults_to_the_console_calendar_not_the_host_calendar(tmp_path, monkeypatch):
+    """The console says GMT+8 on /usage; the day label must follow that,
+    otherwise spend lands on the wrong side of midnight every evening."""
+    mod = _load_module()
+    seen = {}
+
+    class _FixedDatetime(mod.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            seen["tz"] = tz
+            # 16:30Z is still 2026-10-31 on a UTC host, but the console's
+            # GMT+8 calendar has already rolled over to 2026-11-01.
+            return mod.datetime(2026, 10, 31, 16, 30, tzinfo=timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr(mod, "datetime", _FixedDatetime)
+    st = mod.budget_status(str(tmp_path / "nope.jsonl"))
+    assert seen["tz"] is not None and seen["tz"] == timezone(timedelta(hours=8))
+    assert st["date"] == "2026-11-01"
+
+
+def test_budget_posts_only_when_notify_is_on_and_the_level_is_not_ok(monkeypatch):
+    """A manual run must never page the fleet; the launchd runner opts in."""
+    mod = _load_module()
+    calls = []
+    monkeypatch.setattr(mod, "_post_budget_row", lambda st: calls.append(st) or 0)
+    alert = {"level": "alert", "bus_rc": None}
+    warn = {"level": "warn", "bus_rc": None}
+    ok = {"level": "ok", "bus_rc": None}
+
+    class A:
+        pass
+
+    off = A()
+    off.budget_notify = False
+    mod._maybe_post_budget(off, dict(alert))
+    assert calls == []  # notify off, even at alert
+
+    on = A()
+    on.budget_notify = True
+    mod._maybe_post_budget(on, dict(ok))
+    assert calls == []  # notify on, but nothing to say
+    mod._maybe_post_budget(on, dict(warn))
+    assert len(calls) == 1
+
+    no_attr = A()
+    mod._maybe_post_budget(no_attr, dict(alert))
+    assert len(calls) == 1  # args without the flag default to silent
 
 
 def test_merge_jsonl_refreshes_a_changed_day_without_duplicating(tmp_path):

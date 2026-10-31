@@ -73,7 +73,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _ORCH_ROOT = os.path.dirname(_SCRIPT_DIR)
@@ -863,6 +863,104 @@ def merge_jsonl(path: str, records: list, currency: str) -> dict:
     return {"records_added": added, "records_updated": updated, "records_total": len(existing)}
 
 
+_BUDGET_WARN_USD = 5.0
+_BUDGET_ALERT_USD = 7.0
+_BUS_SEND_SCRIPT = os.path.join(_ORCH_ROOT, "scripts", "bus_send.py")
+# The console states "All dates and times are GMT+8" on /usage, so a day label
+# in the export is a GMT+8 day. Comparing against the host's local calendar
+# would move spend across the boundary every evening.
+_CONSOLE_TZ = timezone(timedelta(hours=8))
+
+
+def budget_status(path: str, day: str | None = None) -> dict:
+    """Calendar-day DeepSeek spend from the JSONL, with a per-key breakdown.
+
+    Musa's line (orch-console bus #87142, op#36779): under USD 7/day DeepSeek
+    stays cheaper than another Claude plan. WARN at 5, ALERT at 7.
+
+    CALENDAR DAY ONLY, deliberately. A trailing-24h figure cannot be derived
+    from this artifact: the console export is daily granularity per key, so any
+    24h number computed here would just be the same partial day relabelled --
+    a fabricated number that reads as measured. orch-console ruled to drop the
+    trailing-24h half entirely (bus #87284): calendar-day WARN 5 / ALERT 7 is
+    the whole feature. Do not re-add a 24h figure from these rows; if a real
+    one is ever wanted it has to come from a balance delta, not this file.
+    """
+    day = day or datetime.now(_CONSOLE_TZ).date().isoformat()
+    per_key: dict = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("date") != day:
+                    continue
+                key = rec.get("api_key_name") or "?"
+                per_key[key] = per_key.get(key, 0.0) + float(rec.get("cost_usd") or 0.0)
+    total = round(sum(per_key.values()), 10)
+    if total >= _BUDGET_ALERT_USD:
+        level = "alert"
+    elif total >= _BUDGET_WARN_USD:
+        level = "warn"
+    else:
+        level = "ok"
+    top = sorted(per_key.items(), key=lambda kv: kv[1], reverse=True)[:3]
+    return {
+        "date": day,
+        "total_usd": total,
+        "level": level,
+        "warn_usd": _BUDGET_WARN_USD,
+        "alert_usd": _BUDGET_ALERT_USD,
+        "top_keys": [{"key": k, "usd": round(v, 6)} for k, v in top],
+    }
+
+
+def _post_budget_row(status: dict) -> int:
+    """One P1 bus row to orch-console. An alert never pauses lanes on its own
+    (bus #87142), so this only reports; the command's own exit code stays 0."""
+    top = ", ".join(f"{t['key']} ${t['usd']:.4f}" for t in status["top_keys"]) or "(none)"
+    body = (
+        f"DeepSeek spend {status['level'].upper()} for {status['date']} (GMT+8): "
+        f"${status['total_usd']:.4f} against a ${status['alert_usd']:.0f}/day "
+        f"line (WARN ${status['warn_usd']:.0f}). Top keys: {top}. "
+        "Calendar-day figure from the console export; a trailing-24h figure "
+        "needs a balance delta, not this artifact. Nothing was paused."
+    )
+    proc = subprocess.run(
+        [
+            sys.executable, _BUS_SEND_SCRIPT,
+            "--to", "orch-console",
+            "--type", "update",
+            "--priority", "P1",
+            "--subject", (
+                f"DeepSeek spend {status['level'].upper()}: "
+                f"${status['total_usd']:.2f} today vs ${status['alert_usd']:.0f} line"
+            ),
+            "--body", body,
+        ],
+        capture_output=True, text=True, cwd=_ORCH_ROOT,
+    )
+    if proc.returncode != 0:
+        sys.stderr.write(
+            "budget bus row FAILED (exit %d): %s\n"
+            % (proc.returncode, _redact((proc.stderr or proc.stdout or "").strip()))
+        )
+    return proc.returncode
+
+
+def _maybe_post_budget(args, status: dict) -> None:
+    """Post only when the runner asked for it AND there is something to say.
+    Manual runs and tests leave --budget-notify off, so the fleet is never
+    paged by somebody poking at the console."""
+    if getattr(args, "budget_notify", False) and status["level"] != "ok":
+        status["bus_rc"] = _post_budget_row(status)
+
+
 def cmd_usage_export(args) -> int:
     """Download the console's own usage export and write per-key daily usage.
 
@@ -923,6 +1021,12 @@ def cmd_usage_export(args) -> int:
             "cost_cross_check_max_abs_diff_usd": meta["max_abs_diff_usd"],
         }
     )
+    # Musa's 5/7 USD/day line (bus #87142). Evaluated on every run so the
+    # summary always states where the fleet sits; the bus row is opt-in so
+    # manual runs and tests never post to the fleet.
+    status = budget_status(out_path)
+    _maybe_post_budget(args, status)
+    summary["budget"] = status
     print(json.dumps(summary, indent=2))
     return 0
 
@@ -981,6 +1085,16 @@ def main(argv) -> int:
         help="JSONL path (default ~/wingmen/fleet-health/state/deepseek_usage_by_key.jsonl)",
     )
     p_usage.add_argument("--headed", action="store_true")
+    p_usage.add_argument(
+        "--budget-notify",
+        action="store_true",
+        help=(
+            "post a P1 bus row to orch-console when the calendar-day total is "
+            "at/above the WARN (5 USD) or ALERT (7 USD) line -- bus #87142. "
+            "Off by default so manual runs never page the fleet. Never exits "
+            "nonzero for budget level and never pauses a lane."
+        ),
+    )
     p_usage.set_defaults(func=cmd_usage_export)
 
     args = ap.parse_args(argv[1:])
