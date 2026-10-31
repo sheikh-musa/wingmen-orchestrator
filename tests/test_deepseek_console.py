@@ -1,12 +1,16 @@
-"""deepseek_console.py Phase 1 scaffold (op#35851, bus #82526/#82540/#82537).
+"""deepseek_console.py (op#35851 Phase 1, op#36768 Phase 2).
 
-Phase 1 ships no verified browser selectors -- there is nothing live to test
-against yet. These tests exercise everything that IS real at this stage:
-CLI wiring, the slug/collision guardrails ahead of any browser or vault
-call, the map file read/write round-trip, and the no-capture-API
-constraint (grepped directly from the shipped source, not re-implemented
-here, so a later edit that adds a screenshot/trace call fails this test
-immediately instead of only being caught by someone reading the diff).
+Phase 1 shipped PLACEHOLDER browser selectors because nothing had ever driven
+the live console. Phase 2 replaced them with selectors verified against the
+real authenticated session (2026-10-31) and rewired usage-export around the
+console's own Export download. Browser-driving itself is still not unit-
+testable here -- there is no live session in CI -- so these tests cover
+everything around it: CLI wiring, the slug/collision guardrails ahead of any
+browser or vault call, the map file read/write round-trip, the export zip
+parser and its JSONL merge, and the no-capture-API constraint (grepped
+directly from the shipped source, not re-implemented here, so a later edit
+that adds a screenshot/trace call fails this test immediately instead of only
+being caught by someone reading the diff).
 """
 import json
 import os
@@ -216,3 +220,193 @@ def test_slug_regex_boundary_lengths():
     assert mod._SLUG_RE.match("a" * 41)
     assert not mod._SLUG_RE.match("a" * 42)
     assert not mod._SLUG_RE.match("")
+
+
+# --- usage export: zip parsing + JSONL merge (op#36768 Phase 2) ------------
+
+def _load_module(script_path=_SCRIPT, name="deepseek_console_export"):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(name, script_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_AMOUNT_HEADER = (
+    "user_id,start_time_iso,end_time_iso,model,name,api_key_name,api_key,type,price,amount"
+)
+_COST_HEADER = "user_id,start_time_iso,end_time_iso,model,name,wallet_type,cost,currency"
+_USER = "Google-aaaa-bbbb"
+
+
+def _build_export_zip(amount_lines, cost_lines):
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "amount-2026-10-01_2026-11-01.csv",
+            "\n".join([_AMOUNT_HEADER, *amount_lines]) + "\n",
+        )
+        zf.writestr(
+            "cost-2026-10-01_2026-11-01.csv",
+            "\n".join([_COST_HEADER, *cost_lines]) + "\n",
+        )
+    return buf.getvalue()
+
+
+def test_parse_export_zip_groups_per_key_per_day_and_sums_cost():
+    mod = _load_module()
+    zip_bytes = _build_export_zip(
+        [
+            # 2 days x 2 keys x 3 usage types, one row each
+            f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,bariq,sk-MASKED*****aa,output_tokens,0.0000012,1000",
+            f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,bariq,sk-MASKED*****aa,input_cache_hit_tokens,0.0000001,50",
+            f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,bariq,sk-MASKED*****aa,input_cache_miss_tokens,0.0000005,200",
+            f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,cosem,sk-MASKED*****bb,output_tokens,0.0000012,500",
+            f"{_USER},2026-10-31T00:00:00+08:00,2026-11-01T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,bariq,sk-MASKED*****aa,output_tokens,0.0000012,10",
+        ],
+        [
+            f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,Paid,0.001905,USD",
+            f"{_USER},2026-10-31T00:00:00+08:00,2026-11-01T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,Paid,0.000012,USD",
+        ],
+    )
+
+    records, meta = mod.parse_export_zip(zip_bytes)
+    idx = {(r["date"], r["api_key_name"]): r for r in records}
+
+    bariq_30 = idx[("2026-10-30", "bariq")]
+    assert bariq_30["usage"] == {
+        "output_tokens": 1000,
+        "input_cache_hit_tokens": 50,
+        "input_cache_miss_tokens": 200,
+    }
+    assert bariq_30["cost_usd"] == round(1000 * 0.0000012 + 50 * 0.0000001 + 200 * 0.0000005, 10)
+    assert bariq_30["currency"] == "USD"
+    assert bariq_30["source"] == "console_export"
+
+    # one row per (day, key), not one per usage type
+    assert ("2026-10-30", "cosem") in idx
+    assert idx[("2026-10-30", "cosem")]["cost_usd"] == round(500 * 0.0000012, 10)
+    assert len(records) == 3
+
+    # the console's own per-day cost is reproduced by amount x price
+    assert meta["max_abs_diff_usd"] < 1e-9
+    assert meta["keys"] == ["bariq", "cosem"]
+
+
+def test_parse_export_zip_never_emits_key_material_or_user_id():
+    mod = _load_module()
+    zip_bytes = _build_export_zip(
+        [
+            f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,bariq,sk-9b3bf***********************ff74,output_tokens,"
+            f"0.0000012,1000",
+        ],
+        [],
+    )
+    records, _meta = mod.parse_export_zip(zip_bytes)
+    blob = json.dumps(records)
+    assert "sk-" not in blob
+    assert _USER not in blob
+    assert "ff74" not in blob
+    assert records[0]["api_key_name"] == "bariq"
+
+
+def test_parse_export_zip_since_filters_days():
+    mod = _load_module()
+    zip_bytes = _build_export_zip(
+        [
+            f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,bariq,sk-MASKED,output_tokens,0.0000012,10",
+            f"{_USER},2026-10-31T00:00:00+08:00,2026-11-01T00:00:00+08:00,deepseek-flash,"
+            f"deepseek-flash,bariq,sk-MASKED,output_tokens,0.0000012,20",
+        ],
+        [],
+    )
+    records, _meta = mod.parse_export_zip(zip_bytes, since="2026-10-31")
+    assert [r["date"] for r in records] == ["2026-10-31"]
+
+
+def test_parse_export_zip_rejects_a_bad_since_date():
+    mod = _load_module()
+    zip_bytes = _build_export_zip([], [])
+    try:
+        mod.parse_export_zip(zip_bytes, since="31-10-2026")
+    except mod.LayoutMismatch as exc:
+        assert "YYYY-MM-DD" in str(exc)
+    else:
+        raise AssertionError("expected LayoutMismatch for a malformed --since")
+
+
+def test_parse_export_zip_fails_closed_when_the_export_shape_changes():
+    import io
+    import zipfile
+
+    mod = _load_module()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("something-else.csv", "a,b\n1,2\n")
+    try:
+        mod.parse_export_zip(buf.getvalue())
+    except mod.LayoutMismatch as exc:
+        assert "amount-*.csv" in str(exc)
+    else:
+        raise AssertionError("expected LayoutMismatch when amount-*.csv is absent")
+
+
+def test_merge_jsonl_is_idempotent_and_keeps_first_seen_at(tmp_path):
+    mod = _load_module()
+    out = str(tmp_path / "state" / "deepseek_usage_by_key.jsonl")
+
+    first, _ = mod.parse_export_zip(
+        _build_export_zip(
+            [
+                f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+                f"deepseek-flash,bariq,sk-MASKED,output_tokens,0.0000012,1000",
+            ],
+            [],
+        )
+    )
+    s1 = mod.merge_jsonl(out, first, currency="USD")
+    assert s1["records_added"] == 1 and s1["records_total"] == 1
+    original_first_seen = json.loads(open(out).read().strip())["first_seen_at"]
+
+    s2 = mod.merge_jsonl(out, first, currency="USD")
+    assert s2["records_added"] == 0 and s2["records_updated"] == 1
+    assert s2["records_total"] == 1
+    row = json.loads(open(out).read().strip())
+    assert row["first_seen_at"] == original_first_seen
+    assert row["usage"]["output_tokens"] == 1000
+
+
+def test_merge_jsonl_refreshes_a_changed_day_without_duplicating(tmp_path):
+    mod = _load_module()
+    out = str(tmp_path / "deepseek_usage_by_key.jsonl")
+
+    def run(amount):
+        recs, _ = mod.parse_export_zip(
+            _build_export_zip(
+                [
+                    f"{_USER},2026-10-30T00:00:00+08:00,2026-10-31T00:00:00+08:00,deepseek-flash,"
+                    f"deepseek-flash,bariq,sk-MASKED,output_tokens,0.0000012,{amount}",
+                ],
+                [],
+            )
+        )
+        return mod.merge_jsonl(out, recs, currency="USD")
+
+    run(100)
+    run(250)
+    lines = [json.loads(l) for l in open(out) if l.strip()]
+    assert len(lines) == 1
+    assert lines[0]["usage"]["output_tokens"] == 250
