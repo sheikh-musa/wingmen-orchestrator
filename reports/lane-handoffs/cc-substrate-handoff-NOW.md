@@ -89,10 +89,15 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
-**22:50Z — 785 head `56208a5`; cc-quality's PASS (88433) names a STALE head `f25b109` — do not merge on it.**
-Their verdict also checked **origin/main** (9dc89b7, lags by design) instead of this PR's base
-`fable/substrate-safe-fixes`, so it reported the base executor as unhardened and "no 774 merge" —
-both false since 22:43Z. Told them directly (88435) and warned the console not to merge on it (88436).
+**22:52Z — 785 head `56208a5`; BOTH cc-quality PASSes are stale, do not merge on either.**
+88433 names `f25b109`; 88434 (sent later) names `580766b` — I had already pushed `56208a5` when
+88434 landed, so it crossed. 88433's verdict also checked **origin/main** (9dc89b7, lags by design)
+instead of this PR's base `fable/substrate-safe-fixes`, so it reported the base executor as
+unhardened and "no 774 merge" — both false since 22:43Z. Told them directly (88435 for 88433,
+**88437** for 88434) and warned the console twice: **88436** (do not merge on 88433) and **88438**
+(do not merge on 88434 either; only a verdict naming `56208a5` exactly is mergeable).
+**88437 states a hard stop: no further edits to 785 tonight.** If no PASS naming `56208a5` arrives,
+785 does not ship and step zero becomes a manual instruction in the 03:30Z checklist instead.
 
 **Adopted their good catch:** `def _scrub` tests DEFINITION, but the leak was a missing CALL — `e02a0e2c`
 has def=1/comment=0 and still leaked. Gate now greps the hardening comment
@@ -114,6 +119,7 @@ closed in trunk as of 22:43Z.** → **All three of the console's 87921 gate cond
 
 **03:30Z checklist still owed:** (1) re-run the PAT check, (2) confirm 785 landed so step zero is
 live in the doc, (3) confirm base has not moved the executor blob off `a7bf4c01` since 22:43Z.
+At 22:52Z 785 was `MERGEABLE`/`BLOCKED` with only `Lint & Test` pending on `56208a5`; inbox unread 0.
 
 **22:39Z — 774 PASSed by cc-quality at the rebased head (row 88411)**, verified by object identity
 (both files' blobs identical to `cee1dd4`; dependency `rotate_substrate_dsn.py` blob `f4b64c23`
