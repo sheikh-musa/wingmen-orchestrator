@@ -90,12 +90,15 @@ The order **is** the safety property. This is not a preference.
    hub to re-run `fetch-secrets` (pull) and then its restart groups.
 5. **restart** — every launchd loader is kicked. This must be adjacent to the patch: the
    only interval in which the fleet is broken is between 3 and 5, and it should be
-   seconds. **This step does NOT cover the three tmux singletons** (console, cai,
-   fleet-health) — see the heartbeat box below; they need their own restart and only the
-   console can order it.
+   seconds. **This step does NOT cover the two tmux singletons** (console, fleet-health) —
+   they get step 7 below.
 6. **verify** — the new value must connect, and the old value must **fail**. Both halves
    matter; a rotation where the old password still works did not happen.
-7. **watch** — re-probe for the configured window.
+7. **singleton restart (operator-driven, not by this tool)** — once verify has shown the
+   old value refused, fleet-health restarts first and the console last (see the decided
+   design below). The executor does not do this: restarting the console is the one action
+   that ends the session running the operation.
+8. **watch** — re-probe for the configured window.
 
 **Why the vault write comes before the patch.** The vault lives *inside* the substrate
 database. Fetching from it uses the same connection the rotation is rotating. Stage
@@ -138,33 +141,33 @@ printing the OLD body, five beats out of five. Bash parses the function once. **
 no no-restart fallback.** Getting fresh code into a loop means one of the three outcomes
 below.
 
-**The three outcomes, and who picks.** The console asked for the premise check (bus
-87921) and has since proposed a third option (87940); 87929 and 87964 answer both.
+**The decided design (console, bus 87978 — final for this window).** The measured facts
+above killed the "no restart" premise and the "replace only the loop" option, so the
+design is now three parts and contains **no new lifeline code**:
 
-1. **Restart the singletons.** Costs the live console session — and the console is the
-   executor of this rotation, so this one is ruled out for the console body regardless.
-2. **Do not restart.** Their `last_heartbeat` rows freeze from the patch until each body
-   is recycled. **This is not the false-alarm case it looks like** — the SRE measured its
-   own detectors (bus 87965) and none of the three can be flipped offline or reported
-   stalled: all three are in `protected_agents`, and `fleet_stall_watch` needs a
-   `fleet_lanes` row with `desired_state` up, which none of them has. The real cost is
-   **blindness, not noise**: `context_health_watchdog` builds its live-agent set from
-   `last_heartbeat` within 30 minutes, so a frozen row removes the console — the body
-   driving the rotation — from the gauge that catches a bloated context, silently, at the
-   exact moment the fleet is being changed under it. That is the window the SRE wants
-   declared and bounded, on their terms (a durable bus row at GO time, absolute expiry of
-   at most four hours, fail-closed read, and a substitute signal: bus rows or a live pane
-   must still hold or the SRE pages anyway). A declared gap is acceptable; a fabricated
-   heartbeat is not, which is why suppression was refused.
-3. **Replace only the loop.** Kill the recorded loop pid after the files hold the new
-   value and fork a fresh loop on the patched code and fresh env — no session lost. This
-   is the only one of the three that keeps every signal honest, **but only with its own
-   dead-man's switch**: the replacement must check each beat that the boot-shell pid it
-   was born under is still alive, and stamp `offline` once and exit when it is not. Without
-   that check the replacement outlives its body and the fleet is told a dead console is
-   working. That is not a stylistic preference; it is the specific failure the boot script
-   was written to prevent, and no post-window report repairs it. Option 3 is new code on a
-   lifeline path and therefore needs the same review as the executor itself.
+1. **A bounded declaration, not a suppression.** At GO, cc-substrate posts one durable
+   P1 bus row to cc-fleet-health naming the two ids that will go heartbeat-blind
+   (`orch-console`, `cc-fleet-health`), T0, an **absolute expiry of at most four hours**
+   and the owner. It never asserts the bodies are healthy. The SRE's terms (bus 87965)
+   are the contract: a failed read of the declaration pages normally, the declaration
+   mutes only heartbeat-derived decisions, and **no surrogate heartbeat is ever written**
+   — a fabricated liveness column is worse than a declared gap because it makes a dead
+   body look alive.
+2. **Restart the two bodies on their real boot scripts, inside that window.** After
+   `verify` has shown the old value refused and the new one connecting: **fleet-health
+   first, console last**, so the operator is never dropped mid-run. The mechanism is the
+   one that already owns recycle — kill the tmux session (`fleet-health`, then `nazim`)
+   and let the launchd KeepAlive waiters (`dev.wingmen.fleet-health-session`,
+   `dev.wingmen.nazim-session`) relaunch `boot_fleet_health.sh` / `boot_nazim.sh` on the
+   patched files. Nothing is hand-rolled and nothing is `nohup`-shaped.
+3. **The declaration closes by expiry** because the restarts land well inside it. The SRE
+   reads its cost gauge directly during the gap rather than pretending a pager covers it
+   (bus 87980) — the blind spot is `context_health_watchdog`'s live set, and it is named
+   rather than papered over.
+
+`cai` is out of scope: it has no session on this host and has read `offline` since
+13 October (bus 87965/87978). Its absence is an ownership question for another body, not
+a rotation problem.
 
 **The Supavisor cache.** The pooler keeps a credential cache that can hold the old value
 for roughly 15 seconds while connections are active. An idle pool may refresh only on a
@@ -176,7 +179,12 @@ the auth circuit breaker, which is a different failure wearing the same mask.
 
 ## 3. Execute
 
-Only after the console's GO, and only inside the agreed window:
+**The window is Sunday 2026-11-01 at 04:00Z** (console, bus 87978), not the 22:00Z slot
+first proposed. Two independent reasons, either sufficient: the operator ruled that the
+schedule settles before the rotation and had just reopened W5 questions, so it is not
+settled; and the 21:45Z checklist could not clear because CI was queued behind two
+long-running jobs. Only after the console's explicit GO, and only inside the agreed
+window:
 
 ```bash
 cd ~/wingmen/projects/orchestrator.wt-exec
@@ -213,6 +221,11 @@ execute: rotation COMPLETE — journal at …/journal.jsonl
 on its own is half a rotation, which is why the old half is not optional: with no backup
 holding the old value the executor refuses outright rather than recording a pass it did
 not earn.
+
+`COMPLETE` from the executor is **not** the end of the operation. The singleton restart
+(step 7) and the declaration closing are still owed — see the decided design above — and
+until both bodies are beating again, the rotation is "in progress" in the console's
+words.
 
 ---
 
