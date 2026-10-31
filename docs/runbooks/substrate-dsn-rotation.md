@@ -160,10 +160,22 @@ design is now three parts and contains **no new lifeline code**:
    and let the launchd KeepAlive waiters (`dev.wingmen.fleet-health-session`,
    `dev.wingmen.nazim-session`) relaunch `boot_fleet_health.sh` / `boot_nazim.sh` on the
    patched files. Nothing is hand-rolled and nothing is `nohup`-shaped.
-3. **The declaration closes by expiry** because the restarts land well inside it. The SRE
-   reads its cost gauge directly during the gap rather than pretending a pager covers it
-   (bus 87980) — the blind spot is `context_health_watchdog`'s live set, and it is named
-   rather than papered over.
+   **A reset is not a restart** (SRE, bus 87991): `reset_nazim.sh` / `reset_fleet_health.sh`
+   are in-place clears whose own comments say they keep the heartbeat subshell alive, so
+   after a reset the loop is still frozen on the dead credential and the declaration does
+   **not** close early. Only a clean session exit (the trap kills the loop) followed by a
+   fresh boot script re-forks it. And **neither body can do this to itself** — each needs
+   an external actor, which is cc-substrate running this step from its own process, not
+   from inside a singleton.
+3. **The declaration closes by expiry** because the restarts land well inside it. If the
+   restarts do not land, it simply runs its four hours and nothing is wrong — that is a
+   bounded, declared gap, not a failure. The SRE reads its cost gauge directly during the
+   gap rather than pretending a pager covers it (bus 87980) — the blind spot is
+   `context_health_watchdog`'s live set, and it is named rather than papered over.
+   **Expect, and do not page on:** the SRE's own `fleet_health_lease` renewals fail on the
+   same stale credential, its 900s TTL lapses, and the hub reclaims the watchdog and
+   fleet-status pens (87991). That is the dead-man's switch working as designed on a body
+   that cannot prove it is alive — not the SRE dying.
 
 `cai` is out of scope: it has no session on this host and has read `offline` since
 13 October (bus 87965/87978). Its absence is an ownership question for another body, not
@@ -259,6 +271,11 @@ do not retry blindly — check the API response in the journal first.
 - Old value is **rejected** — not "untested".
 - The journal shows a restart entry for every daemon.
 - The vault holds the new value with the previous one archived in `vault_secrets_history`.
+- **Both singletons were relaunched, not reset**, and their `last_heartbeat` rows are
+  advancing again on the new credential — checked in the rows, not inferred from "the
+  restart command returned 0". A reset leaves the frozen loop alive (87991).
+- The declaration has expired or been superseded by a restart, and nothing in a later
+  reader's view suggests the gap is still open.
 - A 10-minute watch shows no new authentication failures.
 
 Anything less is "in progress", and the console should hear that word rather than "done".
