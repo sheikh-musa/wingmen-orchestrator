@@ -59,9 +59,13 @@ def fetch_new(conn, to_agents: list[str], last_id: int) -> list[dict]:
 
 
 def _connect():
+    # op#892 (bus #83148): bus_watch is explicitly lane-invoked ("the ONE
+    # sanctioned way for a lane to watch its bus inbox"), and a lane's env no
+    # longer carries a bare DATABASE_URL after the rename -- use the same
+    # BUS_DATABASE_URL-preferring resolution bus_send.py itself uses.
     import psycopg2
-    from scripts.bus_send import dburl
-    conn = psycopg2.connect(dburl(os.environ.get("DATABASE_URL")))
+    from scripts.bus_send import dburl, _bus_database_url
+    conn = psycopg2.connect(dburl(_bus_database_url()))
     conn.autocommit = True
     return conn
 

@@ -1113,6 +1113,28 @@ fi
 _LANE_ENV_PAIRS=()
 while IFS= read -r -d '' _lp; do _LANE_ENV_PAIRS+=("$_lp"); done < <(lane_env_scrubbed_pairs0 "${CC_BASE_AGENT_ID:-}")
 
+# >>> bus-dsn-leak-guard
+# op#892 (bus #82524/#82668): FAIL-CLOSED regression guard. lane_env_allowlist.sh's
+# KEEP tier no longer carries bare DATABASE_URL/SUPABASE_DB_URL -- the bus DSN now
+# reaches a lane only as BUS_DATABASE_URL/BUS_SUPABASE_DB_URL (see that file for why:
+# a bare-named DATABASE_URL in a lane's scrubbed env SHADOWS a client lane's own
+# `process.env.DATABASE_URL`, TENANT-RESIDENCY-001 commingling risk). If either bare
+# name is EVER present in the computed scrub (a future edit re-adding it to the KEEP
+# tier or the per-lane opt-in map), refuse the boot loudly rather than silently let the
+# hazard back in -- same fail-closed shape as the CAI-RESP-1225 L2 guard above. Names
+# the var + doctrine, never the secret value.
+for _lp in "${_LANE_ENV_PAIRS[@]+"${_LANE_ENV_PAIRS[@]}"}"; do
+    case "$_lp" in
+        DATABASE_URL=*|SUPABASE_DB_URL=*)
+            echo -e "\033[31mSECURITY[op#892]: a bare DATABASE_URL/SUPABASE_DB_URL would reach this lane's scrubbed env — REFUSING to boot.\033[0m" >&2
+            echo "  Doctrine: lanes get BUS_DATABASE_URL (the renamed bus/coordination DSN), never a bare name — a client lane's own DATABASE_URL must never be shadowed by the bus DSN under the same name (TENANT-RESIDENCY-001)." >&2
+            echo "  Likely cause: a regression re-added DATABASE_URL/SUPABASE_DB_URL to lane_env_allowlist.sh's KEEP tier or scripts/lib/lane_env_optin.map." >&2
+            exit 1
+            ;;
+    esac
+done
+# <<< bus-dsn-leak-guard
+
 if [ -n "$SCHEDULED_PROMPT_FILE" ]; then
     PROMPT_PATH="$ORCH_DIR/$SCHEDULED_PROMPT_FILE"
     if [ ! -f "$PROMPT_PATH" ]; then

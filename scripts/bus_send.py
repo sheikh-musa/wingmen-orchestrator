@@ -72,6 +72,15 @@ _VALID_TYPES = (
 _MIN_BODY_BYTES = 40
 _HUB_AGENT = "cc-orchestrator"
 
+
+def _bus_database_url() -> str | None:
+    """op#892 (bus #82524/#82668): a lane's scrubbed env now carries the bus DSN
+    as BUS_DATABASE_URL (lane_env_allowlist.sh no longer passes a bare
+    DATABASE_URL through, to stop it shadowing a client lane's own DSN of the
+    same name). Direct orchestrator-side invocation (no lane scrub involved)
+    still only has DATABASE_URL in .env, so fall back to it."""
+    return os.environ.get("BUS_DATABASE_URL") or os.environ.get("DATABASE_URL")
+
 # Real, intentional send targets that are legitimately NEVER wake-eligible by
 # is_wake_eligible_recipient's definition (operator / human-opened addresses) --
 # never "undeliverable" below, despite having no live wake owner. Mirrors the
@@ -117,7 +126,7 @@ def live_instance_ids(base_to: str, dsn: str | None = None) -> list[str]:
     coords) -- that case is a no-op by construction, not a special case."""
     import psycopg2
 
-    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
+    conn = psycopg2.connect(dsn or dburl(_bus_database_url()))
     cur = conn.cursor()
     cur.execute(
         "SELECT agent_id FROM agent_status "
@@ -141,7 +150,7 @@ def _heartbeat_age_str(agent_id: str, dsn: str | None = None) -> str:
     import psycopg2
 
     try:
-        conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
+        conn = psycopg2.connect(dsn or dburl(_bus_database_url()))
         cur = conn.cursor()
         cur.execute(
             "SELECT status, now() - last_heartbeat FROM agent_status WHERE agent_id=%s",
@@ -183,7 +192,7 @@ def _agent_status_row(agent_id: str, dsn: str | None = None) -> tuple | None:
     and a heartbeat inside _LIVE_INSTANCE_WINDOW."""
     import psycopg2
 
-    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
+    conn = psycopg2.connect(dsn or dburl(_bus_database_url()))
     cur = conn.cursor()
     cur.execute(
         "SELECT base_agent_id, "
@@ -651,7 +660,7 @@ def _open_rr_from(to_agent: str, addressed_to: str, dsn: str | None = None) -> t
     without linking via --reply-to. None when there is no such open row."""
     import psycopg2
 
-    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
+    conn = psycopg2.connect(dsn or dburl(_bus_database_url()))
     cur = conn.cursor()
     cur.execute(
         "SELECT id, now() - created_at FROM agent_messages "
@@ -744,7 +753,7 @@ def _is_lane(to: str, dsn: str | None = None) -> bool:
     import psycopg2
 
     base = re.sub(r"-\d+$", "", to)
-    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")))
+    conn = psycopg2.connect(dsn or dburl(_bus_database_url()))
     cur = conn.cursor()
     cur.execute(
         "SELECT 1 FROM fleet_lanes WHERE launcher='launch_dangerous_cc.sh' "
@@ -1119,7 +1128,7 @@ def send(
     connect_kwargs = {}
     if connect_timeout is not None:
         connect_kwargs["connect_timeout"] = connect_timeout
-    conn = psycopg2.connect(dsn or dburl(os.environ.get("DATABASE_URL")), **connect_kwargs)
+    conn = psycopg2.connect(dsn or dburl(_bus_database_url()), **connect_kwargs)
     cur = conn.cursor()
     if statement_timeout_ms is not None:
         cur.execute(f"SET LOCAL statement_timeout = {int(statement_timeout_ms)}")

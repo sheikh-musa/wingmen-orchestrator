@@ -65,13 +65,43 @@ lane_env_safe_names() {
 # env -i — a separate gap, out of scope for the native GLM campaign (flagged).
 
 # Minimal SECRETS kept for every lane (verified fleet-wide need).
+#
+# op#892 (bus #82524/#82668, approved design bus #44901/#44903/#45008): DATABASE_URL
+# and SUPABASE_DB_URL are DELIBERATELY ABSENT from this list -- they used to be here,
+# which meant every lane's scrubbed env carried a variable literally NAMED
+# DATABASE_URL pointing at the orchestrator/BUS substrate. A client lane's own code
+# reading `process.env.DATABASE_URL` (the standard Postgres-client convention, e.g.
+# alderei-invoice-tracker's db/client.ts) would then be SHADOWED by the bus DSN under
+# the same name instead of its own intended target -- TENANT-RESIDENCY-001 commingling
+# risk (CAI-RESP-1308 first flagged this as a detect-only warning; this is the rename
+# that actually closes it). The bus DSN is now emitted under BUS_DATABASE_URL /
+# BUS_SUPABASE_DB_URL instead -- see lane_env_bus_dsn_pairs() below. This is a PURE
+# RENAME (identical DSN value, identical "every lane can reach the bus" property) --
+# any script a lane invokes that needs the bus DSN reads the new name (falling back to
+# DATABASE_URL for direct orchestrator-side invocation, where only DATABASE_URL exists
+# in .env and no scrub is involved at all).
 lane_env_keep_secret_names() {
     printf '%s\n' \
         CLAUDE_CODE_OAUTH_TOKEN \
-        DATABASE_URL SUPABASE_DB_URL SUPABASE_URL SUPABASE_SERVICE_KEY \
+        SUPABASE_URL SUPABASE_SERVICE_KEY \
         ORCHESTRATOR_SUPABASE_URL ORCHESTRATOR_SUPABASE_SERVICE_KEY \
         GH_TOKEN \
         ANTHROPIC_AUTH_TOKEN
+}
+
+# The bus/coordination DSN, renamed on the way into a lane's env (op#892). Reads the
+# orchestrator's OWN DATABASE_URL/SUPABASE_DB_URL (from .env, already in this process'
+# env by the time the launcher calls this) and re-emits them under the BUS_-prefixed
+# names -- never the bare names. Absent/empty source vars emit nothing (same
+# "unset allow-listed name is absent, not empty" contract as the rest of the scrub).
+lane_env_bus_dsn_pairs() {
+    local val
+    if val="$(printenv DATABASE_URL)"; then
+        printf 'BUS_DATABASE_URL=%s\0' "$val"
+    fi
+    if val="$(printenv SUPABASE_DB_URL)"; then
+        printf 'BUS_SUPABASE_DB_URL=%s\0' "$val"
+    fi
 }
 
 # Per-lane opt-in extras from the git-tracked map. Format: one lane per line,
@@ -102,4 +132,5 @@ lane_env_scrubbed_pairs0() {
             printf '%s=%s\0' "$name" "$val"
         fi
     done < <(lane_env_allow_names "$base")
+    lane_env_bus_dsn_pairs
 }

@@ -509,6 +509,16 @@ def test_blocks_echo_of_write_dsn_override_suffixed_var_with_no_sink():
     assert_blocked("Bash", {"command": 'echo "$WRITE_DSN_OVERRIDE"'})
 
 
+def test_blocks_echo_of_renamed_bus_database_url_with_no_sink():
+    # op#892/bus #83148: DATABASE_URL was bare/exact in SENSITIVE_VAR_RE, so a leak of
+    # the BUS_DATABASE_URL rename would have gone uncaught -- now \w*DATABASE_URL.
+    assert_blocked("Bash", {"command": 'echo "$BUS_DATABASE_URL"'})
+
+
+def test_allows_echo_of_renamed_bus_database_url_through_hash_sink():
+    assert_allowed("Bash", {"command": 'echo "$BUS_DATABASE_URL" | shasum'})
+
+
 def test_blocks_env_dump_piped_to_sed_redact():
     # bus #49026/#49029/#49030 real leak: a sed-mask sink is no longer accepted for an
     # UNBOUNDED "dumps the environment" trigger -- only a hash/length sink is, since a

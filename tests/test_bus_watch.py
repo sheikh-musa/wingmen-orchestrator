@@ -65,3 +65,45 @@ def test_fetch_new_refuses_a_non_autocommit_connection():
         assert "autocommit" in str(e)
     else:
         raise AssertionError("expected RuntimeError on a non-autocommit connection")
+
+
+def test_connect_prefers_bus_database_url_over_bare_database_url(monkeypatch):
+    # op#892/bus #83148: bus_watch is lane-invoked, and a lane's scrubbed env no
+    # longer carries a bare DATABASE_URL post-rename -- _connect() must resolve via
+    # bus_send's BUS_DATABASE_URL-preferring helper, same as bus_send.py itself.
+    monkeypatch.setenv("BUS_DATABASE_URL", "postgresql://bus/one")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://bare/two")
+    seen = {}
+
+    class FakeConnObj:
+        def __init__(self):
+            self.autocommit = False
+
+    def fake_connect(dsn):
+        seen["dsn"] = dsn
+        return FakeConnObj()
+
+    import psycopg2
+    monkeypatch.setattr(psycopg2, "connect", fake_connect)
+    conn = bw._connect()
+    assert "bus/one" in seen["dsn"]
+    assert conn.autocommit is True
+
+
+def test_connect_falls_back_to_bare_database_url_when_bus_one_unset(monkeypatch):
+    monkeypatch.delenv("BUS_DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://bare/two")
+    seen = {}
+
+    class FakeConnObj:
+        def __init__(self):
+            self.autocommit = False
+
+    def fake_connect(dsn):
+        seen["dsn"] = dsn
+        return FakeConnObj()
+
+    import psycopg2
+    monkeypatch.setattr(psycopg2, "connect", fake_connect)
+    bw._connect()
+    assert "bare/two" in seen["dsn"]
