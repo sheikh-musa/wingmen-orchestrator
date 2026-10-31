@@ -658,3 +658,49 @@ def test_reverse_file_verify_only_does_not_write(tmp_path):
     rep = s.reverse_file(str(tr), [(offset, len(value))], value, h8, execute=False)
     assert rep["restored"] == 1   # reports what WOULD happen
     assert tr.read_bytes() == before, "verify-only must never write"
+
+
+# ── 2026-11-01 (bus 87660): a REPEATED --scan/--env must ADD, not replace ──────
+# argparse with plain nargs="+" keeps only the LAST occurrence of a flag. On
+# 2026-11-01 a two-glob invocation ("--scan <transcripts> --scan <tool-results>")
+# silently scanned only the tool-results, and the report's "scanned: 783" read as
+# a clean fleetwide sweep when 778 transcripts had never been opened. That is the
+# worst possible failure for a security sweep: a false clean.
+
+def test_repeated_scan_flags_sweep_every_glob(tmp_path, capsys):
+    env = tmp_path / ".env"
+    _write(env, "K=%s\n" % FAKE_KEY)
+    d1, d2 = tmp_path / "a", tmp_path / "b"
+    d1.mkdir(); d2.mkdir()
+    f1 = d1 / "one.jsonl"
+    f2 = d2 / "two.txt"
+    _write(f1, json.dumps({"x": "leak %s" % FAKE_KEY}) + "\n")
+    _write(f2, "leak %s\n" % FAKE_KEY)
+
+    rc = s.main(["--env", str(env),
+                 "--scan", str(d1 / "*.jsonl"),
+                 "--scan", str(d2 / "*.txt"),
+                 "--dry-run", "--report-json"])
+    assert rc == 0
+    report = json.loads(capsys.readouterr().out)
+    files = {r["file"] for r in report["reports"]}
+    assert str(f1) in files, "the first --scan glob was silently dropped"
+    assert str(f2) in files
+    assert report["scanned"] == 2
+    assert report["total_before"] == 2
+
+
+def test_repeated_env_flags_build_one_manifest(tmp_path, capsys):
+    e1, e2 = tmp_path / "a.env", tmp_path / "b.env"
+    _write(e1, "K1=%s\n" % FAKE_KEY)
+    _write(e2, "K2=%s\n" % FAKE_TOKEN)
+    tr = tmp_path / "t.jsonl"
+    _write(tr, json.dumps({"x": "both %s and %s" % (FAKE_KEY, FAKE_TOKEN)}) + "\n")
+
+    rc = s.main(["--env", str(e1), "--env", str(e2), "--scan", str(tr),
+                 "--dry-run", "--report-json"])
+    assert rc == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["env_files"] == 2
+    assert report["secrets_in_manifest"] >= 2
+    assert report["reports"][0]["matches_before"] == 2
