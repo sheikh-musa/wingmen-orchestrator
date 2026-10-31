@@ -1,11 +1,32 @@
-# cc-substrate handoff (updated 2026-10-31 20:45Z, TRACK C rotation armed; window now Sunday)
+# cc-substrate handoff (updated 2026-10-31 20:55Z, TRACK C rotation armed; window Sunday)
 
-## LATEST (2026-10-31 20:45Z) — read this first
+## LATEST (2026-10-31 20:55Z) — read this first
 
-**THE WINDOW MOVED TO SUNDAY 2026-11-01 04:00Z** (console 87978). Two reasons, either
+**THE WINDOW IS SUNDAY 2026-11-01 04:00Z** (console 87978). Two reasons, either
 sufficient: the operator ruled the schedule settles before the rotation and reopened W5
 questions, so it is not settled; and the 21:45Z checklist could not clear because CI was
 queued behind two long jobs. Nothing fires tonight.
+
+**NEW SINCE 20:45Z — three defects found in my own executor, all on the paths a human
+touches first. PR 774's head moved twice; cc-quality's PASS is now on NONE of them.**
+
+1. **Rollback skipped on any non-`Refused` exception** (fixed at `16b7c69`). `run()` caught
+   only its own exception type, so a psycopg/OSError/ImportError escaped as a traceback and
+   skipped the rollback — for exactly the failures the rollback exists for. Every exception
+   is now a refusal, scrubbed.
+2. **The scrub did not cover the probe, so the OLD password leaked** (fixed at `e02a0e2`).
+   `self.old_dsn` was assigned *after* `probe()`, and the probe is the first step that
+   reaches the network — so psycopg quoting the connection string it could not use was
+   raised while the scrub did not yet know that value, and printed it verbatim. Found by
+   running `plan` against the real env file, not by re-reading the diff.
+3. **Plan-mode refusals printed a traceback and exited 1** (fixed at `e02a0e2`). `plan` is
+   the dry run a reviewer reads at 04:00Z; a stack reads as a broken tool and 1 is not the
+   refusal code. Now `plan: REFUSED — <reason>. Nothing written.`, exit 3, still writes no
+   journal.
+   Tests for all three were **red at the previous head** (proven by restoring the old file
+   and re-running, not assumed); **19 green** at `e02a0e2`. Shipped entry point exercised:
+   `plan --env-file ~/wingmen/orchestrator/.env --old-sha8 95ea35a8` →
+   `preflight: OK targets=1 remote=False daemons=9`; wrong sha → exit 3, clean stderr.
 
 **The heartbeat question is CLOSED, and the answer is not what anyone assumed.** I
 measured rather than reasoned (87909, 87964):
@@ -19,7 +40,16 @@ measured rather than reasoned (87909, 87964):
   not three.
 - The SRE measured its own detectors (87965): no false-dead flip, no false stall page for
   these ids. The real cost is **blindness** — `context_health_watchdog` drops them from its
-  live set. My runbook said "false alarms"; that was wrong and is corrected.
+  live set. My runbook said "false alarms"; that was wrong and is corrected (d784ca2).
+
+**Verify recipe corrected TWICE by the SRE, and the second correction is the subtle one**
+(88036/88056, runbook `dc8b767`): sample **≥330s apart**, not 60s (the beat is 300s, so
+closer samples report a healthy body frozen); and **never pass on recency** — the EXIT trap
+writes `last_heartbeat = now()` as it stamps the row offline, so just after a clean exit the
+timestamp is the freshest it has ever been on a body that no longer exists. PASS = both
+samples `status='working'` **and** B's timestamp strictly later than A's. The generalisation
+is now in the runbook's residuals: any shutdown handler that writes telemetry inverts every
+freshness check.
 
 **Decided design (console 87978, no new lifeline code):** at GO, a bounded declaration
 row to cc-fleet-health (two ids, T0, absolute expiry ≤4h, owner, never a surrogate
@@ -33,17 +63,29 @@ runbook as step 7 plus a dedicated section.
 |---|---|---|---|
 | 771 | `cc-substrate/verify-no-argv-dsn` | `511c587` | **MERGED as `05f2797`** |
 | 765 | `cc-substrate/substrate-dsn-rotation` | — | **CLOSED as superseded** |
-| 774 | `cc-substrate/rotation-executor` | `f60a5a4f` | cc-quality **PASS** 87957; CI queued |
-| 773 | `cc-substrate/merge-signoff` | `079e9eb9` | cc-quality **PASS** 87946; CI queued |
-| 762 | `cc-substrate/credguard-bypass-followup` | `d3b71dd` | **CI green** + PASS 87984 |
-| 766 | `cc-substrate/sweep-multi-scan` | `61f3dce` | **CI green** + PASS 87984 |
+| 774 | `cc-substrate/rotation-executor` | `e02a0e2c` | re-review requested 88057 (**PASSes 87957/87987 are on dead heads**); CI queued |
+| 773 | `cc-substrate/merge-signoff` | `079e9eb9` | cc-quality **PASS** 87946; CI queued; console's waiter may merge — coordinate |
+| 762 | `cc-substrate/credguard-bypass-followup` | `d3b71dd` | **MERGED `d3b71ddeb5fc`** |
+| 766 | `cc-substrate/sweep-multi-scan` | `61f3dce` | **MERGED `61f3dcef2084`** |
 | 761 | `cc-substrate/no-cross-provider-resume` | `675c2e7` | PASS 87984; CI queued |
-| 776 | `cc-substrate/rotation-runbook` | `3134236` | doc; decided design recorded |
+| 776 | `cc-substrate/rotation-runbook` | `0277a81` | doc; §1 targets=3→1, step-e verify, residuals; needs a sign-off to merge |
+
+**Outstanding at the 21:45Z checklist** (owed to the console): (a) 774 — **not** PASSed on
+`e02a0e2`, therefore **not merged**; (b) heartbeat — answered, declaration accepted on terms
+4a–g, step seven in the runbook; (c) hub sudo gap — **asked the hub (88048), no answer
+yet**; do not report it closed, and per fleet-health (88056) report the *consequence* for
+the night (wake backstop absent = nobody would learn it from fleet telemetry), not a status
+word.
 
 **Blocker type to remember: the fleet shares ONE GitHub token**, so GraphQL rate limits
 are a shared, fleet-wide budget. `gh pr checks`/`gh pr view --json` are GraphQL; use
 `gh api repos/.../commits/<sha>/check-runs` (REST) for polling. I hit the secondary limit
 by polling five PRs in a loop.
+
+**Correction to my own earlier note:** I recorded that the pre-push hook "silently skips
+test collection without a `.venv`". It does not skip silently — it prints
+`⚠ pre-push: no pytest available — skipping the test-collection check` to stderr, and CI is
+the intended backstop. Not a defect; do not raise it as one.
 
 ---
 
