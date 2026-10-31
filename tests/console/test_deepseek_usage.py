@@ -66,10 +66,14 @@ def test_distinct_key_rows_groups_families_sharing_a_key():
     # yet, so every family maps explicitly to the shared DEEPSEEK_CODING_KEY
     # -- one row, every family grouped onto it. Will split back into
     # per-client rows once real keys are provisioned and the map updates.
+    # Derived from the real map file (op#36531/36535, bus #86506) rather than
+    # hardcoded, so the next family added there can't silently break this.
+    expected = {}
+    for family, key_name in ds._key_map().items():
+        expected.setdefault(key_name, []).append(family)
     rows = {r["key_name"]: sorted(r["families"]) for r in ds.distinct_key_rows()}
-    assert rows["DEEPSEEK_CODING_KEY"] == sorted(
-        ["cosem", "cosem-tdu", "bariq", "oeh", "ffsfulfilment", "hc95", "fleet", "loop"]
-    )
+    assert rows == {k: sorted(v) for k, v in expected.items()}
+    assert rows["DEEPSEEK_CODING_KEY"]  # sanity: the shared row is non-empty
     assert len(rows) == len(set(rows))   # one row per distinct key name, no dupes
 
 
@@ -358,13 +362,17 @@ def test_api_fleet_deepseek_per_client_key_not_provisioned_is_distinct_from_shar
     du = r.json()["deepseek_usage"]
     assert du["shared"]["available"] is True and du["shared"]["balance_usd"] == 46.68
     # Interim state (bus #84011, 2026-10-30): the grouped row's name/families
-    # reflect every family now explicitly mapped to the shared key.
+    # reflect every family now explicitly mapped to the shared key. Families
+    # derived from the real map file (op#36531/36535, bus #86506) rather than
+    # hardcoded, so the next family added there can't silently break this.
+    expected_families = sorted(
+        fam for fam, key_name in ds._key_map().items() if key_name == "DEEPSEEK_CODING_KEY"
+    )
     bariq = next(k for k in du["keys"] if k["key_name"] == "DEEPSEEK_CODING_KEY")
     assert bariq == {"available": False, "balance_usd": None, "delta_usd": None,
                       "reason": "key not created yet", "fetched_at": bariq["fetched_at"],
                       "key_name": "DEEPSEEK_CODING_KEY",
-                      "families": sorted(["cosem", "cosem-tdu", "bariq", "oeh",
-                                           "ffsfulfilment", "hc95", "fleet", "loop"]),
+                      "families": expected_families,
                       "age_s": None, "lanes": ["bariq"]}
 
 
