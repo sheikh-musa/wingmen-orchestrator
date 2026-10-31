@@ -28,6 +28,10 @@ WHAT THIS GUARD OWNS (and what it deliberately does NOT):
       "narrow named non-secret columns stay allowed" requirement: a guard that
       blocks ordinary store work gets disabled, and a disabled guard protects
       nothing.
+      Wrapper words in front of the command are peeled before the verdict —
+      `env PGPASSWORD=x psql …`, `command psql …`, `exec psql …` are judged as the
+      psql call they are (cc-quality 87497 B/D), and a non-WP store's DSN env var
+      (`$STRIPE_DSN`) marks it a client store just as `$WOO_DSN` does (finding E).
 
   Rule 3 — secret-READING CLIs whose output has no fixed shape any value-pattern
       could match (firebase functions:secrets:access, gcloud secrets versions
@@ -148,6 +152,15 @@ STORE_MARKER_RE = re.compile(
     r"|\b(WOO|WORDPRESS)_[A-Z0-9_]*\b",
     re.IGNORECASE,
 )
+# Non-WordPress client stores (cc-quality 87497 finding E). Rule 2 recognises a
+# client SITE by WordPress table names, which does not exist for a Stripe/Shopify/
+# Magento store — but the DSN ENV VAR a read is launched with is just as
+# unambiguous ($STRIPE_DSN, $SHOPIFY_DATABASE_URL). Deliberately NOT
+# case-insensitive: `select * from stripe_events` is also a table name in the
+# fleet's OWN substrate, and refusing those would get the guard switched off.
+NON_WP_DSN_ENV_RE = re.compile(
+    r"\$\{?[A-Z0-9_]*(?:STRIPE|SHOPIFY|MAGENTO|BIGCOMMERCE)[A-Z0-9_]*\b"
+    r"|\b(?:STRIPE|SHOPIFY|MAGENTO|BIGCOMMERCE)_[A-Z0-9_]+\b")
 BROAD_SELECT_RE = re.compile(r"\bselect\s+(?:distinct\s+)?\*", re.IGNORECASE)
 DUMP_RE = re.compile(
     r"\b(pg_dump|pg_dumpall|mysqldump|mongodump|sqlite3)\b"
@@ -209,6 +222,18 @@ METADATA_ONLY_RE = re.compile(
 
 STATEMENT_SPLIT_RE = re.compile(r"\n|;|&&|\|\|")
 ASSIGNMENT_PREFIX_RE = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+")
+# Launcher words that sit BETWEEN the shell and the real command. `env PGPASSWORD=x
+# psql …` is the NORMAL way to pass a DB password, so this is an accidental-leak
+# path, not only an adversarial one (cc-quality 87497 finding B/D: the anchoring
+# `^` in DB_CLIENT_RE never saw past `env`, so Rule 2 silently did not run).
+_ENV_PREFIX_RE = re.compile(
+    r"^env(?:\s+(?:-[uCS]\s+\S+|-\S+|[A-Za-z_][A-Za-z0-9_]*=\S*))*\s+")
+_LAUNCHER_PREFIX_RE = re.compile(
+    r"^(?:command|exec|nohup|builtin|time|sudo(?:\s+-u\s+\S+)?)\s+")
+# `$(< file)` is bash's verbless "read this file": no command name appears, so the
+# verb-anchored half of Rule 1 cannot see it (cc-quality 87497 finding A — `$(cat f)`
+# was already caught).
+_VERBLESS_READ_RE = re.compile(r"\$\(\s*<\s*([^)\s]+)\s*\)")
 
 REFUSAL_HEAD = "BLOCKED by credential_store_guard: "
 REFUSAL_TAIL = (
@@ -230,7 +255,21 @@ def _statements(command: str) -> list[str]:
 
 
 def _leading(segment: str) -> str:
-    return ASSIGNMENT_PREFIX_RE.sub("", segment.strip())
+    """The command a shell statement actually runs, with wrappers peeled off.
+
+    VAR=value assignments, `env` (with its own assignments/flags), and the launcher
+    words `command`/`exec`/`nohup`/`time`/`sudo` all sit in front of the real command
+    without changing what it does — so they must not defeat a `^`-anchored match.
+    Peeled in a loop because they compose (`env A=b command psql …`).
+    """
+    s = segment.strip()
+    while True:
+        peeled = ASSIGNMENT_PREFIX_RE.sub("", s)
+        peeled = _ENV_PREFIX_RE.sub("", peeled)
+        peeled = _LAUNCHER_PREFIX_RE.sub("", peeled)
+        if peeled == s:
+            return s
+        s = peeled
 
 
 def _last_stage_is_sink(statement: str) -> bool:
@@ -282,6 +321,15 @@ def _rule1_violation(statement: str) -> str | None:
     for stage in statement.split("|"):
         if METADATA_ONLY_RE.match(_leading(stage)):
             continue
+        # `$(< path)` has no command verb at all, so the loop below cannot see it.
+        for m in _VERBLESS_READ_RE.finditer(stage):
+            v_hard, v_soft = _store_tokens(m.group(1))
+            if v_hard or v_soft:
+                return (
+                    "this command substitutes the WHOLE contents of a file that holds "
+                    "credentials into the shell (bash's `$(< file)` form). Print only "
+                    "what you need — or pipe the file into a hash/length sink."
+                )
         hard, soft = _store_tokens(stage)
         if not (hard or soft):
             continue
@@ -309,7 +357,7 @@ def _rule2_violation(statement: str) -> str | None:
     # incident gets switched off.
     if not DB_CLIENT_RE.match(_leading(statement)):
         return None
-    if not STORE_MARKER_RE.search(statement):
+    if not (STORE_MARKER_RE.search(statement) or NON_WP_DSN_ENV_RE.search(statement)):
         return None
     if SECRET_IDENT_RE.search(statement):
         verb = "READS" if _READ_VERB_RE.search(statement) else "NAMES"
