@@ -741,6 +741,60 @@ def warn_if_unevidenced_claim(mtype: str, subject: str, body: str, evidence: str
     _log_warn("unevidenced_claim", mtype=mtype, subject=subject, matched_keyword=m.group(1))
 
 
+# Memory 2.0 Part 2 PR C (op#36768, backlog #127). A message asserting it is
+# waiting on the operator for something fleet_memory records as done is exactly
+# the amnesia the fact table exists to stop -- so this is checked on the way
+# out. WARN, never REFUSE (console ruling, bus #87068): the bus is how the
+# fleet talks, refusals there would block corrections and handoffs, and the
+# sentence being flagged is frequently somebody else's, quoted. asks_open.py,
+# where the claim is a durable row on the operator's attention, does refuse.
+#
+# Both halves of the sentence must be present before the database is touched, so
+# ordinary traffic pays nothing. The distinct-token match itself lives in
+# scripts/lib/fleet_memory.py; this is a lexical tripwire, not a judgement.
+_PENDING_CLAIM_RE = re.compile(r"(?i)\b(waiting|waits|awaiting|blocked|pending|still\s+needs?)\b")
+_OPERATOR_RE = re.compile(r"(?i)\b(musa|operator)\b")
+
+
+def _default_fact_match(text: str):
+    """Facts in scope for this sender. Imported lazily so bus_send keeps working
+    on hosts where fleet_memory's psycopg3 stack is absent."""
+    from scripts.lib import fleet_memory
+
+    repo = os.path.basename(os.path.abspath(os.getcwd()))
+    clients = [c.strip() for c in os.environ.get("CC_CLIENT", "").split(",") if c.strip()]
+    return fleet_memory.facts_matching(text, repos=[repo] if repo else [], clients=clients)
+
+
+def warn_if_asserting_pending_over_a_known_fact(mtype: str, subject: str, body: str,
+                                                stream=None, matching=None) -> None:
+    """WARN when this message says it waits on the operator for a settled thing.
+
+    `matching` is injectable so the warn can be tested (and reasoned about)
+    without a database. Any failure inside it -- dead DB, 139 not applied yet,
+    import error -- is silence: this warning must never cost a send.
+    """
+    text = f"{subject}\n{body}"
+    if not (_PENDING_CLAIM_RE.search(text) and _OPERATOR_RE.search(text)):
+        return
+    matcher = matching or _default_fact_match
+    try:
+        facts = list(matcher(text))
+    except Exception:  # noqa: BLE001 -- a warn must never cost a send
+        return
+    if not facts:
+        return
+    detail = "; ".join(f"#{f.id} {f.fact} [{f.op_ref}]" for f in facts)
+    print(
+        f"bus_send: WARNING — this {mtype} says it is waiting on the operator, but "
+        f"fleet_memory records as done: {detail}. Read the fact before asserting it "
+        "is pending (op#36768, WARN mode).",
+        file=stream or sys.stderr,
+    )
+    _log_warn("asserting_pending_over_fact", mtype=mtype, subject=subject,
+              fact_ids=[f.id for f in facts])
+
+
 # console ruling #78298 "A" (op#34803 slow-ask): every orch-console delegation subject
 # cites the op number, so the slow-ask net can tie a lane's ack to Musa's ask. Two
 # delegations without one (#78234, #78246) false-flagged real acks on 10-27. WARN mode
@@ -1262,6 +1316,7 @@ def main(argv: list[str] | None = None) -> int:
     warn_if_missing_provenance_citation(args.priority, args.subject, body)
     warn_if_weekday_date_mismatch(args.subject, body)
     warn_if_unevidenced_claim(args.type, args.subject, body, args.evidence)
+    warn_if_asserting_pending_over_a_known_fact(args.type, args.subject, body)
 
     if args.dry_run:
         print(f"DRY RUN — would insert: from={from_agent} to={args.to} type={args.type} "
