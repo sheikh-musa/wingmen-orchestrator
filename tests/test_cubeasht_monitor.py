@@ -43,7 +43,29 @@ FREE_END
 CUBEMON_WSL_END
 """
 
+WSL_GENERIC_REAL = """CUBEMON_WSL_BEGIN
+RUNNER_SERVICES_BEGIN
+actions.runner.sheikh-musa-cosem-adcda.cubeasht-cosem-adcda-runner.service=active
+actions.runner.sheikh-musa-cosem-adcda.cubeasht-cosem-adcda-runner-2.service=active
+RUNNER_SERVICES_END
+uptime_s=78853.03
+loadavg=1.00 0.88 0.95
+FREE_BEGIN
+               total        used        free      shared  buff/cache   available
+Mem:           15992        2383        7064         447        7235       13609
+Swap:           4096         520        3575
+FREE_END
+CUBEMON_WSL_END
+"""
+
 RUNNER = {"name": "cubeasht-orchestrator", "status": "online", "busy": False}
+ALL_RUNNERS = {
+    "cubeasht-orchestrator": dict(RUNNER),
+    "cubeasht-orchestrator-2": {"name": "cubeasht-orchestrator-2", "status": "online", "busy": False},
+    "cubeasht-cosem-adcda-runner": {"name": "cubeasht-cosem-adcda-runner", "status": "online", "busy": True},
+    "cubeasht-cosem-adcda-runner-2": {"name": "cubeasht-cosem-adcda-runner-2", "status": "online", "busy": False},
+    "cubeasht-cosem-platform-runner": {"name": "cubeasht-cosem-platform-runner", "status": "online", "busy": False},
+}
 
 
 # ---------------------------------------------------------------- parsers
@@ -129,22 +151,84 @@ def test_wsl_parse_and_failure():
 
 def test_wsl_probe_does_not_escalate_to_root(monkeypatch):
     # Least privilege: the WSL probe only reads unit state (`systemctl is-active`),
-    # /proc and `free -m`, none of which needs root. Lock the exact remote command
-    # so a future edit can't silently reintroduce the `-u root` escalation.
+    # /proc and `free -m`, none of which needs root. Lock the exact remote commands
+    # (now 3: the primary distro + 2 extra, op#35970/bus #86104) so a future edit
+    # can't silently reintroduce the `-u root` escalation on any of them.
     cmds = []
 
     def fake_ssh(remote_cmd, stdin_path, timeout):
         cmds.append(remote_cmd)
-        out = WSL_REAL if remote_cmd.startswith("wsl ") else PS_REAL
+        if remote_cmd == f"wsl -d {cm.WSL_DISTRO} -- bash -s":
+            out = WSL_REAL
+        elif remote_cmd.startswith("wsl "):
+            out = WSL_GENERIC_REAL
+        else:
+            out = PS_REAL
         return subprocess.CompletedProcess([], 0, out, "")
 
     monkeypatch.setattr(cm, "fetch_runner", lambda: dict(RUNNER))
+    monkeypatch.setattr(cm, "fetch_all_runners", lambda: dict(ALL_RUNNERS))
     monkeypatch.setattr(cm, "_ssh", fake_ssh)
-    ok, _metrics, err, _loud = cm.collect()
+    ok, metrics, err, _loud = cm.collect()
     assert ok is True and err is None
     wsl_cmds = [c for c in cmds if c.startswith("wsl ")]
-    assert wsl_cmds == [f"wsl -d {cm.WSL_DISTRO} -- bash -s"]
-    assert "-u root" not in wsl_cmds[0]
+    assert wsl_cmds == (
+        [f"wsl -d {cm.WSL_DISTRO} -- bash -s"]
+        + [f"wsl -d {d} -- bash -s" for d in cm.EXTRA_WSL_DISTROS]
+    )
+    assert all("-u root" not in c for c in wsl_cmds)
+    assert set(metrics["wsl_by_distro"]) == {cm.WSL_DISTRO, *cm.EXTRA_WSL_DISTROS}
+    assert metrics["wsl_by_distro"]["ci-cosem-adcda"]["mem_used_mb"] == 2383
+    assert metrics["runners_by_name"] == ALL_RUNNERS
+
+
+def test_wsl_generic_parse_multi_service_and_failure():
+    w = cm.parse_wsl_generic_output(WSL_GENERIC_REAL)
+    assert w["mem_total_mb"] == 15992 and w["mem_used_mb"] == 2383
+    assert w["mem_used_pct"] == pytest.approx((15992 - 13609) / 15992 * 100, abs=0.1)
+    assert w["runner_services"] == {
+        "actions.runner.sheikh-musa-cosem-adcda.cubeasht-cosem-adcda-runner.service": "active",
+        "actions.runner.sheikh-musa-cosem-adcda.cubeasht-cosem-adcda-runner-2.service": "active",
+    }
+    assert w["loadavg"] == [1.00, 0.88, 0.95] and w["uptime_s"] == pytest.approx(78853.03)
+    # a distro with zero runner services (none registered/running) is not an error
+    none_running = WSL_GENERIC_REAL.replace(
+        "actions.runner.sheikh-musa-cosem-adcda.cubeasht-cosem-adcda-runner.service=active\n"
+        "actions.runner.sheikh-musa-cosem-adcda.cubeasht-cosem-adcda-runner-2.service=active\n",
+        "",
+    )
+    assert cm.parse_wsl_generic_output(none_running)["runner_services"] == {}
+    with pytest.raises(cm.ProbeParseError):
+        cm.parse_wsl_generic_output("There is no distribution with the supplied name.")
+
+
+def test_fetch_all_runners_queries_each_runners_own_repo(monkeypatch):
+    # The 5 runners split across 3 repos (op#35970/bus #86104: cosem-adcda's
+    # and cosem-platform's runners are registered under THEIR OWN repos, never
+    # wingmen-orchestrator) -- must make exactly one `gh api` call per distinct
+    # repo, never per runner name, and never query a runner's repo for another
+    # repo's runners.
+    per_repo_data = {
+        cm.GH_REPO: {"runners": [{"name": "cubeasht-orchestrator", "status": "online", "busy": False}]},
+        "sheikh-musa/cosem-adcda": {"runners": [
+            {"name": "cubeasht-cosem-adcda-runner", "status": "online", "busy": True}]},
+        "sheikh-musa/cosem-platform": {"runners": []},
+    }
+    calls = []
+
+    def fake_fetch(repo=cm.GH_REPO):
+        calls.append(repo)
+        return per_repo_data[repo]
+
+    monkeypatch.setattr(cm, "_fetch_runners_json", fake_fetch)
+    out = cm.fetch_all_runners()
+    assert sorted(calls) == sorted(per_repo_data)  # exactly one call per repo
+    assert out["cubeasht-orchestrator"]["status"] == "online"
+    assert out["cubeasht-cosem-adcda-runner"]["busy"] is True
+    # absent from its OWN repo's list -> not_registered, not KeyError/crash
+    assert out["cubeasht-orchestrator-2"]["status"] == "not_registered"
+    assert out["cubeasht-cosem-platform-runner"]["status"] == "not_registered"
+    assert set(out) == set(cm.RUNNER_NAMES)
 
 
 def test_runner_from_api():
