@@ -156,7 +156,14 @@ def add_stdin_secrets(secrets: Dict[bytes, str], stream) -> int:
         if not val:
             continue
         b = val.encode("utf-8")
-        if len(b) < MIN_DSN_PW_LEN or _is_public_value("", val):
+        # MIN_SECRET_LEN, not MIN_DSN_PW_LEN (cc-quality N2, bus #87327). The 8-byte DSN
+        # floor is justified because that value is EXTRACTED FROM A DSN STRUCTURE — high
+        # confidence it is a password. A bare stdin line carries no such evidence, so it is
+        # the least-confident input and must not get the most permissive floor: a short
+        # value redacts by pure equality, so an 8-15 byte line can clobber benign transcript
+        # text of the same length. Intended feeds (Facebook/WooCommerce/bot tokens) are far
+        # longer, so 16 does not bite the real use case.
+        if len(b) < MIN_SECRET_LEN or _is_public_value("", val):
             continue
         if b not in secrets:
             secrets[b] = hash8(b)
@@ -459,10 +466,24 @@ def sweep_file(path: str, secrets: Dict[bytes, str], execute: bool,
         stale = [rec for rec in ledger
                  if written[rec["offset"]:rec["offset"] + rec["length"]]
                  == data[rec["offset"]:rec["offset"] + rec["length"]]]
-        if stale:
-            rep["error"] = ("%d of %d redacted span(s) did not take on read-back — NO ledger "
-                            "rows written; the recurring sweep re-scans this file next cycle"
-                            % (len(stale), len(ledger)))
+        # POSITIVE assertion (cc-quality N1, bus #87327): the span must equal the bytes we
+        # INTENDED to write, not merely differ from the original. fsync is page-granular
+        # (4KB) while writes are per-line, so a kill during fsync can leave a straddling
+        # span partly-placeholder/partly-original: it differs from `data` (so the `stale`
+        # check above passes) yet still carries secret residue. The whole-secret re-scan
+        # below would also miss it (the torn write splits the match), so the sweep would
+        # report a clean redaction that did not happen — the exact failure this readback
+        # exists to prevent. `changes` already holds the intended bytes, so this is free.
+        torn = [new for (s, new) in changes if written[s:s + len(new)] != new]
+        if stale or torn:
+            if stale:
+                why = ("%d of %d redacted span(s) did not take on read-back"
+                       % (len(stale), len(ledger)))
+            else:
+                why = ("%d of %d line(s) did not match the intended redaction on read-back "
+                       "(torn/partial write)" % (len(torn), len(changes)))
+            rep["error"] = (why + " — NO ledger rows written; the recurring sweep re-scans "
+                            "this file next cycle")
             rep["spans_redacted"] = 0
             rep["lines_changed"] = 0
             rep["size_after"] = len(written)

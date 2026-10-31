@@ -765,3 +765,52 @@ def test_every_credential_named_value_is_covered_regardless_of_shape(tmp_path, m
         assert v not in after, "a credential-named value survived the sweep"
         assert "[REDACTED:%s]" % s.hash8(v.encode()) in after
     assert len(ledger.read_text().splitlines()) == len(values)
+
+
+def test_sweep_file_aborts_when_readback_is_torn_not_merely_stale(tmp_path, monkeypatch):
+    """cc-quality N1 (bus #87327): the readback must assert the span EQUALS the intended
+    redacted bytes, not merely that it DIFFERS from the original. A torn write (kill during
+    a page-granular fsync) leaves partly-placeholder/partly-original bytes: they differ from
+    the original, so the stale check passes, yet secret residue survives and the whole-secret
+    re-scan misses it because the match is split. That must abort with NO ledger row."""
+    env = tmp_path / ".env"
+    _write(env, "ANTHROPIC_API_KEY=%s\n" % FAKE_KEY)
+    secrets = s.build_secret_set([str(env)])
+
+    tr = tmp_path / "t.jsonl"
+    _write(tr, json.dumps({"o": FAKE_KEY}) + "\n")
+
+    real_fsync = os.fsync
+
+    def torn_fsync(fd):
+        real_fsync(fd)
+        # the redacted line has landed; splice a fragment of the original secret back in,
+        # producing bytes matching NEITHER the original nor the intended redaction.
+        with open(tr, "r+b") as fh:
+            blob = fh.read()
+            fh.seek(len(blob) // 2)
+            fh.write(FAKE_KEY.encode()[:8])
+            fh.flush()
+
+    monkeypatch.setattr(s.os, "fsync", torn_fsync)
+
+    rep = s.sweep_file(str(tr), secrets, execute=True, ledger_path=str(tmp_path / "ledger.jsonl"))
+
+    assert rep["error"] is not None, "a torn readback must set an error"
+    assert "read-back" in rep["error"]
+    assert rep["spans_redacted"] == 0, "no span may be claimed redacted"
+    assert not (tmp_path / "ledger.jsonl").exists(), "no ledger row for a span that did not land"
+
+
+def test_stdin_values_must_clear_the_credential_floor_not_the_dsn_floor():
+    """cc-quality N2 (bus #87327): a bare stdin line has no key/structure context, so it is
+    the LEAST-confident input and must not get the most permissive (8-byte DSN) floor —
+    over-redaction of same-length benign text is the harm. 16 bytes still accepted."""
+    import io
+
+    secrets = {}
+    added = s.add_stdin_secrets(secrets, io.StringIO("abcdefgh\nabcdefghijklmnop\n"))  # 8 then 16
+
+    assert added == 1, "only the 16-byte value may be accepted"
+    assert b"abcdefghijklmnop" in secrets
+    assert b"abcdefgh" not in secrets
