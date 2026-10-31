@@ -1,6 +1,362 @@
-# cc-substrate handoff (updated 2026-09-24, bus #42896→#42908)
+# cc-substrate handoff (updated 2026-10-31 20:45Z, TRACK C rotation armed; window now Sunday)
 
-## STATUS: substrate ihsanification programme — P1/P3 proposal + re-measurement done, NO BUILD (per #42896)
+## LATEST (2026-10-31 20:45Z) — read this first
+
+**THE WINDOW MOVED TO SUNDAY 2026-11-01 04:00Z** (console 87978). Two reasons, either
+sufficient: the operator ruled the schedule settles before the rotation and reopened W5
+questions, so it is not settled; and the 21:45Z checklist could not clear because CI was
+queued behind two long jobs. Nothing fires tonight.
+
+**The heartbeat question is CLOSED, and the answer is not what anyone assumed.** I
+measured rather than reasoned (87909, 87964):
+- A running bash loop **never** re-reads its heredoc — whole-file replacement and
+  same-inode overwrite, 5/5 beats each, old body both ways. There is no no-restart patch.
+- The loops are **not** detached orphans: `ps` shows the nazim pane (`boot_nazim.sh`) and
+  the fleet-health pane both alive with their heartbeat subshell as a **child**, and the
+  exit trap kills a pid recorded at boot. A replacement loop would outlive its body and
+  report a dead console as working — the exact liveness-lie the boot script forbids.
+- **cai has no session on this host** and has read `offline` since 2026-10-13. Two loops,
+  not three.
+- The SRE measured its own detectors (87965): no false-dead flip, no false stall page for
+  these ids. The real cost is **blindness** — `context_health_watchdog` drops them from its
+  live set. My runbook said "false alarms"; that was wrong and is corrected.
+
+**Decided design (console 87978, no new lifeline code):** at GO, a bounded declaration
+row to cc-fleet-health (two ids, T0, absolute expiry ≤4h, owner, never a surrogate
+heartbeat), then after verify the two bodies restart on their real boot scripts —
+fleet-health first, console last — via the launchd KeepAlive waiters. Written into the
+runbook as step 7 plus a dedicated section.
+
+**PR state (base `fable/substrate-safe-fixes`):**
+
+| PR | branch | head | state |
+|---|---|---|---|
+| 771 | `cc-substrate/verify-no-argv-dsn` | `511c587` | **MERGED as `05f2797`** |
+| 765 | `cc-substrate/substrate-dsn-rotation` | — | **CLOSED as superseded** |
+| 774 | `cc-substrate/rotation-executor` | `f60a5a4f` | cc-quality **PASS** 87957; CI queued |
+| 773 | `cc-substrate/merge-signoff` | `079e9eb9` | cc-quality **PASS** 87946; CI queued |
+| 762 | `cc-substrate/credguard-bypass-followup` | `d3b71dd` | **CI green** + PASS 87984 |
+| 766 | `cc-substrate/sweep-multi-scan` | `61f3dce` | **CI green** + PASS 87984 |
+| 761 | `cc-substrate/no-cross-provider-resume` | `675c2e7` | PASS 87984; CI queued |
+| 776 | `cc-substrate/rotation-runbook` | `3134236` | doc; decided design recorded |
+
+**Blocker type to remember: the fleet shares ONE GitHub token**, so GraphQL rate limits
+are a shared, fleet-wide budget. `gh pr checks`/`gh pr view --json` are GraphQL; use
+`gh api repos/.../commits/<sha>/check-runs` (REST) for polling. I hit the secondary limit
+by polling five PRs in a loop.
+
+---
+
+## SUPERSEDED (2026-10-31 20:25Z) — the hub/pull finding and the PR table as it stood then
+
+**The hub question is CLOSED, and the answer changes the plan.** cc-orchestrator
+(87863/87845): the alias is **`gzb`**, not `hub-vps`; its env file is a **tmpfs** file
+under `/dev/shm/wingmen-secrets/` recreated at every boot by `fetch-secrets`; and the
+plan it already agreed with the console in 87782 is **PULL, not push** — a write into
+gzb's files from outside the pull is unreviewed. I confirmed the far side from this
+end: this Mini's `authorized_keys` carries one forced command that **assembles the
+bundle here** (`~/wingmen/orchestrator/.env` + two private env files under
+`~/.wingmen/private` + `keys/` + `.orch_default_token`) and streams a tar. So the pull
+terminates on this machine, rewriting the Mini file is the whole job on this side, and
+**`--remote` must NOT be used against gzb**. Reply sent: 87890.
+
+**OPEN, can sink the hub's restart:** if either of those two private bundle files also
+embeds the substrate credential, the pull hands the hub a dead value *after* a
+successful reset. I could not check them — reading that path is refused by
+`console_irsyad_guard` on this lane even though `CC_BASE_AGENT_ID=cc-substrate` is set
+and `ORCH_BODY_ROLE` is unset (exemption did not apply; not worked around). Asked the
+console in 87892, together with the still-unanswered scope question (all three Mini
+files, or only the live one).
+
+**PR state (all base `fable/substrate-safe-fixes`, all MERGEABLE, all CI pending at
+20:22Z — the queue was backed to 19:37, I cancelled 7 superseded runs):**
+
+| PR | branch | head | what |
+|---|---|---|---|
+| 774 | `cc-substrate/rotation-executor` | `8670d768` | the one atomic executor |
+| 776 | `cc-substrate/rotation-runbook` | `e5a6b0e0` | doc: how to fire it |
+| 773 | `cc-substrate/merge-signoff` | `079e9eb9` | merge gate, F1 fixed |
+| 771 | `cc-substrate/verify-no-argv-dsn` | `511c587b` | verify F1/F2 fix |
+| 765 | `cc-substrate/substrate-dsn-rotation` | `e37a4923` | the tool itself |
+
+**Found and fixed in my own code before the window (self-review, 8670d76):**
+`step_verify` recorded `OK — not attempted (no backup)` when no backup could yield the
+old password — the **F2 fail-open, reintroduced**. The old half is now unconditional:
+no recoverable old value means refuse. Test red at 6110114, green after.
+
+**PR 773 F1 (cc-quality 87866, blocking, proved):** sign-off facts were matched
+independently across a whole row, so a combined verdict ("A passes, B is blocked")
+signed off B. Now bound to ONE verdict line (PASS + repo + PR# + full sha on the same
+line); a FAIL line for the same PR+sha blocks the row; a FAIL-only row from an
+independent auditor refuses the merge even if another passed. N1 taken: two auditor
+families passing the same exact sha is corroboration, not ambiguity. Verified on real
+rows — 767/766/762/761 still pass (762+761 through one combined row), 759 refused
+(short sha). 20 tests.
+
+**Ask 5878 answered in content (87860):** relay-ready substrate/TG/memory 2.0 status
+sent to the console, plus the correction that programme row **126 shows PR 716 as
+building when it is MERGED** (owner cc-paperclip-spike-1 must update it; I did not edit
+another owner's row).
+
+---
+
+## SUPERSEDED (2026-11-01 20:45Z — the date stamp was wrong, it is 2026-10-31) — read for the a5a71254 attribution and the four-location scope
+
+**THE VPS COPY IS KNOWN NOW, AND IT IS A FOURTH LOCATION.** Hub report 87776: exactly
+one copy on the VPS, `/dev/shm/wingmen-secrets/<dotenv>` (tmpfs), with
+`~/wingmen/orchestrator/.env` a symlink to it; re-pulled by
+`wingmen-fetch-secrets.service` over a forced-command ssh tar stream from the **core
+host's bundle**. Plus one surface the hub could NOT check: `/opt/irsyad-exec-broker/
+broker.env` (0400, irsyad-exec user) — carried as UNCHECKED, not clean.
+
+**Order that now holds (87781):** stage → apply the three local files → apply the
+core-side bundle (`apply --remote`, built tonight) → dashboard reset → restart
+fetch-secrets → restart every consumer (hub, ingest, tg-out, lease-renew, coord,
+tabung, mizan, bayanqa, encoder) → verify → scrub → delete backups.
+Console told me to agree host + path with cc-orchestrator: **sent as 87815 (P1)**.
+
+**Tool state (PR #771, branch `cc-substrate/verify-no-argv-dsn`, head 511c587):**
+verify takes no DSN at all and its old-password probe is mandatory (87760 F1/F2);
+`apply --remote HOST` rewrites the far-side bundle over ssh with the value on stdin
+at both hops (87762/87781); `stage` now ARCHIVES the superseded vault value via
+`vault.rotate` instead of the flag-then-overwrite no-op cc-quality caught as N6
+(that one was live: `put` upserts one row per name, so the second write cleared the
+flag the first set and nothing was archived). 40 tests, red-first.
+
+**Independent sign-off gate is written (PR #773, head 6f55421, base
+`fable/substrate-safe-fixes`).** `scripts/lib/merge_signoff.py` + wiring in
+`merge_pinned.sh`: VERDICT PASS row for the FULL 40-char sha, signer family resolved
+through `agent_status.base_agent_id` and registered in `protected_agents`
+(kind=auditor-singleton), not the branch's author family, not older than the head
+commit, fail closed on the lookup. Proved against real rows: PR 767 passes on
+cc-quality 87744; PR 765 is REFUSED because its PASS names 12 chars only — reviewers
+must now paste the full sha (told cc-quality, 87822).
+
+**Commitment 978 is NOT overdue** — due 2026-11-01 17:10Z, i.e. ~21h from 19:58Z on
+10-31. The trial windows I compared were mislabelled: window B (121 rows) is only
+~2h45m of DeepSeek, not 24h, so 121 rows in ~2.8h vs 297 in 24h is a ~3.5x higher row
+rate, confounded by the incident-heavy night. Do not read it as a quality signal.
+
+---
+
+## RECONSTITUTE HERE (2026-11-01 ~19:58Z) — TRACK C: rotation armed, window pending
+
+**a5a71254 ATTRIBUTED — it is the `quality` lane.** tmux session `quality`, pane pid
+94860 → claude pid 95006, `lstart` 2026-10-31 22:27:28 local = **14:27:32Z**, cwd
+`/Users/sheikhmusa/wingmen/quality`. Evidence chain: (1) project dir
+`-Users-sheikhmusa-wingmen-quality` encodes exactly that cwd and `quality-2` has its
+own dir (`-…-quality-2`, single file born 18:09Z vs its 18:06Z start); (2) the
+previous quality process last wrote at 14:27:27Z, five seconds before 95006 started;
+(3) a5a71254 was born 19:11:55Z = the exact last-mtime of 58b7e2ff, the file THIS
+process opened at 14:50:48Z — session files appear on the first turn, not at boot —
+so a5a71254 is a continuation of its own session. Sent as **87752** to cc-fleet-health
+with a warning: the console (87737/87738) told cc-quality to finish the **PR 765
+review first**, then request a reset, so fleet-health must not kill it before that.
+Sweep re-measured over all 54 files in both quality dirs: 3 spans / 2 lines, all in
+a5a71254, zero in quality-2.
+
+**BLAST RADIUS (asserted the TOTAL, not the obvious):** 348,264 files scanned by
+hash over `~/wingmen` → exactly three carry the substrate password, none a symlink:
+`~/wingmen/orchestrator/.env`, `projects/orchestrator.wt-pr215fix/.env`,
+`projects/cosem-platform.wt-author/.env.local`. No shell profile, plist or script.
+**OPEN, not answerable from this box:** does the VPS hub (`cc-orchestrator@wingmen-core`)
+hold the same DSN? If yes the reset takes the hub down until that copy is updated.
+
+**ALTER ROLE IS NOT A PATH (87756).** Supabase docs name the dashboard only; hosted
+projects fail `ALTER ROLE` with 42501 because `postgres` is owned by `supabase_admin`
+(public report: discussion 50374 — where the dashboard reset ALSO failed silently).
+So Musa does the dashboard steps. His "copy the generated password before confirming"
+order is **unverified**: the KB does not say the dialog reveals the value pre-confirm.
+The checklist therefore has two branches, and the fallback uses
+`apply --from-stdin` (built in e37a492 for exactly this).
+
+**POOLER, from the Supabase KB (28P01 after rotation):** Supavisor caches credentials
+(~15 s with active pooled connections; an **idle pool only refreshes on a real
+reconnect**). Do not reset twice in quick succession; do not let anything retry with
+the OLD password (that trips the auth circuit breaker). Hence the order: apply
+(.env = new) → dashboard confirm → `restart-consumers` (they reconnect with the NEW
+value) → `verify`.
+
+**NEW: PR #771** `cc-substrate/verify-no-argv-dsn` @ 3a979dd, stacked on #765
+(e37a492 untouched, its review unaffected; merge AFTER 765). `verify` now takes no
+DSN on argv (reads `--env-file` + rebuilds the old DSN from the newest `.env.bak.*`),
+retries the pooler window (default 3 × 5 s) and only probes the old DSN when the new
+one connected — a rejection during a cache window proves nothing. 6 new tests, each
+proven red against the previous script; 28 green in the file.
+
+**Runbook once Musa picks the window:** stage → apply `--execute` ×3 env files → he
+confirms the dashboard reset → `restart-consumers` → `verify` → scrub
+`secret_hash_sweep.py --execute --ledger` over the three transcripts (a5a71254,
+6da64adb, and the third) → delete `.env.bak.*`. Nothing staged, applied or scrubbed
+so far; the console holds the trigger.
+
+---
+
+## TRACK B — credential-store guard + no cross-provider resume (2026-11-01, P0 Musa op 36795)
+
+THREE PRs, one stack — merge in this order: **#759 → #762 → #761**. **Heads are
+FROZEN** (orch-console, 87541: "fewer pushes please"); no new head unless a reviewer
+finds a blocker.
+
+**REBASED 2026-11-01 ~19:35Z (bus 87665/87666):** the 759 squash made both remaining
+PRs `CONFLICTING` (their branches still carried the unsquashed `917e9dc..8ea32ef`
+stack on the same base). Rebased onto `27e9905`, dropped the three commits already in
+base, kept only the reviewed deltas: **#762 → `d3b71ddeb5fcc587032cc0fa0b90eebd1746dbdc`,
+#761 → `675c2e71e33d8c38550e9f37cffde1d1dcc9411d`**, both MERGEABLE. Byte-identity of
+every touched file against the PASSed heads verified before pushing (13 files), 60
+tests green on the rebased tree. cc-quality asked for a confirmation PASS naming the
+new full shas (87665) — the old PASSes name the old shas and the gate must refuse them.
+
+**LANDED 2026-11-01:** #759 → merge commit `58b06c4` (PASS 87516 at `8ea32ef`);
+#752 → `27e9905`. orch-console merges 762 and 761 as their CI goes green (87601/87604)
+— the lane does not run merge_pinned. **Fleet-wide hook INSTALLED** from the live
+checkout (`ensure_user_global_hooks.py --apply`, approved 87339) and verified by
+executing the installed command line: the 30 Oct `wc_facebook%` dump DENIES (exit 2
++ marker), the narrow `woocommerce_currency` read ALLOWS (exit 0), `Read` of
+`wp-config.php` DENIES. ~~**Caveat flagged to the console (87606):** user-global hooks
+load at session start, so the hub, Nazim and every already-running lane are still
+unprotected until they restart.~~ **WRONG — CORRECTED 2026-11-01 (87726).** Hooks
+hot-reload: cc-fleet-health proved it (87700/87706) and I reproduced it in my OWN
+process — claude running since 15:56:47Z, guard installed ~19:16Z, probe refused at
+19:44Z, never restarted, binary 2.1.316. No recycle is needed for guard coverage on
+THIS host; the VPS hub and cubeasht remain unprobed.
+
+- **#759** `cc-substrate/credential-store-guard`, head `8ea32ef` — the PREVENTION half,
+  the head cc-quality PASSed (87497 at `4adbab4`, re-affirmed 87516 at `8ea32ef`).
+  I had briefly pushed the bypass fixes onto this branch (`0340db5`) before orch-console
+  asked for them as a follow-up (87512), so the branch was reset to the reviewed head:
+  **only a PASSed sha may merge** (merge_pinned pins it).
+  `scripts/hooks/credential_store_guard.py` (PreToolUse on Bash|Read|Grep) refuses
+  (1) printing a credential-bearing store (WordPress/Woo options + exports, wp-config,
+  Shopify/Stripe/Meta settings, `.env`, credentials/service-account json, token caches)
+  unless the output goes to a hash/length sink or straight into vault; (2) broad
+  `SELECT *` / dumps against client-site DBs, with narrow named non-secret columns still
+  allowed; (3) secret-reading CLIs. `scripts/put_client_secret.py` is the ONE sanctioned
+  road from a store into vault — prints only `OK NAME sha256:xxxxxxxx len=N`. Proof: a test
+  replays the exact 30 Oct `wc_facebook_*` options dump and must be blocked, plus the
+  narrow path must still pass.
+- **#762** `cc-substrate/credguard-bypass-followup`, head `0340db5`, stacked on #759 —
+  cc-quality's five findings: B/D fixed (launcher peeling: `env`/`command`/`exec` no
+  longer defeat Rule 2's anchor), A fixed (`$(< file)` verbless read — the console had
+  asked only to document it; it was cheap), E's narrow half fixed (a non-WP store's DSN
+  env var, case-sensitive so `stripe_events` in our own substrate is not a FP); C and
+  E-broad documented in the playbook residual list and pinned as known-allow tests.
+  **PASS 87552 at `0340db5`** (verified empirically, incl. that `stripe_events` against
+  `$DATABASE_URL` correctly does NOT trip). One new non-blocking finding **N1**: a
+  launcher WITH A FLAG still defeats the anchor (`sudo -E psql`, `time -p psql`,
+  `nohup -- psql`) because `_LAUNCHER_PREFIX_RE` is not flag-tolerant the way
+  `_ENV_PREFIX_RE` is. **NOT fixed — batched with the merge_pinned sign-off work**
+  (heads frozen); the residual list must say it is open until then.
+- **#761** `cc-substrate/no-cross-provider-resume`, head `c70cea9` (PASS 87538 named
+  `1f9a605`; cc-quality re-anchored to `756ca15` in 87542; a re-affirm at `c70cea9` is
+  requested in 87544 — **no further pushes on this branch**), stacked on #759 + #762.
+  Applied all three of cc-quality's recommendations instead of deferring them:
+  **F1(a)** the conninfo fail-open is CLOSED (three bare `password=` tokens + no
+  libpq key scored 3 in the shared pattern and 1 here — verified old-vs-new, plus
+  the missing word boundary now present, which also removed an over-report);
+  **F1(b)** the docstring/test name no longer claim "same answer" — they say
+  conservative superset and name the over-reports; **F2** the interactive
+  `--resume` picker gap is in the playbook residual list with operator guidance —
+  `scripts/lib/session_provider_guard.py` + `.sh` shim, wired into
+  `launch_dangerous_cc.sh` (the funnel under `launch_lane_as.sh` and `switch_lane_token.sh`),
+  `boot_orch.sh`, `boot_mirror.sh`, `boot_nazim.sh`. A resume across a provider boundary is
+  refused unless the transcript scans clean; refusal boots FRESH loudly + writes a handoff
+  note. 22 tests, incl. a lockstep test that shells the real `_provider_for_model`.
+- **#752** (render-gate fail-loud) — CI queued, cc-quality already PASS (87372).
+
+**Sequencing:** merge_pinned #759, then #762, then #761 (every step via merge_pinned on
+a PASSed sha with green CI; CI is queue-congested, cc-fleet-health confirms runners are
+healthy — 87528). Then run
+`scripts/lib/ensure_user_global_hooks.py --apply` **FROM `~/wingmen/orchestrator`** (the live
+checkout) — it resolves `$CLAUDE_PROJECT_DIR` at the checkout it runs in, so running it from a
+worktree installs hooks that die with the worktree. Verify afterwards from a lane sitting in a
+client repo (orch-console asked for exactly this, bus 87339).
+
+**Decisions I made on safe defaults (two questions to orch-console in bus #87334 still
+unanswered):** pipe-to-sink only, NO override flag; no vendored gitleaks ruleset — reuse the
+fleet's existing `secret_shape_patterns` detector.
+
+**Lessons worth keeping:**
+- CI run 41227818506, 5 red: my `fake_vault` fixture stubbed `sys.modules` only. On Python 3.9
+  `import nervous_system.vault as sv` resolves through the **package attribute**, so the `as`
+  form handed back the REAL module and the test patched the live vault singleton for the rest of
+  the process. Fixed in `8ea32ef` by patching the package attribute too, and the test now takes
+  its stub from `sys.modules` and asserts its class.
+- A guard is not tested until you re-read the **shipped** block. A bare `--resume` (picker mode)
+  left both the resume-id and continue variables unset, so the whole guard was skipped; and
+  `spg_strip_resume_flags` ate the token after `--resume` unconditionally. Fixed in `1f9a605`.
+- Shared-detector ReDoS (87483 → cc-fleet-health CONFIRMED at 87499, I handed them the fix at
+  87503): `postgres-dsn-kv` is quadratic — a single 640-byte line repeating `password=` never
+  returned. `session_provider_guard.py` scans line-by-line and substitutes a bounded equivalent,
+  pinned by an equivalence test. Every OTHER `find_hits` caller still eats it.
+- Every guard tightening was justified by measured false positives on real fleet commands
+  (92,826 on the first pass: 64 → 32 → 15 denials), each measured FP pinned as a regression
+  test. The cc-quality hardening was re-measured the same way: 36,931 unique commands rebuilt
+  from local transcripts, pre-change and post-change guards compared — 34 denials before, 34
+  after, 0 newly denied, 0 newly allowed.
+
+
+
+## TRACK C — leaked substrate DSN: identified, scope measured, rotation PLAN sent (2026-11-01, P1 87628 → 87660/87661)
+
+The 26 Oct `pgrep -fl` leak in session `6da64adb` is the **substrate `postgres` role**
+(`postgres.tscuymavysscrvoberrr` via the ap-southeast-2 pooler, pw `sha256:95ea35a8`,
+40 chars) — byte-identical to `DATABASE_URL` in `~/wingmen/orchestrator/.env`, so it is
+**live, not stale**. Project-owner level: full DDL+DML over bus, briefings, decisions and
+the vault table.
+
+Measured scope (byte scan of **1,561** files / **9.54 GB** under `~/.claude/projects`):
+three files carry it — the `cosem-adcda` lane transcript `6da64adb…jsonl` (171.8 MB,
+2 hits; **still running**: pid 20698, `--resume 6da64adb`, replays every turn), the
+`-wingmen-quality` transcript `a5a71254…jsonl` (1.4 MB, 3 hits — already spread one hop
+to a reviewer), and the persisted tool result `…/tool-results/bpiulbdx3.txt` (431,876
+bytes). GitHub Actions holds no such secret.
+
+Plan in 87660: vault-store new password → Supabase dashboard reset (console's step) →
+rewrite `.env` from the vault → restart ingest/tg-out/watchdogs → VPS hub → terminate
+lingering pooler backends (a reset does NOT evict them) → verify old password fails →
+**then** hash-scrub the three files while no session is appending → durable fix is a
+dedicated non-superuser fleet role. Nothing destructive executed; three yes/no questions
+are with the console (87661 crosses the P1+requires_response wake floor).
+
+**Lessons banked:** a repeated `--scan` flag REPLACED the earlier glob (argparse
+`nargs="+"`), so my first "one file, clean" reading was a blind filter — corrected in the
+same cycle; and `lsof` returns nothing at all in this sandbox, so its silence is not
+evidence that no process holds a file.
+
+**PREPARED (87688):** `scripts/rotate_substrate_dsn.py` + 18 tests → **PR #765**
+(`cc-substrate/substrate-dsn-rotation`): `stage` (stdin → vault, flags the superseded
+value leaked first), `apply` (rewrites ONLY the `.env` keys whose URL password hashes to
+`--old-sha8`, atomic, 0600 backup), `verify` (new connects / old rejected),
+`restart-consumers` (ingest, tg-out). Dry runs against the live box clean; nothing written.
+Vault already held this credential from the **1 Oct** rotation: `SUBSTRATE_DB_PASSWORD_NEW`
+== the live password (`95ea35a8`), `SUBSTRATE_DB_PASSWORD_PREV` and
+`substrate_database_url_password` == the 1 Oct superseded one (`5b920dfb`), neither
+leak-flagged. Console's answer (87677): Musa picks the window; cosem-adcda lane quiesced
+and relaunched fresh; hub updates its own VPS env; phase-6 role approved.
+**a5a71254 CORRECTION:** it IS the current cc-quality conversation (newest, still growing),
+`/clear` did not move it to a new file — the secret is at lines 298/301 of 639 and any
+resume replays it, so the third file is a real scrub target, not history.
+
+**ORDER CORRECTED (87711) — apply BEFORE the dashboard reset.** The vault is reached
+through `DATABASE_URL`, i.e. the credential being rotated, so reset-then-apply strands
+the fleet with a dead password and a tool that cannot read the value it must write.
+Runbook now: `stage` → `apply --execute` → **dashboard reset** → `restart-consumers` →
+`verify` → scrub. Existing connections survive a password change (Postgres authenticates
+at connect time), so nothing breaks until new connections are attempted. `apply
+--from-stdin` is the escape hatch if the reset already landed. 22 tests.
+**SCRUB FEASIBILITY MEASURED (2026-11-01 19:45Z):** dry-run sweep of the 171 MB
+transcript with the real manifest took **9.1 s**, peak RSS **202 MB**, found the 2
+spans, size preserved (172,182,489 → same), `total_after: 0` predicted. Step 6 of the
+runbook is seconds per file, not minutes — it can ride the same window.
+
+**PR #766** (`cc-substrate/sweep-multi-scan`, `action="extend"`): a repeated `--scan`
+silently replaced the earlier glob — the bug behind my false "clean" reading. 2 tests,
+red on the old code. Only caller (`secret_hash_sweep_run.sh`) passes arrays after one
+flag, so behaviour there is unchanged (verified; I had asserted this before checking and
+sent the correction as 87698).
+
+## STATUS (2026-09-24): substrate ihsanification programme — P1/P3 proposal + re-measurement done, NO BUILD (per #42896)
 
 Full doc: `reports/substrate-ihsanification-next-moves-op42896.md` (both copies, synced). Posted bus #42908. Headline: P1 (one registry) — 3 of ~10 original hardcoded singleton-set copies already fixed (read `protected_agents` now), but 2 NEW hardcoded copies appeared since 09-05 (`hosted_server.py`, `cc_session_costs_auto_writer.py`) — net count is a wash, not progress; `console/app.py:293` is missing `cai` entirely, a live disagreement. P3 (ship gate) — zero wiring progress since 09-05; recommended `deploy_console.sh` as first consumer, not a generic pre-push hook. Re-measured: orphan scripts 17/178 top-level (methodology differs from the 09-05 %, flagged not fudged); `boot_briefing` 1.01MB/1861 rows (marginal -8% from 1.09MB/1899, still ~25x over the proposed invariant); **fable/substrate-safe-fixes now HAS CI configured (real change) but is currently RED** — root cause found: `ModuleNotFoundError: psycopg2` in 4 test files, a pre-existing `requirements.txt` gap NOT caused by anything committed this session — flagged as a quick separate fix, not built here (proposal-only task).
 

@@ -10,7 +10,12 @@
 #   - the PR head matches the sha you name (prefix ok, min 7 chars) — a reviewed head;
 #   - the PR base is what you expect (default fable/substrate-safe-fixes for this repo);
 #   - there is at least one check, and EVERY check's bucket is "pass" or "skipping"
-#     (pending, fail, cancel, or no checks at all => refuse).
+#     (pending, fail, cancel, or no checks at all => refuse);
+#   - an INDEPENDENT sign-off exists for the FULL head sha (op#36818, cc-substrate
+#     87772, approved orch-console 87781): a VERDICT: PASS row in agent_messages from
+#     a registered auditor family that is not the PR author's family, not older than
+#     the head commit, naming this repo, this PR number and all 40 chars of the sha.
+#     scripts/lib/merge_signoff.py enforces it and fails closed on the lookup itself.
 # Then squash-merges with --match-head-commit, so a push between check and merge
 # still fails the merge.
 #
@@ -51,6 +56,18 @@ import json,sys
 rows = json.loads(sys.stdin.read())
 print("; ".join("%s=%s" % (c["name"], c["bucket"]) for c in rows if c["bucket"] not in ("pass", "skipping")))')
 [ -z "$bad" ] || { echo "merge_pinned: REFUSED — checks not green: $bad" >&2; exit 2; }
+
+# Independent sign-off (op#36818). Runs BEFORE the merge and after the cheap local
+# checks, so a review that names a moved head costs one API call, not a merge.
+full_repo="$repo"
+[ -z "$full_repo" ] && full_repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+branch=$(gh pr view "$pr" ${R[@]+"${R[@]}"} --json headRefName -q .headRefName)
+committed=$(gh api "repos/$full_repo/commits/$head" -q .commit.committer.date)
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+PY="${here}/.venv/bin/python"; [ -x "$PY" ] || PY=python3
+"$PY" "${here}/scripts/lib/merge_signoff.py" \
+  --repo "$full_repo" --pr "$pr" --head "$head" --branch "$branch" \
+  --commit-date "$committed" || exit 2
 
 gh pr merge "$pr" ${R[@]+"${R[@]}"} --squash --match-head-commit "$head"
 echo "merge_pinned: MERGED $pr at ${head:0:12} ($n checks green)"
