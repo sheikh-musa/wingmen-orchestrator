@@ -1406,6 +1406,8 @@ def _handle_callback(conn, ch: "Channel", cb: dict, upd_id: int) -> bool:
             note = "Approved — gate request filed."
         elif res.get("ok"):
             note = "Ignored."
+        elif res.get("reason") == "gate_not_filed":
+            note = "Could not file the gate request — the contact is still pending, try again."
         else:
             note = "Nothing to do."
         _answer_callback(ch.token, cb.get("id", ""), note)

@@ -90,6 +90,93 @@ class FakeConn:
         self.commits += 1
 
 
+class UniqueViolation(Exception):
+    """Stands in for psycopg.errors.UniqueViolation raised by the real index."""
+
+
+class IndexedFakeCursor(FakeCursor):
+    """Models the partial unique index `(bot_username, chat_id) WHERE
+    state='pending'` — the thing the old fake did not model, which made the
+    expiry test vacuous (cc-quality PR#726 review, bus #86348 Finding 2).
+
+    A row counts as existing regardless of expiry; only ON CONFLICT may write
+    over it, and only when the DO UPDATE's WHERE (expired) holds.
+    """
+
+    def __init__(self, pending=None, pending_expires_at=None):
+        super().__init__()
+        self.pending = pending                    # existing pending_id or None
+        self.pending_expires_at = pending_expires_at
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+        s = " ".join(sql.split())
+        self.rowcount = 0
+        if s.startswith("INSERT INTO tg_pending_contacts"):
+            conflict = "ON CONFLICT" in s
+            if self.pending is not None and not conflict:
+                raise UniqueViolation(
+                    'duplicate key value violates unique constraint '
+                    '"tg_pending_contacts_one_pending_per_chat"')
+            now = params[6] if params and len(params) > 6 else None
+            expired = (self.pending_expires_at is not None
+                       and now is not None
+                       and self.pending_expires_at <= now)
+            if self.pending is not None and conflict and not expired:
+                self._result = None               # DO UPDATE ... WHERE false
+            else:
+                self.rowcount = 1
+                self._result = ("pcid-new",)
+                if conflict:
+                    # A refresh keeps the SAME row; the id it now carries is new.
+                    self.pending = "pcid-new"
+                    self.pending_expires_at = (
+                        self.pending_expires_at if not conflict else None)
+        elif s.startswith("UPDATE tg_pending_contacts"):
+            self.rowcount = 1
+            self._result = None
+        else:
+            self._result = None
+        return self
+
+
+class TxFakeConn:
+    """A psycopg-shaped connection: commit() raises inside transaction().
+
+    This is the contract the old FakeConn did not model, which is why the
+    first-alert path shipped dead on arrival (bus #86348 Finding 1).
+    """
+
+    def __init__(self, cur):
+        self._cur = cur
+        self.in_tx = False
+        self.commits = 0
+
+    def cursor(self):
+        return self._cur
+
+    class _Tx:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def __enter__(self):
+            assert not self.conn.in_tx
+            self.conn.in_tx = True
+            return self
+
+        def __exit__(self, *exc):
+            self.conn.in_tx = False
+            return False
+
+    def transaction(self):
+        return TxFakeConn._Tx(self)
+
+    def commit(self):
+        if self.in_tx:
+            raise RuntimeError("Explicit commit() forbidden within a Transaction context")
+        self.commits += 1
+
+
 LIVE_ROW = ("1", "pending", "777", "coffeemedia", "Afiq", "afiq")
 
 
@@ -97,7 +184,7 @@ LIVE_ROW = ("1", "pending", "777", "coffeemedia", "Afiq", "afiq")
 
 def test_first_unmatched_dm_creates_one_pending_and_returns_a_notification():
     m = pc()
-    cur = FakeCursor()
+    cur = IndexedFakeCursor()
     out = m.record_unmatched(FakeConn(cur), bot="wingmendevbot", chat_id="777",
                              channel_tag="coffeemedia", first_name="A", username="a",
                              now=NOW)
@@ -105,22 +192,22 @@ def test_first_unmatched_dm_creates_one_pending_and_returns_a_notification():
     assert out["pending_id"]
     assert "777" not in out["pending_id"]          # opaque: no PII in callback_data
     assert len(out["pending_id"]) <= 32
-    assert sum(s.startswith("INSERT INTO tg_pending_contacts") for s in cur.statements()) == 1
+    inserts = [s for s in cur.statements() if s.startswith("INSERT INTO tg_pending_contacts")]
+    assert len(inserts) == 1
 
 
 def test_repeat_dms_from_the_same_pending_chat_do_not_renotify():
     m = pc()
-    cur = FakeCursor(live=("pcid-1", NOW + timedelta(days=1)))
+    cur = IndexedFakeCursor(pending="pcid-1", pending_expires_at=NOW + timedelta(days=1))
     out = m.record_unmatched(FakeConn(cur), bot="wingmendevbot", chat_id="777",
                              channel_tag="coffeemedia", first_name="A", username="a",
                              now=NOW)
     assert out is None
-    assert not any(s.startswith("INSERT INTO tg_pending_contacts") for s in cur.statements())
 
 
 def test_an_expired_pending_row_re_alerts_with_a_fresh_id():
     m = pc()
-    cur = FakeCursor(live=("pcid-old", NOW - timedelta(days=1)))
+    cur = IndexedFakeCursor(pending="pcid-old", pending_expires_at=NOW - timedelta(days=1))
     out = m.record_unmatched(FakeConn(cur), bot="wingmendevbot", chat_id="777",
                              channel_tag="coffeemedia", first_name="A", username="a",
                              now=NOW)
@@ -128,16 +215,44 @@ def test_an_expired_pending_row_re_alerts_with_a_fresh_id():
     assert out["pending_id"] != "pcid-old"
 
 
-def test_ignore_is_not_a_permanent_blacklist():
-    """Design 6 note 2: a later genuine DM after an Ignore must re-surface."""
+def test_expired_realert_does_not_trip_the_one_pending_per_chat_index():
+    """cc-quality bus #86348 Finding 2: an expired row is still state='pending',
+    so a bare INSERT hits the partial unique index and the contact is lost
+    forever. The insert must resolve the stale row in the same statement."""
     m = pc()
-    cur = FakeCursor(resolved=("ignored", NOW - timedelta(minutes=5)))
+    cur = IndexedFakeCursor(pending="pcid-old", pending_expires_at=NOW - timedelta(days=1))
+    out = m.record_unmatched(FakeConn(cur), bot="wingmendevbot", chat_id="777",
+                             channel_tag="coffeemedia", first_name="A", username="a",
+                             now=NOW)
+    assert out is not None
+    inserts = [s for s in cur.statements() if s.startswith("INSERT INTO tg_pending_contacts")]
+    assert inserts and all("ON CONFLICT" in s for s in inserts)
+
+
+def test_record_unmatched_never_commits_so_the_callers_transaction_owns_it():
+    """cc-quality bus #86348 Finding 1: record_unmatched is called from inside
+    `with conn.transaction():`, where an explicit commit() raises
+    ProgrammingError and the alert is silently swallowed."""
+    m = pc()
+    conn = TxFakeConn(IndexedFakeCursor())
+    with conn.transaction():
+        out = m.record_unmatched(conn, bot="wingmendevbot", chat_id="777",
+                                 channel_tag="coffeemedia", first_name="A",
+                                 username="a", now=NOW)
+    assert out is not None
+    assert conn.commits == 0
+
+
+def test_ignore_is_not_a_permanent_blacklist():
+    """Design 6 note 2: a later genuine DM after an Ignore must re-surface.
+    A resolved row is not `pending`, so the index does not block the insert."""
+    m = pc()
+    cur = IndexedFakeCursor()
     conn = FakeConn(cur)
     out = m.record_unmatched(conn, bot="wingmendevbot", chat_id="777",
                              channel_tag="coffeemedia", first_name="A", username="a",
                              now=NOW)
     assert out is not None
-    assert conn.commits >= 1
 
 
 # ── the alert ───────────────────────────────────────────────────────────────
@@ -227,6 +342,39 @@ def test_approve_is_idempotent():
     assert filed == []
 
 
+def test_approve_that_cannot_file_the_gate_request_is_not_left_approved():
+    """Non-blocking (a) in bus #86348: committing 'approved' before the bus row
+    is filed strands the contact — the tap cannot be retried. The row must go
+    back to 'pending' and the reviewer told."""
+    m = pc()
+
+    def boom(_req):
+        raise RuntimeError("bus_send exploded")
+
+    cur = FakeCursor(row=LIVE_ROW)
+    res = m.handle_button(FakeConn(cur), data="pc:approve:pcid-1", presser="999",
+                          reviewer_chat="999", file_gate_request=boom, now=NOW)
+    assert res["ok"] is False
+    assert res["reason"] == "gate_not_filed"
+    updates = [s for s in cur.statements() if s.startswith("UPDATE tg_pending_contacts")]
+    assert any("'pending'" in s for s in updates), updates
+
+
+def test_approve_that_files_a_failing_bus_row_is_also_reverted():
+    m = pc()
+
+    def failing(_req):
+        return type("R", (), {"returncode": 1, "stdout": "", "stderr": "boom"})()
+
+    cur = FakeCursor(row=LIVE_ROW)
+    res = m.handle_button(FakeConn(cur), data="pc:approve:pcid-1", presser="999",
+                          reviewer_chat="999", file_gate_request=failing, now=NOW)
+    assert res["ok"] is False
+    assert res["reason"] == "gate_not_filed"
+    updates = [s for s in cur.statements() if s.startswith("UPDATE tg_pending_contacts")]
+    assert any("'pending'" in s for s in updates), updates
+
+
 def test_ignore_records_the_decision_and_files_nothing():
     m = pc()
     filed = []
@@ -273,3 +421,30 @@ def test_gate_request_files_one_bus_row_to_the_console_via_bus_send():
     assert "chat_id=777" in body
     # the body must travel inline, never via a file flag
     assert not any(arg.startswith("--body-") for arg in cmd)
+    # a gate request wants a response: it lands in the response queue (#86348).
+    assert "--req" in cmd
+
+
+# ── migration grant hygiene (cc-quality bus #86348 Finding 3) ──────────────
+
+MIGRATION = Path(__file__).parent.parent / "migrations" / "136_tg_pending_contacts.sql"
+
+
+def test_migration_136_revokes_web_roles_and_asserts_the_grant_floor():
+    """The table holds external-contact PII (chat_id, first_name, username) on a
+    PostgREST-exposed schema. Like 128/135 it must REVOKE first, enable RLS,
+    and carry post-apply assertions the apply tool actually runs."""
+    sql = MIGRATION.read_text()
+    compact = " ".join(sql.split())
+    assert ("REVOKE ALL ON public.tg_pending_contacts FROM PUBLIC, anon, "
+            "authenticated, service_role;") in compact
+    assert ("REVOKE ALL ON SEQUENCE public.tg_pending_contacts_id_seq "
+            "FROM PUBLIC, anon, authenticated, service_role;") in compact
+    assert "ALTER TABLE public.tg_pending_contacts ENABLE ROW LEVEL SECURITY;" in compact
+    for role in ("anon", "authenticated", "service_role"):
+        for priv in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+            assert (f"-- assert: no_table_privilege {role} "
+                    f"public.tg_pending_contacts {priv}") in sql, (role, priv)
+        for priv in ("USAGE", "SELECT", "UPDATE"):
+            assert (f"-- assert: no_sequence_privilege {role} "
+                    f"public.tg_pending_contacts_id_seq {priv}") in sql, (role, priv)

@@ -42,35 +42,47 @@ def record_unmatched(conn, *, bot, chat_id, channel_tag, first_name=None,
     Returns the notification dict exactly ONCE per pending row (and again after
     that row expires or was ignored), or None when the contact is already
     pending and the reviewer has already been told.
+
+    ONE statement, no commit: the caller owns the transaction. ingest calls
+    this inside `with conn.transaction():`, where psycopg3 forbids an explicit
+    `conn.commit()` — doing it here raised ProgrammingError and every first
+    alert was swallowed (PR#726 review, bus #86348 Finding 1).
+
+    The upsert is also what makes expiry work. An expired row is STILL
+    `state='pending'`, so the partial unique index
+    `(bot_username, chat_id) WHERE state='pending'` refuses a second INSERT;
+    a bare INSERT therefore lost the contact forever after the 3-day TTL
+    (Finding 2). The ON CONFLICT target names that index, and its DO UPDATE's
+    WHERE refreshes the stale row in place only when it has expired — so a
+    live row still yields no RETURNING row and no second alert, atomically,
+    even with two concurrent inbounds.
     """
     now = _as_aware(now or datetime.now(timezone.utc))
     chat_id = str(chat_id)
+    pending_id = secrets.token_hex(6)
 
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT pending_id, expires_at FROM tg_pending_contacts "
-            "WHERE bot_username = %s AND chat_id = %s AND state = 'pending' "
-            "ORDER BY id DESC LIMIT 1",
-            (bot, chat_id),
-        )
-        live = cur.fetchone()
-        if live and _as_aware(live[1]) and _as_aware(live[1]) > now:
-            return None
-
-        pending_id = secrets.token_hex(6)
         cur.execute(
             "INSERT INTO tg_pending_contacts "
             "(bot_username, chat_id, channel_tag, first_name, username, pending_id, "
             " notified_at, expires_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING pending_id",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (bot_username, chat_id) WHERE state = 'pending' "
+            "DO UPDATE SET pending_id = EXCLUDED.pending_id, "
+            " channel_tag = EXCLUDED.channel_tag, "
+            " first_name = EXCLUDED.first_name, username = EXCLUDED.username, "
+            " notified_at = EXCLUDED.notified_at, expires_at = EXCLUDED.expires_at "
+            "WHERE tg_pending_contacts.expires_at <= EXCLUDED.notified_at "
+            "RETURNING pending_id",
             (bot, chat_id, channel_tag, first_name, username, pending_id,
              now, now + pending_ttl),
         )
         written = cur.fetchone()
-    conn.commit()
+    if not written:
+        return None                      # already pending and already alerted
 
     return {
-        "pending_id": (written[0] if written else pending_id),
+        "pending_id": written[0],
         "bot": bot,
         "chat_id": chat_id,
         "channel_tag": channel_tag,
@@ -141,8 +153,16 @@ def file_gate_request_via_bus(req, *, runner=None, bus_send_path=None):
     cmd = [sys.executable, str(bus), "--to", "orch-console", "--type", "decision",
            "--subject", f"New contact gate request: chat {req['chat_id']} on "
                         f"'{req.get('channel_tag')}'",
-           "--priority", "P2", "--body", gate_request_body(req)]
+           "--priority", "P2", "--req", "--body", gate_request_body(req)]
     return runner(cmd, capture_output=True, text=True, timeout=120)
+
+
+def _filing_failed(res):
+    """A filing failed when it raised (handled by the caller) or reported a
+    non-zero return code. `None` means the injected filer completed without
+    reporting — the default runner always returns a CompletedProcess."""
+    rc = getattr(res, "returncode", None)
+    return rc is not None and rc != 0
 
 
 def handle_button(conn, *, data, presser, reviewer_chat, file_gate_request, now=None):
@@ -185,16 +205,37 @@ def handle_button(conn, *, data, presser, reviewer_chat, file_gate_request, now=
             return {"ok": False, "reason": "already_resolved"}
     conn.commit()
 
-    if action == "approve":
-        file_gate_request({
-            "chat_id": str(chat_id),
-            "channel_tag": channel_tag,
-            "first_name": first_name,
-            "username": username,
-            "pending_id": pending_id,
-            # Least privilege, and a phase promotion is still its own gate.
-            "powers": ["reply_text"],
-            "phase": "supervised",
-            "audience": "client",
-        })
+    if action == "ignore":
+        return {"ok": True, "action": action}
+
+    req = {
+        "chat_id": str(chat_id),
+        "channel_tag": channel_tag,
+        "first_name": first_name,
+        "username": username,
+        "pending_id": pending_id,
+        # Least privilege, and a phase promotion is still its own gate.
+        "powers": ["reply_text"],
+        "phase": "supervised",
+        "audience": "client",
+    }
+    try:
+        filed = file_gate_request(req)
+    except Exception:                                            # noqa: BLE001
+        filed = None
+        failed = True
+    else:
+        failed = _filing_failed(filed)
+    if failed:
+        # Do not strand an approved-but-unfiled contact: the state was
+        # committed before filing, so put the row back to pending and let the
+        # reviewer press again (bus #86348, non-blocking (a)).
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tg_pending_contacts SET state = 'pending', resolved_at = NULL, "
+                "resolved_by = NULL WHERE id = %s AND state = 'approved'",
+                (row_id,),
+            )
+        conn.commit()
+        return {"ok": False, "reason": "gate_not_filed"}
     return {"ok": True, "action": action}

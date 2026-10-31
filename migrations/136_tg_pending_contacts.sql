@@ -20,6 +20,39 @@
 --
 -- GATED: apply with scripts/apply_migration.py --gate after orch-console's GO.
 -- Nothing here is applied by this PR.
+--
+-- GRANT HYGIENE (PR#726 review, bus #86348 Finding 3). This table holds
+-- external-contact PII (chat_id, first_name, username) on a PostgREST-exposed
+-- schema, so it gets the same floor as 128/135 rather than the schema default:
+-- REVOKE ALL from every web-exposed role on the TABLE and its SEQUENCE, then
+-- enable RLS with NO policy (nobody but the owner may read or write it; the
+-- ingest connects as the owner, per 131's DEFECT 2 finding that every agent
+-- connects as postgres and owner sessions bypass RLS). No role is granted
+-- SELECT: the reviewer's view is the bus row an Approve files, never the table.
+-- The default-privilege baseline was NOT queried against live prod here; the
+-- REVOKE is explicit precisely so it does not depend on that baseline.
+--
+-- assert: no_table_privilege anon public.tg_pending_contacts SELECT
+-- assert: no_table_privilege anon public.tg_pending_contacts INSERT
+-- assert: no_table_privilege anon public.tg_pending_contacts UPDATE
+-- assert: no_table_privilege anon public.tg_pending_contacts DELETE
+-- assert: no_table_privilege authenticated public.tg_pending_contacts SELECT
+-- assert: no_table_privilege authenticated public.tg_pending_contacts INSERT
+-- assert: no_table_privilege authenticated public.tg_pending_contacts UPDATE
+-- assert: no_table_privilege authenticated public.tg_pending_contacts DELETE
+-- assert: no_table_privilege service_role public.tg_pending_contacts SELECT
+-- assert: no_table_privilege service_role public.tg_pending_contacts INSERT
+-- assert: no_table_privilege service_role public.tg_pending_contacts UPDATE
+-- assert: no_table_privilege service_role public.tg_pending_contacts DELETE
+-- assert: no_sequence_privilege anon public.tg_pending_contacts_id_seq USAGE
+-- assert: no_sequence_privilege anon public.tg_pending_contacts_id_seq SELECT
+-- assert: no_sequence_privilege anon public.tg_pending_contacts_id_seq UPDATE
+-- assert: no_sequence_privilege authenticated public.tg_pending_contacts_id_seq USAGE
+-- assert: no_sequence_privilege authenticated public.tg_pending_contacts_id_seq SELECT
+-- assert: no_sequence_privilege authenticated public.tg_pending_contacts_id_seq UPDATE
+-- assert: no_sequence_privilege service_role public.tg_pending_contacts_id_seq USAGE
+-- assert: no_sequence_privilege service_role public.tg_pending_contacts_id_seq SELECT
+-- assert: no_sequence_privilege service_role public.tg_pending_contacts_id_seq UPDATE
 
 BEGIN;
 
@@ -57,6 +90,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS tg_pending_contacts_one_pending_per_chat
 -- The lookup the ingest makes on every unclaimed inbound.
 CREATE INDEX IF NOT EXISTS tg_pending_contacts_chat_lookup
     ON public.tg_pending_contacts (bot_username, chat_id, created_at DESC);
+
+-- CAI-1018/1019 floor (see the header): REVOKE before any GRANT so no
+-- inherited default-priv survives, for the table AND its bigserial sequence.
+REVOKE ALL ON public.tg_pending_contacts FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON SEQUENCE public.tg_pending_contacts_id_seq
+    FROM PUBLIC, anon, authenticated, service_role;
+
+-- RLS with no policy: deny-all for every non-owner role, while the owner (the
+-- ingest's connection) is unaffected.
+ALTER TABLE public.tg_pending_contacts ENABLE ROW LEVEL SECURITY;
 
 COMMENT ON TABLE public.tg_pending_contacts IS
     'TG2.0 s6: unclaimed chats awaiting the reviewer''s Approve/Ignore. Holds '
