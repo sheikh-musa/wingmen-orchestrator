@@ -159,6 +159,91 @@ def test_digest_never_shows_raw_ask_text_only_triage_summary():
     assert "clean summary" in digest
 
 
+# ── render_turnaround_line: pure formatting (Musa op#34803) ──────────────────
+def _tsum(day="2026-10-29", delivered=7, median_min=45, p90_hr_min=(1, 54),
+          unmatched=0, by_surface=(("cosem-adcda", 5), ("cosem-platform", 1), ("fleet", 1)),
+          slowest=("Facemask", (5 * 60 + 7) * 60, (4 * 60 + 34) * 60, 33 * 60)):
+    import datetime as dt
+    p90 = dt.timedelta(hours=p90_hr_min[0], minutes=p90_hr_min[1])
+    slowest_row = None
+    if slowest is not None:
+        label, total_s, queue_s, build_s = slowest
+        slowest_row = (label, dt.timedelta(seconds=total_s), dt.timedelta(seconds=queue_s),
+                       dt.timedelta(seconds=build_s))
+    return {
+        "day": day, "delivered": delivered,
+        "median_total": dt.timedelta(minutes=median_min), "p90_total": p90,
+        "unmatched": unmatched, "by_surface": list(by_surface), "slowest": slowest_row,
+    }
+
+
+def test_turnaround_line_matches_the_approved_plan_example_shape():
+    """#78194's own worked example: '7 delivered — median 45m, p90 1h54 ·
+    slowest #5343 Facemask 5h07 (queue 4h34 / build 33m) · adcda 5 / platform 1 / fleet 1'."""
+    line = add.render_turnaround_line(_tsum())
+    assert "7 delivered" in line
+    assert "median 45m" in line
+    assert "p90 1h54" in line
+    assert "Facemask 5h07" in line
+    assert "queue 4h34 / build 33m" in line
+    assert "cosem-adcda 5" in line
+    assert "cosem-platform 1" in line
+    assert "fleet 1" in line
+
+
+def test_turnaround_line_none_when_no_summary_and_no_unclosed():
+    assert add.render_turnaround_line(None) is None
+    assert add.render_turnaround_line(None, []) is None
+
+
+def test_turnaround_line_shows_unmatched_as_context_not_folded_into_median():
+    line = add.render_turnaround_line(_tsum(unmatched=12))
+    assert "12" in line
+    assert "not counted" in line
+
+
+def test_turnaround_line_omits_unmatched_note_when_zero():
+    line = add.render_turnaround_line(_tsum(unmatched=0))
+    assert "not counted" not in line
+
+
+def test_turnaround_line_handles_no_slowest_row_gracefully():
+    line = add.render_turnaround_line(_tsum(slowest=None, by_surface=()))
+    assert "7 delivered" in line
+    assert "slowest" not in line
+
+
+def test_unclosed_hygiene_line_lists_ids_capped_at_top_n_with_remainder():
+    unclosed = [(100 + i, 30000 + i, "cc-cosem-exams", "2026-10-29T10:00:00Z") for i in range(7)]
+    line = add.render_turnaround_line(None, unclosed)
+    assert "7 ask(s) look delivered but unclosed" in line
+    shown = line.count("#10")  # #100..#104 shown (TOP_N=5), not #105/#106
+    assert shown == add.TOP_N
+    assert "…and 2 more" in line
+
+
+def test_unclosed_hygiene_line_omitted_when_empty():
+    assert add.render_turnaround_line(_tsum(), []) is not None  # turnaround line alone still renders
+    assert "unclosed" not in add.render_turnaround_line(_tsum(), [])
+
+
+def test_turnaround_and_unclosed_both_render_as_two_lines():
+    unclosed = [(1, 30001, "cc-cosem-exams", "2026-10-29T10:00:00Z")]
+    line = add.render_turnaround_line(_tsum(), unclosed)
+    assert line.count("\n") == 1
+
+
+def test_render_digest_appends_turnaround_block_after_everything_else():
+    digest = add.render_digest([], turnaround=_tsum())
+    assert "⏱ Turnaround" in digest
+    assert "nothing open" not in digest
+
+
+def test_render_digest_still_says_ledger_clear_when_truly_nothing_including_turnaround():
+    digest = add.render_digest([], turnaround=None, unclosed=[])
+    assert "nothing open" in digest
+
+
 # ── dedup: at most one send per UTC calendar day ──────────────────────────────
 def test_already_sent_today_false_when_state_file_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(add, "STATE_FILE", tmp_path / "nope.json")
@@ -189,9 +274,26 @@ def test_already_sent_today_false_on_corrupt_state_file(tmp_path, monkeypatch):
 
 # ── main(): dry-run / force / already-sent skip ───────────────────────────────
 class _FakeCur:
-    def execute(self, *a, **k): pass
+    """Routes fetchone()'s shape by the last executed SQL's text, so main()'s
+    growing set of fetch_* queries (each with its own column count) all get a
+    shape-compatible empty response instead of one static tuple. op#34803's
+    fetch_turnaround_summary does a 3-column percentile_cont query first and
+    short-circuits to None on delivered=0, so the fake never needs to answer
+    its later (unmatched/by_surface/slowest) queries in these main()-level
+    plumbing tests."""
+    def __init__(self):
+        self._last_sql = ""
+
+    def execute(self, sql, *a, **k):
+        self._last_sql = sql
+
     def fetchall(self): return []
-    def fetchone(self): return (0, None)
+
+    def fetchone(self):
+        if "percentile_cont" in self._last_sql:
+            return (0, None, None)
+        return (0, None)
+
     @property
     def description(self): return []
     def __enter__(self): return self

@@ -158,6 +158,130 @@ def fetch_client_captured_summary(conn) -> dict:
         return {"count": count or 0, "oldest": oldest}
 
 
+def fetch_turnaround_summary(conn, day=None) -> "dict | None":
+    """Yesterday's (Asia/Singapore, matching operator_ask_turnaround_daily's
+    own tz) turnaround rollup for the digest (Musa op#34803; orch-console
+    #78190 plan). Deliberately EXCLUDES surface='unmatched' (no lane ever
+    acked -- an instant Q&A reply with no lane work at all, not a slow
+    build) from delivered/median/p90/slowest: mixing the two populations is
+    misleading -- an instant reply and a multi-day stale-ask catch-up
+    delivered the same day are not the same kind of "how long did it
+    take". unmatched is reported as a separate count, context only, never
+    folded into the timing stat. Returns None when nothing matched that
+    day (no line is shown) -- an all-unmatched day still returns None here,
+    same as a quiet day; unmatched volume alone isn't digest-worthy."""
+    if day is None:
+        day = (datetime.now(ZoneInfo("Asia/Singapore")) - timedelta(days=1)).date()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*), "
+            "percentile_cont(0.5) WITHIN GROUP (ORDER BY total), "
+            "percentile_cont(0.9) WITHIN GROUP (ORDER BY total) "
+            "FROM operator_ask_turnaround "
+            "WHERE (delivered_at AT TIME ZONE 'Asia/Singapore')::date = %s AND surface != 'unmatched'",
+            (day,),
+        )
+        delivered, median_total, p90_total = cur.fetchone()
+        if not delivered:
+            return None
+        cur.execute(
+            "SELECT count(*) FROM operator_ask_turnaround "
+            "WHERE (delivered_at AT TIME ZONE 'Asia/Singapore')::date = %s AND surface = 'unmatched'",
+            (day,),
+        )
+        (unmatched,) = cur.fetchone()
+        cur.execute(
+            "SELECT surface, count(*) FROM operator_ask_turnaround "
+            "WHERE (delivered_at AT TIME ZONE 'Asia/Singapore')::date = %s AND surface != 'unmatched' "
+            "GROUP BY surface ORDER BY count(*) DESC, surface ASC",
+            (day,),
+        )
+        by_surface = cur.fetchall()
+        cur.execute(
+            "SELECT oa.triage_summary, t.total, t.queue_wait, t.build_to_live "
+            "FROM operator_ask_turnaround t JOIN operator_asks oa ON oa.id = t.ask_id "
+            "WHERE (t.delivered_at AT TIME ZONE 'Asia/Singapore')::date = %s AND t.surface != 'unmatched' "
+            "ORDER BY t.total DESC LIMIT 1",
+            (day,),
+        )
+        slowest = cur.fetchone()
+    return {
+        "day": day, "delivered": delivered, "median_total": median_total,
+        "p90_total": p90_total, "unmatched": unmatched,
+        "by_surface": by_surface, "slowest": slowest,
+    }
+
+
+def fetch_delivered_but_unclosed(conn, limit: int = TOP_N) -> list:
+    """Hygiene check (Musa op#34803, data gap #1 found validating the plan,
+    #78194): a lane subject implies the work is done/live while the ask
+    itself is still fully open (closed_at AND delivered_at both NULL) --
+    turnaround can only be as good as close discipline. Oldest-first;
+    capped the same way as every other digest bucket (HARD GATE #66732) --
+    the caller reports a remainder count past `limit`, never enumerates
+    further."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT oa.id, oa.source_msg_id, am.from_agent, am.created_at "
+            "FROM operator_asks oa "
+            "JOIN LATERAL ("
+            "  SELECT from_agent, created_at FROM agent_messages "
+            "  WHERE from_agent NOT IN ('orch-console', 'cc-fleet-health') "
+            "    AND from_agent NOT LIKE 'cc-fleet-health-%' "
+            "    AND subject ~ ('op#' || oa.source_msg_id::text || '([^0-9]|$)') "
+            "    AND subject ~* '(done|delivered|is live|merged and live)' "
+            "  ORDER BY created_at ASC LIMIT 1"
+            ") am ON true "
+            "WHERE oa.closed_at IS NULL AND oa.delivered_at IS NULL AND oa.triage_state = 'ask' "
+            "ORDER BY am.created_at ASC"
+        )
+        return cur.fetchall()
+
+
+def _fmt_td(td) -> str:
+    """Pure: format a timedelta as e.g. '1h54', '45m' for the turnaround
+    line -- compact, matches the plan's own example exactly."""
+    if td is None:
+        return "?"
+    total_seconds = int(td.total_seconds())
+    hours, rem = divmod(total_seconds, 3600)
+    minutes = rem // 60
+    if hours:
+        return f"{hours}h{minutes:02d}" if minutes else f"{hours}h"
+    return f"{minutes}m"
+
+
+def render_turnaround_line(summary: "dict | None", unclosed: "list | None" = None) -> "str | None":
+    """Pure formatting (Musa op#34803). Returns None when there's nothing
+    to show (no matched deliveries that day AND no unclosed-hygiene hits) --
+    the digest must never force an empty section just because the feature
+    exists. unclosed is capped by the caller (fetch_delivered_but_unclosed's
+    `limit`); only the remainder count is computed here, not re-capped."""
+    unclosed = unclosed or []
+    lines: list[str] = []
+    if summary:
+        surface_str = " / ".join(f"{s} {n}" for s, n in summary["by_surface"])
+        slowest_str = ""
+        if summary["slowest"]:
+            label, total, queue_wait, build_to_live = summary["slowest"]
+            label = label or "(no triage summary)"
+            slowest_str = (f" · slowest {label} {_fmt_td(total)}"
+                           f" (queue {_fmt_td(queue_wait)} / build {_fmt_td(build_to_live)})")
+        unmatched_note = f" ({summary['unmatched']} more instant/no-lane-work, not counted)" if summary["unmatched"] else ""
+        lines.append(
+            f"⏱ Turnaround ({summary['day']}): {summary['delivered']} delivered{unmatched_note} — "
+            f"median {_fmt_td(summary['median_total'])}, p90 {_fmt_td(summary['p90_total'])}"
+            f"{slowest_str}" + (f" · {surface_str}" if surface_str else "")
+        )
+    if unclosed:
+        shown = unclosed[:TOP_N]
+        ids = ", ".join(f"#{ask_id} (op#{op})" for ask_id, op, _agent, _ts in shown)
+        remainder = len(unclosed) - len(shown)
+        tail = f" …and {remainder} more" if remainder > 0 else ""
+        lines.append(f"⚠ {len(unclosed)} ask(s) look delivered but unclosed: {ids}{tail}")
+    return "\n".join(lines) if lines else None
+
+
 def _age_str(ts, now: "datetime | None" = None) -> str:
     """Pure: a human-readable age string for a timestamptz, hours under 48h
     else days (bus #47110 item 3b: AGE since the client asked)."""
@@ -182,7 +306,9 @@ def _cap_line(shown: int, total: int, noun: str) -> "str | None":
 
 def render_digest(rows: list, captured: "dict | None" = None,
                    client_rows: "list | None" = None,
-                   client_captured: "dict | None" = None) -> str:
+                   client_captured: "dict | None" = None,
+                   turnaround: "dict | None" = None,
+                   unclosed: "list | None" = None) -> str:
     """Pure formatting — no DB/network — so this is trivially unit-testable.
     `rows` must already be triage_state='ask' only — triage_summary is the
     ONLY text ever shown here, never the raw `ask` column (bus #45557
@@ -201,11 +327,19 @@ def render_digest(rows: list, captured: "dict | None" = None,
     operator-surface asks above (ask_surface scoping must stay legible to the
     reader, not just to the query) — each shows AGE since the client asked
     and flags a committed_date given more than 3 days out (Musa op#23946:
-    "no far-out dates"). Capped the same way as the operator section."""
+    "no far-out dates"). Capped the same way as the operator section.
+
+    `turnaround`/`unclosed` (Musa op#34803, orch-console #78190 plan): one
+    "how long did yesterday's delivered work take" line plus an optional
+    hygiene line, via render_turnaround_line() — kept as a single pre-
+    rendered block here so this function stays pure formatting, not a
+    second place that knows the turnaround schema."""
     captured = captured or {"count": 0, "oldest": None}
     client_rows = client_rows or []
     client_captured = client_captured or {"count": 0, "oldest": None}
-    if not rows and not captured["count"] and not client_rows and not client_captured["count"]:
+    turnaround_block = render_turnaround_line(turnaround, unclosed)
+    if (not rows and not captured["count"] and not client_rows and not client_captured["count"]
+            and not turnaround_block):
         return "📋 Daily asks digest — nothing open. The ledger is clear."
     now = datetime.now(timezone.utc)
     lines: list[str] = []
@@ -251,6 +385,10 @@ def render_digest(rows: list, captured: "dict | None" = None,
             oldest = client_captured["oldest"]
             age = f", oldest {_age_str(oldest, now)}" if oldest else ""
             lines.append(f"  ({client_captured['count']} client messages not yet sorted{age})")
+    if turnaround_block:
+        if lines:
+            lines.append("")
+        lines.append(turnaround_block)
     return "\n".join(lines)
 
 
@@ -309,7 +447,9 @@ def main(argv=None) -> int:
             client_captured = fetch_client_captured_summary(conn)
         else:
             client_rows, client_captured = [], {"count": 0, "oldest": None}
-    digest = render_digest(rows, captured, client_rows, client_captured)
+        turnaround = fetch_turnaround_summary(conn)
+        unclosed = fetch_delivered_but_unclosed(conn)
+    digest = render_digest(rows, captured, client_rows, client_captured, turnaround, unclosed)
 
     if args.dry_run:
         print(digest)
