@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PASS_RE = re.compile(r"VERDICT:\s*PASS", re.IGNORECASE)
+VERDICT_RE = re.compile(r"VERDICT:\s*(PASS|FAIL)\b", re.IGNORECASE)
 SHA40_RE = re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE)
 LOOKBACK_DAYS = 14
 
@@ -129,35 +129,70 @@ def names_pr(text: str, pr: int) -> bool:
     return re.search(rf"\bPR\s*#?\s*{pr}(?![\d])", text, re.IGNORECASE) is not None
 
 
-def find_signoffs(cur, repo: str, pr: int, head: str, after: datetime) -> list:
-    """[(id, from_agent, created_at, body)] candidate PASS rows for this HEAD."""
+def bound_verdict_lines(text: str, leaf: str, pr: int, head: str):
+    """(passing, blocking) verdict LINES that name THIS repo, PR number and full sha.
+
+    Bound to one line on purpose. Matching the four facts independently across a whole
+    body lets a row that passes PR#768 elsewhere in the text sign off PR#769: reviewers
+    do write combined verdicts ("A passes, B is blocked"), so that is an accident
+    waiting to happen, not an adversarial-only case. A qualifying line therefore has to
+    be a PASS line that itself carries this repo, this PR number and this full sha.
+
+    A FAIL line naming this same PR and sha is a contradiction — the row denies and
+    grants in one breath — and blocks it even if another line would have passed.
+    """
+    passing, blocking = [], []
+    for line in text.splitlines():
+        m = VERDICT_RE.search(line)
+        if not m:
+            continue
+        if head not in {s.lower() for s in SHA40_RE.findall(line)}:
+            continue
+        if leaf not in line.lower() or not names_pr(line, pr):
+            continue
+        if m.group(1).upper() == "FAIL":
+            blocking.append(line.strip())
+        else:
+            passing.append(line.strip())
+    return passing, blocking
+
+
+def find_signoffs(cur, repo: str, pr: int, head: str, after: datetime):
+    """(passing rows, self-contradicting row ids, rows that only FAIL this sha).
+
+    Passing rows are (id, from_agent, created_at, text). FAIL-only rows matter because
+    one auditor's PASS must not merge past another auditor's FAIL of the same sha.
+    """
     leaf = repo.split("/")[-1].lower()
     cur.execute(
         """
         SELECT id, from_agent, created_at, body, subject, is_test
         FROM agent_messages
         WHERE created_at >= now() - make_interval(days => %s)
-          AND (subject ILIKE '%%VERDICT: PASS%%' OR body ILIKE '%%VERDICT: PASS%%')
+          AND (subject ILIKE '%%VERDICT:%%' OR body ILIKE '%%VERDICT:%%')
         ORDER BY id
         """, (LOOKBACK_DAYS,))
-    out = []
+    out, contradictions, fails = [], [], []
     for row_id, from_agent, created_at, body, subject, is_test in cur.fetchall():
         text = f"{subject or ''}\n{body or ''}"
         if is_test:
             continue
-        if not PASS_RE.search(text):
+        passing, blocking = bound_verdict_lines(text, leaf, pr, head)
+        if blocking:
+            if passing:
+                contradictions.append(row_id)
+            else:
+                ts = _parse_ts(created_at)
+                if ts is not None and ts >= after:
+                    fails.append((row_id, from_agent, ts))
             continue
-        if head.lower() not in {m.lower() for m in SHA40_RE.findall(text)}:
-            continue
-        if leaf not in text.lower():
-            continue
-        if not names_pr(text, pr):
+        if not passing:
             continue
         ts = _parse_ts(created_at)
         if ts is None or ts < after:
             continue
         out.append((row_id, from_agent, ts, text))
-    return out
+    return out, contradictions, fails
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -193,14 +228,27 @@ def main(argv: Optional[list] = None) -> int:
                 return _refuse("no agent is registered as an auditor "
                                "(protected_agents kind=auditor-singleton) — the registry "
                                "is the only thing that makes a PASS mean a reviewer.")
-            rows = find_signoffs(cur, args.repo, args.pr, head, after)
+            rows, contradictions, fails = find_signoffs(cur, args.repo, args.pr, head,
+                                                        after)
             if not rows:
+                extra = ""
+                if contradictions:
+                    extra = (" Rows " + ", ".join(str(c) for c in contradictions) +
+                             " name this PR and sha as a FAIL in the same row, so they "
+                             "cannot sign it off.")
                 return _refuse(
                     f"no VERDICT: PASS row names {args.repo} PR#{args.pr} and the FULL "
-                    f"sha {head} from a row newer than the head commit. Ask the "
-                    "reviewer to re-send with the full 40-char sha in the body.")
+                    f"sha {head} on ONE verdict line from a row newer than the head "
+                    "commit. Ask the reviewer to re-send in the form "
+                    "'VERDICT: PASS | owner/repo | PR#n | <full 40-char sha>'." + extra)
             good, ignored = [], []
             author = author_family(cur, args.branch)
+            for row_id, from_agent, ts in fails:
+                fam = reviewer_base(cur, from_agent)
+                if fam in families and fam != author:
+                    return _refuse(f"an independent auditor ({from_agent}, row {row_id}) "
+                                   f"FAILed this exact sha {head} — a PASS elsewhere "
+                                   "cannot merge past it. Resolve the FAIL first.")
             for row_id, from_agent, ts, _text in rows:
                 fam = reviewer_base(cur, from_agent)
                 if fam not in families:
@@ -213,15 +261,17 @@ def main(argv: Optional[list] = None) -> int:
             if not good:
                 detail = "; ".join(ignored) if ignored else "none matched the auditor bar"
                 return _refuse(f"no INDEPENDENT sign-off for {args.repo} PR#{args.pr}: {detail}")
-            distinct = {g[2] for g in good}
-            if len(distinct) > 1:
-                return _refuse("two different reviewer families signed the same sha "
-                               f"({', '.join(sorted(distinct))}) — ambiguous provenance, "
-                               "refusing rather than picking one.")
+            # Two independent auditors passing the same exact sha is corroboration, not
+            # ambiguity — the ambiguity that mattered was a PASS we could not tie to a
+            # reviewer or a sha, and binding each verdict to one line settles that. A
+            # genuine conflict (one auditor FAILs this sha) is refused above.
+            distinct = sorted({g[2] for g in good})
             row_id, from_agent, fam, ts = good[-1]
+            others = [f for f in distinct if f != fam]
+            note = f" (+corroborated by {', '.join(others)})" if others else ""
             print(f"sign-off: PASS id={row_id} by {from_agent} (family {fam}) at "
                   f"{ts.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} "
-                  f"for {args.repo} PR#{args.pr} {head[:12]}")
+                  f"for {args.repo} PR#{args.pr} {head[:12]}{note}")
             return 0
     except Exception as exc:  # noqa: BLE001
         return _refuse(f"the sign-off lookup failed ({type(exc).__name__}: {exc}). "

@@ -159,13 +159,70 @@ def test_a_test_row_is_not_a_signoff(monkeypatch, capsys):
     assert rc == 2
 
 
-def test_two_different_reviewer_families_on_the_same_sha_refuse(monkeypatch, capsys):
+def test_two_independent_auditor_families_passing_the_same_sha_is_corroboration(
+        monkeypatch, capsys):
+    """cc-quality's N1: cc-finance reviewing a money PR and cc-quality confirming it is
+    two independent reviews, not ambiguous provenance."""
     rc = _run(monkeypatch,
               [_row(1, "cc-quality", _pass_body()), _row(2, "cc-finance", _pass_body())],
               {"cc-quality": "cc-quality", "cc-finance": "cc-finance"})
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "corroborated by" in out
+
+
+def test_a_pass_cannot_merge_past_another_auditors_fail_of_the_same_sha(
+        monkeypatch, capsys):
+    fail_body = f"VERDICT: FAIL | orchestrator | PR#765 | {HEAD}\nblocking: F1"
+    rc = _run(monkeypatch,
+              [_row(1, "cc-quality", _pass_body()), _row(2, "cc-finance", fail_body)],
+              {"cc-quality": "cc-quality", "cc-finance": "cc-finance"})
     err = capsys.readouterr().err
     assert rc == 2
-    assert "two different reviewer families" in err
+    assert "FAILed this exact sha" in err
+
+
+# ── F1 (cc-quality 87866): the four facts must be bound to ONE verdict line ──────
+
+def test_a_fail_line_for_another_pr_in_the_same_row_cannot_sign_this_one(
+        monkeypatch, capsys):
+    """PROBE 1. One combined row: PR#768 passes, PR#769 is blocked. Gating #769 must
+    not find a sign-off anywhere in that row."""
+    sha_768, sha_769 = OTHER, HEAD
+    body = (f"VERDICT: PASS | orchestrator | PR#768 | {sha_768}\n"
+            f"VERDICT: FAIL | orchestrator | PR#769 | {sha_769}\n"
+            "PR#769 has a BLOCKER")
+    rc = _run(monkeypatch, [_row(900, "cc-quality", body)], {"cc-quality": "cc-quality"})
+    err = capsys.readouterr().err
+    assert rc == 2, "a FAILed PR must never receive a merge sign-off"
+    assert "ONE verdict line" in err
+
+
+def test_prose_mentioning_the_verdict_phrase_does_not_sign_off(monkeypatch, capsys):
+    """PROBE 2. A pure FAIL row whose prose says the gate needs a 'VERDICT: PASS' row
+    must not clear itself by quoting the phrase."""
+    body = (f"VERDICT: FAIL | orchestrator | PR#765 | {HEAD}\n"
+            "the merge gate needs a VERDICT: PASS row, and this is not one")
+    rc = _run(monkeypatch, [_row(900, "cc-quality", body)], {"cc-quality": "cc-quality"})
+    assert rc == 2
+    assert "ONE verdict line" in capsys.readouterr().err
+
+
+def test_a_pass_line_and_a_fail_line_for_the_same_pr_sha_refuses(monkeypatch, capsys):
+    body = (f"VERDICT: PASS | orchestrator | PR#765 | {HEAD}\n"
+            f"VERDICT: FAIL | orchestrator | PR#765 | {HEAD}\n")
+    rc = _run(monkeypatch, [_row(900, "cc-quality", body)], {"cc-quality": "cc-quality"})
+    assert rc == 2
+    assert "FAIL in the same row" in capsys.readouterr().err
+
+
+def test_a_combined_row_still_signs_the_pr_its_own_pass_line_names(monkeypatch, capsys):
+    """The fix must not break the normal combined verdict: each qualifying line signs
+    only the PR it names."""
+    body = (f"VERDICT: PASS | orchestrator | PR#765 | {HEAD}\n"
+            f"VERDICT: FAIL | orchestrator | PR#769 | {OTHER}\n")
+    rc = _run(monkeypatch, [_row(900, "cc-quality", body)], {"cc-quality": "cc-quality"})
+    assert rc == 0
 
 
 def test_the_same_reviewer_family_twice_is_fine(monkeypatch, capsys):
