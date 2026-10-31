@@ -52,6 +52,37 @@ def test_deepseek_cleared_respects_narrowing_override():
     assert g.deepseek_cleared("finance", rows, override) is False
 
 
+# ── deepseek_key_map.json preview gate (op#36727: deepseek_cleared used to say
+# "cleared" for a lane whose family has no row in the map, discovered only as a
+# refusal at flip time) ───────────────────────────────────────────────────────
+def test_deepseek_key_mapped_true_for_a_mapped_family():
+    assert g.deepseek_key_mapped("cc-finance") is True
+
+
+def test_deepseek_key_mapped_false_for_an_unmapped_family():
+    assert g.deepseek_key_mapped("cc-some-brand-new-client-9") is False
+
+
+def test_deepseek_cleared_false_for_policy_cleared_but_unmapped_family():
+    """A lane can be fully cleared by provider_policy and STILL have no row in
+    deepseek_key_map.json (exactly the gap that parked 7 families on Syed at
+    op#36727 instead of moving them to DeepSeek) — deepseek_cleared must report
+    BLOCKED, not cleared, in that case."""
+    rows = [{"client_key": "zzznewfam", "allowed_providers": ["anthropic", "zai", "deepseek"], "text_only": True}]
+    assert g.deepseek_cleared("cc-zzznewfam", rows, []) is False
+
+
+def test_deepseek_skip_reason_distinguishes_policy_from_key_map():
+    policy_blocked = [{"client_key": "finance", "allowed_providers": ["anthropic"], "text_only": True}]
+    assert "provider_policy" in g.deepseek_skip_reason("finance", policy_blocked, [])
+
+    unmapped_rows = [{"client_key": "zzznewfam", "allowed_providers": ["anthropic", "zai", "deepseek"], "text_only": True}]
+    assert "deepseek_key_map" in g.deepseek_skip_reason("cc-zzznewfam", unmapped_rows, [])
+
+    cleared_rows = [{"client_key": "finance", "allowed_providers": ["anthropic", "zai", "deepseek"], "text_only": True}]
+    assert g.deepseek_skip_reason("finance", cleared_rows, []) is None
+
+
 # ── worker lane switch (dry-run / apply / pointer-only / pending) ────────────
 def test_dry_run_switch_changes_nothing(tmp_path, monkeypatch):
     ptr = tmp_path / ".finance_model"

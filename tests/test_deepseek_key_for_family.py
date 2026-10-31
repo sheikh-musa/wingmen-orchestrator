@@ -32,6 +32,7 @@ def test_the_real_map_file_has_every_client_console_named():
         mapping = json.load(f)
     assert set(mapping) == {
         "cosem", "cosem-tdu", "bariq", "oeh", "ffsfulfilment", "hc95", "fleet", "loop", "angullia",
+        "coffeemedia", "finance", "second", "shipforge", "substrate", "wingmen", "paperclip",
     }
     assert set(mapping.values()) == {"DEEPSEEK_CODING_KEY"}
 
@@ -47,6 +48,13 @@ def test_resolves_known_families():
         ("cc-fleet-health", "DEEPSEEK_CODING_KEY"),
         ("cc-loop-1", "DEEPSEEK_CODING_KEY"),
         ("cc-angullia", "DEEPSEEK_CODING_KEY"),
+        ("cc-coffeemedia", "DEEPSEEK_CODING_KEY"),
+        ("cc-finance", "DEEPSEEK_CODING_KEY"),
+        ("cc-second-brain", "DEEPSEEK_CODING_KEY"),
+        ("cc-shipforge", "DEEPSEEK_CODING_KEY"),
+        ("cc-substrate", "DEEPSEEK_CODING_KEY"),
+        ("cc-wingmen-sites", "DEEPSEEK_CODING_KEY"),
+        ("cc-paperclip-spike", "DEEPSEEK_CODING_KEY"),
     ]:
         rc, stdout, stderr = _run(agent_id)
         assert rc == 0, (agent_id, stderr)

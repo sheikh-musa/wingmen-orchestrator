@@ -7,5 +7,12 @@
   "hc95": "DEEPSEEK_CODING_KEY",
   "fleet": "DEEPSEEK_CODING_KEY",
   "loop": "DEEPSEEK_CODING_KEY",
-  "angullia": "DEEPSEEK_CODING_KEY"
+  "angullia": "DEEPSEEK_CODING_KEY",
+  "coffeemedia": "DEEPSEEK_CODING_KEY",
+  "finance": "DEEPSEEK_CODING_KEY",
+  "second": "DEEPSEEK_CODING_KEY",
+  "shipforge": "DEEPSEEK_CODING_KEY",
+  "substrate": "DEEPSEEK_CODING_KEY",
+  "wingmen": "DEEPSEEK_CODING_KEY",
+  "paperclip": "DEEPSEEK_CODING_KEY"
 }
