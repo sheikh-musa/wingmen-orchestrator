@@ -73,24 +73,37 @@ that check is a reason to defer the cleanup, never a reason to widen tonight's r
 
 ```bash
 cd ~/wingmen/projects/orchestrator.wt-exec      # the worktree carrying the executor
-PY=~/wingmen/orchestrator/.venv/bin/python3     # the live venv; this worktree has none
-$PY scripts/substrate_rotation_executor.py plan --old-sha8 <sha8 of the CURRENT password>
+PY=~/wingmen/orchestrator/.venv/bin/python3     # the live venv; name it explicitly
+$PY scripts/substrate_rotation_executor.py plan \
+    --env-file ~/wingmen/orchestrator/.env \
+    --old-sha8 <sha8 of the CURRENT password>
 ```
 
 `--old-sha8` is required on purpose: you must state which value you believe you are
 rotating. The current one starts `95ea35a8` (as printed by the tool's own check, and
 confirmed against the live file on 2026-10-31). A hash prefix is not a secret.
 
-Expected on a healthy host:
+**`--env-file` is not optional in the window** (§0 scope): without it the executor falls
+back to the three default files and will rewrite the two stale worktree copies, which is
+exactly what the decision ruled out.
+
+Expected on a healthy host — **`targets=1`**, because the scope is the live env file only:
 
 ```
-[2026-10-31T20:13:09Z] preflight: OK targets=3 remote=False daemons=9
+[2026-11-01T04:00:xxZ] preflight: OK targets=1 remote=False daemons=9
 plan: preflight OK. Steps that WOULD run: generate, rewrite, patch, propagate, restart, verify, watch
 plan: nothing written. Re-run with --execute --confirm rotate-substrate
 ```
 
-`plan` writes nothing, patches nothing and stages nothing. If it does not print those
-lines, stop and read the refusal.
+`targets=3` here would mean `--env-file` was omitted — **stop and re-run**, do not execute.
+`plan` writes nothing, patches nothing and stages nothing. If it refuses, it now says so as
+`plan: REFUSED — <reason>. Nothing written.` and exits 3 rather than printing a traceback.
+
+The interpreter's dependencies are part of this check: `psycopg` and `httpx` are imported
+lazily inside the steps that need them, so a missing one would otherwise first appear at the
+patch step with the files already rewritten. Both are present in the live venv as verified
+on 2026-10-31 (`psycopg 3.2.13`, `httpx 0.28.1`) — which is why `$PY` is named explicitly
+rather than relying on whatever `python3` happens to be first on `PATH`.
 
 ---
 
