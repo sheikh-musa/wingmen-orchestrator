@@ -178,6 +178,17 @@ _TXN_POOLER_PORT = "6543"
 
 
 def _txn_dsn() -> str:
+    """_dsn(), but pointed at the transaction-mode pooler port -- ONLY when
+    CONSOLE_DB_URL is actually set. db.py's own resolve_dsn() docstring is
+    explicit that the DATABASE_URL fallback is "LOCAL DEV ONLY": in that path
+    DATABASE_URL may not be a Supavisor-fronted DSN at all (e.g. a bare local
+    Postgres with nothing listening on 6543), so forcing the port there would
+    break local dev instead of fixing pooler contention (code-review finding,
+    cc-console-revamp-1 #86539 PR). Only rewrite the port for the real
+    console_readonly production credential; fall back to plain session-mode
+    _dsn() otherwise, exactly matching this module's prior behaviour."""
+    if not os.environ.get("CONSOLE_DB_URL"):
+        return _dsn()
     from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
     params = conninfo_to_dict(_dsn())

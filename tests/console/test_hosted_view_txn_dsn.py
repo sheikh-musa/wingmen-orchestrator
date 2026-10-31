@@ -25,12 +25,18 @@ def test_txn_dsn_preserves_host_and_user(monkeypatch):
     assert "dbname=postgres" in dsn
 
 
-def test_txn_dsn_falls_back_to_database_url_like_dsn_does(monkeypatch):
+def test_txn_dsn_does_not_rewrite_port_on_the_local_dev_database_url_fallback(monkeypatch):
+    """db.py's resolve_dsn() docstring is explicit that the DATABASE_URL
+    fallback is LOCAL DEV ONLY -- in that path DATABASE_URL may be a bare
+    local Postgres with nothing listening on 6543, so rewriting the port
+    there would break local dev instead of fixing pooler contention
+    (code-review finding on the #86539 PR). _txn_dsn() must degrade to
+    plain _dsn() -- unchanged, untouched -- whenever CONSOLE_DB_URL isn't
+    the thing actually in play."""
     monkeypatch.delenv("CONSOLE_DB_URL", raising=False)
     monkeypatch.setenv("DATABASE_URL", "postgresql://rw@h:5432/db")
-    dsn = hv._txn_dsn()
-    assert "port=6543" in dsn
-    assert "host=h" in dsn
+    assert hv._txn_dsn() == hv._dsn()
+    assert "port=6543" not in hv._txn_dsn()
 
 
 def test_txn_dsn_raises_when_no_dsn_configured(monkeypatch):
