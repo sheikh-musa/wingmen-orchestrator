@@ -51,9 +51,15 @@ write-DSN file carries the goumlyne and ihsanos values and no substrate value at
 the bayanqa file has no database value whatsoever. **Rewriting the live orchestrator env
 file is therefore sufficient; there is no dead-value risk on the hub's restart.**
 
-**Also asked, not yet answered:** whether all three Mini env files are in scope, or only
-the live one. Preflight reads all three and they all carry the current value, so the
-default covers them — but "the default covers it" is not the same as "it was decided".
+**Scope: the live env file ONLY — decided (bus 87913/87928, console + hub).** The other two
+places the credential sits are **stale worktree copies** (one roughly a month old, one
+inside a client repo). Writing the NEW value into an abandoned worktree *widens* the
+exposure instead of reducing it, and the value left behind is dead after the patch — a
+dead credential in a stale file is litter, not a leak. Clean those up as their own
+decision afterwards, not inside the window. So the command below carries
+`--env-file ~/wingmen/orchestrator/.env` and preflight is expected to report `targets=1`.
+The hub asked for one check on the cosem-platform worktree before it is touched (87928);
+that check is a reason to defer the cleanup, never a reason to widen tonight's run.
 
 ---
 
