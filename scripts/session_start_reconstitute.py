@@ -74,6 +74,24 @@ def _facts_block() -> str:
         return ""
 
 
+def _emit_facts_only(facts: str) -> int:
+    """Emit a facts-only SessionStart block -- no identity, no handoff.
+
+    Silent when there are no facts: an empty additionalContext would be a
+    payload that says nothing, and every branch using this is a fallback where
+    saying nothing is already the honest answer.
+    """
+    if not facts:
+        return 0
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": facts,
+        }
+    }))
+    return 0
+
+
 def _cc_base_agent_id() -> str:
     """The lane discriminator (reference_lane_vs_console_discriminator_is_cc_base_agent_id,
     same signal console_irsyad_guard.py's is_console() uses). Present => this
@@ -226,9 +244,14 @@ def main() -> int:
         }))
         return 0
 
-    # Fail-closed scoping: console body only, past this point.
+    # Fail-closed scoping: console handoff only, past this point. A plain body
+    # in this checkout is neither a lane nor the console, but it still gets the
+    # FACTS: the global facts hook stands down here on the strength of this
+    # branch emitting them, so returning empty would drop memory on a boot that
+    # has no other source (cc-quality H1 on PR#747). Facts only -- this branch
+    # must never claim an identity (op#29128 / bus #63372).
     if _body_role() != "console":
-        return 0
+        return _emit_facts_only(_facts_block())
 
     exp_fp = _expected_token_fp()
     fp_clause = (
@@ -255,7 +278,10 @@ def main() -> int:
             with open(handoff_path, "r", encoding="utf-8") as fh:
                 handoff = fh.read()
         except OSError:
-            return 0
+            # Same reason as the plain-body branch: the global hook has stood
+            # down for this project, so an unreadable handoff must cost the
+            # session the handoff, not its memory.
+            return _emit_facts_only(_facts_block())
         if len(handoff) > _MAX_HANDOFF_CHARS:
             handoff = handoff[:_MAX_HANDOFF_CHARS] + "\n\n…[handoff truncated — read the full file for the rest]"
         rel = os.path.relpath(handoff_path, ORCH_DIR)

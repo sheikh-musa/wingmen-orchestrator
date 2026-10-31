@@ -226,3 +226,90 @@ def test_global_hook_still_emits_where_the_project_does_not(fleet_db, tmp_path):
         '{"hooks": {"PreToolUse": []}}', encoding="utf-8")
     proc, _ = _boot(fleet_db, cwd=proj, env_extra={"CLAUDE_PROJECT_DIR": str(proj)})
     assert "DeepSeek console login done" in _context(proc)
+
+
+# ── H1 (cc-quality on PR#747): the stand-down cannot be blind to the source ──
+
+def _orchestrator_shaped_project(tmp_path):
+    proj = tmp_path / "an-orchestrator-checkout"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".claude" / "settings.json").write_text(
+        '{"hooks": {"SessionStart": [{"hooks": [{"type": "command",'
+        ' "command": "scripts/session_start_reconstitute.py"}]}]}}',
+        encoding="utf-8",
+    )
+    return proj
+
+
+@pytest.mark.parametrize("source", ["resume", "compact"])
+def test_global_hook_emits_on_resume_and_compact_in_an_orchestrator_project(
+        fleet_db, tmp_path, source):
+    """H1: reconstitute returns early on resume/compact (it only re-injects on
+    startup/clear), but the global hook used to stand down for the project on
+    EVERY source. Result: zero facts on a resumed or post-compact boot -- the
+    worst moment to lose them, and precisely what PR B exists to prevent.
+
+    Standing down is only correct where the project will actually emit."""
+    proj = _orchestrator_shaped_project(tmp_path)
+    proc, _ = _boot(fleet_db, cwd=proj, env_extra={"CLAUDE_PROJECT_DIR": str(proj)},
+                    stdin_payload={"source": source})
+    assert proc.returncode == 0
+    assert "DeepSeek console login done" in _context(proc)
+
+
+def test_global_hook_still_defers_on_clear_in_an_orchestrator_project(fleet_db, tmp_path):
+    """The source gate must not undo F1: startup and clear are exactly where
+    reconstitute does emit, so the stand-down still applies there."""
+    proj = _orchestrator_shaped_project(tmp_path)
+    proc, _ = _boot(fleet_db, cwd=proj, env_extra={"CLAUDE_PROJECT_DIR": str(proj)},
+                    stdin_payload={"source": "clear"})
+    assert proc.stdout.strip() == "", "facts were emitted by both hooks"
+
+
+def test_reconstitute_emits_facts_for_a_plain_orchestrator_session(fleet_db, tmp_path):
+    """The other half of H1: a session in the orchestrator checkout that is
+    neither a lane nor the console body used to get NOTHING from reconstitute,
+    while the global hook stood down. It now gets the facts -- and only the
+    facts: this branch must never claim an identity (op#29128 / bus #63372)."""
+    proj = _orchestrator_shaped_project(tmp_path)
+    proc, _ = _boot(fleet_db, cwd=proj, script=RECONSTITUTE_HOOK)
+    assert proc.returncode == 0
+    ctx = _context(proc)
+    assert "DeepSeek console login done" in ctx
+    assert "console body" not in ctx
+    assert "NOT the consol" not in ctx
+
+
+def test_reconstitute_emits_facts_when_the_handoff_cannot_be_read(fleet_db, tmp_path):
+    """cc-quality's residual on H1: the console branch returns 0 when the
+    handoff open raises, and by then the global hook has already stood down.
+    An unreadable handoff must cost the session the handoff, not its memory."""
+    orch = tmp_path / "orch-root"
+    (orch / "reports").mkdir(parents=True)
+    os.symlink(ROOT / "scripts", orch / "scripts")
+    handoff = orch / "reports" / "nazim-handoff-20260101.md"
+    handoff.write_text("unreadable on purpose", encoding="utf-8")
+    handoff.chmod(0o000)
+    try:
+        proc, _ = _boot(fleet_db, cwd=orch, script=RECONSTITUTE_HOOK,
+                        env_extra={"WINGMEN_ORCH_DIR": str(orch),
+                                   "ORCH_BODY_ROLE": "console"})
+        assert proc.returncode == 0
+        assert "DeepSeek console login done" in _context(proc)
+    finally:
+        handoff.chmod(0o600)
+
+
+def test_the_two_hooks_agree_on_which_sources_emit(fleet_db):
+    """The global hook carries its own copy of the source set so it never has
+    to import the identity-bearing hook. That copy can drift; this catches it
+    the moment either side changes."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("reconstitute_probe", RECONSTITUTE_HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    facts_hook = importlib.util.spec_from_file_location("facts_probe", FACTS_HOOK)
+    facts_mod = importlib.util.module_from_spec(facts_hook)
+    facts_hook.loader.exec_module(facts_mod)
+    assert set(facts_mod._RECONSTITUTE_SOURCES) == set(mod.RECONSTITUTE_SOURCES)

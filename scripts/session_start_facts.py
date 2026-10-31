@@ -17,6 +17,7 @@ and exits 0, output is a few hundred tokens scoped to this session.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -24,15 +25,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.lib import boot_facts  # noqa: E402
 
+# The SessionStart sources on which session_start_reconstitute.py actually
+# emits. Copied rather than imported: importing that module pulls in console
+# handoff and identity logic, which is exactly what this global hook must not
+# contain. A test asserts the two sets are equal, so the copy cannot drift.
+_RECONSTITUTE_SOURCES = frozenset({"startup", "clear"})
+
 
 def _project_emits_facts_itself() -> bool:
     """True when this project's own hooks already emit the facts block.
 
     The orchestrator checkout runs session_start_reconstitute.py at PROJECT
-    level, and that hook emits facts for lanes and the console. This global
-    hook fires there too, so without this check an orchestrator session would
-    get the same block twice -- real token waste on every startup and clear
-    (cc-quality F1 on PR#747).
+    level, and on startup/clear that hook emits facts for every session in it
+    (lane, console, or plain body). This global hook fires there too, so
+    without this check an orchestrator session would get the same block twice
+    -- real token waste on every startup and clear (cc-quality F1 on PR#747).
+    The source gate in main() is what keeps this from silencing resume/compact
+    boots, where reconstitute does not emit (cc-quality H1).
 
     Detected from the project's own .claude/settings.json rather than from a
     path: orchestrator worktrees live outside ~/wingmen/orchestrator and each
@@ -51,15 +60,35 @@ def _project_emits_facts_itself() -> bool:
         return False
 
 
-def main() -> int:
-    # Drain the hook payload so the writer never sees a broken pipe. Nothing
-    # in it changes the scope: that comes from cwd and CC_CLIENT.
+def _session_source() -> str:
+    """The SessionStart source, read from the hook payload.
+
+    Missing/unparseable payload reads as "startup", which is what
+    session_start_reconstitute.py assumes in the same situation, so both hooks
+    make the same decision about a malformed event.
+
+    Reading stdin also drains it, so the harness writer never sees a broken
+    pipe. Nothing else in the payload changes the scope: that comes from cwd
+    and CC_CLIENT.
+    """
+    raw = ""
     if not sys.stdin.isatty():
         try:
-            sys.stdin.read()
+            raw = sys.stdin.read()
         except OSError:
-            pass
-    if _project_emits_facts_itself():
+            raw = ""
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        payload = {}
+    return str(payload.get("source") or "startup").strip()
+
+
+def main() -> int:
+    # Stand down only where the project will actually emit for THIS session
+    # (cc-quality H1). reconstitute returns early on resume/compact, so a
+    # source-blind stand-down dropped the facts on exactly those boots.
+    if _session_source() in _RECONSTITUTE_SOURCES and _project_emits_facts_itself():
         return 0
     boot_facts.emit(boot_facts.facts_block())
     return 0
