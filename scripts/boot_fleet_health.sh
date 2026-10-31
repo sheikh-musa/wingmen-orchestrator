@@ -382,4 +382,7 @@ if ! apply_provider_routing "$MODEL" "$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" "
     exit 1
 fi
 [ -n "${PROVIDER_ROUTING_LABEL:-}" ] && echo "[boot_fleet_health] provider-routed: $PROVIDER_ROUTING_LABEL (model $MODEL)" >&2
-"$CLAUDE_BIN" --dangerously-skip-permissions --model "$MODEL"
+# PROVIDER_ROUTING_DISALLOWED_ARGS (bus #87004): non-Anthropic providers reject some
+# tool schemas at the API layer before the model ever sees them (DeepSeek 400s on
+# Artifact's). Empty for a claude-* MODEL, so the Anthropic boot is byte-identical.
+"$CLAUDE_BIN" --dangerously-skip-permissions --model "$MODEL" "${PROVIDER_ROUTING_DISALLOWED_ARGS[@]+"${PROVIDER_ROUTING_DISALLOWED_ARGS[@]}"}"

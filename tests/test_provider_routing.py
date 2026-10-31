@@ -105,7 +105,11 @@ def _run(resolved_model, orch_dir, fetch_script, *, pre_env=None, agent_id="cc-b
         f'source "{_LIB}"\n'
         + f'apply_provider_routing "{resolved_model}" "{orch_dir}" "{sys.executable}" "{agent_id}" "{fetch_script}" "{fam_script}"\n'
         + "echo \"RC=$?\"\n"
-        + f'printf "%s\\x1f" {var_dump} "${{ANTHROPIC_API_KEY+SET}}"\n'
+        # One extra probe for the ARRAY global: [*] joins every element, so a
+        # routed arm reads back as the exact claude argv it would be spliced
+        # into ("--disallowedTools Artifact"), and a no-op/failed-close reads
+        # back empty (bus #87004).
+        + f'printf "%s\\x1f" {var_dump} "${{ANTHROPIC_API_KEY+SET}}" "${{PROVIDER_ROUTING_DISALLOWED_ARGS[*]}}"\n'
     )
     out = subprocess.run(
         ["bash", "-c", script],
@@ -119,9 +123,10 @@ def _run(resolved_model, orch_dir, fetch_script, *, pre_env=None, agent_id="cc-b
     # than rstrip, since rstrip("\x1f") would also eat genuinely-empty
     # trailing fields when every tracked var is unset (the fail-closed case).
     values = rest.rstrip("\n").split("\x1f")[:-1]
-    assert len(values) == len(_TRACKED_VARS) + 1, (values, out.stdout, out.stderr)
+    assert len(values) == len(_TRACKED_VARS) + 2, (values, out.stdout, out.stderr)
     env = dict(zip(_TRACKED_VARS, values))
-    env["ANTHROPIC_API_KEY_IS_SET"] = values[-1] == "SET"
+    env["ANTHROPIC_API_KEY_IS_SET"] = values[len(_TRACKED_VARS)] == "SET"
+    env["PROVIDER_ROUTING_DISALLOWED_ARGS"] = values[len(_TRACKED_VARS) + 1]
     return rc, env, out.stderr
 
 
@@ -273,6 +278,7 @@ def test_provider_small_model_override_env_honored_per_provider(tmp_path):
     ("cc-hc95-broker-1", "DEEPSEEK_CODING_KEY"),
     ("cc-fleet-health", "DEEPSEEK_CODING_KEY"),
     ("cc-loop-1", "DEEPSEEK_CODING_KEY"),
+    ("cc-scholar-1", "DEEPSEEK_CODING_KEY"),
 ])
 def test_deepseek_resolves_vault_key_by_lane_family(agent_id, vault_key_name, tmp_path):
     """The fetch stub only knows ONE key name — the one this family is
@@ -328,6 +334,81 @@ def test_deepseek_family_resolver_itself_fails_closed_on_missing_map_file(tmp_pa
     assert rc == 1
     assert env["ANTHROPIC_AUTH_TOKEN"] == ""
     assert "FATAL" in stderr
+
+
+# ── NON-ANTHROPIC TOOL-SCHEMA WALL (bus #87004): a routed provider rejects the
+# Artifact tool schema on EVERY request, so the routing cascade must hand the
+# boot path an argv fragment disabling it — and every boot path must actually
+# splice that fragment into its claude call ─────────────────────────────────
+
+@pytest.mark.parametrize("model", [
+    "glm-5",
+    "kimi-k2.7-code",
+    "deepseek-v4-pro",
+    "qwen3.8-max",
+    "moonshotai/kimi-k2",
+])
+def test_every_routed_arm_disallows_the_artifact_tool(model, tmp_path):
+    """DeepSeek 400s "Invalid schema for function Artifact" on every turn
+    (cc-substrate-1, 2026-10-31) — a session that cannot take a single turn.
+    Every non-Anthropic arm must therefore hand the launcher the exact argv
+    that disables it; a claude-* lane must get nothing extra (asserted
+    separately below)."""
+    fetch = _write_fetch_stub(tmp_path, always="provider-secret")
+    rc, env, stderr = _run(model, str(tmp_path), fetch)
+    assert rc == 0, stderr
+    assert env["PROVIDER_ROUTING_DISALLOWED_ARGS"] == "--disallowedTools Artifact", (
+        f"{model} routed arm does not disable Artifact -> DeepSeek-style providers 400 every turn"
+    )
+
+
+@pytest.mark.parametrize("model", ["claude-opus-4-8", "claude-fable-5-1", "something-else"])
+def test_claude_and_unknown_models_get_no_extra_claude_argv(model, tmp_path, failing_fetch):
+    rc, env, _ = _run(model, str(tmp_path), failing_fetch)
+    assert rc == 0
+    assert env["PROVIDER_ROUTING_DISALLOWED_ARGS"] == "", (
+        "the claude-* no-op must not add ANY argv — Anthropic accepts the full tool set"
+    )
+
+
+_BOOT_PATHS = (
+    "scripts/launch_dangerous_cc.sh",
+    "scripts/boot_cai.sh",
+    "scripts/boot_fleet_health.sh",
+)
+
+
+def _claude_launch_lines(text):
+    """Every line that actually exec's claude (skips comments and the banner
+    echoes, which merely print the phrase)."""
+    lines = []
+    for raw in text.splitlines():
+        s = raw.strip()
+        if s.startswith("#") or "--dangerously-skip-permissions" not in s:
+            continue
+        if '"$CLAUDE_BIN"' in s or s.startswith("claude "):
+            lines.append(s)
+    return lines
+
+
+@pytest.mark.parametrize("rel", _BOOT_PATHS)
+def test_every_boot_path_splices_the_disallowed_args_into_its_claude_argv(rel):
+    """Gate-test != shipped-path: the lib producing the argv fragment is
+    worthless if a boot script builds its claude call without it. Covers all
+    three launch paths (lane launcher, cai singleton, fleet-health singleton)
+    so a future third launch mode can't silently send Artifact again."""
+    text = open(os.path.join(_ROOT, rel)).read()
+    lines = _claude_launch_lines(text)
+    assert lines, f"{rel}: no claude launch line found — this test would otherwise pass vacuously"
+    for line in lines:
+        assert "PROVIDER_ROUTING_DISALLOWED_ARGS[@]+" in line, (
+            f"{rel}: claude launch line does not splice PROVIDER_ROUTING_DISALLOWED_ARGS, so a "
+            f"DeepSeek lane booted through this path still sends the Artifact schema and 400s: {line}"
+        )
+        if "CLAUDE_PASSTHROUGH" in line:
+            assert line.index("PROVIDER_ROUTING_DISALLOWED_ARGS") < line.index("CLAUDE_PASSTHROUGH"), (
+                f"{rel}: operator passthrough must come AFTER the provider's disallowed-tools argv (last wins)"
+            )
 
 
 def test_deepseek_other_providers_unaffected_by_family_resolution(tmp_path):
@@ -414,6 +495,7 @@ def test_vault_fetch_failure_is_fail_closed_no_export_nonzero_exit(model, tmp_pa
     assert env["ANTHROPIC_BASE_URL"] == "", "a failed vault fetch must never leave ANTHROPIC_BASE_URL pointed at a non-Anthropic host with no credential behind it"
     assert env["ANTHROPIC_AUTH_TOKEN"] == ""
     assert env["ANTHROPIC_API_KEY_IS_SET"] is False
+    assert env["PROVIDER_ROUTING_DISALLOWED_ARGS"] == "", "a failed boot must not hand the launcher argv it will never exec"
     assert "FATAL" in stderr
     assert "vault" in stderr.lower()
 
