@@ -21,6 +21,8 @@ REAL_PROBE_OUTPUT = (
     "\n61000\n"
     "GZBMON_SEP"
     "\n8\n"
+    "GZBMON_SEP"
+    "\ncpu  700 0 200 0 50 0 40 10 0 0\n"
 )
 
 
@@ -37,6 +39,7 @@ def test_parse_probe_output_real_sample():
     assert out["cpu_temp_c"] == 61.0
     assert out["cpu_temp_source"] == "thermal_zone0"
     assert out["claude_sessions"] == 8
+    assert out["cpu_steal_pct"] == 1.0
 
 
 def test_parse_probe_output_thermal_zone_absent_is_could_not_measure():
@@ -49,6 +52,20 @@ def test_parse_probe_output_thermal_zone_absent_is_could_not_measure():
 def test_parse_probe_output_wrong_section_count_raises():
     with pytest.raises(gm.ProbeParseError):
         gm.parse_probe_output("not the expected shape at all")
+
+
+def test_parse_probe_output_steal_absent_is_none_not_raise():
+    text = REAL_PROBE_OUTPUT.replace("\ncpu  700 0 200 0 50 0 40 10 0 0\n", "\n\n")
+    out = gm.parse_probe_output(text)
+    assert out["cpu_steal_pct"] is None
+    # steal is advisory-only -- an unparseable /proc/stat never fails the probe
+    assert out["claude_sessions"] == 8
+
+
+def test_parse_probe_output_steal_malformed_line_is_none():
+    text = REAL_PROBE_OUTPUT.replace("\ncpu  700 0 200 0 50 0 40 10 0 0\n", "\nsome other line\n")
+    out = gm.parse_probe_output(text)
+    assert out["cpu_steal_pct"] is None
 
 
 def test_parse_probe_output_real_used_excludes_buff_cache():

@@ -13,7 +13,7 @@ cubeasht_monitor.py's ssh collection.
 Collection, every 5 min, one ssh call (read-only, no sudo):
   `cat /proc/loadavg; echo SEP; free -m; echo SEP; df -k /; echo SEP; nproc;
    echo SEP; cat /sys/class/thermal/thermal_zone0/temp; echo SEP;
-   pgrep -x claude | wc -l`
+   pgrep -x claude | wc -l; echo SEP; head -1 /proc/stat`
   - CPU load: /proc/loadavg's 1/5/15-min averages (+ nproc for a load_pct).
   - memory: `free -m`'s own columns. The REAL used figure is total minus
     `available` (the kernel's own estimate of memory a new process could get
@@ -31,6 +31,18 @@ Collection, every 5 min, one ssh call (read-only, no sudo):
   - live claude sessions: `pgrep -x claude | wc -l` over ssh -- exact
     process-name match, same secrets-safety reasoning as mini_monitor.py
     (never pgrep -f with a listing flag).
+  - CPU steal time (op#36664, cc-console-revamp's machines-resources panel,
+    Musa: "gzbai: 4 vCPU, show load and steal if available"): one read of
+    /proc/stat's aggregate "cpu " line, same single-read-per-probe shape as
+    everything else here (no added sleep/latency). steal is the 8th
+    space-separated field; cpu_steal_pct is steal as a % of the 8
+    non-guest jiffie buckets (user+nice+system+idle+iowait+irq+softirq+
+    steal -- guest/guest_nice are already folded into user/nice, so they're
+    excluded from the denominator, same convention as top/mpstat). An
+    instantaneous reading, not a delta -- a rough indicator, same caveat as
+    cpu_load_pct's 1-min average. Soft-fails to None (same pattern as
+    cpu_temp_c's absent-thermal-zone case) if /proc/stat is missing or an
+    unexpected shape -- never raises, since it's advisory-only.
 
 Fail LOUD, unreachable-is-a-row (same rule as cubeasht_monitor.py): an ssh
 failure (timeout, auth, network) inserts ok=false with the error -- never a
@@ -85,7 +97,8 @@ _PROBE_CMD = (
     "cat /proc/loadavg; echo GZBMON_SEP; free -m; echo GZBMON_SEP; df -k /; "
     "echo GZBMON_SEP; nproc; echo GZBMON_SEP; "
     "cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo NA; "
-    "echo GZBMON_SEP; pgrep -x claude | wc -l"
+    "echo GZBMON_SEP; pgrep -x claude | wc -l; "
+    "echo GZBMON_SEP; head -1 /proc/stat"
 )
 
 
@@ -101,9 +114,9 @@ class ProbeParseError(MonitorError):
 
 def parse_probe_output(text: str) -> dict:
     parts = text.split("GZBMON_SEP")
-    if len(parts) != 6:
-        raise ProbeParseError(f"gzb probe output has {len(parts)} sections, expected 6: {text[:300]!r}")
-    loadavg_raw, free_raw, df_raw, nproc_raw, therm_raw, claude_raw = (p.strip() for p in parts)
+    if len(parts) != 7:
+        raise ProbeParseError(f"gzb probe output has {len(parts)} sections, expected 7: {text[:300]!r}")
+    loadavg_raw, free_raw, df_raw, nproc_raw, therm_raw, claude_raw, stat_raw = (p.strip() for p in parts)
 
     out: dict = {}
 
@@ -160,6 +173,21 @@ def parse_probe_output(text: str) -> dict:
 
     claude_raw = claude_raw.strip()
     out["claude_sessions"] = int(claude_raw) if claude_raw.isdigit() else None
+
+    # cpu_steal_pct: advisory-only, soft-fails to None on any unexpected shape
+    # (same pattern as cpu_temp_c above) -- never breaks the rest of the probe.
+    out["cpu_steal_pct"] = None
+    stat_fields = stat_raw.split()
+    if len(stat_fields) >= 9 and stat_fields[0] == "cpu":
+        try:
+            jiffies = [int(x) for x in stat_fields[1:9]]  # user nice system idle iowait irq softirq steal
+        except ValueError:
+            jiffies = None
+        if jiffies:
+            total = sum(jiffies)
+            steal = jiffies[7]
+            if total > 0:
+                out["cpu_steal_pct"] = round(steal / total * 100, 1)
 
     return out
 
@@ -275,6 +303,7 @@ def summarize(samples: list[dict], day: date, tz: str = "UTC") -> dict:
         "mem_real_used_pct": cm._stats(vals(ok, "mem_real_used_pct")),
         "disk_free_pct": cm._stats(vals(ok, "disk_free_pct")),
         "cpu_load_pct": cm._stats(vals(ok, "cpu_load_pct")),
+        "cpu_steal_pct": cm._stats(vals(ok, "cpu_steal_pct")),
         "cpu_temp_c": cm._stats(vals(ok, "cpu_temp_c")),
         "claude_sessions": cm._stats(vals(ok, "claude_sessions")),
     }
@@ -285,9 +314,9 @@ def summarize(samples: list[dict], day: date, tz: str = "UTC") -> dict:
 def _brief(m: dict) -> str:
     if not m.get("reachable"):
         return "UNREACHABLE"
-    return (f"cpu={m.get('cpu_load_pct')}% temp={m.get('cpu_temp_c')}C mem_real={m.get('mem_real_used_pct')}% "
-            f"swap={m.get('swap_used_pct')}% disk_free={m.get('disk_free_pct')}% "
-            f"claude_sessions={m.get('claude_sessions')}")
+    return (f"cpu={m.get('cpu_load_pct')}% steal={m.get('cpu_steal_pct')}% temp={m.get('cpu_temp_c')}C "
+            f"mem_real={m.get('mem_real_used_pct')}% swap={m.get('swap_used_pct')}% "
+            f"disk_free={m.get('disk_free_pct')}% claude_sessions={m.get('claude_sessions')}")
 
 
 def build_parser() -> argparse.ArgumentParser:
