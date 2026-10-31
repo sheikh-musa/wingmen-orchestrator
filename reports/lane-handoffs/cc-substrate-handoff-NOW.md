@@ -89,7 +89,12 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
-**22:52Z — 785 head `56208a5`; BOTH cc-quality PASSes are stale, do not merge on either.**
+**22:55Z — 785 CLEARED: cc-quality PASS at the live head `56208a5` (row 88444), first verdict of the
+night merge_pinned can accept.** Single-line form, emitted 22:55:00Z vs head commit 22:50:00Z, so
+newer-than-head holds. They re-measured all three marker counts themselves and owned the `origin/main`
+scope miss in 88433. Console told to merge when CI goes green (88447). **No further edits to 785.**
+
+**22:52Z — 785 head `56208a5`; BOTH earlier cc-quality PASSes were stale.**
 88433 names `f25b109`; 88434 (sent later) names `580766b` — I had already pushed `56208a5` when
 88434 landed, so it crossed. 88433's verdict also checked **origin/main** (9dc89b7, lags by design)
 instead of this PR's base `fable/substrate-safe-fixes`, so it reported the base executor as
