@@ -36,6 +36,26 @@ changes nothing; --apply acts. ONE-WAY ONLY — this script never switches a lan
 reverting the deepseek flip is a restorable pointer-rename (`.bak-musadeepseek-*`),
 reverting a singleton/mamadah Syed move is a separate switch_singleton_token.sh /
 switch_lane_token.sh call back onto Musa (operator's call, never automatic).
+
+cc-quality PR#727 review (bus #86372/#86374) + orch-console #86380 fast-follows, verified
+2026-10-31:
+  (3) read_musa()'s idle_no_data->0% path is fail-safe, not fail-quiet: traced
+      nervous_system.weekly_limit_monitor.probe_pool — it returns idle_no_data ONLY on a
+      genuine http==200 response with no fresh utilization header (a truly parked token);
+      any transient network/timeout/overload error RAISES after retries, and any non-200
+      non-retryable error RAISES immediately. A probe error can never surface as
+      idle_no_data, so this script correctly can't read a broken probe as "Musa is at 0%".
+      No code change needed; recorded here so this isn't re-litigated from scratch later.
+  (4) worker_candidate_sessions()'s host filter (Sheikhs-Mini/NULL only) is NOT just a
+      missing feature — confirmed live that 2 real non-protected worker lanes run on
+      Musa's token on host gzbai (cc-cosem-convergence-2/cosem-convergence,
+      cc-scholar-1/scholar), so they will KEEP burning Musa's quota past 90% even once
+      this fires. Investigated widening it via `ssh gzb` (the checkout + script exist
+      there at the same relative path) but Musa's and Syed's oauth token files do not
+      exist on gzbai at all — there is no known credential path to flip a remote lane
+      onto, so a widen here would be a guess, not a fix. Flagged to orch-console
+      (#86393) instead of guessed at; the host filter stays Mini-only until someone who
+      knows the gzbai credential layout makes that call.
 """
 from __future__ import annotations
 
@@ -61,9 +81,30 @@ SYED_TOKEN = Path.home() / ".wingmen" / "keys" / "syed-oauth-token"
 STATE_FILE = Path.home() / "wingmen" / "fleet-health" / "state" / "musa_deepseek_syed_switch.json"
 PAGE_COOLDOWN_S = 3600
 DEEPSEEK_BALANCE_FILE = Path.home() / "wingmen" / "fleet-health" / "state" / "deepseek_balance_history.jsonl"
-# Musa's own 7d-window reset (pool_usage.resets_at as of 2026-10-31 11:15Z) — the
-# checkpoint Musa/orch-console asked DeepSeek coverage be projected through.
-MUSA_RESET_AT = dt.datetime(2026, 11, 4, 8, 0, tzinfo=dt.timezone.utc)
+# FALLBACK ONLY (pool_usage.resets_at for Musa as of 2026-10-31 11:15Z) — used when the
+# live read below fails or is unset. musa_reset_at() reads the real value every run; a
+# hardcoded reset date silently expires (orch-console #86380 fast-follow 2) and then the
+# balance-insufficient page never fires again (hours_until floors at 0 -> always "sufficient").
+MUSA_RESET_AT_FALLBACK = dt.datetime(2026, 11, 4, 8, 0, tzinfo=dt.timezone.utc)
+
+
+def musa_reset_at(fallback: dt.datetime = MUSA_RESET_AT_FALLBACK) -> dt.datetime:
+    """Live pool_usage.resets_at for Musa. A read failure or missing row falls back to
+    the constant above with a LOUD warning (never silent) rather than raising — this
+    feeds an advisory balance projection, not the real worker/brain switch actions, so a
+    transient DB hiccup here must not abort the whole run."""
+    try:
+        with _db() as c, c.cursor() as cur:
+            cur.execute("SELECT resets_at FROM pool_usage WHERE pool = 'Musa'")
+            row = cur.fetchone()
+        if row and row[0]:
+            ts = row[0]
+            return ts if ts.tzinfo else ts.replace(tzinfo=dt.timezone.utc)
+        print(f"  WARNING: pool_usage has no resets_at for Musa; using fallback {fallback:%Y-%m-%d %H:%MZ}")
+    except Exception as e:
+        print(f"  WARNING: could not read live pool_usage.resets_at for Musa "
+              f"({type(e).__name__}: {e}); using fallback {fallback:%Y-%m-%d %H:%MZ}")
+    return fallback
 
 # Brain/singleton -> its durable default-token pointer file (the filename does NOT
 # match the node name 1:1 — e.g. orch-console's is .nazim_default_token, matching its
@@ -325,20 +366,28 @@ def project_deepseek_coverage(new_lane_count: int, until: dt.datetime, now: Opti
     """Projects whether the current DeepSeek balance covers `new_lane_count` ADDITIONAL
     lanes (on top of however many are on DeepSeek right now) until `until`, scaling the
     observed aggregate $/hr burn by the lane-count ratio. {"measurable": False, ...} on
-    <2 balance points or 0 current lanes — never fabricates a number it can't back."""
+    <2 balance points or 0 current lanes — never fabricates a number it can't back.
+
+    Burn is the SUM of each consecutive interval's drop (never a negative interval, i.e.
+    a top-up is floored to 0 spend for that interval, not netted against surrounding
+    spend) — NOT just (first point - last point). Endpoint-only would UNDERSTATE total
+    spend across any top-up in between (spend $10, top up $20, net change +$10 -> an
+    endpoint read reports $0 spent) and could fabricate a false SUFFICIENT, silencing the
+    one page that matters (cc-quality review, PR#727, orch-console #86380 fast-follow 1)."""
     now = now or dt.datetime.now(dt.timezone.utc)
     pts = points if points is not None else deepseek_balance_points()
     if len(pts) < 2:
         return {"measurable": False, "reason": f"only {len(pts)} balance point(s) recorded"}
-    t0, b0 = pts[0]
-    t1, b1 = pts[-1]
+    t0, _ = pts[0]
+    t1, _ = pts[-1]
     hours_observed = (t1 - t0).total_seconds() / 3600.0
     if hours_observed <= 0:
         return {"measurable": False, "reason": "balance history has no time spread"}
     lanes_now = current_lanes if current_lanes is not None else current_deepseek_lane_count(ORCH_DIR)
     if lanes_now <= 0:
         return {"measurable": False, "reason": "0 lanes currently on deepseek -- cannot derive a per-lane rate"}
-    observed_rate = max(0.0, b0 - b1) / hours_observed          # $/hr, aggregate across lanes_now
+    total_spend = sum(max(0.0, b_prev - b_next) for (_, b_prev), (_, b_next) in zip(pts, pts[1:]))
+    observed_rate = total_spend / hours_observed                # $/hr, aggregate across lanes_now
     per_lane_rate = observed_rate / lanes_now
     total_lanes_after = lanes_now + new_lane_count
     projected_rate = per_lane_rate * total_lanes_after
@@ -417,18 +466,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         for agent_id, session, why in skipped:
             print(f"  worker {session} ({agent_id}): SKIPPED — {why}")
 
-        proj = project_deepseek_coverage(len(to_switch), MUSA_RESET_AT, now)
+        reset_at = musa_reset_at()
+        proj = project_deepseek_coverage(len(to_switch), reset_at, now)
         if proj["measurable"]:
             print(f"  deepseek balance ${proj['balance_now']:.2f}, projected rate "
                   f"${proj['projected_rate_usd_hr']:.3f}/hr over {proj['current_lanes'] + len(to_switch)} lanes, "
-                  f"projected spend ${proj['projected_spend']:.2f} by {MUSA_RESET_AT:%Y-%m-%d %H:%MZ} "
+                  f"projected spend ${proj['projected_spend']:.2f} by {reset_at:%Y-%m-%d %H:%MZ} "
                   f"({'SUFFICIENT' if proj['sufficient'] else 'INSUFFICIENT'})")
             if not proj["sufficient"]:
                 last_bal = state.get("page_balance_insufficient", 0)
                 if now.timestamp() - last_bal >= PAGE_COOLDOWN_S:
                     page("DeepSeek balance INSUFFICIENT for projected worker-lane load (op#36560)",
                          f"Balance ${proj['balance_now']:.2f} but projected spend ${proj['projected_spend']:.2f} "
-                         f"by {MUSA_RESET_AT:%Y-%m-%d %H:%MZ} across {proj['current_lanes'] + len(to_switch)} "
+                         f"by {reset_at:%Y-%m-%d %H:%MZ} across {proj['current_lanes'] + len(to_switch)} "
                          f"lanes (${proj['projected_rate_usd_hr']:.3f}/hr, scaled from the observed "
                          f"${proj['per_lane_rate_usd_hr']:.4f}/hr/lane). Top up DeepSeek or reconsider the move.",
                          a.apply, priority="P1", req=True)

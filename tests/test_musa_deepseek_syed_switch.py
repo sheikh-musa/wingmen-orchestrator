@@ -259,3 +259,64 @@ def test_project_deepseek_coverage_flags_insufficient():
     r = g.project_deepseek_coverage(8, until, now=now, points=pts, current_lanes=7)
     assert r["measurable"] is True
     assert r["sufficient"] is False
+
+
+def test_project_deepseek_coverage_sums_drops_across_a_topup(monkeypatch):
+    """cc-quality fast-follow 1 (orch-console #86372/#86380): endpoint-only (first - last)
+    would read a top-up as near-zero net spend. Spend $10 (50 -> 40), top up $30 (40 ->
+    70), spend $5 (70 -> 65) over 10h -- real spend is $15, endpoint-only would compute
+    (50 - 65) = -15 -> floored to $0. Sum-of-drops must report $15."""
+    t0 = dt.datetime(2026, 10, 31, 0, 0, tzinfo=dt.timezone.utc)
+    pts = [(t0, 50.0),
+           (t0 + dt.timedelta(hours=3), 40.0),   # -10 (spend)
+           (t0 + dt.timedelta(hours=5), 70.0),   # +30 (top-up, floored to 0 spend)
+           (t0 + dt.timedelta(hours=10), 65.0)]  # -5 (spend)
+    now = t0 + dt.timedelta(hours=10)
+    r = g.project_deepseek_coverage(0, now + dt.timedelta(hours=1), now=now, points=pts, current_lanes=5)
+    assert r["measurable"] is True
+    assert r["per_lane_rate_usd_hr"] == pytest.approx((15.0 / 10.0) / 5, rel=1e-6)
+    endpoint_only_rate = max(0.0, 50.0 - 65.0) / 10.0  # the old (wrong) formula: 0.0
+    assert r["per_lane_rate_usd_hr"] * 5 != pytest.approx(endpoint_only_rate, abs=1e-9)
+
+
+# ── live resets_at (fast-follow 2) ──────────────────────────────────────────────
+def test_musa_reset_at_reads_live_value(monkeypatch):
+    class FakeCur:
+        def execute(self, *a, **k): pass
+        def fetchone(self): return (dt.datetime(2026, 12, 1, 8, 0, tzinfo=dt.timezone.utc),)
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    class FakeConn:
+        def cursor(self): return FakeCur()
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(g, "_db", lambda: FakeConn())
+    r = g.musa_reset_at(fallback=dt.datetime(2026, 11, 4, 8, 0, tzinfo=dt.timezone.utc))
+    assert r == dt.datetime(2026, 12, 1, 8, 0, tzinfo=dt.timezone.utc)
+
+
+def test_musa_reset_at_falls_back_on_missing_row(monkeypatch):
+    class FakeCur:
+        def execute(self, *a, **k): pass
+        def fetchone(self): return None
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    class FakeConn:
+        def cursor(self): return FakeCur()
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(g, "_db", lambda: FakeConn())
+    fallback = dt.datetime(2026, 11, 4, 8, 0, tzinfo=dt.timezone.utc)
+    assert g.musa_reset_at(fallback=fallback) == fallback
+
+
+def test_musa_reset_at_falls_back_on_db_error(monkeypatch):
+    def boom():
+        raise RuntimeError("db down")
+    monkeypatch.setattr(g, "_db", boom)
+    fallback = dt.datetime(2026, 11, 4, 8, 0, tzinfo=dt.timezone.utc)
+    assert g.musa_reset_at(fallback=fallback) == fallback
