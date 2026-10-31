@@ -173,6 +173,28 @@ _PERSON_HEADER_KEYWORDS = (
     "student", "trainee", "candidate", "learner",
 )
 
+# "X Name" column headers where X denotes a catalog/reference item, not a
+# person (bus #85559/#961: an xlsx skill-index sheet's "Skill Name" column
+# false-positived as a person-record signal). Keeps the broad bare "name"
+# substring match for genuine person-identifying compounds ("Donor Name",
+# "Trainee Name", ...) -- this only excludes a short, explicit list of known
+# non-person catalog columns, so it narrows a false positive without
+# loosening the general heuristic.
+_NON_PERSON_NAME_COLUMN_RE = re.compile(
+    r"\b(?:skill|competenc\w*|criteri\w*|file|item|product|course|class|subject|"
+    r"module|categor\w*|field|column|sheet|table|exam|test|document|template|"
+    r"task|unit|lesson|topic)\s+name\b",
+    re.IGNORECASE,
+)
+
+
+def _header_has_person_name_keyword(header_lower: str) -> bool:
+    """True if a header cell's 'name' mention is person-identifying, not a
+    catalog/reference-column label like 'Skill Name' or 'File Name'."""
+    if "name" not in header_lower:
+        return False
+    return not _NON_PERSON_NAME_COLUMN_RE.search(header_lower)
+
 # ── person-name shape patterns, scanned over free TEXT (not just headers) ───
 # bus #52465: a single-person progress report ("Student: Ahmad bin Yusof")
 # has no 20+-row table and no header row at all — these catch the name
@@ -282,13 +304,56 @@ def is_person_record_header(headers: list[str]) -> bool:
     case-insensitive) — the first of the two person-record heuristics."""
     for h in headers:
         hl = (h or "").strip().lower()
-        if any(kw in hl for kw in _PERSON_HEADER_KEYWORDS):
-            return True
+        for kw in _PERSON_HEADER_KEYWORDS:
+            if kw == "name":
+                if _header_has_person_name_keyword(hl):
+                    return True
+            elif kw in hl:
+                return True
     return False
 
 
 def has_name_like_column(headers: list[str]) -> bool:
-    return any("name" in (h or "").strip().lower() for h in headers)
+    return any(_header_has_person_name_keyword((h or "").strip().lower()) for h in headers)
+
+
+def _person_record_header_cols(headers: list[str]) -> list[int]:
+    """Column indices whose header matches a person-record keyword — same
+    match logic as is_person_record_header, but per-column so the
+    field-emptiness gate (bus #85559/#961) can check just those columns."""
+    cols = []
+    for i, h in enumerate(headers):
+        hl = (h or "").strip().lower()
+        for kw in _PERSON_HEADER_KEYWORDS:
+            if kw == "name":
+                if _header_has_person_name_keyword(hl):
+                    cols.append(i)
+                    break
+            elif kw in hl:
+                cols.append(i)
+                break
+    return cols
+
+
+def _name_like_cols(headers: list[str]) -> list[int]:
+    return [
+        i for i, h in enumerate(headers)
+        if _header_has_person_name_keyword((h or "").strip().lower())
+    ]
+
+
+def _person_name_match_values(text: str) -> list[str]:
+    """Return the raw matched substrings for every name-SHAPED pattern —
+    label+value, honorific+name, Malay/Arabic patronymic particle, Arabic-
+    script run. INTERNAL ONLY: classify() uses this to dedupe repeated
+    boilerplate (bus #85559/#961); never returned to any external caller —
+    same no-raw-value contract as scan_person_name_hits below."""
+    return (
+        _PERSON_LABEL_VALUE_RE.findall(text)
+        + _HONORIFIC_NAME_RE.findall(text)
+        + _ARABIC_NAME_PARTICLE_RE.findall(text)
+        + _ARABIC_SCRIPT_RE.findall(text)
+    )
 
 
 def scan_person_name_hits(text: str) -> int:
@@ -297,12 +362,29 @@ def scan_person_name_hits(text: str) -> int:
     patronymic particle, or an Arabic-script run. Any hit (>0) is a
     person-record signal on its own, independent of row count or header
     keywords (bus #52465 single-person-record gap)."""
-    return (
-        len(_PERSON_LABEL_VALUE_RE.findall(text))
-        + len(_HONORIFIC_NAME_RE.findall(text))
-        + len(_ARABIC_NAME_PARTICLE_RE.findall(text))
-        + len(_ARABIC_SCRIPT_RE.findall(text))
-    )
+    return len(_person_name_match_values(text))
+
+
+def _columns_have_any_value(s: "SheetStructure", col_indices: list[int]) -> bool:
+    """Field-emptiness check (bus #85559/#961): True UNLESS we have positive
+    evidence every one of the given columns is blank in every row. Zero
+    rows is itself blank evidence (nothing was ever filled in -- a blank
+    TEMPLATE's field label alone is not a record). If rows_data was never
+    attached even though s.rows > 0 (the existing unit-test shape), this
+    FAILS CLOSED (returns True, 'has a value') — missing evidence is never
+    read as proof of blankness, so this never loosens the pre-existing
+    behavior when no row content is available to check."""
+    if not col_indices:
+        return False
+    if s.rows == 0:
+        return False
+    if not s.rows_data:
+        return True
+    for row in s.rows_data:
+        for i in col_indices:
+            if i < len(row) and (row[i] or "").strip():
+                return True
+    return False
 
 
 _HEADER_REDACTION = "⟨redacted⟩"  # ⟨redacted⟩
@@ -437,10 +519,12 @@ def classify(structure: FileStructure) -> StageVerdict:
     person_record = False
     reasons: list[str] = []
     for s in structure.sheets:
-        if is_person_record_header(s.header):
+        header_cols = _person_record_header_cols(s.header)
+        if header_cols and _columns_have_any_value(s, header_cols):
             person_record = True
             reasons.append(f"sheet '{s.name}' header matches a person-record keyword")
-        if s.rows > 20 and has_name_like_column(s.header):
+        name_cols = _name_like_cols(s.header)
+        if s.rows > 20 and name_cols and _columns_have_any_value(s, name_cols):
             person_record = True
             reasons.append(f"sheet '{s.name}' has {s.rows} rows with a name-like column")
         if structure.kind == "image" and s.rows > _IMAGE_DATA_ROW_HOLD_THRESHOLD:
@@ -449,7 +533,18 @@ def classify(structure: FileStructure) -> StageVerdict:
                 f"image text looks like a data table ({s.rows} rows, "
                 f"threshold {_IMAGE_DATA_ROW_HOLD_THRESHOLD})"
             )
-    name_hits = sum(scan_person_name_hits(t) for t in structure.texts)
+    # Dedup by unique matched value, not raw occurrence count (bus #85559/
+    # #961): repeated BOILERPLATE (the same blank-template placeholder text
+    # verbatim across many pages/files) must not inflate the hit count --
+    # each sub-pattern above returns the FULL matched name-shaped text, so
+    # two DIFFERENT real people never collapse into the same unique value.
+    unique_name_values = {
+        v.strip().lower()
+        for t in structure.texts
+        for v in _person_name_match_values(t)
+        if v and v.strip()
+    }
+    name_hits = len(unique_name_values)
     if name_hits > 0:
         person_record = True
         if any(_RECORD_TYPE_KEYWORDS_RE.search(t) for t in structure.texts):

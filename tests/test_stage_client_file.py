@@ -119,6 +119,27 @@ def test_name_like_column_detected():
     assert scf.has_name_like_column(["Amount", "Category"]) is False
 
 
+def test_name_like_column_excludes_catalog_name_compounds():
+    # bus #85559/#961: an xlsx skill/competency INDEX sheet's "Skill Name"
+    # column is a catalog label, not a person-identifying field -- the bare
+    # "name" substring match must not fire on it (or its siblings), while a
+    # genuine person-role compound ("Donor Name" etc., tested above) still
+    # does.
+    assert scf.has_name_like_column(["Skill Name", "Points"]) is False
+    assert scf.has_name_like_column(["File Name", "Size"]) is False
+    assert scf.has_name_like_column(["Course Name", "Credits"]) is False
+
+
+def test_person_record_header_excludes_catalog_name_compounds():
+    assert scf.is_person_record_header(["Skill Name", "Points"]) is False
+
+
+def test_person_record_header_catalog_compound_does_not_mask_other_keywords():
+    # excluding the catalog "name" reading must not swallow an UNRELATED
+    # person-header keyword on the same or another cell.
+    assert scf.is_person_record_header(["Skill Name", "Candidate ID"]) is True
+
+
 # ── classify(): the fail-closed CLEAN/HOLD core ──────────────────────────────
 
 def _structure(header, rows, texts=None, kind="csv"):
@@ -157,6 +178,112 @@ def test_classify_holds_on_large_row_count_with_name_like_column():
     assert v.verdict == "HOLD"
     assert v.person_record is True
     assert any("25 rows with a name-like column" in r for r in v.reasons)
+
+
+# ── field-emptiness (bus #85559/#961): a person-field LABEL with a blank
+# VALUE underneath must not count as a record on its own ───────────────────
+
+def test_classify_clean_on_person_header_with_zero_rows():
+    # a blank TEMPLATE: the field label exists ("Trainee Name") but there are
+    # literally zero data rows -- nothing was ever filled in.
+    v = scf.classify(_structure(["Trainee Name", "Candidate ID"], rows=0, texts=[]))
+    assert v.verdict == "CLEAN"
+    assert v.person_record is False
+
+
+def test_classify_clean_on_person_header_with_all_blank_cells():
+    # rows>0, but the actual data under the person-field columns is blank in
+    # every row (rows_data supplied and checked, not just the row COUNT).
+    structure = scf.FileStructure(
+        kind="xlsx",
+        sheets=[scf.SheetStructure(name="s1", rows=2, cols=2, header=["Trainee Name", "Candidate ID"],
+                                    rows_data=[["", ""], ["   ", ""]])],
+        texts=[],
+    )
+    v = scf.classify(structure)
+    assert v.verdict == "CLEAN"
+    assert v.person_record is False
+
+
+def test_classify_holds_on_person_header_with_one_filled_row():
+    # same shape, but one row actually has a value under a person column --
+    # must still HOLD (field-emptiness only suppresses genuinely EMPTY data).
+    structure = scf.FileStructure(
+        kind="xlsx",
+        sheets=[scf.SheetStructure(name="s1", rows=2, cols=2, header=["Trainee Name", "Candidate ID"],
+                                    rows_data=[["Ahmad", "C123"], ["", ""]])],
+        texts=[],
+    )
+    v = scf.classify(structure)
+    assert v.verdict == "HOLD"
+    assert v.person_record is True
+
+
+def test_classify_holds_on_header_keyword_without_rows_data_fails_closed():
+    # rows_data was never attached (the pre-existing _structure() test helper
+    # shape, rows>0) -- MISSING evidence must never be read as "proven
+    # blank"; this must keep HOLDing exactly as it did before this fix.
+    v = scf.classify(_structure(["Full Name", "Amount"], rows=1, texts=["x"]))
+    assert v.verdict == "HOLD"
+    assert v.person_record is True
+
+
+def test_classify_large_row_count_name_column_all_blank_is_clean():
+    structure = scf.FileStructure(
+        kind="xlsx",
+        sheets=[scf.SheetStructure(name="s1", rows=25, cols=2, header=["Name", "Amount"],
+                                    rows_data=[["", ""]] * 25)],
+        texts=[],
+    )
+    v = scf.classify(structure)
+    assert v.verdict == "CLEAN"
+
+
+def test_classify_holds_on_large_row_count_name_column_with_one_real_row_among_blanks():
+    # orch-console #86964 adversarial ask: the exact real-world shape (a
+    # bulk >20-row template, mostly blank) must still HOLD if even ONE row
+    # carries a real person value -- field-emptiness only clears a column
+    # that is blank in EVERY row, never "mostly" blank.
+    rows_data = [["", ""]] * 24 + [["Ahmad", "99"]]
+    structure = scf.FileStructure(
+        kind="xlsx",
+        sheets=[scf.SheetStructure(name="s1", rows=25, cols=2, header=["Name", "Amount"],
+                                    rows_data=rows_data)],
+        texts=[],
+    )
+    v = scf.classify(structure)
+    assert v.verdict == "HOLD"
+    assert v.person_record is True
+    assert any("25 rows with a name-like column" in r for r in v.reasons)
+
+
+# ── repeated-boilerplate dedup (bus #85559/#961, fix_direction 2) ──────────
+
+def test_classify_dedupes_repeated_boilerplate_name_shaped_values():
+    # the SAME template label/value repeated across many sections of a form
+    # must not multiply the reported hit count -- capped at unique matched
+    # values. Still a real name-shaped value, so it still (correctly) HOLDs.
+    text = "Trainee Name: John\n" * 50
+    structure = scf.FileStructure(kind="docx", sheets=[], texts=[text])
+    v = scf.classify(structure)
+    assert v.verdict == "HOLD"
+    assert any("1 name-shaped value" in r for r in v.reasons)
+
+
+def test_classify_dedup_does_not_loosen_distinct_name_hits():
+    # two DIFFERENT people must still count as 2, not collapse to 1. Kept
+    # as separate text BLOCKS (as extract_* genuinely produces one text
+    # entry per paragraph/sheet) so _PERSON_LABEL_VALUE_RE's own greedy,
+    # case-insensitive word-run matching -- which otherwise fuses anything
+    # on either side of a single name mention into one match -- can't blur
+    # the two names together; this isolates the dedup-by-value logic.
+    structure = scf.FileStructure(
+        kind="docx", sheets=[],
+        texts=["Trainee Name: Ahmad.", "Trainee Name: Siti."],
+    )
+    v = scf.classify(structure)
+    assert v.verdict == "HOLD"
+    assert any("2 name-shaped value" in r for r in v.reasons)
 
 
 def test_classify_never_leaks_the_matched_value_into_the_rendered_report():
