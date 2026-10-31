@@ -37,12 +37,17 @@ ORDER OF OPERATIONS (the runbook this encodes)
   5. this tool: `verify`   (new DSN connects, old one is rejected)
   6. scrub the old value out of the transcripts (scripts/secret_hash_sweep.py)
 
-`verify` takes NO arguments in the normal case: it reads the new DSN out of
-`--env-file` and reconstructs the pre-rotation DSN from the newest `.env.bak.*`
-sitting beside it. That is not a convenience. The first draft wanted both DSNs on
-the command line, which is precisely how this credential leaked on 26 Oct — a
-`pgrep -fl` read a process's argv and the password went into three transcripts.
-A tool that exists to stop that cannot itself require the secret in argv.
+`verify` NEVER TAKES A DSN, in any mode. It reads the new one out of `--env-file`
+and reconstructs the pre-rotation one from the newest `.env.bak.*` sitting beside
+it. That is not a convenience. The first draft wanted both DSNs on the command
+line, which is precisely how this credential leaked on 26 Oct — a `pgrep -fl` read
+a process's argv and the password went into three transcripts. A tool that exists
+to stop that cannot itself offer to do it (cc-quality 87760 F1).
+
+AND IT NEVER SKIPS THE OLD PROBE (87760 F2, console 87773). No backup, an
+unparseable backup, or a backup that still holds the current password all REFUSE.
+A check that only proves the new password connects is a connection test; the half
+that matters after a reset is that the old password is dead.
 
 WHY `verify` RETRIES THE NEW DSN. Supabase's own KB (28P01 after a password
 rotation) says Supavisor caches database credentials briefly: with active pooled
@@ -73,7 +78,11 @@ SAFETY
   * refuses to write a value shorter than MIN_PASSWORD_LEN
   * refuses to touch a key it cannot parse; never rewrites a file it did not change
   * `--dry-run` is the default for `apply`; writing needs `--execute`
-  * never prints, echoes or logs a password — sha256[:8] and length only
+  * no subcommand accepts a DSN or a password on the command line
+  * never prints, echoes or logs a password — hash prefix and length only
+  * the `.env` selector is a sha256 PREFIX (8-64 hex; `keys` prints 16). Anything
+    empty, short or non-hex matches nothing, so a bad selector can never rewrite a
+    file wholesale. 8 hex is accepted because an operator may already hold one.
 """
 from __future__ import annotations
 
@@ -140,12 +149,27 @@ def read_env_keys(path: Path) -> list:
     return out
 
 
-def keys_embedding_password(path: Path, password_sha8: str) -> list:
-    """Keys whose URL value carries a password with this sha8 prefix."""
+def sha_prefix_matches(password: str, prefix: str) -> bool:
+    """Does this password's sha256 hex start with `prefix`?
+
+    The selector is a HASH PREFIX, so it keys the decision on the secret without any
+    command line or log line ever carrying the value. 8 hex chars (the historical
+    `keys` output, and what an operator may already have in hand) is accepted, but
+    anything shorter, longer than the digest, or non-hex matches NOTHING — an empty
+    prefix would otherwise match every password and rewrite the whole file.
+    """
+    needle = (prefix or "").strip().lower()
+    if not (8 <= len(needle) <= 64) or any(c not in "0123456789abcdef" for c in needle):
+        return False
+    return hashlib.sha256(password.encode()).hexdigest().startswith(needle)
+
+
+def keys_embedding_password(path: Path, password_prefix: str) -> list:
+    """Keys whose URL value carries a password matching this sha256 prefix."""
     found = []
     for key, value in read_env_keys(path):
         m = URL_WITH_PASSWORD_RE.search(value)
-        if m and sha8(m.group(2)) == password_sha8:
+        if m and sha_prefix_matches(m.group(2), password_prefix):
             found.append(key)
     return found
 
@@ -202,7 +226,7 @@ def rewrite_env(path: Path, old_sha8: str, new_password: str,
 
     def _sub(match: "re.Match") -> str:
         user, pw = match.group(1), match.group(2)
-        if sha8(pw) != old_sha8:
+        if not sha_prefix_matches(pw, old_sha8):
             return match.group(0)
         return f"://{user}:{new_password}@"
 
@@ -341,6 +365,13 @@ def cmd_apply(args) -> int:
     if not env_file.exists():
         print(f"apply: REFUSED — {env_file} does not exist", file=sys.stderr)
         return 2
+    # Validate the selector BEFORE reading any secret: a bad prefix (empty matches
+    # everything) must never get as far as a stdin read or a vault call.
+    needle = (args.old_sha8 or "").strip().lower()
+    if not (8 <= len(needle) <= 64) or any(c not in "0123456789abcdef" for c in needle):
+        print("apply: REFUSED — --old-sha8 must be 8 to 64 hex characters of the sha256 "
+              "of the CURRENT password. Nothing written.", file=sys.stderr)
+        return 2
     if args.from_stdin:
         # Escape hatch for the case the runbook exists to avoid: the dashboard reset
         # already landed before `apply` ran, so DATABASE_URL is dead and the vault —
@@ -364,14 +395,14 @@ def cmd_apply(args) -> int:
                   "value.", file=sys.stderr)
             return 2
 
-    olds = keys_embedding_password(env_file, args.old_sha8) if args.old_sha8 else []
+    olds = keys_embedding_password(env_file, needle)
     if not olds:
-        # Fall back: every URL key whose password differs from the staged one is a
-        # candidate ONLY if it belongs to the same role/project. Conservative: require
-        # an explicit --old-sha8 rather than guessing which credential to replace.
-        print("apply: REFUSED — no key's password matches --old-sha8. Pass the sha8 of "
-              "the password currently in .env (printed by `apply --dry-run` on a "
-              "previous run, or `keys --env-file`).", file=sys.stderr)
+        # Conservative: require an explicit --old-sha8 rather than guessing which
+        # credential to replace.
+        print("apply: REFUSED — no key's password matches --old-sha8. Pass the hash "
+              "prefix of the password currently in .env (from `keys`, which prints 16 "
+              "hex chars; a shorter prefix is accepted). Nothing written.",
+              file=sys.stderr)
         return 2
 
     if not args.execute:
@@ -391,12 +422,19 @@ def cmd_apply(args) -> int:
 
 
 def cmd_keys(args) -> int:
-    """Which keys carry a URL password, by sha8 — the input `apply` needs."""
+    """Which keys carry a URL password, by hash prefix — the input `apply` needs.
+
+    Prints 16 hex chars, not 8: the selector decides which credential gets
+    rewritten, and 8 hex is 32 bits — a second key whose password collided there
+    would be silently rewritten too (cc-quality 87760 N3). `apply` still accepts a
+    shorter prefix for a value the operator already has printed.
+    """
     for key, value in read_env_keys(args.env_file):
         m = URL_WITH_PASSWORD_RE.search(value)
         if not m:
             continue
-        print(f"{key}\tuser={m.group(1)}\tpw=sha256:{sha8(m.group(2))}")
+        digest = hashlib.sha256(m.group(2).encode()).hexdigest()[:16]
+        print(f"{key}\tuser={m.group(1)}\tpw=sha256:{digest}")
     return 0
 
 
@@ -412,51 +450,60 @@ def _probe(psycopg, dsn: str, timeout: int = 8) -> Tuple[bool, str]:
         return False, type(exc).__name__
 
 
-def _verify_new_dsn(args) -> Optional[str]:
-    """The DSN to prove, from --new-dsn or from the env file. None = refuse."""
-    if args.new_dsn:
-        return args.new_dsn
+def _verify_refuse(reason: str) -> None:
+    print(f"verify: REFUSED — {reason}", file=sys.stderr)
+
+
+def _verify_dsns(args) -> Tuple[Optional[str], Optional[str]]:
+    """(new_dsn, old_dsn), or (None, None) with a printed refusal.
+
+    NEITHER DSN COMES FROM ARGV (cc-quality 87760 F1). Both already sit on disk: the
+    new one in the env file `apply` rewrote, the old one in the 0600 backup it left
+    beside it. Accepting them as arguments would put the just-rotated password back
+    into ps, shell history and any transcript — which is the leak this whole rotation
+    exists to close.
+
+    THE OLD-DSN PROBE IS MANDATORY (87760 F2, console 87773). A verify that cannot
+    prove the pre-rotation password is dead only proves the new one connects, and the
+    whole point of a rotation is the other half. Missing backup, unparseable backup,
+    or a backup that still holds the current password all REFUSE rather than degrade.
+    """
     if not args.env_file.exists():
-        print(f"verify: REFUSED — {args.env_file} does not exist and no --new-dsn "
-              "was given", file=sys.stderr)
-        return None
-    value = database_url(args.env_file)
-    if value is None:
-        print(f"verify: REFUSED — {args.env_file} has no DATABASE_URL with an embedded "
-              "password. Nothing probed.", file=sys.stderr)
-        return None
-    print(f"verify: using DATABASE_URL from {args.env_file} pw={mask(url_password(value))}")
-    return value
+        _verify_refuse(f"{args.env_file} does not exist")
+        return None, None
+    new_dsn = database_url(args.env_file)
+    if new_dsn is None:
+        _verify_refuse(f"{args.env_file} has no DATABASE_URL with an embedded password")
+        return None, None
+    print(f"verify: new DSN from {args.env_file} pw={mask(url_password(new_dsn))}")
 
-
-def _verify_old_dsn(args, new_dsn: str) -> Tuple[Optional[str], Optional[str]]:
-    """(old_dsn, skipped_reason) from --old-dsn or the newest backup."""
-    if args.old_dsn:
-        return args.old_dsn, None
-    if args.no_old_dsn:
-        return None, "--no-old-dsn given"
     backup = latest_backup(args.env_file)
     if backup is None:
-        return None, f"no {args.env_file.name}.bak.* beside {args.env_file}"
+        _verify_refuse(
+            f"no {args.env_file.name}.bak.* beside {args.env_file}. apply writes one; "
+            "without it there is no pre-rotation password to prove dead, so a PASS here "
+            "would only say the new password connects")
+        return None, None
     old_pw = url_password(database_url(backup) or "")
     if old_pw is None:
-        return None, f"no URL password in {backup.name}"
-    new_pw = url_password(new_dsn)
-    if new_pw is not None and sha8(old_pw) == sha8(new_pw):
-        return None, f"{backup.name} holds the same password as the env file (apply did " \
-                     "not run, or ran twice) — there is no pre-rotation value to test"
+        _verify_refuse(f"{backup.name} carries no DATABASE_URL password to test")
+        return None, None
+    if sha8(old_pw) == sha8(url_password(new_dsn) or ""):
+        _verify_refuse(
+            f"{backup.name} holds the SAME password as {args.env_file.name} — apply did "
+            "not run (or ran twice), so there is no pre-rotation value to test")
+        return None, None
     print(f"verify: old DSN rebuilt from {backup.name} pw={mask(old_pw)}")
-    return dsn_with_password(new_dsn, old_pw), None
+    return new_dsn, dsn_with_password(new_dsn, old_pw)
 
 
 def cmd_verify(args) -> int:
     """New password must connect; the pre-rotation one must be rejected."""
     import psycopg
 
-    new_dsn = _verify_new_dsn(args)
-    if new_dsn is None:
+    new_dsn, old_dsn = _verify_dsns(args)
+    if new_dsn is None or old_dsn is None:
         return 2
-    old_dsn, old_skipped = _verify_old_dsn(args, new_dsn)
 
     attempts = max(1, int(args.retries))
     ok_new, detail_new = False, "not attempted"
@@ -475,21 +522,15 @@ def cmd_verify(args) -> int:
     rc = 0 if ok_new else 1
 
     if not ok_new:
-        if old_dsn:
-            print("verify: OLD probe not attempted — while the pooler is still rejecting "
-                  "everything, a rejection would read as a PASS. Fix the new connection "
-                  "first.")
+        print("verify: OLD probe not attempted — while the pooler is still rejecting "
+              "everything, a rejection would read as a PASS. Fix the new connection first.")
         return rc
 
-    if old_dsn:
-        ok_old, detail_old = _probe(psycopg, old_dsn)
-        print(f"verify: OLD dsn -> {'STILL WORKS — FAIL' if ok_old else 'rejected — PASS'} "
-              f"({detail_old})")
-        if ok_old:
-            rc = 1
-    elif old_skipped:
-        print(f"verify: OLD probe SKIPPED ({old_skipped}). The new password works, but "
-              "nothing in this run proves the old one is dead.")
+    ok_old, detail_old = _probe(psycopg, old_dsn)
+    print(f"verify: OLD dsn -> {'STILL WORKS — FAIL' if ok_old else 'rejected — PASS'} "
+          f"({detail_old})")
+    if ok_old:
+        rc = 1
     return rc
 
 
@@ -539,15 +580,9 @@ def main(argv: Optional[list] = None) -> int:
                         "vault is unreachable through the dead DSN")
     p.set_defaults(func=cmd_apply)
 
-    p = sub.add_parser("verify", help="new DSN connects; old DSN is rejected")
-    p.add_argument("--new-dsn", default=None,
-                   help="default: DATABASE_URL read from --env-file. Passing a DSN here "
-                        "puts the secret in this process's argv — the exact leak this "
-                        "rotation exists to stop — so prefer the default.")
-    p.add_argument("--old-dsn", default=None,
-                   help="default: rebuilt from the newest .env.bak.* beside --env-file")
-    p.add_argument("--no-old-dsn", action="store_true",
-                   help="probe only the new DSN (used when no backup exists)")
+    p = sub.add_parser(
+        "verify",
+        help="new DSN connects AND old DSN is rejected (both read from disk, never argv)")
     p.add_argument("--retries", type=int, default=3,
                    help="attempts for the NEW probe, spaced by --retry-delay "
                         "(the pooler caches credentials ~15s after a reset)")
