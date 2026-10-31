@@ -198,9 +198,11 @@ design is now three parts and contains **no new lifeline code**:
 - **b. Clean exit of the launcher.** The boot script's EXIT trap kills the heartbeat
   subshell first and then marks the row offline, and that order is deliberate. So kill the
   **launcher shell**, never the CC process directly, and never `SIGKILL` — a hard kill skips
-  the trap and leaves the row claiming the body is still there. If the row does not go
-  `offline`, **stop**: the trap did not run, and booting over it is how two bodies end up on
-  one directory.
+  the trap and leaves the row claiming the body is still there. **Measured on this host
+  (2026-10-31): the trap runs on `SIGTERM` and on `SIGHUP`** — the signal `tmux kill-session`
+  actually sends — and by definition not on `SIGKILL`. Send `SIGTERM`; a `tmux kill-session`
+  is acceptable for the same reason. If the row does not go `offline`, **stop**: the trap
+  did not run, and booting over it is how two bodies end up on one directory.
 - **c. Confirm the body is gone** before re-running anything, with both checks: no claude
   process whose cwd is that directory, and the tmux session no longer listed. If either
   check can only say *unknown*, **do not boot** — treating unknown as absent is the one
