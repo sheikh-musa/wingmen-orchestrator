@@ -45,22 +45,39 @@ replacement: capture the pane's claude child pid from the tmux pane tree **befor
 and assert that exact pid is gone afterwards. Runbook edit is post-window work; do not
 rely on the -c form.
 
-**SECOND DEFECT — the auth-fail tripwire cannot attribute by peer IP (bus 89322 to the console,
-89323 to cc-fleet-health).** Step 7 left one open thread the console asked for: "watch the
-auth-failure log by peer IP and restart offenders." That is not possible with today's tooling:
-the Mgmt analytics endpoint has **no `metadata` field** (`Field "metadata" does not exist`), and
-`postgres_logs` / `pooler_logs` do not exist as tables, so **no row carries `peer_ip`** — 174 of
-174 rows across 06:44–07:29Z came back unattributed. `scripts/pooler_authfail_tripwire.py`'s
-`mini=0.00/min gzb=0.00/min` is therefore **structural, not a measurement**, and its per-host
-`>5/min` breach test can never fire; only the aggregate count and the breaker probe survive.
-Measured residual: failures continued after both restarts (07:20 8, 07:21 16, 07:23 4,
-07:26 22, 07:28 4, 07:31 4 → 3.4/min over 10 min, 5.9/min over 30), but **none of it appears in
-this host's logs** — the Mini clients that were failing (weekly-alert-relay, coord-pane-publisher,
-fleet-health-bus-notify, backlog-done-checker) stop logging failures at 07:18Z and fleet-health-bus-notify
-has polled cleanly since. That points off-host (gzb, which the console holds). The breaker stayed
-**clear from 07:16:54Z onward**, so no mass restart on a guess. Post-window: either find a
-log source with connection origin or make the tripwire say UNATTRIBUTABLE instead of printing
-per-host zeros.
+**RESIDUAL AUTH FAILURES — and a WRONG FINDING OF MINE, retracted (bus 89334 to the console,
+89336 to cc-fleet-health).** Step 7 left one open thread the console asked for: "watch the
+auth-failure log by peer IP and restart offenders." I first reported (89322/89323) that **no row
+carries `peer_ip`** and that the tripwire's per-host buckets were structural zeros. **That was
+wrong.** `peer_ip` lives in the **`log_attributes`** object: `SELECT timestamp, log_attributes
+FROM logs WHERE event_message ILIKE '%password authentication failed%'` returns it on every row.
+My error was a **blind filter**: I projected `metadata` and `log_attributes` *together*, the whole
+projection failed, and I then tested the other candidates individually **without ever testing
+`log_attributes` alone** — then wrote a conclusion a query could not support. cc-fleet-health and
+the console both caught it independently within a minute (89329/89331); fleet-health has the
+one-line SELECT fix + a regression test in **orchestrator#802** (the old test injected `peer_ip`
+straight into the mocked row, so it never exercised the query).
+
+**Attributed truth (measured 07:19–07:39Z, 78 rows, 0 unattributed):** Mini `121.6.154.64` = **44**
+(a flat **4 failures every 2–3 min**, still running at 07:38Z) and gzb `66.96.212.114` = **34**
+(8 at 07:21, 18 at 07:26, 8 at 07:37). The Mini offender is a **persistent loop, not a one-off** —
+prime suspect **pid 78030**: ppid=1 orphan (no launchd parent), cwd = the live checkout, links
+psycopg2 from the orchestrator venv, started Sun 25 Oct 06:35 local, 13s CPU in 7 days. **Not
+killed by me** (unidentified; the SRE is hunting it, and the breaker stayed clear from 07:16:54Z
+onward, so an unknown kill was the wrong trade). Fleet-health/console own that call.
+
+**LESSON (worth more than the finding):** "the query returned nothing" is not "the field does not
+exist" — and never generalize a negative from a query that also asked for something invalid.
+
+**PR #803 OPEN (bus 89328/89330).** docs-only: delete the stale wingmen-core secrets-server
+framing (Musa op37138 / console 89295). Branch `cc-substrate/secrets-server-doc-fix` in
+`~/wingmen/projects/orchestrator.wt-secretsdoc`, head **4b0ca05**, base `fable/substrate-safe-fixes`,
+MERGEABLE (+18/−3, 4 files): CLAUDE.md ORCH-TOPOLOGY-001 holder host → **gzb**
+(`orch_lease.holder_host='gzbai'`, read live 07:34Z), correction banner in `docs/orch-move-runbook.md`,
+`docs/README.md`, `docs/migration-file-triage-manifest.md`. `MAP.md` has **zero** wingmen-core refs
+(checked). `scripts/lib/hub_reach.py` still maps wingmen-core → `root@91.107.235.77` — deliberately
+NOT touched (code, own fail-closed tests, behaviour change ≠ doc PR); named in the PR body for a
+separate decision. Awaiting cc-quality VERDICT; merge only via `scripts/merge_pinned.sh`.
 
 ## SUPERSEDED (2026-10-31 20:55Z) — read for the executor defect list
 
