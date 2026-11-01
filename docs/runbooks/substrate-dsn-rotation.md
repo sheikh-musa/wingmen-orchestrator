@@ -632,3 +632,24 @@ this host's peer IP across a window that spans several minutes.
 > Rotate, then relaunch **every** holder in the same window — daemons, singletons, and tmux
 > lanes; connect-check before the first kill; and make every heartbeat read its DSN from the
 > file at use, so the next rotation is a file write rather than a restart hunt.
+
+### 8.6 Any cleanup run must record what the DELETE returned, not what you meant to delete
+
+The rotation window leaves debris — dead `ingest_poll_health` rows, orphaned pollers, stale
+leases — and the cleanup runs that take it away are destructive. On 2026-11-01 two cleanup
+statements deleted four rows and the record written afterwards listed two, and the gap was
+only reconstructed hours later from another agent's observation. That is a data-loss shape
+wearing a maintenance shape.
+
+- Emit `RETURNING` of **every column you would need to restore**, and write the reversibility
+  file **inside the same script** that ran the statement. Never delete in one step and type
+  the list out in the next.
+- One statement per logical action. If a run needs several, the record is derived from all of
+  their `RETURNING`s, not from the ids you intended to touch.
+- `assert len(deleted) == expected` so a surprise is a loud abort rather than a quiet extra
+  deletion.
+- Record provenance in the file: which run, which authority, which statement.
+- When someone reports a row you cannot find in your record, check the **timeline against
+  each candidate writer's merge time** before concluding that new automation did it — on
+  2026-11-01 that comparison is what ruled out an auto-reap that merged nine minutes after
+  the row was already seen gone.
