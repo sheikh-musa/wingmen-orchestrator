@@ -119,11 +119,48 @@ def lane_map(cur):
     return {a: l for a, l in cur.fetchall()}
 
 
+def session_for(agent_id, base, live_members, lmap, status_session=None):
+    """PURE. (session, reason) to probe for `agent_id`; reason is None when we hold a
+    session we are entitled to read.
+
+    ORDER MATTERS, and the first entry is the one that is actually true:
+      1. agent_status.tmux_session — the pane this instance is RUNNING IN. Authoritative,
+         and populated for every live agent (37/37 on 2026-11-01). Measured against it,
+         resolving from fleet_lanes instead probes the wrong pane for 8 of 37 live lanes
+         — cc-irsyad-1/2/5 would all have been read as irsyad-worker-4, cosem-platform-2/4
+         as cosem-platform-author.
+      2. the fleet_lanes row keyed by the instance's own id (cc-quality-2 has one).
+      3. the base's fleet_lanes row, but ONLY when the base has a single live body — then
+         the base lane IS that body. fleet_lanes is keyed by base_agent_id, so it collapses
+         a family's lanes onto one arbitrary row; borrowing it for one of several live
+         instances would read sibling A's pane as evidence about sibling B, which is the
+         false IDLE this digest exists to avoid. There we say "could not measure".
+    """
+    if status_session:
+        return status_session, None
+    own = lmap.get(agent_id)
+    if own:
+        return own, None
+    base_sess = lmap.get(base)
+    if not base_sess:
+        return None, "no tmux_session and no fleet_lanes row for this instance or its base"
+    if len(live_members) == 1:
+        return base_sess, None
+    return None, ("no tmux_session and %d live instances share base '%s'"
+                  % (len(live_members), base))
+
+
 def live_agents(cur, max_heartbeat_min):
-    """Instance-level live agents: agent_id, base_agent_id, host, hb_age_min."""
+    """Instance-level live agents: agent_id, base_agent_id, host, hb_age_min, tmux_session.
+
+    tmux_session is carried through because it is the ONE authoritative instance->pane
+    mapping: agent_status knows which pane each instance is actually running in, while
+    fleet_lanes is keyed by base_agent_id and therefore collapses a lane family's rows
+    onto one arbitrary lane (cc-irsyad has 12 lanes under one base; cosem-platform 6).
+    """
     cur.execute(
         "SELECT agent_id, base_agent_id, host, "
-        "round(EXTRACT(EPOCH FROM (now() - last_heartbeat)) / 60)::int "
+        "round(EXTRACT(EPOCH FROM (now() - last_heartbeat)) / 60)::int, tmux_session "
         "FROM agent_status "
         "WHERE last_heartbeat > now() - (%s * interval '1 minute') "
         "  AND agent_id LIKE 'cc-%%' "
@@ -240,10 +277,10 @@ def collect(cur, min_age_h=DEFAULT_MIN_AGE_H, priorities=DEFAULT_PRIORITIES,
             return "busy"
         return "drained"
 
-    def _entry(agent, base, host, hb_age, session, state, rows):
+    def _entry(agent, base, host, hb_age, session, state, rows, reason=None):
         return {
             "agent": agent, "base": base, "host": host, "hb_age_min": hb_age,
-            "pane": state, "session": session,
+            "pane": state, "session": session, "reason": reason,
             "rows": [
                 {"id": r[0], "from": r[1], "type": r[2], "priority": r[3],
                  "subject": r[4], "age_h": float(r[5]) if r[5] is not None else None}
@@ -263,24 +300,30 @@ def collect(cur, min_age_h=DEFAULT_MIN_AGE_H, priorities=DEFAULT_PRIORITIES,
     live = [a for a in live_agents(cur, max_heartbeat_min)
             if include_self or a[0] != SELF_AGENT]
 
-    # ── 1. instance-addressed mail: one entry per live instance, its own pane ──
+    # Group BEFORE the instance pass: session_for() needs to know how many live
+    # instances share a base to decide whether the base's pane may be borrowed.
     by_base = {}
-    for agent_id, base_agent_id, host, hb_age in live:
+    sessions = {}
+    for agent_id, base_agent_id, host, hb_age, _sess in live:
         base = base_agent_id or agent_id
         by_base.setdefault(base, []).append((agent_id, host, hb_age))
+        sessions[agent_id] = _sess
+
+    # ── 1. instance-addressed mail: one entry per live instance, its own pane ──
+    for agent_id, base_agent_id, host, hb_age, status_session in live:
+        base = base_agent_id or agent_id
         rows = read_unanswered(cur, agent_id, min_age_h, priorities)
         if not rows:
             continue
-        # Prefer THIS instance's own fleet_lanes row before falling back to the
-        # base's. agent_status.base_agent_id is not always the fleet_lanes key:
-        # cc-quality-2 carries base 'cc-quality' in agent_status while fleet_lanes
-        # and its own env both say 'cc-quality-2', so a base-only lookup probed
-        # cc-quality's pane for cc-quality-2's rows (orchestrator#790 follow-up).
-        session = lmap.get(agent_id) or lmap.get(base)
+        # Session resolution order is spelled out in session_for(): the instance's OWN
+        # running pane first, then its own fleet_lanes row, and the base's row only when
+        # the base has a single live body. Anything else reports "could not measure"
+        # rather than borrowing a sibling's pane (orchestrator#790 follow-ups).
+        session, reason = session_for(agent_id, base, by_base[base], lmap, status_session)
         states = ["not_probeable"] if not (probe and (host or "") in hosts and session) \
             else [pane_state(session)]
         _file(_entry(agent_id, base, host, hb_age, session,
-                     _state(hosts, base, session, states), rows))
+                     _state(hosts, base, session, states), rows, reason))
 
     # ── 2. BASE-addressed mail: attributed ONCE per base, never N-fold ──
     # cc-quality F1. A row addressed to `cc-irsyad` while four live instances run
@@ -297,11 +340,13 @@ def collect(cur, min_age_h=DEFAULT_MIN_AGE_H, priorities=DEFAULT_PRIORITIES,
             continue
         session = lmap.get(base)
         states = []
+        reasons = set()
         for _aid, host, _hb in members:
-            # Each sibling is probed on ITS OWN pane — the same instance-before-base
-            # resolution as step 1. Using one base session for every member would
-            # read sibling A's pane as evidence about sibling B.
-            m_session = lmap.get(_aid) or session
+            # Each sibling is probed on ITS OWN running pane — the same resolution as
+            # step 1. A base entry is only idle when every live sibling is drained.
+            m_session, m_reason = session_for(_aid, base, members, lmap, sessions.get(_aid))
+            if m_reason:
+                reasons.add(m_reason)
             if not (probe and (host or "") in hosts and m_session):
                 states.append("not_probeable")
             else:
@@ -309,7 +354,8 @@ def collect(cur, min_age_h=DEFAULT_MIN_AGE_H, priorities=DEFAULT_PRIORITIES,
         host = members[0][1] if len({m[1] for m in members}) == 1 else "mixed"
         hb_age = min((m[2] if m[2] is not None else 10 ** 9) for m in members)
         _file(_entry(base, base, host, hb_age, session,
-                     _state(hosts, base, session, states), rows))
+                     _state(hosts, base, session, states), rows,
+                     "; ".join(sorted(reasons)) or None))
 
     idle.sort(key=lambda e: max((x["age_h"] or 0) for x in e["rows"]), reverse=True)
     not_probeable.sort(key=lambda e: max((x["age_h"] or 0) for x in e["rows"]), reverse=True)
@@ -350,9 +396,10 @@ def _compact_section(title, entries, max_lanes=MAX_LANES_PER_SECTION):
     out = ["%s — %d lane(s), %d row(s):" % (title, len(entries), n_rows)]
     for e in entries[:max_lanes]:
         oldest = max((r["age_h"] or 0) for r in e["rows"])
-        out.append("  %-26s hb %sm  host=%-12s %d row(s), oldest %.1fh  [%s]"
+        reason = e.get("reason")
+        out.append("  %-26s hb %sm  host=%-12s %d row(s), oldest %.1fh  [%s]%s"
                    % (e["agent"], e["hb_age_min"], e["host"], len(e["rows"]),
-                      oldest, e["pane"]))
+                      oldest, e["pane"], (" — " + reason) if reason else ""))
     if len(entries) > max_lanes:
         out.append("  ... +%d more lane(s) (use --json for the full set)"
                    % (len(entries) - max_lanes))

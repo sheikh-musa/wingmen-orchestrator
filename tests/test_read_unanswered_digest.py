@@ -30,8 +30,14 @@ def _entry_row(i, age_h=10.0, pri="P1", frm="orch-console", subj="a question"):
             "subject": subj, "age_h": age_h}
 
 
-def _patch(monkeypatch, agents, rows_by_agent, pane, base_rows=None, lanes=None):
-    monkeypatch.setattr(d, "live_agents", lambda cur, mh: agents)
+def _patch(monkeypatch, agents, rows_by_agent, pane, base_rows=None, lanes=None,
+           sessions=None):
+    """agents rows are 4-tuples (id, base, host, hb) as before, or 5-tuples carrying an
+    explicit tmux_session. A 4-tuple with no sessions= entry gets tmux_session=None,
+    which exercises the fleet_lanes fallback path."""
+    sessions = sessions or {}
+    agents5 = [tuple(a) + (sessions.get(a[0]),) if len(a) == 4 else tuple(a) for a in agents]
+    monkeypatch.setattr(d, "live_agents", lambda cur, mh: agents5)
     monkeypatch.setattr(d, "read_unanswered", lambda cur, a, h, p: rows_by_agent.get(a, []))
     monkeypatch.setattr(d, "read_unanswered_any",
                         lambda cur, ids, h, p: (base_rows or {}).get(ids[0], []))
@@ -140,8 +146,9 @@ def test_base_addressed_rows_reported_once(monkeypatch):
            [("cc-a-1", "cc-a", "Sheikhs-Mini", 1),
             ("cc-a-2", "cc-a", "Sheikhs-Mini", 2)],
            {},                                    # no instance-addressed mail
-           {"sess-a": "drained"},
-           base_rows={"cc-a": [_row(5)]})         # ...only base-addressed mail
+           {"sess-1": "drained", "sess-2": "drained"},
+           base_rows={"cc-a": [_row(5)]},         # ...only base-addressed mail
+           sessions={"cc-a-1": "sess-1", "cc-a-2": "sess-2"})
     out = d.collect(cur=None)
     assert [e["agent"] for e in out["idle"]] == ["cc-a"], "attributed once, not per sibling"
     assert len(out["idle"][0]["rows"]) == 1
@@ -151,7 +158,8 @@ def test_base_entry_not_idle_when_pane_busy(monkeypatch):
     _patch(monkeypatch,
            [("cc-a-1", "cc-a", "Sheikhs-Mini", 1),
             ("cc-a-2", "cc-a", "Sheikhs-Mini", 2)],
-           {}, {"sess-a": "busy"}, base_rows={"cc-a": [_row(5)]})
+           {}, {"sess-1": "drained", "sess-2": "busy"}, base_rows={"cc-a": [_row(5)]},
+           sessions={"cc-a-1": "sess-1", "cc-a-2": "sess-2"})
     out = d.collect(cur=None)
     assert out["idle"] == []
     assert out["busy"] == 1
@@ -213,3 +221,84 @@ def test_base_pass_probes_each_sibling_on_its_own_pane(monkeypatch):
     out = d.collect(cur=None)
     assert out["idle"] == [], "sibling 2 is busy -> the base is busy, never idle"
     assert out["busy"] == 1
+
+
+# ── cc-quality's residual on #791: never borrow a pane that is not ours ──
+# The #791 fix resolves an instance's OWN fleet_lanes row first. The residual it did
+# not close: an instance with NO own row fell back to the BASE's session, which
+# belongs to the base lane — so a drained reading there could file a false IDLE for a
+# lane whose real pane is busy. session_for() now refuses that borrow unless the base
+# has a single live body (in which case the base lane IS that body).
+
+def test_multi_instance_base_does_not_borrow_the_base_pane(monkeypatch):
+    """cc-a-2 has no lane row of its own; the base's pane is drained. The old code
+    borrowed it and filed cc-a-2 as IDLE. It must now be NOT PROBEABLE with a reason:
+    one pane cannot be evidence about two live instances."""
+    _patch(monkeypatch,
+           [("cc-a-1", "cc-a", "Sheikhs-Mini", 1),
+            ("cc-a-2", "cc-a", "Sheikhs-Mini", 2)],
+           {"cc-a-2": [_row(1)]},                  # cc-a-2 owns read-but-unanswered work
+           {"sess-base": "drained"},               # the base's pane looks idle
+           lanes={"cc-a": "sess-base"})            # ...and no row for cc-a-2 itself
+    out = d.collect(cur=None)
+    assert out["idle"] == [], "borrowing the base's drained pane would be a FALSE IDLE"
+    assert [e["agent"] for e in out["not_probeable"]] == ["cc-a-2"]
+    assert "no tmux_session" in (out["not_probeable"][0]["reason"] or "")
+
+
+def test_single_live_instance_may_use_the_base_pane(monkeypatch):
+    """The borrow is still allowed when the base has exactly ONE live body — then the
+    base lane IS that body, and refusing would hide real work."""
+    _patch(monkeypatch,
+           [("cc-a-2", "cc-a", "Sheikhs-Mini", 1)],
+           {"cc-a-2": [_row(1)]},
+           {"sess-base": "drained"},
+           lanes={"cc-a": "sess-base"})
+    out = d.collect(cur=None)
+    assert [e["agent"] for e in out["idle"]] == ["cc-a-2"]
+    assert out["idle"][0]["session"] == "sess-base"
+
+
+def test_base_pass_refuses_a_borrowed_pane_for_a_sibling_without_a_row(monkeypatch):
+    """Base-addressed mail, two live siblings, only one has its own lane row. The
+    row-less sibling is unmeasurable, so the BASE must be not-probeable — claiming
+    idle would assert something about a pane nobody read."""
+    _patch(monkeypatch,
+           [("cc-a-1", "cc-a", "Sheikhs-Mini", 1),
+            ("cc-a-2", "cc-a", "Sheikhs-Mini", 2)],
+           {},
+           {"sess-1": "drained", "sess-base": "drained"},
+           base_rows={"cc-a": [_row(5)]},
+           lanes={"cc-a": "sess-base", "cc-a-1": "sess-1"})
+    out = d.collect(cur=None)
+    assert out["idle"] == []
+    assert [e["agent"] for e in out["not_probeable"]] == ["cc-a"]
+    assert "no tmux_session" in (out["not_probeable"][0]["reason"] or "")
+
+
+def test_reason_is_rendered_for_a_human(monkeypatch):
+    entry = {"agent": "cc-a-2", "base": "cc-a", "host": "Sheikhs-Mini",
+             "hb_age_min": 1, "pane": "not_probeable", "session": None,
+             "reason": "2 live instances share base 'cc-a' and this one has no lane row of its own",
+             "rows": [_entry_row(1)]}
+    text = d.render({"generated_at": "T", "thresholds": {"min_age_h": 6,
+                                                         "priorities": ["P1"],
+                                                         "max_heartbeat_min": 30},
+                     "idle": [], "not_probeable": [entry], "busy": 0})
+    assert "no lane row of its own" in text
+
+
+def test_status_session_wins_over_fleet_lanes(monkeypatch):
+    """agent_status.tmux_session is the pane the instance is RUNNING IN; fleet_lanes is
+    keyed by base and collapses a family's lanes onto one arbitrary row. Trust the
+    instance's own record first."""
+    _patch(monkeypatch,
+           [("cc-a-2", "cc-a", "Sheikhs-Mini", 1)],
+           {"cc-a-2": [_row(1)]},
+           {"sess-real": "drained", "sess-base": "busy"},
+           lanes={"cc-a": "sess-base"},
+           sessions={"cc-a-2": "sess-real"})
+    out = d.collect(cur=None)
+    assert out["idle"][0]["session"] == "sess-real", "must probe the instance's own pane"
+    assert [e["agent"] for e in out["idle"]] == ["cc-a-2"]
+    assert out["busy"] == 0
