@@ -53,6 +53,12 @@ LOG_FILE = ORCH / "logs" / "address_variant_miss_watchdog.log"
 
 UNREAD_MIN_AGE_MIN = int(os.environ.get("AVM_UNREAD_MIN_AGE_MIN", "20"))
 BASE_READ_RECENCY_MIN = int(os.environ.get("AVM_BASE_READ_RECENCY_MIN", "20"))
+# How recent an instance's OWN heartbeat must be before the watchdog will treat it as
+# awake. Deliberately the fleet's live-base definition (hb < 30m), NOT the 20-min READ
+# window: a threshold stricter than the fleet's own liveness bar would suppress a miss
+# for a lane the fleet calls live -- failing toward not-paging, the dangerous direction
+# (cc-quality, #89642: "fail toward still-paging").
+HEARTBEAT_RECENCY_MIN = int(os.environ.get("AVM_HEARTBEAT_RECENCY_MIN", "30"))
 PAGE_COOLDOWN_MIN = int(os.environ.get("AVM_PAGE_COOLDOWN_MIN", "240"))
 # How many page cooldowns a row may survive before the "you read it first, you probably
 # took it and did not answer" diagnosis stops being the most likely story (see
@@ -91,9 +97,19 @@ def save_state(state: dict) -> None:
 QUERY = """
 WITH instances AS (
     SELECT DISTINCT agent_id AS instance_id, base_agent_id, status AS instance_status,
-           tmux_session
+           tmux_session, last_heartbeat AS instance_last_heartbeat
     FROM agent_status
     WHERE base_agent_id IS NOT NULL AND agent_id <> base_agent_id
+),
+family AS (
+    -- How many LIVE sibling instances share this base. A base-addressed read cannot
+    -- be attributed to one instance when more than one is alive, so it stops being
+    -- evidence that THIS instance is awake (2026-11-01 #89443: the read that kept
+    -- the alert alive was a sibling's).
+    SELECT base_agent_id, COUNT(*) FILTER (WHERE status IS DISTINCT FROM 'offline') AS live_instances
+    FROM agent_status
+    WHERE base_agent_id IS NOT NULL AND agent_id <> base_agent_id
+    GROUP BY base_agent_id
 ),
 unread_instance AS (
     SELECT to_agent AS instance_id,
@@ -101,6 +117,12 @@ unread_instance AS (
            COUNT(*) AS unread_count
     FROM agent_messages
     WHERE read_at IS NULL
+      -- P3 never wakes a lane anywhere else in the fleet (agent_wake's
+      -- _WAKE_TYPES/P0-P1 floor and wake_backstop_sweep both drop it), so a
+      -- P3-only backlog is not evidence that a reader is blind -- it is the
+      -- #80448 priority-ordering shape. Without this floor the sibling fix below
+      -- would have paged five times on deploy, four of them for P3 FYIs.
+      AND priority IS DISTINCT FROM 'P3'
     GROUP BY to_agent
 ),
 recent_base_read AS (
@@ -112,11 +134,14 @@ recent_base_read AS (
 SELECT i.instance_id, i.base_agent_id, i.instance_status, i.tmux_session,
        u.oldest_unread_created_at, u.unread_count,
        r.last_base_read_at,
-       ri.last_base_read_at AS last_instance_read_at
+       ri.last_base_read_at AS last_instance_read_at,
+       f.live_instances AS family_live_instances,
+       i.instance_last_heartbeat
 FROM instances i
 JOIN unread_instance u ON u.instance_id = i.instance_id
 LEFT JOIN recent_base_read r ON r.base_id = i.base_agent_id
 LEFT JOIN recent_base_read ri ON ri.base_id = i.instance_id
+LEFT JOIN family f ON f.base_agent_id = i.base_agent_id
 """
 
 
@@ -127,6 +152,7 @@ def find_address_variant_misses(
     unread_min_age_min: int = UNREAD_MIN_AGE_MIN,
     base_read_recency_min: int = BASE_READ_RECENCY_MIN,
     page_cooldown_min: int = PAGE_COOLDOWN_MIN,
+    heartbeat_recency_min: int = HEARTBEAT_RECENCY_MIN,
 ) -> list[dict]:
     """PURE: rows -> the subset that are a genuine address-variant miss.
 
@@ -164,12 +190,30 @@ def find_address_variant_misses(
         unread_age_min = (now - oldest).total_seconds() / 60.0
         if unread_age_min < unread_min_age_min:
             continue
+        # LIVENESS EVIDENCE. The original proof was "the base id was read recently",
+        # which is sound only while the base has ONE live instance: with siblings
+        # alive, any one of them reading base-addressed mail makes every sibling
+        # look awake. So when the family has more than one live instance the base
+        # read is not attributable to THIS one and we require its own heartbeat
+        # instead. Unknown family size (an older caller, no family_live_instances)
+        # keeps the original behaviour.
         last_base_read = r.get("last_base_read_at")
-        if last_base_read is None:
-            continue
-        base_read_age_min = (now - last_base_read).total_seconds() / 60.0
-        if base_read_age_min > base_read_recency_min:
-            continue
+        family_live = r.get("family_live_instances")
+        if family_live is not None and family_live > 1:
+            hb = r.get("instance_last_heartbeat")
+            if hb is None:
+                continue  # cannot prove this instance is awake -> not a miss to page on
+            heartbeat_age_min = (now - hb).total_seconds() / 60.0
+            if heartbeat_age_min > heartbeat_recency_min:
+                continue
+            liveness_basis = "instance-heartbeat"
+        else:
+            if last_base_read is None:
+                continue
+            base_read_age_min = (now - last_base_read).total_seconds() / 60.0
+            if base_read_age_min > base_read_recency_min:
+                continue
+            liveness_basis = "base-read"
         # INSTANCE-READ VETO (#80448): the lane read mail addressed to its INSTANCE id after
         # the oldest unread one landed, so it sees that address; the backlog is priority
         # ordering (P3 FYIs left for later) or a long task, not blindness.
@@ -185,6 +229,7 @@ def find_address_variant_misses(
         # nothing here reads page history or wall-clock, so the escalation below cannot
         # be reset by the daemon coming back up.
         miss["cooldowns_unread"] = unread_age_min / page_cooldown_min if page_cooldown_min else 0.0
+        miss["liveness_basis"] = liveness_basis
         misses.append(miss)
     return misses
 
@@ -255,6 +300,18 @@ def page_body(miss: dict) -> str:
             )
         return soft
     base_id = miss["base_agent_id"]
+    if miss.get("liveness_basis") == "instance-heartbeat":
+        # Its own heartbeat is the proof it is alive; do NOT claim a base read, the
+        # family shares that address and a sibling may have been the one reading.
+        return (
+            f"TL;DR: {instance_id} has {miss['unread_count']} unread message(s) addressed "
+            f"to its instance id, oldest since {miss['oldest_unread_created_at']}, and it "
+            f"is alive (its own heartbeat is current) but has not read mail on its "
+            f"instance address since then. Sibling instances share the base id "
+            f"{base_id}, so a base read cannot be attributed to this one. It looks blind "
+            f"to its own instance address (bus #51166 regression class). Check its inbox "
+            f"reader filters on to_agent IN (base, instance), not base alone."
+        )
     return (
         f"TL;DR: {instance_id} has {miss['unread_count']} unread message(s) addressed "
         f"to its instance id, oldest since {miss['oldest_unread_created_at']}, while it "

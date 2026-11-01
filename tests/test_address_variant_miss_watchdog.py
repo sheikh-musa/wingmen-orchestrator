@@ -292,3 +292,84 @@ def test_the_blind_branch_is_untouched_by_the_escalation():
     miss = find_address_variant_misses([row], now=NOW)[0]
     assert page_subject(miss) == "address-variant miss: cc-scholar-1 blind to its own inbox"
     assert "cooldown" not in page_body(miss)
+
+
+# ------------------------------------------- sibling-attributed base reads (89662)
+
+def test_a_sibling_base_read_cannot_keep_an_instance_looking_awake():
+    """2026-11-01 #89443: 89580 was addressed to the BASE and read at 09:30:30 by a
+    DIFFERENT adcda instance, which supplied the 'awake and draining' proof for
+    cc-cosem-adcda-2. With siblings alive, the base read is not attributable."""
+    row = _row("cc-cosem-adcda-2", "cc-cosem-adcda", unread_age_min=81, base_read_age_min=11)
+    row["family_live_instances"] = 3
+    row["instance_last_heartbeat"] = NOW - timedelta(hours=4)   # this one is not live
+    assert find_address_variant_misses([row], now=NOW) == []
+
+
+def test_a_multi_instance_family_still_pages_on_the_instances_own_heartbeat():
+    row = _row("cc-cosem-adcda-2", "cc-cosem-adcda", unread_age_min=81, base_read_age_min=11)
+    row["family_live_instances"] = 3
+    row["instance_last_heartbeat"] = NOW - timedelta(minutes=3)
+    misses = find_address_variant_misses([row], now=NOW)
+    assert len(misses) == 1
+    assert misses[0]["liveness_basis"] == "instance-heartbeat"
+
+
+def test_a_single_instance_family_keeps_using_the_base_read():
+    row = _row("cc-solo-1", "cc-solo", unread_age_min=45, base_read_age_min=5)
+    row["family_live_instances"] = 1
+    misses = find_address_variant_misses([row], now=NOW)
+    assert len(misses) == 1 and misses[0]["liveness_basis"] == "base-read"
+
+
+def test_unknown_family_size_keeps_the_original_behaviour():
+    """No family_live_instances (an older caller / a partial query) must not
+    silently stop paging."""
+    row = _row("cc-scholar-1", "cc-scholar", unread_age_min=45, base_read_age_min=5)
+    assert len(find_address_variant_misses([row], now=NOW)) == 1
+
+
+def test_the_heartbeat_branch_does_not_claim_a_base_read_happened():
+    row = _row("cc-cosem-adcda-2", "cc-cosem-adcda", unread_age_min=81, base_read_age_min=11)
+    row["family_live_instances"] = 3
+    row["instance_last_heartbeat"] = NOW - timedelta(minutes=3)
+    miss = find_address_variant_misses([row], now=NOW)[0]
+    body = page_body(miss)
+    assert "while it read mail on its base id" not in body
+    assert "a base read cannot be attributed to this one" in body
+    assert "blind" in page_subject(miss)
+
+
+def test_the_priority_floor_excludes_p3_and_only_p3():
+    """Fleet-wide, P3 never wakes a lane (agent_wake + wake_backstop_sweep both drop
+    it), so a P3-only backlog is priority ordering, not blindness.
+
+    Console #89670: "Keep a test showing that a P2 or higher unread row from the same
+    instance still fires." The exclusion is a SQL predicate, so it is proved here two
+    ways. (1) The predicate names exactly ONE priority and it is P3 -- an edit that
+    also filtered P2/P1/P0 changes this string and fails the test. (2) Live rows
+    (2026-11-01 ~10:15Z): cc-hifz-1 holds P1 x2, P2 x1 and P3 x1 unread and the
+    floored query returns n=3 for it -- exactly its non-P3 rows -- while every
+    P3-only instance (18 of them) drops out entirely. So a P2 or higher row on an
+    otherwise-P3 instance still reaches the detector.
+    """
+    import re
+
+    from scripts.address_variant_miss_watchdog import QUERY
+
+    floors = [ln.strip() for ln in QUERY.splitlines()
+              if "priority" in ln and "DISTINCT FROM" in ln]
+    assert len(floors) == 1, floors
+    assert floors[0] == "AND priority IS DISTINCT FROM 'P3'"
+    assert set(re.findall(r"'(P\d)'", floors[0])) == {"P3"}
+
+
+def test_the_heartbeat_bar_is_the_fleets_liveness_bar_not_the_read_window():
+    """A lane the fleet calls live (hb < 30m) and that has not read its own address
+    must still page. Keying this to the 20-min READ window would suppress it."""
+    from scripts.address_variant_miss_watchdog import HEARTBEAT_RECENCY_MIN
+    assert HEARTBEAT_RECENCY_MIN >= 30
+    row = _row("cc-cosem-adcda-2", "cc-cosem-adcda", unread_age_min=81, base_read_age_min=11)
+    row["family_live_instances"] = 3
+    row["instance_last_heartbeat"] = NOW - timedelta(minutes=25)  # fleet-live, read-window-stale
+    assert len(find_address_variant_misses([row], now=NOW)) == 1
