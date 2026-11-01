@@ -1664,3 +1664,23 @@ lines 48-51, bulk_insert_morphology as its own 059. Reply 89509; responded_at no
 
 Waiting on: the console merge. Then post-merge verification = content check on the base, the
 17-case harness against the LIVE hook path, and the gzb hook status quoted as it stands then.
+
+### Track B PASS delivered (89517, 09:05Z) — follow-up PR 810 in review
+
+Merged: #807 as fcdcfbd. Mini live checkout advanced to it; both guard files there are
+byte-identical to base by sha256, so the user-global hook target is exactly the reviewed
+code. Live-path harness 17/17. Corpus replay 204,256 commands, zero verdict changes.
+
+gzb AT PASS TIME (measured on the host, not assumed): six hooks WIRED (settings mtime
+08:45Z; the provisioning tool reports up to date) but checkout at c076ec1b, one merge
+behind — so gzb runs the PRE-FIX guard and ssh-wrapped reads are still allowed there
+until the hub pulls fcdcfbd. The console was told exactly that.
+
+Follow-up: cc-quality obs 2 (absolute-path ssh binary bypass) is PR 810,
+branch cc-substrate/abs-path-ssh, head 08f5160. First cut was branched from the PRE-merge
+commit 7214394 and went DIRTY against the base — lesson: after a squash merge, branch the
+follow-up from the MERGED base, never from your own pre-merge tip. Rebased onto fcdcfbd,
+force-pushed with lease, re-ran tests after the rebase. Corpus: 204,042 commands, zero
+false positives. Review requested 89515, head-change note 89516.
+
+Depth-3 wrapper bound: documented, NOT fixed, per console 89510.
