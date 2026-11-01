@@ -334,6 +334,67 @@ def test_non_wp_client_store_dsn_env_is_refused():
     assert_allowed(*bash('psql "$SUBSTRATE_DSN" -tAc "select 1"'))
 
 
+def test_ssh_wrapped_store_reads_are_refused():
+    """Rule 2 anchors on the DB client that LEADS a statement, so a read wrapped in
+    `ssh host '…'` used to be invisible to it. Measured against the shipped code on
+    2026-11-01: the local `wp option list --search='wc_facebook_*'` was DENIED while
+    the identical command behind `ssh` was ALLOWED. The fleet reaches client hosts
+    over ssh, so the wrapper is not an exotic shape — it is how this work is done."""
+    assert_denied(*bash('ssh modestyhut "wp option list --search=\'wc_facebook_*\'"'))
+    assert_denied(*bash('ssh modestyhut "wp db export -"'))
+    assert_denied(*bash('ssh modestyhut "mysql -e \'SELECT * FROM wp_options\'"'))
+    # a flag that CONSUMES the next token, and a user@host form: both must be skipped
+    # as ssh arguments, not mistaken for the remote command
+    assert_denied(*bash('ssh -p 2222 modesty@modestyhut "wp db export -"'))
+    assert_denied(*bash('ssh -o BatchMode=yes -i ~/.ssh/id_ed25519 modest@host "wp db export -"'))
+    assert_denied(*bash('sudo ssh modestyhut "wp db export -"'))
+
+
+def test_ssh_wrapped_store_read_is_refused_through_each_wrapper_shape():
+    """The wrapper composes: sshpass in front of ssh, `bash -c` inside it, and an
+    unquoted remote command are all the same read."""
+    assert_denied(*bash('sshpass -p x ssh modestyhut "wp option list"'))
+    assert_denied(*bash('ssh modestyhut bash -c "wp db export -"'))
+    assert_denied(*bash('ssh modestyhut wp db export -'))
+    assert_denied(*bash('bash -c "wp db export -"'))
+
+
+def test_a_subshell_that_does_ordinary_work_still_runs():
+    assert_allowed(*bash('bash -c "git status --short"'))
+    assert_allowed(*bash('sh -c "ls scripts | head -3"'))
+
+
+def test_ssh_wrapped_store_file_print_is_refused():
+    """Rule 1 was already wrapper-proof (it matches the PATH, not the leading verb),
+    so this is a regression pin: the ssh fix must not disturb it."""
+    assert_denied(*bash('ssh modestyhut "cat /srv/modestyhut/wp-config.php"'))
+    assert_denied(*bash('ssh modestyhut "grep DB_PASSWORD /srv/modestyhut/client.env"'))
+
+
+def test_ssh_wrapped_ordinary_work_still_runs():
+    """The whole fleet runs its remote work over ssh; a guard that refuses `tmux ls`
+    on the other host gets switched off, and a switched-off guard protects nothing."""
+    assert_allowed(*bash("ssh gzb 'tmux ls'"))
+    assert_allowed(*bash('ssh gzb "sudo cat /etc/hostname"'))
+    assert_allowed(*bash("ssh modestyhut 'wp option get woocommerce_currency'"))
+    assert_allowed(*bash(
+        'ssh modestyhut \'psql "$WOO_DSN" -tAc "SELECT option_value FROM wp_options '
+        "WHERE option_name = 'siteurl'\"'"))
+    # interactive shells and key management are not reads of a store
+    assert_allowed(*bash("ssh gzb"))
+    assert_allowed(*bash("ssh-keygen -lf ~/.ssh/id_ed25519.pub"))
+    assert_allowed(*bash("scp /tmp/report.pdf gzb:/tmp/"))
+
+
+def test_ssh_wrapped_read_into_the_vault_sink_is_allowed():
+    """The sanctioned path stays open through ssh: the value goes to the vault and
+    only a hash prefix is printed, so it never enters the transcript."""
+    assert_allowed(*bash(
+        'ssh modestyhut \'psql "$WOO_DSN" -tAc "SELECT option_value FROM wp_options '
+        "WHERE option_name='wc_facebook_app_secret'\"' | "
+        "scripts/put_client_secret.py MODESTYHUT_FB_SECRET --reason 'rotate'"))
+
+
 def test_documented_residuals_stay_allowed():
     """Findings C and the broad half of E are NOT fixed here, deliberately — the
     playbook's residual list names them. Pinned so the gap is stated in code, not

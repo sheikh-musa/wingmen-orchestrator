@@ -52,6 +52,13 @@ hooks already enforce — it's 🟢, included so a lane knows WHY the guard refu
   users tables, `wp-config.php`, non-dotfile `.env` files, store settings exports,
   token/netrc caches, and secret-reading CLIs. It deliberately does NOT re-implement
   this playbook's file/inline-literal rules: `secrets_transcript_guard` owns those.
+  Wrapped commands are judged as the command that runs, not the wrapper: an
+  `ssh host '…'`, `sshpass … ssh host '…'` or `bash -c '…'` around a store read is
+  refused exactly like the local command (added 2026-11-01 after measuring that
+  `ssh modestyhut "wp option list --search='wc_facebook_*'"` was ALLOWED while the
+  identical local command was denied — the fleet reaches client hosts over ssh, so
+  that wrapper is the normal shape of this work, not an exotic one). The parser is
+  shared with `secrets_transcript_guard` in `scripts/lib/remote_shell.py`.
   `scripts/put_client_secret.py` is the sanctioned way through: value in via stdin /
   `--from-env` / `--from-file`, out to the vault, and the only thing printed is
   `sha256[:8]` + length.
@@ -62,7 +69,9 @@ hooks already enforce — it's 🟢, included so a lane knows WHY the guard refu
   therefore a data export, not a convenience (31 Oct: a DeepSeek transcript resumed
   on an Anthropic model). `scripts/lib/session_provider_guard.py` (called by
   `launch_dangerous_cc.sh` — and so by `launch_lane_as.sh` and `switch_lane_token.sh`
-  — plus `boot_orch.sh`, `boot_mirror.sh`, `boot_nazim.sh`) refuses the resume when
+  — plus `boot_orch.sh`, `boot_mirror.sh`, `boot_nazim.sh`, and the Studio
+  breakglass `breakglass_studio_orch.sh`, which replays a transcript from a remote
+  heredoc and does not pass through the launcher funnel) refuses the resume when
   the provider changed and the transcript carries any secret-shaped value, and boots
   FRESH with a handoff note instead. A changed provider with a CLEAN transcript
   resumes (the decision records the transcript's `sha256` prefix). Measured: 12 of 25

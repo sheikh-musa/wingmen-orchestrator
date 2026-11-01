@@ -73,6 +73,9 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+from scripts.lib.remote_shell import extract_remote_script  # noqa: E402
+
 # ---- Rule 1: client-store files ------------------------------------------------
 
 # Dotfile `.env` and the credentials/secrets JSON/YAML class already belong to
@@ -400,7 +403,10 @@ def _rule3_violation(statement: str) -> str | None:
     )
 
 
-def _bash_violation(command: str) -> str | None:
+_MAX_WRAPPER_DEPTH = 3
+
+
+def _bash_violation(command: str, _depth: int = 0) -> str | None:
     for statement in _statements(command):
         if _last_stage_is_sink(statement):
             continue
@@ -408,6 +414,18 @@ def _bash_violation(command: str) -> str | None:
             reason = rule(statement)
             if reason:
                 return reason
+        # A wrapper (ssh host '…', sshpass … ssh host '…', bash -c '…') makes the
+        # leading-command anchor above judge the WRAPPER, not the command that runs:
+        # Rules 1-3 never see `wp option list` inside `ssh modestyhut "wp option list"`.
+        # The fleet reaches client hosts over ssh, so judge the wrapped script too.
+        # Bounded recursion (a wrapper can nest) and it must actually SHRINK, or a
+        # pathological input would loop.
+        if _depth < _MAX_WRAPPER_DEPTH:
+            inner = extract_remote_script(statement, _leading(statement))
+            if inner and inner.strip() != statement.strip():
+                reason = _bash_violation(inner, _depth + 1)
+                if reason:
+                    return reason
     return None
 
 
