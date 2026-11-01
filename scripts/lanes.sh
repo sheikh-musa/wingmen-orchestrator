@@ -232,7 +232,8 @@ cmd_up() {
 # without a live tmux or DB, and the SRE's idle detector will call the SAME predicate — so a
 # lane can never be ended by one path under rules the other path would have refused. Ending a
 # session is harsher than a recycle (there is no boot afterwards; context that was only in
-# that session is gone), so every gate fails CLOSED: busy, unread bus rows, a stale/missing
+# that session is gone), so every gate fails CLOSED: busy, unread P0–P2 bus rows (P3 never wakes
+# a lane anywhere, so it is not work this gate can strand), a stale/missing
 # handoff, real staged text, or an unreadable composer all refuse.
 cmd_down() {
   local lane="${1:?usage: lanes.sh down <lane> [--kill]}"; shift || true
