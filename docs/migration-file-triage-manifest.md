@@ -6,9 +6,14 @@ Authoritative classification of the Mini's ignored real-work files for the orch-
 Counts: SECRETS-live 15 | SECRETS-destroy 8 | CLIENT-PII/residency 117 | FLEET-INTERNAL 210 | JUNK(not preserved): logs+node_modules+runtime-state+renders.
 
 
-## BUCKET 1a — SECRETS (LIVE) -> SECRETS->wingmen-core track, tmpfs-fetch on gzb, NEVER gzb disk
+## BUCKET 1a — SECRETS (LIVE) -> secrets track, NEVER gzb disk
 
 Live credentials/pointers. Ride Phase-0 secrets track; never land on gzb disk.
+
+**CORRECTION (2026-11-01, op37138):** this bucket used to read "SECRETS->wingmen-core
+track, tmpfs-fetch on gzb". There is no wingmen-core secrets server — the fleet `.env`
+lives on the Mac Mini (`100.83.21.34`) and hosts pull from the Mini over Tailscale. The
+"never on gzb disk" rule below still holds.
 
 - `.env`
 - `.group_default_token.caai`

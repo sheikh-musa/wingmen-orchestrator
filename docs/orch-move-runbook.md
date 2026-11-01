@@ -1,5 +1,15 @@
 # Orch-move runbook — Mac Mini → gzb (compute) + wingmen-core (secrets)
 
+> **CORRECTION (2026-11-01, orch-console bus 89295, Musa op37138): there is no
+> wingmen-core secrets server.** The compute half of this runbook happened — the hub
+> runs on **gzb** (`orch_lease.holder_host = 'gzbai'`, cut over from `wingmen-core`
+> 2026-09-30). The secrets half did **not** go to wingmen-core: the fleet `.env` lives
+> on the **Mac Mini** (`100.83.21.34`) and other hosts pull it from the Mini over
+> Tailscale (`scripts/sync_env_from_mini.sh`, or the equivalent fetch on each host).
+> Read every "SECRETS → wingmen-core" line below as a **superseded plan**, not as the
+> current design; the rest of the runbook is kept for the compute-migration record.
+> Musa, 2026-11-01: "there is no main secrets server, stale info, delete it."
+
 **Status:** DRAFT for operator sign-off. No live cutover until Musa OKs the sequence + the marked decisions. (Nazim/console, 2026-08-27.)
 
 **Direction (Musa op17195/17198):** orchestrator COMPUTE → **gzb** (Gazzabyte office server `gzbai` / 192.168.1.114, Ubuntu 26.04, 4cpu/30GB). **SECRETS → wingmen-core** (existing VPS we control, OFF gzb), fetched at runtime. **Orch moves FIRST**, then every other lane (singletons + workers). Access proven: FortiGate SSL-VPN → SSH (openfortivpn headless).
