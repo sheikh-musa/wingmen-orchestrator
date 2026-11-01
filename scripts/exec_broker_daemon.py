@@ -85,6 +85,7 @@ from exec_broker.gate_validation import (  # noqa: E402
     SILO_ALIASES,
 )
 from exec_broker import heartbeat  # noqa: E402
+from exec_broker import vault_log  # noqa: E402
 from exec_broker.mgmt_api import post_to_mgmt_api  # noqa: E402
 from exec_broker.server import BrokerServer  # noqa: E402
 from substrate_dsn import dsn_from_env_file  # noqa: E402
@@ -173,18 +174,49 @@ def load_heartbeat_interval(raw: "str | None") -> int:
     return int(value)
 
 
-def _start_heartbeat(*, db_conn_factory, refs, interval_seconds: int,
-                     sock_path: "str | None" = None) -> "heartbeat.HeartbeatWriter":
-    """Take every gated ref's heartbeat row (CAS) and start the writer thread.
-    Raises RuntimeError on any reason boot must be refused."""
+def _resolve_host() -> str:
     import fleet_host_id  # scripts/lib is on sys.path (top of this file)
 
     try:
-        host = fleet_host_id.fleet_host_id()
-    except Exception as e:  # noqa: BLE001 -- never beat under an unknown identity
-        raise RuntimeError(f"cannot resolve a stable host identity for the heartbeat: {e}") from e
+        return fleet_host_id.fleet_host_id()
+    except Exception as e:  # noqa: BLE001 -- never act under an unknown identity
+        raise RuntimeError(f"cannot resolve a stable host identity: {e}") from e
+
+
+def _reconcile_in_doubt(*, db_conn_factory, boot_id: str, host: str) -> "tuple[int, int]":
+    """Queue row 272: BEFORE serving and before taking heartbeat rows, move every
+    'started' row from a PREVIOUS boot to status 'in_doubt' (see
+    vault_log.mark_previous_boots_in_doubt). Never retries, never finalizes.
+    Raises RuntimeError (boot refused) on any DB error."""
+    try:
+        with db_conn_factory() as conn:
+            with conn.cursor() as cur:
+                n, oldest = vault_log.mark_previous_boots_in_doubt(cur, boot_id=boot_id, host=host)
+            conn.commit()
+    except Exception as e:  # noqa: BLE001 -- class only, never a DSN or SQL text
+        raise RuntimeError(f"in-doubt reconcile failed: {e.__class__.__name__}") from e
+    print(
+        f"exec_broker_daemon: in-doubt reconcile: marked {n} row(s) from previous boot(s) "
+        f"as '{vault_log.IN_DOUBT_STATUS}'" + (f", oldest {oldest}s old" if n else ""),
+        file=sys.stderr,
+    )
+    return n, oldest
+
+
+def _start_heartbeat(*, db_conn_factory, refs, interval_seconds: int,
+                     sock_path: "str | None" = None, boot_id: "str | None" = None,
+                     host: "str | None" = None) -> "heartbeat.HeartbeatWriter":
+    """Take every gated ref's heartbeat row (CAS) and start the writer thread.
+    Raises RuntimeError on any reason boot must be refused."""
+    if host is None:
+        import fleet_host_id  # scripts/lib is on sys.path (top of this file)
+
+        try:
+            host = fleet_host_id.fleet_host_id()
+        except Exception as e:  # noqa: BLE001 -- never beat under an unknown identity
+            raise RuntimeError(f"cannot resolve a stable host identity for the heartbeat: {e}") from e
     writer = heartbeat.HeartbeatWriter(
-        db_conn_factory, refs, host=host, pid=os.getpid(), boot_id=str(uuid.uuid4()),
+        db_conn_factory, refs, host=host, pid=os.getpid(), boot_id=boot_id or str(uuid.uuid4()),
         interval_seconds=interval_seconds, sock_path=sock_path,
     )
     try:
@@ -429,6 +461,17 @@ def main(argv=None) -> int:
         )
         return 1
 
+    # Queue row 272: ONE boot id for this daemon process -- stamped on every
+    # access-log row (log_started) AND used as the heartbeat boot_id -- so the
+    # next boot's in-doubt reconcile can tell exactly whose rows were in flight.
+    boot_id = str(uuid.uuid4())
+    try:
+        host = _resolve_host()
+        _reconcile_in_doubt(db_conn_factory=_db_conn_factory, boot_id=boot_id, host=host)
+    except RuntimeError as e:
+        print(f"exec_broker_daemon: {e}", file=sys.stderr)
+        return 1
+
     server = BrokerServer(
         sock_path=os.environ["EXEC_BROKER_SOCKET"],
         allowed_uids=allowed_uids,
@@ -442,11 +485,12 @@ def main(argv=None) -> int:
         live_gated_refs=live_gated_refs,
         gate_max_age_seconds=gate_max_age_seconds,
         gate_not_before=gate_not_before,
+        boot_id=boot_id,
     )
     try:
         _start_heartbeat(
             db_conn_factory=_db_conn_factory, refs=live_gated_refs, interval_seconds=heartbeat_interval,
-            sock_path=os.environ["EXEC_BROKER_SOCKET"],
+            sock_path=os.environ["EXEC_BROKER_SOCKET"], boot_id=boot_id, host=host,
         )
     except (RuntimeError, ValueError) as e:  # ValueError: HeartbeatWriter config (e.g. no refs)
         print(f"exec_broker_daemon: {e}", file=sys.stderr)

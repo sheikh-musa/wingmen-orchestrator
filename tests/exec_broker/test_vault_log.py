@@ -149,3 +149,27 @@ def test_record_executed_updates_the_same_row_with_prologue_and_executed_hash():
     assert sql.startswith("UPDATE exec_broker_access_log SET executed_prologue = %s, executed_sql_sha256 = %s")
     assert "INSERT" not in sql.upper() and "sql_sha256 = %s, " not in sql.replace("executed_sql_sha256", "")
     assert params == ("SET TRANSACTION READ ONLY; ", "abc", 42)
+
+
+
+# --- queue row 272 ------------------------------------------------------------
+
+def test_log_started_records_boot_id_when_present():
+    cur = FakeCursor(fetchone_result={"id": 9})
+    log_started(cur, VaultLogEntry(exec_ledger_id="e", caller="c", project_ref="p", guarded_sql="select 1",
+                                   reason="", gate_id=None, boot_id="11111111-1111-1111-1111-111111111111"))
+    sql, params = cur.calls[0]
+    cols = [c.strip() for c in sql.split("(", 1)[1].split(")", 1)[0].split(",")]
+    assert cols[-3:] == ["boot_id", "status", "ts_start"] and params[-1] == "11111111-1111-1111-1111-111111111111"
+    assert "gate_ref" not in cols and len(params) == 7
+
+
+def test_in_doubt_sql_never_touches_ts_end_or_finalizes():
+    from exec_broker.vault_log import IN_DOUBT_STATUS, MARK_IN_DOUBT_SQL
+    assert IN_DOUBT_STATUS == "in_doubt"
+    sql = MARK_IN_DOUBT_SQL
+    assert "SET status = 'in_doubt', in_doubt_at = now()" in sql
+    set_clause = sql.split("SET", 1)[1].split("WHERE", 1)[0]
+    assert "ts_end" not in set_clause and "'ok'" not in sql and "'error'" not in sql
+    assert "WHERE status = 'started' AND ts_end IS NULL" in sql
+    assert "boot_id IS DISTINCT FROM %(boot)s::uuid" in sql
