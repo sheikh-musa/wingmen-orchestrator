@@ -337,10 +337,10 @@ def test_non_blank_request_from_an_unlisted_uid_is_still_acl_denied():
 
 def test_same_host_second_boot_take_is_stamped_with_the_first_boot_id():
     first = {"holder_host": "gzbai", "boot_id": "boot-1", "taken_over_from": None, "takeover_reason": None}
-    assert takeover_stamp(first, "gzbai", "boot-2") == ("boot-1", "same_host_new_boot")
-    assert takeover_stamp(first, "other", "boot-2") == ("boot-1", "host_change")
-    assert takeover_stamp(first, "gzbai", "boot-1") == (None, None)        # same boot re-take: unchanged
-    assert takeover_stamp(None, "gzbai", "boot-1") == (None, None)
+    assert takeover_stamp(first, "gzbai", "boot-2") == ("boot-1", "same_host_new_boot", "gzbai")
+    assert takeover_stamp(first, "other", "boot-2") == ("boot-1", "host_change", "gzbai")
+    assert takeover_stamp(first, "gzbai", "boot-1") == (None, None, None)  # same boot re-take: unchanged
+    assert takeover_stamp(None, "gzbai", "boot-1") == (None, None, None)
 
 
 def test_take_sql_stamps_on_any_boot_id_change():
@@ -349,6 +349,22 @@ def test_take_sql_stamps_on_any_boot_id_change():
     assert "THEN exec_broker_heartbeat.boot_id::text" in sql
     assert "'same_host_new_boot'" in sql and "'host_change'" in sql
     assert "%(reason)s" not in sql
+    assert "taken_over_from_host = CASE WHEN exec_broker_heartbeat.boot_id <> EXCLUDED.boot_id" in sql
+    assert "THEN exec_broker_heartbeat.holder_host" in sql
+
+
+def test_take_has_no_reason_parameter():
+    import inspect
+    assert "reason" not in inspect.signature(heartbeat.take).parameters
+
+
+def test_heartbeat_draft_adds_the_open_row_index_and_leaves_gate_ref_alone():
+    drafts = Path(__file__).resolve().parents[2] / "migrations" / "drafts"
+    hb = (drafts / "hc95_exec_broker_heartbeat.sql").read_text()
+    assert ("CREATE INDEX IF NOT EXISTS exec_broker_access_log_open_idx\n"
+            "  ON exec_broker_access_log (ts_start) WHERE ts_end IS NULL;") in hb
+    assert "taken_over_from_host text" in hb
+    assert "exec_broker_access_log_open_idx" not in (drafts / "hc95_exec_broker_gate_ref.sql").read_text()
 
 
 def test_oversized_all_whitespace_line_is_too_large_not_the_probe_answer():

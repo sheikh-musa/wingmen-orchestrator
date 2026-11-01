@@ -20,6 +20,10 @@
 --
 -- DEPLOY ORDER: apply THIS before deploying the heartbeat daemon code -- the daemon
 -- REFUSES TO BOOT if it cannot take its heartbeat rows (fail closed).
+--
+-- ALSO IN THIS FILE: the partial index exec_broker_access_log_open_idx on
+-- exec_broker_access_log (ts_start) WHERE ts_end IS NULL, for the watchdog's
+-- open-row (stuck 'started') probe -- see the bottom of the file.
 
 CREATE TABLE IF NOT EXISTS exec_broker_heartbeat (
   project_ref      text PRIMARY KEY,                 -- the gated ref this broker serves
@@ -34,6 +38,7 @@ CREATE TABLE IF NOT EXISTS exec_broker_heartbeat (
   taken_over_from  text,                             -- previous holder's boot_id, stamped on ANY boot_id change
   takeover_reason  text CHECK (takeover_reason IS NULL
                                OR takeover_reason IN ('same_host_new_boot', 'host_change')),
+  taken_over_from_host text,                         -- previous holder's holder_host, same CASE arms as taken_over_from
   -- Listener self-probe (cc-fleet-health bus #89888): each beat also records
   -- whether the daemon's OWN accept loop answered a b"\n" probe with a
   -- well-formed response line. NULL until the first tick after boot.
@@ -48,6 +53,14 @@ ALTER TABLE exec_broker_heartbeat ADD COLUMN IF NOT EXISTS loop_ok boolean;
 ALTER TABLE exec_broker_heartbeat ADD COLUMN IF NOT EXISTS loop_checked_at timestamptz;
 ALTER TABLE exec_broker_heartbeat ADD COLUMN IF NOT EXISTS loop_latency_ms integer;
 ALTER TABLE exec_broker_heartbeat ADD COLUMN IF NOT EXISTS loop_error text;
+ALTER TABLE exec_broker_heartbeat ADD COLUMN IF NOT EXISTS taken_over_from_host text;
+
+-- Watchdog open-row probe (coord, 2026-11-01): exec_broker_access_log rows still
+-- 'started' (ts_end IS NULL) past a threshold mean a broker died mid-call. The
+-- partial index keeps that probe cheap as the log grows. It lives HERE, not in
+-- the already-merged hc95_exec_broker_gate_ref.sql draft (which must not change).
+CREATE INDEX IF NOT EXISTS exec_broker_access_log_open_idx
+  ON exec_broker_access_log (ts_start) WHERE ts_end IS NULL;
 
 ALTER TABLE exec_broker_heartbeat ENABLE ROW LEVEL SECURITY;
 

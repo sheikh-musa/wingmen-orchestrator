@@ -39,6 +39,8 @@ def conn(request):
         for role in ("authenticated", "anon", "service_role", "exec_broker_role"):
             c.execute(f"DO $$ BEGIN CREATE ROLE {role}; EXCEPTION WHEN duplicate_object THEN NULL; END $$")
         c.execute("DROP TABLE IF EXISTS exec_broker_heartbeat")
+        # the draft also indexes exec_broker_access_log (watchdog open-row probe)
+        c.execute((_ROOT / "migrations" / "drafts" / "hc95_exec_broker_access_log.sql").read_text())
         c.execute(_DRAFT.read_text())
         c.execute(_DRAFT.read_text())   # idempotent re-apply
     with psycopg.connect(dsn, row_factory=dict_row) as c:
@@ -66,6 +68,7 @@ def test_same_host_second_boot_take_is_stamped(conn):
     row = _row(conn)
     assert str(row["boot_id"]) == b2
     assert row["taken_over_from"] == b1 and row["takeover_reason"] == "same_host_new_boot"
+    assert row["taken_over_from_host"] == "gzbai"            # same host stamped
 
 
 def test_fresh_foreign_holder_is_never_stolen_and_renew_records_the_probe(conn):
@@ -89,3 +92,11 @@ def test_expired_row_on_another_host_is_taken_with_host_change(conn):
     assert _take(conn, "otherhost", b2)
     row = _row(conn)
     assert row["taken_over_from"] == b1 and row["takeover_reason"] == "host_change"
+    assert row["taken_over_from_host"] == "gzbai"            # the OLD host, not "otherhost"
+    assert row["holder_host"] == "otherhost"
+
+
+
+def test_open_row_index_exists_and_is_partial(conn):
+    row = conn.execute("SELECT indexdef FROM pg_indexes WHERE indexname = 'exec_broker_access_log_open_idx'").fetchone()
+    assert row and "WHERE (ts_end IS NULL)" in row["indexdef"]
