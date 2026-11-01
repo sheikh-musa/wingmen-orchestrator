@@ -561,6 +561,44 @@ def test_card_payload_puts_every_live_lane_under_exactly_one_key(monkeypatch, fa
     assert sorted(seen) == sorted(lanes), (sorted(seen), sorted(lanes))
 
 
+def test_a_lane_whose_family_maps_to_no_key_falls_to_shared_never_vanishes(monkeypatch, fake_key):
+    """cc-quality-2 advisory on the 31f4887b review, folded in here.
+
+    The first fix filtered the shared row by `family is None or family in
+    <shared families>`. That caught a lane with NO family, but a lane whose
+    family EXISTS and maps to no key at all appeared under neither the shared
+    row nor a key row -- it vanished. On a cost card a vanished lane is
+    untracked spend attribution, and it holds by construction only if the
+    shared row is the true complement of the per-key rows.
+
+    `ghostfam` is deliberately a real string that is absent from the shipped
+    deepseek_key_map.json, which is exactly the case the None-family test does
+    not exercise."""
+    lanes = ["fleet-health", "ghost-lane"]
+    monkeypatch.setattr(console_app, "_deepseek_lanes",
+                        lambda: [{"session": s, "model": "deepseek-flash",
+                                  "model_label": "DeepSeek-V4.1-Flash-1017"} for s in lanes])
+    monkeypatch.setattr(console_app, "_family_of",
+                        lambda sess: {"fleet-health": "fleet",
+                                      "ghost-lane": "ghostfam"}.get(sess))
+    monkeypatch.setattr(ds, "http_get_json", _fake_http([]))
+    recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    _write_history(ds._SHARED_HISTORY_PATH, {"ts": recent, "balance_usd": 46.68})
+    monkeypatch.setattr(ds, "get_spend", lambda now=None: {
+        "available": True, "day": "2026-11-01", "day_label": "provider day (UTC+8)",
+        "total_today_usd": 1.0, "total_7d_usd": 2.0, "budget_line_usd": 7.0,
+        "budget_warn_usd": 5.0, "updated_at": None, "age_s": 1, "stale": False,
+        "by_family": {}})
+
+    assert "ghostfam" not in ds._key_map(), "fixture broke: ghostfam must not be a mapped family"
+    payload = console_app._deepseek_card_payload()
+    assert "ghost-lane" in payload["shared"]["lanes"], payload["shared"]["lanes"]
+
+    shown = [s for k in payload["keys"] for s in k["lanes"]] + payload["shared"]["lanes"]
+    assert sorted(shown) == sorted(lanes)      # exactly once each ...
+    assert len(shown) == len(set(shown))       # ... never twice
+
+
 # ---- fleet.js card render (node vm sandbox, same idiom as fleet_glm.test.js) --
 
 @pytest.mark.skipif(__import__("shutil").which("node") is None, reason="node not installed")
