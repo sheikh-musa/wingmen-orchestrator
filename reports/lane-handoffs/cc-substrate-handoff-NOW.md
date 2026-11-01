@@ -1,6 +1,68 @@
 # cc-substrate handoff (updated 2026-10-31 20:55Z, TRACK C rotation armed; window Sunday)
 
-## LATEST (2026-10-31 20:55Z) — read this first
+## LATEST (2026-11-01 07:2xZ) — ROTATION DONE, STEP 7 EXECUTED. Read this before anything else.
+
+**07:22Z — STEP 7 RUN AND VERIFYING. Both singletons restarted on the rotated credential
+by `cc-substrate-1` from its own process, fleet-health first, console last, exactly per
+runbook §7 / SRE 88003. Console confirmed at 07:19Z (bus 89279: "PATCHED 07:04Z … run step
+7 now … kill =fleet-health first, =nazim last").**
+
+Timeline, measured (all UTC, 2026-11-01):
+
+- **07:19:28Z** new credential connects from this lane; `fleet_health_lease` row then stale
+  (`renewed_at` 07:03:17Z + 900s ⇒ expired 07:18:17Z), as the SRE predicted and did not contest.
+- **07:20:31Z** `tmux kill-session -t fleet-health` (pane pid 77671 = `boot_fleet_health.sh`,
+  children 78195 heartbeat subshell + 78485 claude — the shape that makes "kill the session"
+  correct). Exit 0.
+- **07:20:35Z** launchd `dev.wingmen.fleet-health-session` (KeepAlive) re-ran the wrapper and
+  adopted/created a fresh session; **07:20:42Z** new pane pid 93901 = `boot_fleet_health.sh`,
+  already running `fleet_health_lease.py take --reason cc-fleet-health boot`.
+- **07:20:43Z** lease re-taken by the new body (`holder=cc-fleet-health`,
+  `renewed_at` 07:20:43.126Z) — the expired/reclaimed window closed itself.
+- **07:21:14Z** `tmux kill-session -t '=nazim'` (quote it: zsh expands bare `=nazim` as a
+  command-path lookup and fails "nazim not found"). Old pane 3101 gone; **07:21:16Z** new
+  session, pane 96229 = `boot_nazim.sh`, claude 96392.
+- **Sample A** 07:20:48Z / 07:21:26Z: cc-fleet-health `working` `last_heartbeat` **07:20:41Z**
+  (boot one-shot write, not yet proof); orch-console `working` `last_heartbeat` **07:21:22Z**.
+- **Sample B** 07:28:11Z: cc-fleet-health `working` `last_heartbeat` **07:25:45Z** (443s after A);
+  orch-console `working` `last_heartbeat` **07:26:24Z** (405s after A). **Both PASS** — status
+  `working` at both samples AND the timestamp strictly moved across a beat, which is the only
+  evidence that the *loop* re-forked on the new credential (recency alone proves the opposite,
+  because the EXIT trap writes `last_heartbeat=now()` when it stamps `offline`).
+- **`fleet_health_lease`** holder is `cc-fleet-health` again, `renewed_at` **07:25:47Z** — the
+  body the SRE said would not contest a reclaim retook it by itself, as designed.
+- Reported: **bus 89299** (console, P1) and **89300** (cc-fleet-health, P2, with `--evidence`).
+  Step 7 is COMPLETE; no further restarts pending.
+
+**DEFECT FOUND IN THE RUNBOOK'S OWN CONSOLE PROBE (fix after the window).** The §7 console
+probe `/usr/sbin/lsof -a -c claude -d cwd -Fn | grep -qx 'n/Users/sheikhmusa/wingmen/orchestrator'`
+**always reports "free" on this host**, because the claude process's command name is the
+version string (`2.1.316`), not `claude` — `-c claude` matches nothing, so the AND form
+returns zero lines even while a live console body holds that cwd (verified against pid 3282,
+whose `lsof -p 3282 -a -d cwd` does show `n/Users/sheikhmusa/wingmen/orchestrator`). A probe
+that always answers "free" is UNKNOWN per the runbook's own rule, not a clean bill. Safe
+replacement: capture the pane's claude child pid from the tmux pane tree **before** the kill
+and assert that exact pid is gone afterwards. Runbook edit is post-window work; do not
+rely on the -c form.
+
+**SECOND DEFECT — the auth-fail tripwire cannot attribute by peer IP (bus 89322 to the console,
+89323 to cc-fleet-health).** Step 7 left one open thread the console asked for: "watch the
+auth-failure log by peer IP and restart offenders." That is not possible with today's tooling:
+the Mgmt analytics endpoint has **no `metadata` field** (`Field "metadata" does not exist`), and
+`postgres_logs` / `pooler_logs` do not exist as tables, so **no row carries `peer_ip`** — 174 of
+174 rows across 06:44–07:29Z came back unattributed. `scripts/pooler_authfail_tripwire.py`'s
+`mini=0.00/min gzb=0.00/min` is therefore **structural, not a measurement**, and its per-host
+`>5/min` breach test can never fire; only the aggregate count and the breaker probe survive.
+Measured residual: failures continued after both restarts (07:20 8, 07:21 16, 07:23 4,
+07:26 22, 07:28 4, 07:31 4 → 3.4/min over 10 min, 5.9/min over 30), but **none of it appears in
+this host's logs** — the Mini clients that were failing (weekly-alert-relay, coord-pane-publisher,
+fleet-health-bus-notify, backlog-done-checker) stop logging failures at 07:18Z and fleet-health-bus-notify
+has polled cleanly since. That points off-host (gzb, which the console holds). The breaker stayed
+**clear from 07:16:54Z onward**, so no mass restart on a guess. Post-window: either find a
+log source with connection origin or make the tripwire say UNATTRIBUTABLE instead of printing
+per-host zeros.
+
+## SUPERSEDED (2026-10-31 20:55Z) — read for the executor defect list
 
 **THE WINDOW IS SUNDAY 2026-11-01 04:00Z** (console 87978). Two reasons, either
 sufficient: the operator ruled the schedule settles before the rotation and reopened W5
