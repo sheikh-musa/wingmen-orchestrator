@@ -190,13 +190,16 @@
   // median, so this is pure paint: no client-side grouping logic to drift
   // from the server's.
   function repoSectionHtml(g, isDefaultOpen) {
-    var rows = "";
+    var rowHtml = [];
     if (g.measured && g.measured.length) {
-      rows += '<div class="items">' + groupPending(groupDuplicateDeliveries(g.measured)).map(deliveryRow).join("") + "</div>";
+      rowHtml = rowHtml.concat(groupPending(groupDuplicateDeliveries(g.measured)).map(deliveryRow));
     }
     if (g.not_measured && g.not_measured.length) {
-      rows += '<div class="items">' + groupPending(g.not_measured).map(notMeasuredRow).join("") + "</div>";
+      rowHtml = rowHtml.concat(groupPending(g.not_measured).map(notMeasuredRow));
     }
+    // console #90323: an OPEN group is what actually filled the phone screen —
+    // 15 rows ~2,300 px. Paint the first few, fold the rest with its count.
+    var rows = capRows(rowHtml, MAX_ROWS_PER_GROUP, "more ask", "more asks");
     var meta = esc(String(g.count)) + (g.count === 1 ? " ask" : " asks");
     if (g.median_hours != null) meta += " · " + esc(fmtHours(g.median_hours)) + " median";
     // orch-console 81075: whole header row is the tap target (native
@@ -261,12 +264,41 @@
   }
   // same <details> idiom as a repo group (native summary = the tap target),
   // marked .quiet so it reads as a fold rather than a section
-  function quietBlock(title, inner) {
-    return '<details class="repo-group quiet">' +
+  function foldBlock(title, inner, cls) {
+    return '<details class="' + (cls || "repo-group quiet") + '">' +
       '<summary aria-expanded="false"><span class="repo-left">' +
         '<span class="chev" aria-hidden="true">&#10148;</span>' +
         '<span class="repo-name">' + esc(title) + "</span></span></summary>" +
       inner + "</details>";
+  }
+  function quietBlock(title, inner) { return foldBlock(title, inner); }
+
+  // op#37222 follow-up (console #90323): the FIRST fold barely shrank the page
+  // (measured 19,061 -> 19,142 css px all-open) because the fat was elsewhere:
+  // one OPEN repo group at 15 rows (~2,300 px) plus every active programme card
+  // laid out in full (~3,500 px for 4 programmes) — not the finished/quiet
+  // material the first fold targets. Console's budget is a phone PNG under
+  // ~5,000 px; an iPhone 13 shot is 3x DPR, so that is ~1,667 CSS px.
+  // So: ALL programmes fold behind one toggle, and an open group paints at most
+  // MAX_ROWS_PER_GROUP rows with the remainder behind a nested toggle that
+  // carries its count. Nothing is dropped; every row is still one tap away.
+  var MAX_ROWS_PER_GROUP = 4;
+
+  function capRows(rowHtml, max, labelOne, labelMany) {
+    var n = max == null ? MAX_ROWS_PER_GROUP : max;
+    // a caller that omits the labels must still get a true, readable count —
+    // never the word "undefined" in an operator-facing toggle
+    labelOne = labelOne == null ? "more row" : labelOne;
+    labelMany = labelMany == null ? "more rows" : labelMany;
+    var shown = rowHtml.slice(0, n);
+    var rest = rowHtml.slice(n);
+    var out = shown.length ? '<div class="items">' + shown.join("") + "</div>" : "";
+    if (rest.length) {
+      out += '<div class="items">' + foldBlock(
+        plural(rest.length, labelOne, labelMany) + " — show",
+        '<div class="items">' + rest.join("") + "</div>") + "</div>";
+    }
+    return out;
   }
   function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
 
@@ -283,10 +315,16 @@
       return;
     }
     var sp = splitProgrammes(progs);
+    var cards = (sp.active.length ? sp.active.map(programmeCard).join("")
+      : '<div class="item"><div class="meta"><span class="when">every programme is finished — the ' +
+        esc(String(sp.finished.length)) + ' below are kept, not dropped</span></div></div>');
+    // console #90323: the programme cards were ~3,500 px of the phone page. Fold
+    // ALL of them behind one toggle whose title carries the live counts, so the
+    // section still answers "is anything in flight?" in one line without paint.
     var html = '<div class="section">Programmes</div><div class="items">' +
-      (sp.active.length ? sp.active.map(programmeCard).join("")
-        : '<div class="item"><div class="meta"><span class="when">every programme is finished — the ' +
-          esc(String(sp.finished.length)) + ' below are kept, not dropped</span></div></div>') +
+      foldBlock(plural(progs.length, "programme", "programmes") + " — " +
+        esc(String(sp.active.length)) + " in progress, " + esc(String(sp.finished.length)) + " finished",
+        '<div class="items">' + cards + "</div>", "prog-fold quiet") +
       "</div>";
     if (sp.finished.length) {
       html += '<div class="items">' + quietBlock(
@@ -392,6 +430,7 @@
       groupPending: groupPending, groupDuplicateDeliveries: groupDuplicateDeliveries,
       repoSectionHtml: repoSectionHtml, isFinishedProgramme: isFinishedProgramme,
       splitProgrammes: splitProgrammes, isQuietRepo: isQuietRepo, splitRepos: splitRepos,
-      quietBlock: quietBlock, QUIET_REPO_DAYS: QUIET_REPO_DAYS };
+      quietBlock: quietBlock, foldBlock: foldBlock, capRows: capRows,
+      MAX_ROWS_PER_GROUP: MAX_ROWS_PER_GROUP, QUIET_REPO_DAYS: QUIET_REPO_DAYS };
   }
 })();

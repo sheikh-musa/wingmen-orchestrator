@@ -83,6 +83,27 @@
     '</div>';
   }
 
+  // console #90323: this page painted every open item flat. With 600 open items
+  // that measured 100,413 css px — 301,630 device px on an iPhone 13, i.e. ~119
+  // screens. The board is already sorted darkest-first (annotate_status_rows), so
+  // the honest cap is: paint the first STATUS_MAX_RENDERED of each section and
+  // fold the remainder behind ONE toggle that carries its count. Nothing is
+  // dropped — the rows stay in the DOM, one tap away, and the hero keeps the
+  // true totals so a fold can never make the board look smaller than it is.
+  var STATUS_MAX_RENDERED = 12;
+
+  function cappedCards(cards, max) {
+    var n = (max == null ? STATUS_MAX_RENDERED : max);
+    var shown = cards.slice(0, n), rest = cards.slice(n);
+    var out = shown.join("");
+    if (rest.length) {
+      var many = rest.length === 1 ? "more open item" : "more open items";
+      out += '<details class="fold"><summary aria-expanded="false">' +
+        esc(rest.length + " " + many + " — show") + "</summary>" + rest.join("") + "</details>";
+    }
+    return out;
+  }
+
   function paint(body) {
     var main = $("main");
     var items = (body && body.items) || [];
@@ -107,9 +128,11 @@
       html += '<div class="empty">No open items — nothing is waiting on anyone.</div>';
     } else {
       if (dark.length)
-        html += '<div class="section">Gone dark</div>' + dark.map(itemCard).join("");
+        html += '<div class="section">Gone dark · ' + esc(String(dark.length)) + '</div>' +
+          cappedCards(dark.map(itemCard));
       if (live.length)
-        html += '<div class="section">Watching</div>' + live.map(itemCard).join("");
+        html += '<div class="section">Watching · ' + esc(String(live.length)) + '</div>' +
+          cappedCards(live.map(itemCard));
     }
     main.innerHTML = html;
 
@@ -162,6 +185,7 @@
     module.exports = {
       tokenFromHash: tokenFromHash, esc: esc, fmtAge: fmtAge,
       partyLabel: partyLabel, overdueLabel: overdueLabel,
+      cappedCards: cappedCards, STATUS_MAX_RENDERED: STATUS_MAX_RENDERED,
     };
   }
 })();

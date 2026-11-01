@@ -468,7 +468,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v97';
+  var APP_BUILD = 'fc-v98';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -738,10 +738,18 @@
   // Tapping a needs row opens that lane's action sheet + its live peek.
   function jumpToLane(session) {
     if (!session) return;
-    if (!routineExpanded && entries[session] && entries[session]._routine) {
+    var ent = entries[session];
+    if (!routineExpanded && ent && ent._routine) {
       routineExpanded = true; renderLanes(lastLanes);
     }
     if (!entries[session]) { toast("that lane is not on the board right now", true); return; }
+    // console #90323 (N1): a down lane is in #down, a collapsed block of its own
+    // ("registered, not running") — expanding the idle group for it was the wrong
+    // container, so the row being addressed stayed shut. Open the right box.
+    if (ent && ent._group === "down") {
+      var box = $("down");
+      if (box && box.style.display === "none") { box.style.display = "block"; bindTiles(); }
+    }
     openSheet(session, true);
   }
 
@@ -830,11 +838,22 @@
   // A lane with no live process is DOWN, and counting it as idle-and-fine said
   // "all good" about lanes nobody had running (the glm-5.3 registrations).
   // Down lanes keep their own line: visible, but never counted as healthy.
+  // ONE definition of which block a lane renders in, used by BOTH the renderer
+  // (laneGroups) and the sheet jump (buildEntries._group). They drifting apart is
+  // exactly the console #90323 N1 bug: a down lane was flagged "routine", so
+  // jumpToLane opened the idle group while the lane itself sat in #down.
+  function laneGroupOf(l) {
+    if (!l) return "down";
+    if (l.bucket === "working" || l.flagged) return "primary";
+    if (l.bucket === "idle") return "routine";
+    return "down";
+  }
   function laneGroups(lanes) {
     var primary = [], routine = [], down = [];
     (lanes || []).forEach(function (l) {
-      if (l.bucket === "working" || l.flagged) primary.push(l);
-      else if (l.bucket === "idle") routine.push(l);
+      var g = laneGroupOf(l);
+      if (g === "primary") primary.push(l);
+      else if (g === "routine") routine.push(l);
       else down.push(l);
     });
     return { primary: primary, routine: routine, down: down };
@@ -927,7 +946,13 @@
         bucket: l.bucket, ctx: laneCtx(l), ctxIdle: l.ctx_idle,
         activity: (live.running && live.activity) || l.activity || l.current_task || "",
         auth_fp: l.auth_fp, pool: poolOf(l), host: l.host, model: l.model || null, peekable: true,
-        _routine: !(l.bucket === "working" || l.flagged)
+        // which collapsed container this lane lives in — laneGroups below puts
+        // working/flagged in the primary list, idle in #routine, and everything
+        // else (down/registered-not-running) in #down. jumpToLane needs the
+        // RIGHT box (console #90323 N1): a down lane used to be flagged routine,
+        // so jumping to it expanded the idle group and left #down shut.
+        _group: laneGroupOf(l),
+        _routine: laneGroupOf(l) === "routine"
       };
     });
     (coordinators || []).forEach(function (c) {
@@ -1956,7 +1981,7 @@
 
   // Node-only: expose the pure helpers for the unit tests (inert in the browser).
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, laneGroups: laneGroups, deepseekCard: deepseekCard, paceAdvisory: paceAdvisory, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset, next5hBoundary: next5hBoundary,
+    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, laneGroups: laneGroups, laneGroupOf: laneGroupOf, deepseekCard: deepseekCard, paceAdvisory: paceAdvisory, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset, next5hBoundary: next5hBoundary,
       ctxDisplayFrom: ctxDisplayFrom, idleLabel: idleLabel,
       poolOf: poolOf, tokChip: tokChip, poolRollup: poolRollup,
       mdlChip: mdlChip, shortModel: shortModel, routineSummary: routineSummary, collapsedHtml: collapsedHtml,
