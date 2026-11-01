@@ -292,3 +292,61 @@ def test_load_channels_db_error_falls_back_to_static_list(monkeypatch):
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---- non-text / service updates are NOT client messages (orch-console #89481) -----------
+# THE false positive: op#37155 is a Telegram PIN event. Its only payload key was
+# pinned_message, so ingest stored its last-resort shape marker, and the watch read that
+# row as "Hariz's latest message, unanswered for 33 minutes" — while his real message
+# 37148 had been answered twice (37149, 37150) nine minutes earlier.
+PIN_37155 = "[non-text update 50118302 — keys: chat,date,from,message_id,pinned_message]"
+
+
+def test_is_non_text_update_matches_the_real_marker():
+    assert nd.is_non_text_update(PIN_37155) is True
+    # bare form ingest emits when content extraction raised and there was no text
+    assert nd.is_non_text_update("[non-text update 14]") is True
+    # fetch_recent reads LEFT(text,240): a long key list cuts the closing bracket
+    truncated = "[non-text update 50118302 — keys: " + ",".join(f"k{i}" for i in range(100))
+    assert len(truncated) > 240
+    assert nd.is_non_text_update(truncated[:240]) is True
+
+
+def test_a_real_message_is_not_swept_up_by_the_marker():
+    # anchored at the start: a client may quote the marker back at us
+    assert nd.is_non_text_update("why did you send me [non-text update 12]?") is False
+    assert nd.is_non_text_update("As of today may i know the list of assigned staffer") is False
+    assert nd.is_non_text_update("") is False and nd.is_non_text_update(None) is False
+
+
+def test_pin_after_an_answered_message_is_not_a_drop():
+    # EXACT shape of the 2026-11-01 rows, newest-first.
+    rows = [
+        _row(37155, "inbound", 33 * 60, PIN_37155),        # pin event, no text/caption/media
+        _row(37150, "outbound", 42 * 60, "One addition to point 5, on how a role gets assigned"),
+        _row(37149, "outbound", 43 * 60, "Answers, all read from the live system at 07:50 UTC"),
+        _row(37148, "inbound", 47 * 60, "As of today may i know the list of assigned staffer"),
+    ]
+    assert nd.latest_unanswered_inbound(rows) is None
+
+
+def test_pin_event_does_not_hide_an_older_unanswered_message():
+    # Looking back must still FIND a genuine drop sitting under the pin.
+    rows = [
+        _row(37155, "inbound", 60, PIN_37155),
+        _row(37148, "inbound", 600, "As of today may i know the list of assigned staffer"),
+    ]
+    w = nd.latest_unanswered_inbound(rows)
+    assert w is not None and w["id"] == 37148
+
+
+def test_pin_event_alone_is_not_a_drop():
+    assert nd.latest_unanswered_inbound([_row(37155, "inbound", 60, PIN_37155)]) is None
+
+
+def test_a_captionless_photo_still_counts_as_a_client_message():
+    # Media DOES get a real handler, so it never lands as the marker — a client sending a
+    # picture is a genuine inbound and must keep paging.
+    rows = [_row(37200, "inbound", 600, "📷 Photo received (image/jpeg) — saved as media/abc.jpg")]
+    w = nd.latest_unanswered_inbound(rows)
+    assert w is not None and w["id"] == 37200

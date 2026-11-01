@@ -140,6 +140,23 @@ def is_receipt(text: "str | None") -> bool:
     return "got your message" in (text or "").lower()
 
 
+# The ingest's LAST-RESORT marker for an update it had no handler for and that carried no
+# text/caption/media — `[non-text update 50118302 — keys: chat,date,from,message_id,pinned_message]`
+# (nervous_system/ingest.py, _unknown_marker). Service events land here: a pin, a chat-member
+# change, an edit with no new text. None of them is something a client is WAITING on.
+# START-anchored and tolerant of truncation (fetch_recent takes LEFT(text,240), so a long key
+# list can cut the closing bracket); a real message would have to BEGIN with this exact marker
+# to be skipped, which is why the anchor matters more than the tail.
+_NON_TEXT_UPDATE_RE = re.compile(r"^\[non-text update \d+")
+
+
+def is_non_text_update(text: "str | None") -> bool:
+    """True for the ingest's shape marker for a service/non-text update (NO text, caption or
+    media — orch-console #89481). Such a row is a Telegram EVENT, not a message the client
+    sent us: it must never be read as the client's latest request."""
+    return bool(_NON_TEXT_UPDATE_RE.match((text or "").strip()))
+
+
 def is_operator_sender(from_user_id, *, musa_id=None) -> bool:
     """True iff `from_user_id` is the operator's own Telegram id (orch-console
     #72925/#72951/#72953) — an inbound FROM the operator is never a client waiting for a
@@ -156,11 +173,15 @@ def latest_unanswered_inbound(rows, *, musa_id=None):
     / not-waiting). A '📨 Got your message' receipt does NOT count as an answer (Nazim
     43631). An inbound FROM THE OPERATOR is skipped entirely — not a client waiting, and
     does not count as "answered" either, so a genuine older unanswered client message
-    underneath it still surfaces (#72953)."""
-    # newest-first: find the first (latest) inbound NOT from the operator
+    underneath it still surfaces (#72953). A non-text/service update (see is_non_text_update)
+    is skipped the same way — it is not a client message — so an older genuine message that
+    IS still unanswered underneath a pin event is found by looking back (#89481)."""
+    # newest-first: find the first (latest) inbound NOT from the operator and NOT a service event
     for i, r in enumerate(rows):
         if r["direction"] == "inbound":
             if is_operator_sender(r.get("from_user_id"), musa_id=musa_id):
+                continue
+            if is_non_text_update(r.get("text")):
                 continue
             # any row newer than it (earlier in the list) that is a real (non-receipt) outbound?
             for newer in rows[:i]:
