@@ -136,7 +136,18 @@ def find_address_variant_misses(
     base can outlive any one of its past instances), AND the instance has NOT
     read any instance-addressed row since its oldest unread one landed (#80448:
     a lane that reads P2 instance mail in minutes but leaves P3 FYIs for later
-    can plainly see its instance address)."""
+    can plainly see its instance address).
+
+    The returned row also carries `prior_instance_read_age_min`: how long before
+    the oldest unread row landed this instance last read mail addressed to its
+    OWN id (None when it never has). That read does not veto the miss -- a
+    reader can regress mid-session -- but it changes the DIAGNOSIS: a lane that
+    read its own address minutes before this row arrived is not blind to the
+    address, it took the mail and did not answer it. The page and the pane
+    nudge say so instead of sending the body after a filter that is fine
+    (2026-11-01 cc-cosem-adcda-2: read 89412/89431 at 08:19:16/08:19:25, then
+    89443 landed 08:20:41 while the body was under a stop-all-DB-calls
+    rotation hold, so it could not stamp the row it had plainly read)."""
     misses = []
     for r in rows:
         if r.get("instance_status") == "offline":
@@ -159,7 +170,12 @@ def find_address_variant_misses(
         last_instance_read = r.get("last_instance_read_at")
         if last_instance_read is not None and last_instance_read > oldest:
             continue
-        misses.append(r)
+        miss = dict(r)
+        miss["prior_instance_read_age_min"] = (
+            None if last_instance_read is None
+            else (oldest - last_instance_read).total_seconds() / 60.0
+        )
+        misses.append(miss)
     return misses
 
 
@@ -183,11 +199,31 @@ def _fetch_rows(conn) -> list[dict]:
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def _page(conn, miss: dict) -> bool:
+def page_subject(miss: dict) -> str:
+    """PURE: the console page headline. Names what is OBSERVED (unread mail on the
+    instance address) and only claims blindness when the evidence supports it."""
+    if miss.get("prior_instance_read_age_min") is not None:
+        return f"address-variant miss: {miss['instance_id']} unread on its instance address (not blindness — it read that address first)"
+    return f"address-variant miss: {miss['instance_id']} blind to its own inbox"
+
+
+def page_body(miss: dict) -> str:
+    """PURE: the console page body for a miss row (see find_address_variant_misses)."""
     instance_id = miss["instance_id"]
+    if miss.get("prior_instance_read_age_min") is not None:
+        return (
+            f"TL;DR: {instance_id} has {miss['unread_count']} unread message(s) addressed "
+            f"to its instance id, oldest since {miss['oldest_unread_created_at']}. This is "
+            f"NOT a base-only reader: the instance read mail addressed to its OWN id at "
+            f"{miss.get('last_instance_read_at')}, {miss['prior_instance_read_age_min']:.0f} "
+            f"minute(s) before that row landed, so it can see the address. The row was "
+            f"either taken and left unanswered, or the body was stopped before it could "
+            f"stamp what it had read (a rotation/hold window does exactly that). Worth "
+            f"checking what the lane was doing between those two timestamps before "
+            f"changing any reader."
+        )
     base_id = miss["base_agent_id"]
-    subj = f"address-variant miss: {instance_id} blind to its own inbox"
-    body = (
+    return (
         f"TL;DR: {instance_id} has {miss['unread_count']} unread message(s) addressed "
         f"to its instance id, oldest since {miss['oldest_unread_created_at']}, while it "
         f"read mail on its base id {base_id} as recently as {miss['last_base_read_at']} — "
@@ -195,6 +231,13 @@ def _page(conn, miss: dict) -> bool:
         f"(bus #51166 regression class). Check its inbox reader filters on "
         f"to_agent IN (base, instance), not base alone."
     )
+
+
+def _page(conn, miss: dict) -> bool:
+    instance_id = miss["instance_id"]
+    base_id = miss["base_agent_id"]
+    subj = page_subject(miss)
+    body = page_body(miss)
     try:
         bus_send.send(from_agent="cc-fleet-health", to="orch-console", mtype=PAGE_MESSAGE_TYPE,
                        subject=subj, body=body, priority="P2", req=False, dsn=_dsn())
@@ -216,6 +259,21 @@ def lane_nudge_message(miss: dict) -> str:
     affected lane's OWN terminal, so it's shorter and talks to the lane in
     second person rather than describing it to an observer.
     """
+    if miss.get("prior_instance_read_age_min") is not None:
+        return (
+            f"[address-variant-miss] you have {miss['unread_count']} unread "
+            f"message(s) addressed to your instance id ({miss['instance_id']}), "
+            f"oldest since {miss['oldest_unread_created_at']}. This is probably NOT "
+            f"an addressing problem: you last marked instance-addressed mail read at "
+            f"{miss.get('last_instance_read_at')}, "
+            f"{miss['prior_instance_read_age_min']:.0f} minute(s) before that row "
+            f"landed, so your reader sees your own address. More likely you took the "
+            f"mail and were stopped before you could answer or stamp it. Run "
+            f"`python3 scripts/lib/my_inbox.py` to confirm what is still unread, "
+            f"answer it, and stamp exactly those ids. If the call really shows nothing "
+            f"addressed to {miss['instance_id']}, then it is the base-only filter "
+            f"(bus #51166 regression class) and fix the filter."
+        )
     return (
         f"[address-variant-miss] you have {miss['unread_count']} unread "
         f"message(s) addressed to your instance id ({miss['instance_id']}), "

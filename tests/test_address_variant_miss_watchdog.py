@@ -17,6 +17,8 @@ from scripts.address_variant_miss_watchdog import (
     due_for_page,
     find_address_variant_misses,
     lane_nudge_message,
+    page_body,
+    page_subject,
 )
 
 NOW = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
@@ -196,3 +198,51 @@ def test_instance_read_BEFORE_oldest_unread_does_not_veto():
     row = _row("cc-scholar-1", "cc-scholar", unread_age_min=45, base_read_age_min=5)
     row["last_instance_read_at"] = row["oldest_unread_created_at"] - timedelta(minutes=10)
     assert len(find_address_variant_misses([row], now=NOW)) == 1
+
+
+def test_a_prior_instance_read_is_carried_into_the_miss_for_the_diagnosis():
+    """2026-11-01 cc-cosem-adcda-2: it read its own instance-addressed mail
+    85 seconds BEFORE the unread row landed, so it was never blind to the
+    address. The miss stands (the row still sat unanswered) but must carry
+    the evidence, because the page used to tell the lane to fix a reader that
+    was working."""
+    row = _row("cc-cosem-adcda-2", "cc-cosem-adcda", unread_age_min=81, base_read_age_min=11)
+    row["last_instance_read_at"] = row["oldest_unread_created_at"] - timedelta(seconds=85)
+    misses = find_address_variant_misses([row], now=NOW)
+    assert len(misses) == 1
+    assert abs(misses[0]["prior_instance_read_age_min"] - 85 / 60) < 0.01
+
+
+def test_a_lane_that_never_read_its_instance_address_carries_no_prior_read():
+    row = _row("cc-scholar-1", "cc-scholar", unread_age_min=45, base_read_age_min=5)
+    misses = find_address_variant_misses([row], now=NOW)
+    assert misses[0]["prior_instance_read_age_min"] is None
+
+
+def test_the_page_does_not_claim_blindness_when_the_instance_read_first():
+    row = _row("cc-cosem-adcda-2", "cc-cosem-adcda", unread_age_min=81, base_read_age_min=11)
+    row["last_instance_read_at"] = row["oldest_unread_created_at"] - timedelta(seconds=85)
+    miss = find_address_variant_misses([row], now=NOW)[0]
+    body = page_body(miss)
+    assert "blind to its own instance address" not in page_body(miss)
+    assert "NOT a base-only reader" in body
+    assert "claude" not in body.lower()  # no stray provider/model claims in an operator page
+    assert "blind to its own inbox" not in page_subject(miss)
+
+
+def test_the_lane_nudge_does_not_send_it_after_a_working_filter():
+    row = _row("cc-cosem-adcda-2", "cc-cosem-adcda", unread_age_min=81, base_read_age_min=11)
+    row["last_instance_read_at"] = row["oldest_unread_created_at"] - timedelta(seconds=85)
+    miss = find_address_variant_misses([row], now=NOW)[0]
+    msg = lane_nudge_message(miss)
+    assert "probably NOT" in msg
+    assert "my_inbox.py" in msg
+    # it still leaves the door open for a genuine regression
+    assert "base-only filter" in msg
+
+
+def test_the_blind_case_still_gets_the_original_instruction():
+    row = _row("cc-scholar-1", "cc-scholar", unread_age_min=45, base_read_age_min=5)
+    miss = find_address_variant_misses([row], now=NOW)[0]
+    assert "blind to its own inbox" in page_subject(miss)
+    assert "to_agent IN (base, instance)" in lane_nudge_message(miss)
