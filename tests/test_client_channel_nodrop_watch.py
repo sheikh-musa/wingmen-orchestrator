@@ -562,10 +562,32 @@ def test_an_undeclared_channel_with_no_inbound_does_not_page():
     assert action is None and ns == {}
 
 
-def test_channel_is_undeclared_reads_the_allowlist(monkeypatch):
-    cur = _ChatFakeCursor([[([],)]])
+def test_fetch_channel_reports_the_undeclared_flag_in_one_connection(monkeypatch):
+    """undeclared comes back with the rows, so the watcher opens ONE connection per channel
+    per cycle. Connection churn is what tripped the pooler breaker fleet-wide on 2026-11-01."""
+    cur = _ChatFakeCursor([[([CHAT_A],)], []])
     monkeypatch.setattr(nd.psycopg2, "connect", lambda *a, **k: _ChatFakeConn(cur))
-    assert nd.channel_is_undeclared("postgresql://ignored", "bariq") is True
-    cur2 = _ChatFakeCursor([[([CHAT_A],)]])
+    _rows, undeclared = nd.fetch_channel("postgresql://ignored", "cosem-exams", musa_id=MUSA)
+    assert undeclared is False
+    assert len(cur.sqls) == 2, "allowlist + messages; no third connect or query"
+
+    cur2 = _ChatFakeCursor([[([],)], [(CHAT_A,)], []])
     monkeypatch.setattr(nd.psycopg2, "connect", lambda *a, **k: _ChatFakeConn(cur2))
-    assert nd.channel_is_undeclared("postgresql://ignored", "cosem-exams") is False
+    _rows, undeclared = nd.fetch_channel("postgresql://ignored", "bariq", musa_id=MUSA)
+    assert undeclared is True
+
+
+def test_the_declare_dedup_survives_a_cycle_with_no_inbound():
+    """cc-quality 89624: returning {} on a no-inbound cycle dropped the timestamp, so an
+    empty-allowlist channel could re-page inside 24h when a window aged out."""
+    rows = [_r(801, "outbound", 100, "a receipt", chat_id=CHAT_A)]
+    action, ns = nd.undeclared_channel_action("bariq", rows, {nd.UNDECLARED_KEY: {"declared_paged_at": 900_000}}, 1_000_000)
+    assert action is None
+    assert ns[nd.UNDECLARED_KEY]["declared_paged_at"] == 900_000
+    # 13.9h later (inside the 24h window) the page must still be suppressed, which it is only
+    # because the quiet cycle above preserved the timestamp
+    action2, _ns2 = nd.undeclared_channel_action("bariq", [_r(802, "inbound", 50, "hi", chat_id=CHAT_A)], ns, 950_000)
+    assert action2 is None
+    # and past 24h it is allowed to page again
+    action3, _ns3 = nd.undeclared_channel_action("bariq", [_r(803, "inbound", 50, "hi", chat_id=CHAT_A)], ns, 1_000_100)
+    assert action3 is not None

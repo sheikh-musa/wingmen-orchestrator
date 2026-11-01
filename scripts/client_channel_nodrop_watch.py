@@ -247,9 +247,12 @@ def undeclared_channel_action(tag, rows, state, now, re_page_s=86400):
     not the operator's own DM.
     """
     inbound = [r for r in rows if r.get("direction") == "inbound"]
-    if not inbound:
-        return None, {}
     st = dict(state.get(UNDECLARED_KEY) or {})
+    if not inbound:
+        # KEEP the dedup timestamp (cc-quality 89624). Returning {} here dropped it, so an
+        # empty-allowlist channel that had paged could re-page sooner than 24h whenever a
+        # cycle's window happened to hold no inbound row.
+        return None, ({UNDECLARED_KEY: st} if st else {})
     if now - st.get("declared_paged_at", 0) < re_page_s:
         return None, {UNDECLARED_KEY: st}
     seen = sorted({str(r.get("chat_id")) for r in inbound})
@@ -371,8 +374,19 @@ def load_channels(dsn) -> list:
 
 
 def fetch_recent(dsn: str, tag: str, limit: int = FETCH_LIMIT, musa_id=None) -> list:
-    """Recent messages for a channel's CONVERSATION, NEWEST-FIRST. Raises CouldNotMeasure on
-    any DB failure.
+    """Recent messages for a channel's CONVERSATION. See fetch_channel()."""
+    return fetch_channel(dsn, tag, limit=limit, musa_id=musa_id)[0]
+
+
+def fetch_channel(dsn: str, tag: str, limit: int = FETCH_LIMIT, musa_id=None):
+    """(rows, undeclared) for one channel in ONE connection. Raises CouldNotMeasure on any
+    DB failure.
+
+    `undeclared` is True when bot_channels.allowed_chat_ids is empty for this tag — the
+    channel is running on the tag-only fallback and should prompt a declare-your-chat page.
+    It is returned here rather than probed separately so the watcher opens one connection per
+    channel per cycle instead of two (cc-quality 89624): connection churn is exactly what
+    tripped the pooler breaker fleet-wide on 2026-11-01.
 
     THE CONVERSATION IS THE CHAT, NOT THE TAG (orch-console #89533, after op#37148). An
     outbound reply is not always stamped with the channel tag: on cosem-exams the two
@@ -400,7 +414,8 @@ def fetch_recent(dsn: str, tag: str, limit: int = FETCH_LIMIT, musa_id=None) -> 
     """
     try:
         with psycopg2.connect(dsn) as c, c.cursor() as cur:
-            chats = _channel_chats(cur, tag, musa_id)
+            chats, allow = _resolve(cur, tag, musa_id)
+            undeclared = not allow
             where, params = ((("tag=%s"), (tag,)) if chats is None
                              else (("chat_id = ANY(%s) OR (tag=%s AND chat_id IS NULL)"),
                                    (chats, tag)))
@@ -421,22 +436,10 @@ def fetch_recent(dsn: str, tag: str, limit: int = FETCH_LIMIT, musa_id=None) -> 
             rs = cur.fetchall()
     except Exception as e:  # noqa: BLE001 — fail-closed
         raise CouldNotMeasure(str(e))
-    return [{"id": int(r[0]), "direction": r[1], "created_epoch": float(r[2]),
+    rows = [{"id": int(r[0]), "direction": r[1], "created_epoch": float(r[2]),
              "from_name": r[3], "text": r[4] or "", "from_user_id": r[5],
              "chat_id": r[6]} for r in rs]
-
-
-def channel_is_undeclared(dsn: str, tag: str) -> bool:
-    """True when bot_channels declares no client chat for this tag. Raises CouldNotMeasure.
-
-    Separate from _channel_chats on purpose: that one falls back to row-derived chats, so it
-    returns a non-empty set for a channel that is undeclared but already has traffic — which is
-    exactly the channel whose first client message should prompt a declaration."""
-    try:
-        with psycopg2.connect(dsn) as c, c.cursor() as cur:
-            return not _allowlist(cur, tag)
-    except Exception as e:  # noqa: BLE001 — fail-closed
-        raise CouldNotMeasure(str(e))
+    return rows, undeclared
 
 
 def _allowlist(cur, tag: str) -> list:
@@ -454,6 +457,23 @@ def _allowlist(cur, tag: str) -> list:
     return sorted(out)
 
 
+def _resolve(cur, tag: str, musa_id=None):
+    """(chats, allowlist) for one channel, reading the allowlist ONCE for both answers.
+
+    chats is None when nothing resolves (the caller must then read tag-only). allowlist is
+    the declared list as text ids; empty means the channel is undeclared."""
+    allow = _allowlist(cur, tag)
+    if allow:
+        return allow, allow
+    cur.execute(
+        "SELECT DISTINCT chat_id FROM operator_messages WHERE tag=%s AND chat_id IS NOT NULL",
+        (tag,),
+    )
+    chats = sorted({str(c) for (c,) in cur.fetchall()
+                    if musa_id is None or str(c) != str(musa_id)})
+    return (chats or None), allow
+
+
 def _channel_chats(cur, tag: str, musa_id=None):
     """The Telegram chats that make up this channel's conversation.
 
@@ -462,20 +482,13 @@ def _channel_chats(cur, tag: str, musa_id=None):
     the operator's own DM unconditionally — a topic tag in that DM is not a client chat.
 
     Returns None when the channel resolves to NO chat at all. The caller must then read
-    tag-only rather than read nothing: an empty chat set silently blinds the channel."""
-    # NOTE ON TYPES: bot_channels.allowed_chat_ids is bigint[] but operator_messages.chat_id
-    # is TEXT, so every id is normalised to str here and compared as text. Comparing the
-    # bigint array directly raised "operator does not exist: text = bigint" on the live
-    # column — a fake cursor cannot catch that, so this line is wet-proven, not unit-proven.
-    chats = _allowlist(cur, tag)
-    if chats:
-        return chats
-    cur.execute(
-        "SELECT DISTINCT chat_id FROM operator_messages WHERE tag=%s AND chat_id IS NOT NULL",
-        (tag,),
-    )
-    return sorted({str(c) for (c,) in cur.fetchall()
-                   if musa_id is None or str(c) != str(musa_id)}) or None
+    tag-only rather than read nothing: an empty chat set silently blinds the channel.
+
+    NOTE ON TYPES: bot_channels.allowed_chat_ids is bigint[] but operator_messages.chat_id is
+    TEXT, so every id is normalised to str in _allowlist and compared as text. Comparing the
+    bigint array directly raised "operator does not exist: text = bigint" on the live column —
+    a fake cursor cannot catch that, so that path is wet-proven, not unit-proven."""
+    return _resolve(cur, tag, musa_id)[0]
 
 
 def _bus(dsn: str, action: dict) -> None:
@@ -517,8 +530,7 @@ def main(argv=None) -> int:
     for ch in channels:
         tag = ch["tag"]
         try:
-            rows = fetch_recent(dsn, tag, musa_id=musa_id)
-            undeclared = channel_is_undeclared(dsn, tag)
+            rows, undeclared = fetch_channel(dsn, tag, musa_id=musa_id)
         except CouldNotMeasure as e:
             had_error = True
             _fail_closed_page(dsn, tag, str(e), armed)
