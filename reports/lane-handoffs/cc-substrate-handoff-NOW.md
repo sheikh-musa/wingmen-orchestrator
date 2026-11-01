@@ -1441,3 +1441,54 @@ several more work items to completion. Current state:
 #70394 (acted on). No standing task owed. On next wake: reconcile inbox first (Option B
 doctrine), and if genuinely idle, pick up bus #45730 (operator_asks triage-gap, P2, still
 unactioned as of this writing) — low priority, nothing else outstanding.
+
+
+---
+
+## 2026-11-01 (later) — PR #805 retired the wingmen-core reach; auth-failure offenders attributed
+
+**PR #805** (https://github.com/sheikh-musa/wingmen-orchestrator/pull/805), head
+`507d9366caf91b34d2a24147e4fb52c95cc14cee`, branch `cc-substrate/retire-wingmen-core-reach`,
+base `fable/substrate-safe-fixes` (`491a83f`). Built in `orchestrator.wt-secretsdoc` on a
+SEPARATE branch from PR #803 on purpose — pushing onto #803's branch would have changed its
+head and stale-pinned its cc-quality PASS. Console instruction: 89343 (Musa op37138).
+
+- `scripts/lib/hub_reach.py`: wingmen-core + aliases resolve to a REFUSAL — `known=True`
+  (name still recognized), `reach=None`, `ssh_target=None`, `retired=True`, remedy states
+  RETIRED and points at `orch_lease.holder_host` without repeating the address.
+  `is_reach_host_current()` returns False for a retired host even under a stale lease.
+- `scripts/reset_hub_remote.sh`: refuses a retired holder by name BEFORE constructing any
+  address; `WINGMEN_VPS_HOST` must still pass the same guard.
+- `scripts/irsyad_media_mirror.py`: had a SECOND hardcoded copy of the old IP (holder
+  wingmen-core -> `root@<old ip>` for scp). Removed; retired holder -> None -> logged skip.
+  Mirror is a no-op until a gzb reach exists — stated in the module docstring.
+- Tests: `tests/test_hub_reach.py` (refusal + every alias + guard expectations, incl. that
+  gzbai/gzbai still matches) and new `tests/test_irsyad_media_mirror_retired.py`.
+- Runs: hub_reach+mirror 13 passed; reset_dryrun_gate/fire_window/hub_self_recovery/
+  singleton_liveness/console panes 166 passed; context_health_watchdog+media 151 passed;
+  `bash -n` clean. Routed to cc-quality (bus 89379). Merge is the console's (merge_pinned).
+
+**Auth-failure attribution (console 89279/89329), measured 07:55Z, 20-min window:** 66
+password-auth failures, 0 unattributed (Mini 50, gzb 16); Mini peaks 10-11/min. Breaker
+tripped 07:54:52Z on my own bus read, cleared 07:55:20Z — the traffic is still live.
+All launchd daemons are on the current credential `e055e28bca55`. Offenders = long-lived
+processes holding pre-rotation `82241100ae4d`: ten Mini claude lanes started before 07:04Z
+(cc-quality, cc-quality-2, cc-hc95-broker-1, cc-oeh-1, cc-bariq-1, cc-cosem-exams-1,
+cc-cosem-tdu-coord-1, cc-cosem-platform-1/-2, cc-ffsfulfilment-1) and on gzb the tmux SERVER
+plus an encoder_supervisor chain of five procs. Reported to console (89384, P1+req: asks for
+the rolling-restart go — console owns lane pens) and to cc-fleet-health (89386, for the
+tripwire/PR 802 work).
+
+**Two traps recorded:**
+1. A DSN hash MISMATCH alone is not evidence of a rogue credential. Ten Mini processes hold
+   an `auditor_ro` credential for the ihsanos multi-tenant store; that correctly differs from
+   the substrate DSN and never hits the substrate pooler. Compare DSN shape (host + user)
+   before counting a process as an offender.
+2. **Retraction:** I had named Mini pid 78030 as the prime suspect for the flat 4-per-2-3-min
+   loop. It is gone and the rate is unchanged, so it was not the source. Corrected to console
+   in 89385 so nobody chases it.
+
+**Open on next wake:** (a) console decision on the rolling restart — cc-quality and
+cc-quality-2 are BOTH stale, so they cannot read the bus or the PR, which blocks the #805
+review; (b) PR #803 and #805 merges (console); (c) gzb tmux server stale env — restarting it
+kills every session incl. the hub, console decides; (d) reconcile inbox first.
