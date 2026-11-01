@@ -57,6 +57,7 @@ ORCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_PATH = os.path.join(ORCH, "state", "client_channel_nodrop_watch.json")
 
 CONSOLE_AGENT = "orch-console"
+SRE_AGENT = "cc-fleet-health"   # the fleet SRE — receives the declare-your-chat page
 NUDGE_S = int(os.environ.get("CLIENT_NODROP_NUDGE_S", str(30 * 60)))         # coord nudge after 30m
 ESCALATE_S = int(os.environ.get("CLIENT_NODROP_ESCALATE_S", str(2 * 3600)))  # console/Nazim after 2h
 RE_NUDGE_S = int(os.environ.get("CLIENT_NODROP_RE_NUDGE_S", str(60 * 60)))   # re-nudge cadence
@@ -64,7 +65,7 @@ RE_NUDGE_S = int(os.environ.get("CLIENT_NODROP_RE_NUDGE_S", str(60 * 60)))   # r
 # won't help — it's backlog / done-but-unacked). It is reported ONCE per message id as
 # 'stale backlog' to console (no coord nudge, no repeats), so an ancient drop is still seen once.
 MAX_LIVE_S = int(os.environ.get("CLIENT_NODROP_MAX_LIVE_S", str(7 * 86400)))  # 7 days
-FETCH_LIMIT = 25  # recent rows to scan per channel (plenty to see the reply-after-inbound)
+FETCH_LIMIT = 25  # recent rows PER CHAT (a per-chat window, so a busy sibling cannot starve a quiet one)
 
 # Channels covered by OTHER mechanisms — never double-watch.
 EXCLUDE_TAGS = {"gazzabyte-irsyad"}  # dedicated gazzabyte_request_nodrop_watch.py (3h/12h)
@@ -210,6 +211,67 @@ def latest_unanswered_inbound(rows, *, musa_id=None):
     return None  # no inbound at all
 
 
+def waiting_by_chat(rows, *, musa_id=None):
+    """The unanswered inbound of EVERY chat in the window, newest-first. One entry per chat.
+
+    A channel can own more than one client chat (cosem-caai and oeh each have two allowlisted).
+    Judging the single newest inbound across the merged set lets one sibling hide the other:
+    the newest inbound in chat A being answered returns None for the WHOLE channel while chat B
+    still holds an unanswered client (cc-quality 89597, F1 — answer-shadow). Deciding per chat
+    means both are judged on their own last turn, and a page is raised if ANY chat is waiting.
+    """
+    groups: dict = {}
+    for r in rows:                      # rows arrive newest-first, so each group stays ordered
+        groups.setdefault(str(r.get("chat_id")), []).append(r)
+    out = []
+    for chat_rows in groups.values():
+        w = latest_unanswered_inbound(chat_rows, musa_id=musa_id)
+        if w:
+            out.append(w)
+    out.sort(key=lambda r: r["created_epoch"], reverse=True)
+    return out
+
+
+UNDECLARED_KEY = "__undeclared__"
+
+
+def undeclared_channel_action(tag, rows, state, now, re_page_s=86400):
+    """Page cc-fleet-health ONCE to declare this channel's client chat, when a channel whose
+    bot_channels.allowed_chat_ids is empty first shows real inbound traffic (orch-console 89596).
+
+    With no declared chat the watcher can only match rows that happen to carry the channel tag.
+    A client writing under a topic tag is invisible, and there is nothing to resolve to — so the
+    channel is silently half-blind until someone declares which chat is the client's. Reporting
+    the chats actually seen on INBOUND rows is what makes the declaration a one-minute job; it
+    deliberately does NOT auto-declare, because only a human can say a chat is the client's and
+    not the operator's own DM.
+    """
+    inbound = [r for r in rows if r.get("direction") == "inbound"]
+    if not inbound:
+        return None, {}
+    st = dict(state.get(UNDECLARED_KEY) or {})
+    if now - st.get("declared_paged_at", 0) < re_page_s:
+        return None, {UNDECLARED_KEY: st}
+    seen = sorted({str(r.get("chat_id")) for r in inbound})
+    oldest = min(inbound, key=lambda r: r["created_epoch"])
+    action = {
+        "to": SRE_AGENT, "type": "update", "priority": "P3",
+        "subject": f"DECLARE CHAT: {tag} has an empty allowed_chat_ids but inbound traffic",
+        "body": (
+            f"The {tag} client channel is running on the tag-only fallback because "
+            f"bot_channels.allowed_chat_ids is empty for it, and it now has inbound traffic "
+            f"(op#{oldest['id']}, chats seen: {', '.join(seen)}). Until its client chat is "
+            f"declared, any message that arrives under a topic tag instead of the channel tag "
+            f"is invisible to the no-drop watch.\n\n"
+            f"CONFIRM which of those chat ids is the CLIENT's (not the operator's own DM — the "
+            f"DM carries topic tags too and must never be declared), then set it in "
+            f"bot_channels.allowed_chat_ids. This is a decision, not maintenance: do not infer "
+            f"it from volume alone."
+        ),
+    }
+    return action, {UNDECLARED_KEY: {"declared_paged_at": now}}
+
+
 def evaluate(waiting, now, state, *, coord, label, tag, send_script,
              nudge_s=NUDGE_S, escalate_s=ESCALATE_S, re_nudge_s=RE_NUDGE_S, max_live_s=MAX_LIVE_S):
     """PURE decision core for ONE channel. `waiting` = the unanswered inbound (or None).
@@ -337,27 +399,59 @@ def fetch_recent(dsn: str, tag: str, limit: int = FETCH_LIMIT, musa_id=None) -> 
     cannot lose a channel entirely — losing one silently is worse than a false page.
     """
     try:
-        sel = ("SELECT id, direction, EXTRACT(EPOCH FROM created_at), from_name, LEFT(text, 240), "
-               "from_user_id, chat_id FROM operator_messages WHERE ")
         with psycopg2.connect(dsn) as c, c.cursor() as cur:
             chats = _channel_chats(cur, tag, musa_id)
-            if chats is None:
-                # No allowlist AND no tag-bearing non-DM chat (bariq today). Reading nothing
-                # would make this channel permanently silent, so fall back to the tag-only
-                # read: a false page is recoverable, a silent no-drop is not.
-                cur.execute(sel + "tag=%s ORDER BY created_at DESC LIMIT %s", (tag, limit))
-            else:
-                cur.execute(
-                    sel + "chat_id = ANY(%s) OR (tag=%s AND chat_id IS NULL) "
-                    "ORDER BY created_at DESC LIMIT %s",
-                    (chats, tag, limit),
-                )
+            where, params = ((("tag=%s"), (tag,)) if chats is None
+                             else (("chat_id = ANY(%s) OR (tag=%s AND chat_id IS NULL)"),
+                                   (chats, tag)))
+            # PER-CHAT limit, not one LIMIT over the merged window (cc-quality 89597, F1).
+            # cosem-caai and oeh each own two client chats. With a single LIMIT, a busy
+            # sibling fills the window and a quiet one's last client turn is never fetched,
+            # so grouping in Python could not rescue it: the row would already be missing.
+            # The window function gives every chat its own last `limit` rows.
+            cur.execute(
+                "SELECT id, direction, created_epoch, from_name, text, from_user_id, chat_id "
+                "FROM (SELECT id, direction, EXTRACT(EPOCH FROM created_at) AS created_epoch, "
+                "             from_name, LEFT(text, 240) AS text, from_user_id, chat_id, "
+                "             row_number() OVER (PARTITION BY chat_id ORDER BY created_at DESC) AS rn "
+                "      FROM operator_messages WHERE " + where + ") s "
+                "WHERE rn <= %s ORDER BY created_epoch DESC",
+                params + (limit,),
+            )
             rs = cur.fetchall()
     except Exception as e:  # noqa: BLE001 — fail-closed
         raise CouldNotMeasure(str(e))
     return [{"id": int(r[0]), "direction": r[1], "created_epoch": float(r[2]),
              "from_name": r[3], "text": r[4] or "", "from_user_id": r[5],
              "chat_id": r[6]} for r in rs]
+
+
+def channel_is_undeclared(dsn: str, tag: str) -> bool:
+    """True when bot_channels declares no client chat for this tag. Raises CouldNotMeasure.
+
+    Separate from _channel_chats on purpose: that one falls back to row-derived chats, so it
+    returns a non-empty set for a channel that is undeclared but already has traffic — which is
+    exactly the channel whose first client message should prompt a declaration."""
+    try:
+        with psycopg2.connect(dsn) as c, c.cursor() as cur:
+            return not _allowlist(cur, tag)
+    except Exception as e:  # noqa: BLE001 — fail-closed
+        raise CouldNotMeasure(str(e))
+
+
+def _allowlist(cur, tag: str) -> list:
+    """bot_channels.allowed_chat_ids as text ids (the column is bigint[]; chat_id is TEXT)."""
+    cur.execute(
+        "SELECT allowed_chat_ids FROM bot_channels "
+        "WHERE channel_tag=%s AND allowed_chat_ids IS NOT NULL",
+        (tag,),
+    )
+    out = set()
+    for (ids,) in cur.fetchall():
+        for cid in (ids or []):
+            if cid is not None:
+                out.add(str(cid))
+    return sorted(out)
 
 
 def _channel_chats(cur, tag: str, musa_id=None):
@@ -369,22 +463,13 @@ def _channel_chats(cur, tag: str, musa_id=None):
 
     Returns None when the channel resolves to NO chat at all. The caller must then read
     tag-only rather than read nothing: an empty chat set silently blinds the channel."""
-    cur.execute(
-        "SELECT allowed_chat_ids FROM bot_channels "
-        "WHERE channel_tag=%s AND allowed_chat_ids IS NOT NULL",
-        (tag,),
-    )
     # NOTE ON TYPES: bot_channels.allowed_chat_ids is bigint[] but operator_messages.chat_id
     # is TEXT, so every id is normalised to str here and compared as text. Comparing the
     # bigint array directly raised "operator does not exist: text = bigint" on the live
     # column — a fake cursor cannot catch that, so this line is wet-proven, not unit-proven.
-    chats = set()
-    for (ids,) in cur.fetchall():
-        for cid in (ids or []):
-            if cid is not None:
-                chats.add(str(cid))
+    chats = _allowlist(cur, tag)
     if chats:
-        return sorted(chats)
+        return chats
     cur.execute(
         "SELECT DISTINCT chat_id FROM operator_messages WHERE tag=%s AND chat_id IS NOT NULL",
         (tag,),
@@ -433,13 +518,22 @@ def main(argv=None) -> int:
         tag = ch["tag"]
         try:
             rows = fetch_recent(dsn, tag, musa_id=musa_id)
+            undeclared = channel_is_undeclared(dsn, tag)
         except CouldNotMeasure as e:
             had_error = True
             _fail_closed_page(dsn, tag, str(e), armed)
             continue
-        waiting = latest_unanswered_inbound(rows, musa_id=musa_id)
-        actions, ns = evaluate(waiting, now, state.get(tag, {}), coord=ch["coord"],
-                               label=ch["label"], tag=tag, send_script=ch["send_script"])
+        waitings = waiting_by_chat(rows, musa_id=musa_id)
+        actions, ns = [], {}
+        for waiting in waitings:            # ONE decision per chat, so no chat can shadow another
+            a_i, ns_i = evaluate(waiting, now, state.get(tag, {}), coord=ch["coord"],
+                                 label=ch["label"], tag=tag, send_script=ch["send_script"])
+            actions += a_i
+            ns.update(ns_i)
+        if undeclared:
+            a_u, ns_u = undeclared_channel_action(tag, rows, state.get(tag, {}), now)
+            actions += [a_u] if a_u else []
+            ns.update(ns_u)
         new_state[tag] = ns
         for a in actions:
             total_actions += 1
@@ -448,7 +542,8 @@ def main(argv=None) -> int:
                 _bus(dsn, a)
             print(f"[{tag}] {verb} {a['to']} ({a['priority']}): {a['subject']}")
         if not actions:
-            print(f"[{tag}] coord={ch['coord']} waiting={'op#' + str(waiting['id']) if waiting else 'none'} — no action")
+            shown = ", ".join("op#" + str(w["id"]) for w in waitings) or "none"
+            print(f"[{tag}] coord={ch['coord']} waiting={shown} — no action")
 
     if armed:
         _save_state(new_state)
