@@ -20,6 +20,7 @@ def _load():
 
 
 daemon = _load()
+_real_start_heartbeat = daemon._start_heartbeat
 
 
 def test_load_allowed_uids_parses_csv():
@@ -201,6 +202,9 @@ def test_parse_override_expiry_within_cap_is_not_clamped():
     assert got == _NOW + timedelta(hours=1)
 
 
+_HEARTBEAT_CALLS: list = []
+
+
 def _set_base_env(monkeypatch, tmp_path):
     token_file = tmp_path / "token"
     token_file.write_text("secret")
@@ -214,8 +218,13 @@ def _set_base_env(monkeypatch, tmp_path):
         "EXEC_BROKER_UID_OVERRIDE",
         "EXEC_BROKER_UID_OVERRIDE_EXPIRES_AT",
         "EXEC_BROKER_LIVE_GATED_REFS",
+        "EXEC_BROKER_HEARTBEAT_INTERVAL_SECONDS",
     ):
         monkeypatch.delenv(v, raising=False)
+    # main() tests exercise config wiring; the heartbeat take (a real DB call)
+    # is replaced here and tested on its own below.
+    _HEARTBEAT_CALLS.clear()
+    monkeypatch.setattr(daemon, "_start_heartbeat", lambda **kw: _HEARTBEAT_CALLS.append(kw))
 
 
 class _FakeServer:
@@ -345,3 +354,109 @@ def test_main_logs_the_resolved_live_gated_refs_once_at_boot(monkeypatch, tmp_pa
     assert daemon.main([]) == 0
     err = capsys.readouterr().err
     assert "goumlyne=goumlynecruxrlmzlntp" in err and "irsyad-qa/qa=oovskwogvefnznfowjky" in err
+
+
+# --- dead-man heartbeat (spec bus #89814 §5.2) -------------------------------
+
+def test_load_heartbeat_interval_default_and_bounds():
+    assert daemon.load_heartbeat_interval(None) == 60
+    assert daemon.load_heartbeat_interval(" 120 ") == 120
+    for bad in ("0", "9", "901", "1m", "-60"):
+        with pytest.raises(ValueError):
+            daemon.load_heartbeat_interval(bad)
+
+
+def test_main_refuses_boot_on_bad_heartbeat_interval(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("EXEC_BROKER_HEARTBEAT_INTERVAL_SECONDS", "5")
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 1
+
+
+def test_main_starts_the_heartbeat_for_every_gated_ref_before_serving(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("EXEC_BROKER_LIVE_GATED_REFS", "qa,goumlyne")
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 0
+    (call,) = _HEARTBEAT_CALLS
+    assert call["refs"] == frozenset({"oovskwogvefnznfowjky", "goumlynecruxrlmzlntp"})
+    assert call["interval_seconds"] == 60
+
+
+def test_main_refuses_boot_when_the_heartbeat_cannot_start(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+
+    def _fail(**kw):
+        raise RuntimeError("held by another live broker")
+
+    monkeypatch.setattr(daemon, "_start_heartbeat", _fail)
+    assert daemon.main([]) == 1
+
+
+class _HbConn:
+    def __init__(self, take_ok=True, boom=False):
+        self.take_ok, self.boom = take_ok, boom
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def cursor(self):
+        conn = self
+
+        class _C:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def execute(self, sql, params=None):
+                if conn.boom:
+                    raise RuntimeError("db down")
+                self._r = {"boot_id": "x"} if conn.take_ok else None
+
+            def fetchone(self):
+                return self._r
+
+        return _C()
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+
+def test_start_heartbeat_refuses_on_live_foreign_holder_db_error_or_no_host(monkeypatch):
+    import fleet_host_id
+    monkeypatch.setattr(fleet_host_id, "fleet_host_id", lambda: "gzb")
+    with pytest.raises(RuntimeError, match="another LIVE broker"):
+        _real_start_heartbeat(db_conn_factory=lambda: _HbConn(take_ok=False),
+                              refs=frozenset({"oovskwogvefnznfowjky"}), interval_seconds=60)
+    with pytest.raises(RuntimeError, match="take failed"):
+        _real_start_heartbeat(db_conn_factory=lambda: _HbConn(boom=True),
+                              refs=frozenset({"oovskwogvefnznfowjky"}), interval_seconds=60)
+
+    def _nohost():
+        raise OSError("gethostname failed")
+
+    monkeypatch.setattr(fleet_host_id, "fleet_host_id", _nohost)
+    with pytest.raises(RuntimeError, match="host identity"):
+        _real_start_heartbeat(db_conn_factory=lambda: _HbConn(),
+                              refs=frozenset({"oovskwogvefnznfowjky"}), interval_seconds=60)
+
+
+def test_start_heartbeat_takes_then_starts_the_writer(monkeypatch):
+    import fleet_host_id
+    monkeypatch.setattr(fleet_host_id, "fleet_host_id", lambda: "gzb")
+    writer = _real_start_heartbeat(db_conn_factory=lambda: _HbConn(),
+                                   refs=frozenset({"oovskwogvefnznfowjky"}), interval_seconds=60)
+    try:
+        assert writer.host == "gzb" and writer.ttl_seconds == 180
+        assert writer._thread is not None and writer._thread.is_alive()
+    finally:
+        writer.stop()

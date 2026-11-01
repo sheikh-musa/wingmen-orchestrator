@@ -43,11 +43,19 @@ RUNBOOK NOTE -- the env REPLACES the default, it does not ADD to it: setting
 EXEC_BROKER_LIVE_GATED_REFS=goumlyne DROPS QA. For rollout step (b) (QA + one
 real ref in overlap) the value must list BOTH, e.g.
 EXEC_BROKER_LIVE_GATED_REFS=qa,goumlyne.
+
+DEAD-MAN HEARTBEAT (spec bus #89814 §5.2): before serving, the daemon CAS-takes
+one exec_broker_heartbeat row per gated ref (exec_broker/heartbeat.py) and
+then renews each every EXEC_BROKER_HEARTBEAT_INTERVAL_SECONDS (default 60,
+bounded 10..900; ttl = 3 x interval). Boot REFUSES if the host identity cannot
+be resolved, the take hits a DB error, or a gated ref is held by another live
+broker -- fail closed.
 """
 from __future__ import annotations
 
 import os
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -56,6 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from dotenv import load_dotenv  # noqa: E402
 
 from exec_broker.gate_validation import DEFAULT_LIVE_GATED_REFS, SILO_ALIASES  # noqa: E402
+from exec_broker import heartbeat  # noqa: E402
 from exec_broker.mgmt_api import post_to_mgmt_api  # noqa: E402
 from exec_broker.server import BrokerServer  # noqa: E402
 from substrate_dsn import dsn_from_env_file  # noqa: E402
@@ -127,6 +136,47 @@ def describe_live_gated_refs(refs: "frozenset[str]") -> str:
         aliases = sorted(a for a, r in SILO_ALIASES.items() if r == ref)
         parts.append(f"{'/'.join(aliases) or '?'}={ref}")
     return ", ".join(parts)
+
+
+def load_heartbeat_interval(raw: "str | None") -> int:
+    """EXEC_BROKER_HEARTBEAT_INTERVAL_SECONDS: unset/blank -> 60; else an
+    integer in 10..900, or ValueError (fail loud at boot)."""
+    if not raw or not raw.strip():
+        return heartbeat.DEFAULT_INTERVAL_SECONDS
+    value = raw.strip()
+    if (not value.isascii() or not value.isdigit()
+            or not heartbeat.MIN_INTERVAL_SECONDS <= int(value) <= heartbeat.MAX_INTERVAL_SECONDS):
+        raise ValueError(
+            "EXEC_BROKER_HEARTBEAT_INTERVAL_SECONDS must be an integer in "
+            f"{heartbeat.MIN_INTERVAL_SECONDS}..{heartbeat.MAX_INTERVAL_SECONDS}, got {value!r}"
+        )
+    return int(value)
+
+
+def _start_heartbeat(*, db_conn_factory, refs, interval_seconds: int) -> "heartbeat.HeartbeatWriter":
+    """Take every gated ref's heartbeat row (CAS) and start the writer thread.
+    Raises RuntimeError on any reason boot must be refused."""
+    import fleet_host_id  # scripts/lib is on sys.path (top of this file)
+
+    try:
+        host = fleet_host_id.fleet_host_id()
+    except Exception as e:  # noqa: BLE001 -- never beat under an unknown identity
+        raise RuntimeError(f"cannot resolve a stable host identity for the heartbeat: {e}") from e
+    writer = heartbeat.HeartbeatWriter(
+        db_conn_factory, refs, host=host, pid=os.getpid(), boot_id=str(uuid.uuid4()),
+        interval_seconds=interval_seconds,
+    )
+    try:
+        failed = writer.take_all()
+    except Exception as e:  # noqa: BLE001 -- DB error at boot -> refuse
+        raise RuntimeError(f"heartbeat take failed: {e.__class__.__name__}") from e
+    if failed:
+        raise RuntimeError(
+            f"heartbeat row(s) for {failed} are held by another LIVE broker -- refusing to "
+            "boot a second broker for the same gated ref (never steal a fresh holder)"
+        )
+    writer.start()
+    return writer
 
 
 def load_live_gated_refs(raw: "str | None") -> "frozenset[str]":
@@ -240,6 +290,12 @@ def main(argv=None) -> int:
     )
 
     try:
+        heartbeat_interval = load_heartbeat_interval(os.environ.get("EXEC_BROKER_HEARTBEAT_INTERVAL_SECONDS"))
+    except ValueError as e:
+        print(f"exec_broker_daemon: {e}", file=sys.stderr)
+        return 1
+
+    try:
         ref_override = resolve_ref_override_alias(os.environ.get("EXEC_BROKER_REF_OVERRIDE_ALIAS"))
     except ValueError as e:
         print(f"exec_broker_daemon: {e}", file=sys.stderr)
@@ -306,6 +362,13 @@ def main(argv=None) -> int:
         ref_override_expires_at=ref_override_expires_at,
         live_gated_refs=live_gated_refs,
     )
+    try:
+        _start_heartbeat(
+            db_conn_factory=_db_conn_factory, refs=live_gated_refs, interval_seconds=heartbeat_interval,
+        )
+    except RuntimeError as e:
+        print(f"exec_broker_daemon: {e}", file=sys.stderr)
+        return 1
     server.serve_forever()
     return 0
 
