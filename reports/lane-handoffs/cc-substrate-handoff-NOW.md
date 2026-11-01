@@ -89,6 +89,18 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**03:26Z — 03:30Z CHECKLIST: all three PASS (console told, 89041, P1).**
+(1) **PAT**: `GET /v1/projects/tscuymavysscrvoberrr` → HTTP 200, `ACTIVE_HEALTHY`, `ap-southeast-2`,
+name `orchestrator`; token sha256-8 `02fa5ae2` — SAME credential as the 22:05Z check; still does not
+prove PATCH write scope (only the executor's patch step does). (2) **785 live**: `f9786df` is an
+ancestor of base tip `bfe39cf`, and the live checkout HEAD IS `bfe39cf`; doc at HEAD carries the
+hardening marker. (3) **blob unmoved**: `scripts/substrate_rotation_executor.py` = `a7bf4c01` at base
+tip AND live checkout, `def _scrub` + comment both 1 — stable 12h since the 774 merge. Base has
+moved 10 PRs since (`bfe39cf` tip, nudge-path/digest fixes) — none touched the executor blob, which
+is why the blob check, not a HEAD pin, is the right instrument. **0 open RR rows ≤12h.**
+Also closed the 56-day-old RR **37953** (apply_migration dollar-quote fix) — verified in code
+(`_dollar_quote_spans` in `strip_txn_control`), answered as 89043. Open RR now 10, all pre-12h.
+
 **00:19Z — RR backlog stamped, not just answered.** Six `requires_response` rows carried substantive
 answers sent WITHOUT `--reply-to` during the night, so they kept firing SLA pings: 88391 (88539),
 87803 (88574), 87830 (88575), 87921 (88577), 87940 (88578), 87978 (88580). All verified stamped in
