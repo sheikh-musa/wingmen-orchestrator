@@ -419,11 +419,12 @@
   // server cache per key; a key never reaches this payload).
   function fmtUsd(n) {
     if (n == null) return "—";
-    return (n < 0 ? "-" : "") + "$" + Math.abs(n).toFixed(2);
-  }
-  function deepseekLaneChips(lanes) {
-    return (lanes && lanes.length)
-      ? '<span class="dslanes-inline">' + lanes.map(esc).join(", ") + '</span>' : "";
+    var a = Math.abs(n);
+    // A measured-but-tiny cost is NOT zero: rounding it to "$0.00" reads as
+    // "this key costs nothing", which is a claim we cannot make from a 5e-06
+    // export row. Same rule as "unknown is not zero" (console #90015).
+    if (n !== 0 && a < 0.005) return (n < 0 ? "-" : "") + "<$0.01";
+    return (n < 0 ? "-" : "") + "$" + a.toFixed(2);
   }
   // spend level vs the daily line -> css class + a plain-language verdict
   function spendLevel(sp) {
@@ -440,29 +441,34 @@
     return t + " today of " + fmtUsd(sp.budget_line_usd) + " line";
   }
   function spendCell(sp) {
-    // per-key measured cost; a key with no export row reads "—", not "$0.00"
+    // per-key measured cost; a key with no export row reads "no cost row", never
+    // $0.00. The BALANCE is deliberately not repeated per key -- every key draws
+    // on one account, so 15 copies of 29.27 carry one fact and bury the cost the
+    // operator actually asked for (console #90081).
     if (!sp) return '<span class="dsspend stale">no cost row</span>';
     return '<span class="dsspend">' + fmtUsd(sp.today_usd) + ' today'
       + (sp.last7_usd != null ? ' · ' + fmtUsd(sp.last7_usd) + ' / 7d' : '')
       + '</span>';
   }
+  // One key = one BLOCK: the key name on its own line with cost right-aligned,
+  // and its lanes on a muted second line. The previous inline rows ran together
+  // on a phone -- a key's lane list sat on the same line as the next key's
+  // figures (console #90081).
   function deepseekRow(label, k, showCost) {
-    var laneChips = deepseekLaneChips(k.lanes);
-    var cost = showCost ? spendCell(k.spend) : "";
+    var lanes = (k.lanes && k.lanes.length) ? k.lanes.slice() : [];
+    var head;
     if (!k.available) {
       var reason = k.reason || "could not read";
-      return '<div class="poolwin stale" title="' + esc(label) + ': ' + esc(reason) + '">'
-        + '<span class="poolwl">' + esc(label) + '</span>'
-        + '<b>' + esc(reason) + '</b>' + cost + (laneChips ? ' ' + laneChips : "")
-        + '</div>';
+      head = '<span class="dsrow-k">' + esc(label) + '</span>'
+        + '<span class="dsspend stale">' + esc(reason) + '</span>';
+    } else {
+      head = '<span class="dsrow-k">' + esc(label) + '</span>'
+        + (showCost ? spendCell(k.spend) : "");
     }
-    var delta = (k.delta_usd == null) ? "" :
-      ' <span class="dsdelta">(' + (k.delta_usd >= 0 ? "+" : "") + fmtUsd(k.delta_usd) + ' since last poll)</span>';
-    return '<div class="poolwin ok" title="' + esc(label) + ' balance'
-      + (k.age_s != null ? ", read " + fmtAge(k.age_s) + " ago" : "") + '">'
-      + '<span class="poolwl">' + esc(label) + '</span>'
-      + '<b>' + fmtUsd(k.balance_usd) + '</b> balance' + delta + cost
-      + (laneChips ? ' ' + laneChips : "")
+    return '<div class="dsrow' + (k.available ? "" : " stale") + '"'
+      + (k.age_s != null && k.available ? ' title="balance read ' + fmtAge(k.age_s) + ' ago"' : "")
+      + '><div class="dsrow-h">' + head + '</div>'
+      + (lanes.length ? '<div class="dsrow-l">' + esc(lanes.join(", ")) + '</div>' : "")
       + '</div>';
   }
   function deepseekCard(du, open) {
@@ -481,16 +487,21 @@
     var staleNote = (sp && sp.available && sp.stale)
       ? '<div class="dsnote">Spend figures are stale — export last written '
         + (sp.age_s != null ? fmtAge(sp.age_s) + ' ago' : 'at an unknown time') + '.</div>' : '';
-    // A key with no measured cost today AND no live lane is not news: its
-    // balance is the same account balance the active rows already show. They
+    // A key with no measured cost today AND no live lane is not news: it has
+    // nothing to say that the count line does not say more cheaply. They
     // collapse to a count so the expanded card stays readable (op#37222 asks
-    // for exactly this: the per-key balance rows that never change).
+    // for exactly this: the per-key rows that never change).
     var label = function (k) {
       return (k.families && k.families.length) ? k.families.join(" / ") : k.key_name;
     };
     var active = keys.filter(function (k) {
       return ((k.spend || {}).today_usd > 0) || (k.lanes && k.lanes.length) || k.unmapped
         || !k.available;   // a key that cannot be read is a finding, always shown
+    });
+    // Dearest first, in the view as well as the payload -- "where is the money
+    // going" must not depend on the server's ordering surviving a refactor.
+    active.sort(function (a, b) {
+      return (((b.spend || {}).today_usd) || 0) - (((a.spend || {}).today_usd) || 0);
     });
     var quiet = keys.filter(function (k) { return active.indexOf(k) < 0; });
     var rows = (shared ? deepseekRow(shared.families && shared.families.length

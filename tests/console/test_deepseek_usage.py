@@ -527,6 +527,40 @@ def test_api_fleet_joins_per_family_spend_onto_each_key_row(fleet_server, monkey
     assert du["spend"]["total_today_usd"] == pytest.approx(11.99)
 
 
+def test_card_payload_puts_every_live_lane_under_exactly_one_key(monkeypatch, fake_key):
+    """console #90081.2: the render showed cosem-adcda / cosem-exams* under the
+    shared key AND under cosem. The payload builder must be disjoint: one lane,
+    one key -- including the shared row, which used to list every live lane."""
+    lanes = ["fleet-health", "cosem-adcda", "cosem-exams", "wingmen-sites", "mystery-lane"]
+    monkeypatch.setattr(console_app, "_deepseek_lanes",
+                        lambda: [{"session": s, "model": "deepseek-flash",
+                                  "model_label": "DeepSeek-V4.1-Flash-1017"} for s in lanes])
+    monkeypatch.setattr(console_app, "_family_of",
+                        lambda sess: {"fleet-health": "fleet", "cosem-adcda": "cosem",
+                                      "cosem-exams": "cosem", "wingmen-sites": "wingmen",
+                                      # unknown family -> falls back to the shared key at boot
+                                      }.get(sess))
+    monkeypatch.setattr(ds, "http_get_json", _fake_http([]))
+    recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    _write_history(ds._SHARED_HISTORY_PATH, {"ts": recent, "balance_usd": 46.68})
+    monkeypatch.setattr(ds, "get_spend", lambda now=None: {
+        "available": True, "day": "2026-11-01", "day_label": "provider day (UTC+8)",
+        "total_today_usd": 1.0, "total_7d_usd": 2.0, "budget_line_usd": 7.0,
+        "budget_warn_usd": 5.0, "updated_at": None, "age_s": 1, "stale": False,
+        "by_family": {}})
+
+    payload = console_app._deepseek_card_payload()
+    seen = {}
+    rows = [payload["shared"]] + payload["keys"]
+    for row in rows:
+        for lane in row.get("lanes") or []:
+            seen.setdefault(lane, []).append(row.get("key_name"))
+    dupes = {lane: keys for lane, keys in seen.items() if len(keys) > 1}
+    assert not dupes, f"lane(s) under more than one key: {dupes}"
+    # and no lane silently vanishes: every live lane is on exactly one row
+    assert sorted(seen) == sorted(lanes), (sorted(seen), sorted(lanes))
+
+
 # ---- fleet.js card render (node vm sandbox, same idiom as fleet_glm.test.js) --
 
 @pytest.mark.skipif(__import__("shutil").which("node") is None, reason="node not installed")
