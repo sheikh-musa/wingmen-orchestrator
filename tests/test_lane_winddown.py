@@ -147,3 +147,81 @@ def test_missing_handoff_reports_where_it_looked(tmp_path, monkeypatch):
     (tmp_path / "reports").mkdir()
     assert lw.live_handoff_age_s("irsyad-prog2") is None
     assert any("irsyad-prog2" in p for p in lw.handoff_candidates("irsyad-prog2"))
+
+
+# ---------------------------------------------------------------------------
+# The unread gate's P3 floor (orch-console #89707)
+# ---------------------------------------------------------------------------
+
+def _captured_unread_sql(monkeypatch, tmp_path):
+    """Run live_unread_count against a fake driver and return the SQL it sent.
+
+    A fake DB cannot prove what Postgres does with the predicate; what it CAN prove is
+    that the predicate is in the statement the live path sends -- which is the half that
+    was missing while the gate gated on an unconditional count.
+    """
+    import types
+
+    sent = []
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            sent.append((" ".join(sql.split()), params))
+
+        def fetchone(self):
+            return (0,)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    fake = types.SimpleNamespace(connect=lambda dsn: _Conn())
+    monkeypatch.setitem(sys.modules, "psycopg", fake)
+    monkeypatch.setattr(lw, "_agent_for_session", lambda s: "cc-hifz-1")
+    assert lw.live_unread_count("hifz") == 0
+    return sent[0][0]
+
+
+def test_unread_gate_floors_out_p3(monkeypatch, tmp_path):
+    """P3 never wakes a lane anywhere in the fleet, so a P3-only backlog is not work this
+    gate can strand. Without the floor a lane was un-windable because of FYI rows nobody
+    would ever be woken for (it blocked 4 of 15 lanes during the 2026-11-01 spend pause)."""
+    sql = _captured_unread_sql(monkeypatch, tmp_path)
+    assert "priority IS DISTINCT FROM 'P3'" in sql
+
+
+def test_the_floor_excludes_p3_and_only_p3(monkeypatch, tmp_path):
+    """An edit that also swallows P2/P1/P0 would silently un-gate real work, so pin the
+    predicate to name exactly one priority and to name P3."""
+    import re
+    sql = _captured_unread_sql(monkeypatch, tmp_path)
+    floors = [ln for ln in sql.split(" AND ") if "priority" in ln]
+    assert len(floors) == 1, floors
+    assert re.findall(r"'(P\d)'", floors[0]) == ["P3"]
+
+
+def test_the_floor_uses_is_distinct_from_so_null_still_blocks(monkeypatch, tmp_path):
+    """A NULL priority must keep counting as work: `<> 'P3'` would drop it and fail toward
+    winding down, which is the dangerous direction."""
+    sql = _captured_unread_sql(monkeypatch, tmp_path)
+    assert "IS DISTINCT FROM 'P3'" in sql
+    assert "priority <> 'P3'" not in sql and "priority != 'P3'" not in sql
+
+
+def test_the_refusal_names_the_priority_range():
+    """The message has to say why a lane that clearly has mail is still windable."""
+    ok, why = lw.may_wind_down("irsyad-prog2", **_probes(unread=1))
+    assert ok is False
+    assert "P0–P2" in why and "P3" in why

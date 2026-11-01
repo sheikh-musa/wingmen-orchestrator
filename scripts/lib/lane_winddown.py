@@ -77,10 +77,11 @@ def may_wind_down(
 
     n = unread_count(session)
     if n is None:
-        return False, f"could not measure '{session}' unread bus rows — refusing (unknown is not zero)"
+        return False, f"could not measure '{session}' unread P0–P2 bus rows — refusing (unknown is not zero)"
     if n > 0:
-        return False, (f"'{session}' has {n} unread bus row(s) — winding it down strands that work AND hides it: "
-                       f"the rows stay unread forever because their recipient stops existing")
+        return False, (f"'{session}' has {n} unread P0–P2 bus row(s) — winding it down strands that work AND "
+                       f"hides it: the rows stay unread forever because their recipient stops existing "
+                       f"(P3 rows do not block: no wake path in the fleet is woken by P3)")
 
     age = handoff_age_s(session)
     if age is None:
@@ -146,6 +147,17 @@ def _agent_for_session(session: str) -> Optional[str]:
 
 
 def live_unread_count(session: str) -> Optional[int]:
+    """Unread rows that constitute WORK, which is what this gate protects.
+
+    P3 is floored out (orch-console #89707, the same rule as orchestrator#817): P3 never
+    wakes a lane anywhere in the fleet -- `agent_wake.should_auto_wake` and
+    `wake_backstop_sweep` both drop it -- so a P3-only backlog is the state the fleet
+    *designed*, not work this gate would be stranding. Gating on an unconditional count
+    instead made a lane un-windable because of FYI rows nobody would ever be woken for.
+
+    `IS DISTINCT FROM 'P3'` (not `<> 'P3'`) is deliberate: a NULL priority still counts as
+    blocking, so an unlabelled row fails toward refusing, not toward winding down.
+    """
     agent = _agent_for_session(session)
     if not agent:
         return None
@@ -154,7 +166,8 @@ def live_unread_count(session: str) -> Optional[int]:
         dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
         with psycopg.connect(dsn) as conn, conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM agent_messages WHERE to_agent=%s AND read_at IS NULL "
-                        "AND coalesce(is_test,false)=false", (agent,))
+                        "AND coalesce(is_test,false)=false "
+                        "AND priority IS DISTINCT FROM 'P3'", (agent,))
             return int(cur.fetchone()[0])
     except Exception:
         return None
