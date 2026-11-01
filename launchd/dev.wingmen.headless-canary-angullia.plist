@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- op#36531/36535 headless-agent spike canary (orch-console bus #86360, 5
+     conditions). TEMPORARY -- scoped to the angullia 24-48h canary only. Remove
+     this plist and unload it when the canary ends (condition 5: rollback is
+     `scripts/lanes.sh up angullia` + removing this file, not a permanent
+     fleet daemon). KeepAlive proves the design doc's own stated restart model
+     (launchd KeepAlive + resume-on-start) before the real window starts.
+     Repointed at the tracked live-checkout path 2026-10-31 (bus #87654/#87739)
+     -- was running out of a lane worktree that could be pruned mid-window. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.wingmen.headless-canary-angullia</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/boot_headless_canary_angullia.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/sheikhmusa/wingmen/projects/angullia</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/canary-angullia.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/canary-angullia.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/sheikhmusa</string>
+    <key>PATH</key>
+    <string>/Users/sheikhmusa/.local/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin</string>
+    <!-- op#36531/36535, bus #86575 point 3: the canary's own claude CLI
+         session posts bus replies as cc-angullia, the real lane under
+         test. Without this, bus_send.py inside that session has no env
+         identity to resolve -- the earlier "successful" reply (bus
+         #86534, from_agent cc-angullia-1) only worked because the agent
+         improvised its own --from flag live, not because this was
+         actually configured. Fixing that gap so it can't silently
+         recur. -->
+    <key>CC_BASE_AGENT_ID</key>
+    <string>cc-angullia</string>
+  </dict>
+</dict>
+</plist>

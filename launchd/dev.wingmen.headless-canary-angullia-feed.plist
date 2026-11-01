@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- op#36531/36535 condition 2: synthetic traffic generator for the angullia
+     canary. TEMPORARY, same lifecycle as dev.wingmen.headless-canary-angullia --
+     remove both when the canary ends. StartInterval=900 (15 min) gives roughly
+     4-6 bus rows/hour to cc-angullia counting the occasional mid-turn pair,
+     matching condition 2's "a handful of test bus rows per hour" ask.
+     Repointed at the tracked live-checkout path 2026-10-31 (bus #87654/#87739)
+     -- was running out of a lane worktree that could be pruned mid-window. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.wingmen.headless-canary-angullia-feed</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/synthetic_feed_angullia.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/canary-angullia-feed.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/canary-angullia-feed.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/sheikhmusa</string>
+    <key>PATH</key>
+    <string>/Users/sheikhmusa/.local/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin</string>
+    <!-- op#36531/36535, bus #86575: the feed posts as the TEST SENDER
+         (cc-loop), never cc-angullia -- it is traffic FROM the harness TO
+         the lane under test, not traffic from the lane itself. Without
+         this, bus_send.py under launchd's minimal env has no identity to
+         resolve and refuses (the 13:17 UTC missed delivery, bus #86562). -->
+    <key>CC_BASE_AGENT_ID</key>
+    <string>cc-loop</string>
+    <key>AGENT_ID</key>
+    <string>cc-loop</string>
+  </dict>
+</dict>
+</plist>
