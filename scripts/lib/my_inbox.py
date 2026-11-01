@@ -43,15 +43,34 @@ def my_ids() -> list[str]:
     return [base]
 
 
+def _bus_dsn():
+    """The bus DSN as it actually reaches this process.
+
+    A LANE's scrubbed env carries it ONLY as BUS_DATABASE_URL (op#892:
+    `scripts/lib/lane_env_allowlist.sh` re-emits it under the BUS_ prefix, and
+    `launch_dangerous_cc.sh` refuses to boot if a bare DATABASE_URL would reach a
+    lane, because a bare name would shadow a client lane's own
+    `process.env.DATABASE_URL` -- TENANT-RESIDENCY-001). This file is what
+    MAP.md and the SessionStart notice tell a LANE to read its mail with, so the
+    bare-only lookup made the sanctioned reader unusable in exactly the place it
+    is for. Orchestrator-side invocation still carries DATABASE_URL, so the
+    fallback stays: the same precedence as
+    `scripts/hooks/client_powers_guard.py::_bus_dsn()` and
+    `scripts/bus_send.py::_bus_database_url()`.
+    """
+    return os.environ.get("BUS_DATABASE_URL") or os.environ.get("DATABASE_URL")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--include-read", action="store_true")
     args = parser.parse_args(argv)
 
     ids = my_ids()
-    dsn = os.environ.get("DATABASE_URL")
+    dsn = _bus_dsn()
     if not dsn:
-        raise SystemExit("my_inbox.py: DATABASE_URL not set.")
+        raise SystemExit("my_inbox.py: no bus DSN in this process's environment "
+                         "(BUS_DATABASE_URL or DATABASE_URL).")
 
     where = "to_agent = ANY(%s)"
     if not args.include_read:

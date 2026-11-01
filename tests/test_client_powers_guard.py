@@ -48,7 +48,11 @@ def run_hook(tool_name, tool_input, env=None, stdin_override=None):
         k: v for k, v in os.environ.items()
         if k not in ("CC_BASE_AGENT_ID", "ORCH_BODY_ROLE", SEAM, SESSION_SEAM)
     }
+    # Both bus-DSN names are scrubbed from the inherited env so a developer's own
+    # shell can never decide what these tests observe (the lane rename op#892 is
+    # the whole point of the tests below).
     full_env.pop("DATABASE_URL", None)
+    full_env.pop("BUS_DATABASE_URL", None)
     full_env.update(env or {})
     return subprocess.run(
         [sys.executable, str(HOOK)], input=payload, capture_output=True,
@@ -177,6 +181,62 @@ def test_db_unreachable_refuses_the_outbound():
     })
     assert r.returncode == 2, r.stdout + r.stderr
     assert MARKER in r.stderr
+
+
+def test_a_lane_env_reaches_the_powers_with_bus_database_url_only():
+    """orch-console #90166 / op#892: a LANE's scrubbed env carries the bus DSN as
+    BUS_DATABASE_URL and NEVER a bare DATABASE_URL (lane_env_allowlist.sh drops it;
+    launch_dangerous_cc.sh refuses to boot if one leaks through). The guard used to
+    read only DATABASE_URL, so it failed closed on EVERY client-serving lane.
+
+    This is the whole defect reproduced in its real env shape: BUS_DATABASE_URL
+    present, DATABASE_URL absent. The DSN here is dead, so the correct outcome is
+    still a refusal -- but for the RIGHT reason: an attempted connect that failed,
+    not "no DSN". That distinction is what tells us the lane's DSN was found."""
+    r = run_hook("Bash", {"command": reply_cmd("faizul")}, env={
+        "CC_BASE_AGENT_ID": "cc-cosem-exams",
+        "BUS_DATABASE_URL": DEAD_DB,
+    })
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert MARKER in r.stderr
+    # the reason must be an unreadable DB, never a missing variable
+    assert "no bus DSN in the hook env" not in r.stderr, r.stderr
+    assert "bot_channels unreadable" in r.stderr, r.stderr
+
+
+def test_neither_bus_dsn_name_present_still_refuses():
+    r = run_hook("Bash", {"command": reply_cmd("faizul")}, env={
+        "CC_BASE_AGENT_ID": "cc-cosem-exams",
+    })
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert MARKER in r.stderr
+    assert "no bus DSN in the hook env" in r.stderr, r.stderr
+
+
+def test_a_bare_database_url_still_works_for_orchestrator_side_invocation():
+    """The fallback keeps direct (unscrubbed) invocation working -- bus_send.py's
+    precedence, deliberately mirrored."""
+    r = run_hook("Bash", {"command": reply_cmd("faizul")}, env={
+        "CC_BASE_AGENT_ID": "cc-cosem-exams",
+        "DATABASE_URL": DEAD_DB,
+    })
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "bot_channels unreadable" in r.stderr, r.stderr
+
+
+def test_lane_names_covers_both_spellings_and_the_session():
+    """`bot_channels.owner_lane` does not use one spelling (the module docstring
+    names 'coffeemedia', 'cosem-exams', 'cc-bariq' side by side). The old query
+    compared it to the base id alone and inject_target to the session alone, so
+    `cc-cosem-exams` (owner_lane 'cosem-exams', inject_target 'exams') matched
+    NEITHER and served zero channels even with a working DSN -- the second half
+    of #90166. Every spelling the column actually uses must be a candidate."""
+    g = _load_module()
+    for base, alias in (("cc-cosem-exams", "cosem-exams"), ("bariq", "cc-bariq")):
+        names = g._lane_names(base)
+        assert base in names, names
+        assert alias in names, names
+        assert g._lane_session(base) in names, names
 
 
 def test_unreadable_tool_input_is_refused_for_a_worker_lane():
