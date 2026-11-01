@@ -359,6 +359,21 @@ def test_ssh_wrapped_store_read_is_refused_through_each_wrapper_shape():
     assert_denied(*bash('bash -c "wp db export -"'))
 
 
+def test_absolute_path_ssh_binary_is_judged_like_the_bare_name():
+    """cc-quality 89507 observation 2: the anchor `^(?:ssh|sshpass)\\b` missed an
+    ABSOLUTE-PATH ssh binary, so `/usr/bin/ssh host 'wp option list'` was ALLOWED while
+    the bare-name form was DENIED — a one-word bypass of the whole wrapper fix. The
+    fleet writes absolute paths whenever a shell has a thin PATH (launchd, cron, the
+    Studio breakglass), so this is a shape that shows up in practice, not a curiosity."""
+    assert_denied(*bash('/usr/bin/ssh modestyhut "wp db export -"'))
+    assert_denied(*bash('/usr/bin/ssh modestyhut "wp option list"'))
+    assert_denied(*bash('/bin/sshpass -p x /usr/bin/ssh modestyhut "wp option list"'))
+    assert_denied(*bash('sudo /usr/bin/ssh -p 2222 modest@host "wp db export -"'))
+    # the ordinary-work controls must survive the wider anchor
+    assert_allowed(*bash("/usr/bin/ssh gzb 'tmux ls'"))
+    assert_allowed(*bash("/usr/bin/ssh-keygen -lf ~/.ssh/id_ed25519.pub"))
+
+
 def test_a_subshell_that_does_ordinary_work_still_runs():
     assert_allowed(*bash('bash -c "git status --short"'))
     assert_allowed(*bash('sh -c "ls scripts | head -3"'))

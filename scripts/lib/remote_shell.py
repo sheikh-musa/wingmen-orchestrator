@@ -22,7 +22,11 @@ from __future__ import annotations
 import re
 import shlex
 
-SSH_WRAPPER_LEADING_RE = re.compile(r"^(?:ssh|sshpass)\b")
+# An ABSOLUTE-PATH binary is the same wrapper: `/usr/bin/ssh host '…'` runs exactly what
+# `ssh host '…'` runs, and thin-PATH environments (launchd, cron, the Studio breakglass
+# heredoc) are where absolute paths get written. Anchoring on the BARE name only was a
+# one-word bypass of the whole wrapper handling (cc-quality 89507 observation 2).
+SSH_WRAPPER_LEADING_RE = re.compile(r"^(?:\S*/)?(?:ssh|sshpass)\b")
 SHELL_DASH_C_LEADING_RE = re.compile(r"^(?:bash|sh|zsh)\s+(?:-\w*\s+)*-\w*c\w*\b")
 # ssh flags that consume the NEXT token as their argument; anything else starting
 # with "-" is treated as a standalone flag.
@@ -60,7 +64,8 @@ def extract_remote_script(segment: str, lead: str) -> str | None:
     # the host argument; everything left is the remote command.
     i = 0
     n = len(tokens)
-    while i < n and tokens[i] != "ssh":
+    # match on the BASENAME so `/usr/bin/ssh` and plain `ssh` are the same wrapper
+    while i < n and tokens[i].rsplit("/", 1)[-1] != "ssh":
         i += 1
     if i >= n:
         return None
