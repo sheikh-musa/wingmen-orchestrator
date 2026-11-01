@@ -495,3 +495,99 @@ def test_a_channel_with_no_resolvable_chat_still_reads(monkeypatch):
     msg_sql, msg_params = cur.sqls[-1], cur.params[-1]
     assert "ANY(" not in msg_sql, "empty chat set must not be sent as a ANY() filter"
     assert msg_params == ("cosem-exams", nd.FETCH_LIMIT)
+
+
+# ---- per-chat judgement (cc-quality 89597 F1) -------------------------------------------
+CHAT_A, CHAT_B = -5390372474, -5390372475
+
+
+def test_a_quiet_sibling_chat_cannot_be_answer_shadowed():
+    """THE F1 MISS. Newest inbound (chat A) is answered in chat A; chat B holds an OLDER
+    unanswered client. Judging the merged newest-first list returns None for the whole
+    channel and chat B is never examined."""
+    rows = [
+        _r(500, "outbound", 60, "reply in chat A", chat_id=CHAT_A),
+        _r(499, "inbound", 120, "question in chat A", chat_id=CHAT_A),
+        _r(498, "inbound", 600, "unanswered question in chat B", chat_id=CHAT_B),
+    ]
+    assert nd.latest_unanswered_inbound(rows, musa_id=MUSA) is None   # the old, blind answer
+    got = nd.waiting_by_chat(rows, musa_id=MUSA)
+    assert [w["id"] for w in got] == [498], "chat B's older unanswered client must still be seen"
+
+
+def test_one_waiting_entry_per_chat_when_both_are_waiting():
+    rows = [
+        _r(600, "inbound", 100, "q in A", chat_id=CHAT_A),
+        _r(599, "inbound", 200, "q in B", chat_id=CHAT_B),
+    ]
+    got = nd.waiting_by_chat(rows, musa_id=MUSA)
+    assert sorted(w["id"] for w in got) == [599, 600]
+    assert [w["id"] for w in got] == [600, 599], "newest-first across chats"
+
+
+def test_waiting_by_chat_is_empty_when_every_chat_is_answered():
+    rows = [
+        _r(700, "outbound", 60, "a", chat_id=CHAT_A),
+        _r(699, "inbound", 120, "q", chat_id=CHAT_A),
+        _r(698, "outbound", 60, "b", chat_id=CHAT_B),
+        _r(697, "inbound", 120, "q", chat_id=CHAT_B),
+    ]
+    assert nd.waiting_by_chat(rows, musa_id=MUSA) == []
+
+
+def test_fetch_recent_limits_per_chat_not_over_the_merge(monkeypatch):
+    """The read half of F1: a single LIMIT over the merged window lets a busy sibling starve a
+    quiet one BEFORE any grouping can help. Each chat must get its own rows."""
+    _out, cur = _fetch_with(monkeypatch, [[([CHAT_A, CHAT_B],)], []])
+    sql = cur.sqls[-1]
+    assert "PARTITION BY chat_id" in sql, "rows must be windowed per chat, not limited over the merge"
+    assert "rn <= %s" in sql
+
+
+# ---- declare-your-chat page for an undeclared channel (orch-console 89596) --------------
+def test_an_undeclared_channel_with_inbound_pages_once():
+    rows = [_r(800, "inbound", 300, "hello", chat_id=CHAT_A)]
+    action, ns = nd.undeclared_channel_action("bariq", rows, {}, 1_000_000)
+    assert action and action["to"] == "cc-fleet-health" and action["priority"] == "P3"
+    assert str(CHAT_A) in action["body"] and "op#800" in action["body"]
+    assert "DM" in action["body"], "must warn against declaring the operator's own DM"
+    # a second run inside the window does NOT page again
+    again, ns2 = nd.undeclared_channel_action("bariq", rows, ns, 1_000_100)
+    assert again is None
+    assert ns2[nd.UNDECLARED_KEY]["declared_paged_at"] == 1_000_000
+
+
+def test_an_undeclared_channel_with_no_inbound_does_not_page():
+    action, ns = nd.undeclared_channel_action("bariq", [], {}, 1_000_000)
+    assert action is None and ns == {}
+
+
+def test_fetch_channel_reports_the_undeclared_flag_in_one_connection(monkeypatch):
+    """undeclared comes back with the rows, so the watcher opens ONE connection per channel
+    per cycle. Connection churn is what tripped the pooler breaker fleet-wide on 2026-11-01."""
+    cur = _ChatFakeCursor([[([CHAT_A],)], []])
+    monkeypatch.setattr(nd.psycopg2, "connect", lambda *a, **k: _ChatFakeConn(cur))
+    _rows, undeclared = nd.fetch_channel("postgresql://ignored", "cosem-exams", musa_id=MUSA)
+    assert undeclared is False
+    assert len(cur.sqls) == 2, "allowlist + messages; no third connect or query"
+
+    cur2 = _ChatFakeCursor([[([],)], [(CHAT_A,)], []])
+    monkeypatch.setattr(nd.psycopg2, "connect", lambda *a, **k: _ChatFakeConn(cur2))
+    _rows, undeclared = nd.fetch_channel("postgresql://ignored", "bariq", musa_id=MUSA)
+    assert undeclared is True
+
+
+def test_the_declare_dedup_survives_a_cycle_with_no_inbound():
+    """cc-quality 89624: returning {} on a no-inbound cycle dropped the timestamp, so an
+    empty-allowlist channel could re-page inside 24h when a window aged out."""
+    rows = [_r(801, "outbound", 100, "a receipt", chat_id=CHAT_A)]
+    action, ns = nd.undeclared_channel_action("bariq", rows, {nd.UNDECLARED_KEY: {"declared_paged_at": 900_000}}, 1_000_000)
+    assert action is None
+    assert ns[nd.UNDECLARED_KEY]["declared_paged_at"] == 900_000
+    # 13.9h later (inside the 24h window) the page must still be suppressed, which it is only
+    # because the quiet cycle above preserved the timestamp
+    action2, _ns2 = nd.undeclared_channel_action("bariq", [_r(802, "inbound", 50, "hi", chat_id=CHAT_A)], ns, 950_000)
+    assert action2 is None
+    # and past 24h it is allowed to page again
+    action3, _ns3 = nd.undeclared_channel_action("bariq", [_r(803, "inbound", 50, "hi", chat_id=CHAT_A)], ns, 1_000_100)
+    assert action3 is not None
