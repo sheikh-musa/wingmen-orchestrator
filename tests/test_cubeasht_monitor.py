@@ -651,3 +651,47 @@ def test_dry_run_label_matches_live_page_priority():
     for k in ("ssh_unreachable_runner_online", "unreachable", "ram", "runner_offline"):
         prio, req = cm.page_priority({"kind": k})
         assert cm.page_label({"kind": k}) == prio + (" rr" if req else "")
+
+
+# ------------------------------------------------- pagefile + compressed (89662)
+
+PS_WITH_SWAP = PS_REAL.replace(
+    '"vmmem_ws_bytes":2599096320}',
+    '"vmmem_ws_bytes":2599096320,"pagefile_alloc_mb":14874,"pagefile_used_mb":2310,'
+    '"compressed_ws_bytes":137314304}'
+)
+
+
+def test_pagefile_and_compressed_are_stored_when_the_host_reports_them():
+    """orch-console #89662: the whole-desktop RAM answer needed pagefile and
+    compressed memory, and neither was in the 5-minute row."""
+    m = cm.build_metrics(cm.parse_ps_output(PS_WITH_SWAP), cm.parse_wsl_output(WSL_REAL), RUNNER)
+    assert m["pagefile_alloc_mb"] == 14874
+    assert m["pagefile_used_mb"] == 2310
+    assert m["compressed_mb"] == 131  # 137314304 B
+
+
+def test_absent_pagefile_and_compressed_are_none_not_zero():
+    """A host that does not report them must not look like 'nothing swapped'."""
+    m = cm.build_metrics(cm.parse_ps_output(PS_REAL), cm.parse_wsl_output(WSL_REAL), RUNNER)
+    assert m["pagefile_alloc_mb"] is None
+    assert m["pagefile_used_mb"] is None
+    assert m["compressed_mb"] is None
+
+
+def test_pagefile_and_compressed_probe_errors_are_recorded_not_swallowed():
+    ps = cm.parse_ps_output(PS_REAL)
+    ps["pagefile_error"] = "Access denied "
+    ps["compressed_error"] = "Cannot find a process with the name Memory Compression"
+    m = cm.build_metrics(ps, cm.parse_wsl_output(WSL_REAL), RUNNER)
+    assert m["probe_errors"]["pagefile"].startswith("Access denied")
+    assert m["probe_errors"]["compressed"].startswith("Cannot find a process")
+
+
+def test_the_collector_script_actually_probes_both_sources():
+    """Guard against the ps1 and the parser drifting apart: the fields the
+    parser reads must exist in the script that ships them."""
+    ps1 = (ROOT / "scripts" / "cubeasht_collect.ps1").read_text()
+    assert "Win32_PageFileUsage" in ps1
+    assert "$out.pagefile_used_mb" in ps1 and "$out.pagefile_alloc_mb" in ps1
+    assert "Memory Compression" in ps1 and "$out.compressed_ws_bytes" in ps1

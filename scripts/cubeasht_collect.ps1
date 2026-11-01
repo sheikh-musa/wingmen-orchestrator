@@ -65,6 +65,22 @@ try {
   $out.vmmem_ws_bytes = [int64](($vm | Measure-Object -Property WorkingSet64 -Sum).Sum)
 } catch { $out.vmmem_error = "$_" }
 
+# Pagefile (the swap half of "real use") and Windows memory compression. Both are
+# additive; a host with the pagefile on another drive or with compression off
+# reports an empty/absent value rather than failing the sample (orch-console
+# #89662, after the whole-desktop RAM answer had to be measured by hand because
+# these were not in the 5-minute row).
+try {
+  $pf = @(Get-CimInstance Win32_PageFileUsage -ErrorAction Stop)
+  $out.pagefile_alloc_mb = [int64](($pf | Measure-Object -Property AllocatedBaseSize -Sum).Sum)
+  $out.pagefile_used_mb = [int64](($pf | Measure-Object -Property CurrentUsage -Sum).Sum)
+} catch { $out.pagefile_error = "$_" }
+
+try {
+  $mc = Get-Process -Name 'Memory Compression' -ErrorAction Stop
+  $out.compressed_ws_bytes = [int64](($mc | Measure-Object -Property WorkingSet64 -Sum).Sum)
+} catch { $out.compressed_error = "$_" }
+
 Write-Output 'CUBEMON_JSON_BEGIN'
 Write-Output ($out | ConvertTo-Json -Depth 5 -Compress)
 Write-Output 'CUBEMON_JSON_END'
