@@ -540,3 +540,92 @@ This entry exists because the wrong form is the one that sounds right at 4am.
 
 If either unit comes back still holding the old password, that is a failed step, not a
 warning.
+
+---
+
+## 8. After the first execution (2026-11-01) — three things this runbook did not say
+
+The 2026-11-01 rotation ran the order above correctly and the executor reported `COMPLETE`.
+The password was rotated, every launchd loader was restarted, and both singletons were
+relaunched on the new credential. **The fleet still went down**, because three holders
+were outside what the runbook enumerated. This section is written from that run, with the
+measurements, so the next rotation does not repeat it.
+
+### 8.1 Relaunch every holder in the same window as the patch, not just the named daemons
+
+Step 5 (restart) enumerates **launchd loaders**. The staged procedure restarts the **two
+singletons**. Neither list contains the long-lived **tmux worker lanes** — claude bodies
+that carry a heartbeat loop dialing the substrate every 5 minutes. Nothing restarted them,
+so after the patch they kept dialing with the dead value, from this host, for hours.
+
+The cost was not local. Supavisor counts authentication failures and opens
+`ECIRCUITBREAKER` past a threshold, and an open breaker rejects **new** connections
+fleet-wide — the bus included, because the bus *is* the database. A rotation that succeeded
+produced a fleet-wide outage. After the affected lanes were relaunched, zero Mini auth
+failures were measured over a clean 11m30s (08:30:01Z → 08:41:31Z).
+
+**Rule:** the window is not over when the executor says `COMPLETE` and the two singletons
+beat. It is over when **no process on this host still holds the old value**. Enumerate the
+tmux lanes alongside the daemons and relaunch them in the same window.
+
+### 8.2 Connect-check, then kill, then boot — in that order, never a single loop
+
+Relaunching the lanes as kill-then-boot inside one loop failed on 2026-11-01. Five booted;
+the sixth hit the now-open breaker; every boot after it failed the same way, because the
+launcher **registers the body in the substrate as part of boot**. Ten lanes sat down for
+about four minutes until the breaker cleared. The boot step *needs* a working DSN, so
+killing before proving connectivity converts a busy lane into a dead one.
+
+Four more lanes printed `BOOTED` while the pooler was blocking and then exited. They were
+caught only because `fleet_health.py` reported `'working' but tmux is GONE`.
+
+**Rule:**
+
+1. Before the first kill, prove the pooler answers with a real connect, not a flag:
+   `psycopg.connect(dsn(), connect_timeout=6)`.
+2. If it is blocked, wait it out and kill nothing.
+3. Then kill and boot one lane at a time, confirming the session survives before the next.
+4. A failed connect from your own probe is **not** an auth failure, so the check itself does
+   not feed the breaker — but each killed lane's next boot attempt does.
+5. `BOOTED` is a claim, not a state. Verify with `tmux has-session` a few seconds later.
+
+### 8.3 Every heartbeat loop must file-source its DSN
+
+The heartbeat trap in §2 was known and `scripts/lib/dsn_at_use.py` existed. Two boot scripts
+still did not use it: `boot_quality.sh` and `boot_orch.sh` read `DATABASE_URL` from the
+process environment captured at boot. After the patch those loops failed auth on every beat
+— the Mini's hammer on the breaker, in bursts. `boot_cai.sh` and `boot_fleet_health.sh` were
+already file-first.
+
+A running bash loop also keeps printing its **old** body after the heredoc is replaced, by
+full-file replacement *and* by in-place overwrite of the same inode (measured, five beats
+out of five, §2). So there is no in-place rescue: the loop must be restarted, **and** it
+must read the file at use so that the *next* rotation needs only a file write.
+
+**Rule:** every heartbeat and daemon DSN read goes through `dsn_at_use.dsn()`, with the
+inherited environment value kept **only** as the `except` fallback (an unreadable `.env`
+must degrade, not leave a silent dead beat). This is asserted for `boot_orch.sh`,
+`boot_cai.sh`, `boot_quality.sh` and `boot_fleet_health.sh` in
+`tests/test_boot_heartbeat_dsn_file_first.py`.
+
+### 8.4 Measuring the watch: log-quiet is not quiet
+
+§5 asks for "a 10-minute watch [with] no new authentication failures", and §6 correctly says
+the executor's own watch step cannot read Supabase's log. The rotation's measurement must
+therefore be taken by **peer IP** from the log, which has two traps:
+
+- **While the breaker is open, the log goes quiet.** Connections are rejected *before*
+  authentication, so a blocked period writes no failure lines at all. A quiet window during
+  an open breaker is evidence of nothing.
+- **The tripwire that watches that log must select `log_attributes`**, or it can see that
+  failures happened but not which host they came from, and cannot attribute them. An
+  unattributable failure count is not a measurement of *this* host.
+
+A genuine zero is: breaker closed, connections accepted, and **zero** auth failures from
+this host's peer IP across a window that spans several minutes.
+
+### 8.5 The one-line version
+
+> Rotate, then relaunch **every** holder in the same window — daemons, singletons, and tmux
+> lanes; connect-check before the first kill; and make every heartbeat read its DSN from the
+> file at use, so the next rotation is a file write rather than a restart hunt.
