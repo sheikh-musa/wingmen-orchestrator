@@ -42,7 +42,8 @@ def test_photo_success_returns_ok_media_meta(ch, monkeypatch):
     content, meta = ingest.message_content_with_media(
         ch, _msg(photo=[{"file_id": "F1", "file_unique_id": "U1"}]), 1)
     assert "/media/U1" in content
-    assert meta == {"file_id": "F1", "file_unique_id": "U1", "kind": "photo", "ok": True}
+    assert meta == {"file_id": "F1", "file_unique_id": "U1", "kind": "photo",
+                    "ok": True, "unrecoverable": None}
 
 
 def test_photo_download_failure_still_returns_file_id(ch, monkeypatch):
@@ -56,7 +57,10 @@ def test_photo_download_failure_still_returns_file_id(ch, monkeypatch):
 
     assert "download failed" in content
     # The whole point of bus #74111: the identity survives the failure.
-    assert meta == {"file_id": "F2", "file_unique_id": "U2", "kind": "photo", "ok": False}
+    # 'unrecoverable' is None because a RuntimeError is a TRANSIENT shape — only
+    # a Telegram HTTPError answer can be terminal (held_commitment #964).
+    assert meta == {"file_id": "F2", "file_unique_id": "U2", "kind": "photo",
+                    "ok": False, "unrecoverable": None}
 
 
 def test_document_download_failure_still_returns_file_id(ch, monkeypatch):
@@ -69,7 +73,8 @@ def test_document_download_failure_still_returns_file_id(ch, monkeypatch):
         ch, _msg(document={"file_id": "F3", "file_unique_id": "U3", "file_name": "a.pdf"}), 3)
 
     assert "download failed" in content
-    assert meta == {"file_id": "F3", "file_unique_id": "U3", "kind": "document", "ok": False}
+    assert meta == {"file_id": "F3", "file_unique_id": "U3", "kind": "document",
+                    "ok": False, "unrecoverable": None}
 
 
 def test_text_only_has_no_media_meta(ch):

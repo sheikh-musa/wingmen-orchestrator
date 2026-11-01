@@ -207,6 +207,64 @@ def _get_file_path(token: str, file_id: str, sleep=time.sleep) -> str:
                 raise
 
 
+# held_commitment #964 (bus #85768): Telegram getFile answers that NO retry can
+# ever fix. They used to land as 'failed', so media_reaper re-paged the console
+# every ESCALATE_AFTER (2h) about a file that will never download — noise that
+# trains people to ignore the pager. These map to the TERMINAL
+# media_status='unrecoverable' (migration 141) instead.
+#
+# Only an HTTPError qualifies: it carries a real Telegram API answer, whereas an
+# OSError (Errno 54 reset, timeout, DNS) is transient and MUST stay retryable —
+# that distinction is the whole reason this cannot be "any exception".
+_UNRECOVERABLE_PATTERNS = (
+    ("file is too big", "over the 20 MB Bot API download limit", False),
+    ("file_too_big", "over the 20 MB Bot API download limit", False),
+    ("invalid file_id", "Telegram rejected the file_id as invalid", False),
+    ("wrong file identifier", "Telegram rejected the file identifier", False),
+    ("file reference", "the file reference expired on the Telegram CDN", False),
+    ("file is not found", "the file is gone from the Telegram CDN", False),
+    # cc-quality F2 on PR#786: Telegram's most common bad-id answer is
+    # "Bad Request: wrong file_id or the file is temporarily unavailable". The
+    # "temporarily" half makes it ambiguous on a FIRST attempt, so ingest keeps
+    # it retryable; once the reaper has already retried (after_retry=True) that
+    # reading is no longer credible and it is terminal, which is what stops the
+    # 2-hourly re-page this commitment exists to kill.
+    ("wrong file_id", "Telegram could not resolve the stored file_id", True),
+)
+
+
+def _unrecoverable_reason(exc: BaseException, *, after_retry: bool = False) -> str | None:
+    """A human-readable reason when `exc` is a PERMANENT getFile failure, else None.
+
+    Reads Telegram's own JSON answer (`{"error_code":400,"description":...}`)
+    from the HTTPError body. Never raises: a classification failure degrades to
+    None, which keeps the row retryable — the SAFE direction, because wrongly
+    calling something terminal would silently stop the reaper on a file that
+    could have been recovered.
+
+    `after_retry=True` (the media_reaper) additionally accepts the patterns
+    marked retry-only — see the "wrong file_id ... temporarily unavailable"
+    note in _UNRECOVERABLE_PATTERNS.
+
+    NOTE: this consumes the HTTPError body, so call it ONCE per exception."""
+    if not isinstance(exc, urllib.error.HTTPError):
+        return None
+    try:
+        raw = exc.read() or b""
+        payload = json.loads(raw) if raw else {}
+    except Exception:                                          # noqa: BLE001
+        payload = {}
+    description = str(payload.get("description") or "")
+    code = payload.get("error_code") or getattr(exc, "code", None)
+    low = description.lower()
+    for pattern, reason, retry_only in _UNRECOVERABLE_PATTERNS:
+        if pattern in low and (after_retry or not retry_only):
+            return f"{reason} [{code}: {description or exc}]"
+    if code == 404:
+        return f"the file is gone from the Telegram CDN [{code}: {description or exc}]"
+    return None
+
+
 def _download_media(token: str, file_id: str, file_unique_id: str, channel_key: str,
                      upd_id: int, name: str | None = None) -> str:
     fp = _get_file_path(token, file_id)
@@ -229,6 +287,100 @@ def _log_media_fail(ch: "Channel", kind: str, upd_id: int, e: Exception) -> None
     how the operator's DPA + ADCDA photos were lost twice). NEVER silent."""
     _log_line(f"{ch.key}: MEDIA download FAILED ({kind}) on update {upd_id} "
               f"— {type(e).__name__}: {e} — row marked, agent CANNOT Read this attachment")
+
+
+def _page_unrecoverable_once(conn, ch: "Channel", upd_id: int, op_msg_id: int,
+                             kind: str, reason: str) -> None:
+    """Page ONCE per (channel, update) that an attachment can NEVER download.
+
+    held_commitment #964: the terminal status stops the REAPER retrying, but it
+    must not also stop US TELLING THE OPERATOR — "silently going quiet" is the
+    failure mode the commitment names, and it is the worse half: the reaper
+    paging forever is noise, a file that quietly disappears is a lost item.
+
+    The ask is explicit and one-shot: resend smaller (the Bot API cannot
+    download over 20 MB), or confirm the file was redundant. Dedup is the same
+    durable page-once marker _page_stage_file_once uses — a marker substring in
+    `body`, not in-memory state, so it survives a restart."""
+    marker = f"MEDIA-UNRECOVERABLE:{ch.key}:{upd_id}"
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM agent_messages WHERE body LIKE %s LIMIT 1", (f"{marker}%",))
+        if cur.fetchone():
+            return
+    from scripts import bus_send
+    bus_send.send(
+        from_agent=PAGE_FROM_AGENT, to=PAGE_TO_AGENT, mtype="blocker",
+        subject=(f"MEDIA UNRECOVERABLE: {ch.key} op#{op_msg_id} ({kind}) — "
+                 f"operator must resend or confirm redundant"),
+        body=(f"{marker}\n"
+              f"operator_messages #{op_msg_id} on {ch.key} can NEVER be downloaded: {reason}.\n\n"
+              "No retry can fix this, so the media reaper will not retry it and there will "
+              "NOT be the usual 'still failing' page. Exactly one action is needed, ONCE: "
+              "ask the operator to resend it smaller (the Bot API cannot download anything "
+              "over 20 MB), OR confirm the attachment was redundant or already covered "
+              "elsewhere, in which case the message can be closed without it. If the "
+              "operator resends, the resend is a fresh row — do not try to recover this one."),
+        priority="P1", req=True, dsn=_dsn(),
+    )
+
+
+_OP_MSG_INSERT_SQL = (
+    "INSERT INTO operator_messages "
+    "(direction, channel, chat_id, tag, text, delivered, "
+    " from_user_id, from_username, from_name, cos_triage, "
+    " file_id, file_unique_id, media_kind, media_status) "
+    "VALUES ('inbound','telegram',%s,%s,%s,true,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id"
+)
+_MEDIA_STATUS_CONSTRAINT = "operator_messages_media_status_check"
+
+
+def _insert_operator_message(conn, cur, *, chat_id, tag, content, from_user_id,
+                             from_username, from_name, cos_triage, file_id,
+                             file_unique_id, media_kind,
+                             media_status) -> tuple[int, str]:
+    """Insert the inbound envelope. Returns (op_msg_id, media_status AS STORED).
+
+    held_commitment #964 dead-man's switch. 'unrecoverable' only exists once
+    migration 141 is applied. If this code meets a database that has not had it
+    yet (deploy ahead of migration, or a silo that skipped it), the CHECK
+    rejects the insert — and an unhandled rejection here is not "one lost
+    status": it rolls back the envelope, leaves the dedup row unwritten and the
+    poll offset unadvanced, so Telegram redelivers the same oversized file
+    FOREVER and that channel stalls behind a poison update. A savepoint plus a
+    recorded downgrade keeps the operator's message safe and makes the drift
+    LOUD instead of fatal.
+
+    Only THIS constraint is downgraded. Any other CheckViolation is re-raised:
+    guessing about someone else's schema drift is how a real failure gets
+    silently swallowed.
+    """
+    params = [str(chat_id) if chat_id is not None else None, tag, content,
+              from_user_id, from_username, from_name, cos_triage,
+              file_id, file_unique_id, media_kind, media_status]
+    # Explicit SAVEPOINT (not conn.transaction()) so the guard is plain SQL on
+    # the cursor the caller already holds: the outer envelope txn — and the
+    # dedup row already written in it — survives the inner rejection.
+    cur.execute("SAVEPOINT media_status_terminal")
+    try:
+        cur.execute(_OP_MSG_INSERT_SQL, params)
+        return cur.fetchone()[0], media_status
+    except psycopg.errors.CheckViolation as e:
+        if (media_status != "unrecoverable"
+                or getattr(getattr(e, "diag", None), "constraint_name", None)
+                != _MEDIA_STATUS_CONSTRAINT):
+            raise
+        _log_line(
+            f"{tag}: migration 141 NOT APPLIED on this silo — accepted media_status="
+            f"'unrecoverable' is rejected by {_MEDIA_STATUS_CONSTRAINT}; this row is stored "
+            f"as 'failed' and the media reaper will keep retrying and re-paging until the "
+            f"migration is applied. The message itself is safe; the retry-stop is inert.")
+        # Postgres put the whole transaction into aborted state on that
+        # rejection; rolling back to the savepoint is what makes the retry (and
+        # every later statement in process_update) legal again.
+        cur.execute("ROLLBACK TO SAVEPOINT media_status_terminal")
+        params[-1] = "failed"
+        cur.execute(_OP_MSG_INSERT_SQL, params)
+        return cur.fetchone()[0], "failed"
 
 
 SHAPE_KEYS_MAX = 400       # cap on the key-list in the last-resort marker
@@ -277,8 +429,17 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> tuple[st
     def _dl(file_id: str, file_unique_id: str, kind: str, name: str | None = None) -> str:
         nonlocal media_meta
         media_meta = {"file_id": file_id, "file_unique_id": file_unique_id,
-                      "kind": kind, "ok": False}
-        path = _download_media(ch.token, file_id, file_unique_id, ch.key, upd_id, name)
+                      "kind": kind, "ok": False, "unrecoverable": None}
+        try:
+            path = _download_media(ch.token, file_id, file_unique_id, ch.key, upd_id, name)
+        except Exception as e:                                 # noqa: BLE001
+            # Classify BEFORE re-raising: the per-branch handler above still
+            # degrades content to the "download failed" marker exactly as
+            # before, and the caller persists the TERMINAL status off this flag
+            # (held_commitment #964). Re-raising keeps the dead-man's rule — a
+            # media failure is never swallowed, it is only labelled.
+            media_meta["unrecoverable"] = _unrecoverable_reason(e)
+            raise
         media_meta["ok"] = True
         return path
 
@@ -1603,19 +1764,23 @@ def process_update(conn, ch: Channel, upd: dict,
                 stored_file_id = media_meta["file_id"]
                 stored_file_unique_id = media_meta["file_unique_id"]
                 stored_media_kind = media_meta["kind"]
-                stored_media_status = "ok" if media_meta["ok"] else "failed"
-        cur.execute(
-            "INSERT INTO operator_messages "
-            "(direction, channel, chat_id, tag, text, delivered, "
-            " from_user_id, from_username, from_name, cos_triage, "
-            " file_id, file_unique_id, media_kind, media_status) "
-            "VALUES ('inbound','telegram',%s,%s,%s,true,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-            (str(chat_id) if chat_id is not None else None, ch.channel_tag,
-             stored_content, stored_from_user_id, stored_from_username,
-             stored_from_name, cos_triage,
-             stored_file_id, stored_file_unique_id, stored_media_kind, stored_media_status),
-        )
-        op_msg_id = cur.fetchone()[0]
+                # held_commitment #964: three outcomes now, not two. A TERMINAL
+                # getFile failure ('file too big' / bad or expired file_id / 404)
+                # is 'unrecoverable' so the reaper stops retrying and the
+                # operator is paged ONCE to resend smaller. Everything else
+                # stays 'failed' and keeps its retry.
+                if media_meta["ok"]:
+                    stored_media_status = "ok"
+                elif media_meta.get("unrecoverable"):
+                    stored_media_status = "unrecoverable"
+                else:
+                    stored_media_status = "failed"
+        op_msg_id, stored_media_status = _insert_operator_message(
+            conn, cur, chat_id=chat_id, tag=ch.channel_tag, content=stored_content,
+            from_user_id=stored_from_user_id, from_username=stored_from_username,
+            from_name=stored_from_name, cos_triage=cos_triage,
+            file_id=stored_file_id, file_unique_id=stored_file_unique_id,
+            media_kind=stored_media_kind, media_status=stored_media_status)
         cur.execute(
             "UPDATE ingest_dedup SET operator_msg_id=%s "
             "WHERE channel_key=%s AND telegram_update_id=%s",
@@ -1648,6 +1813,21 @@ def process_update(conn, ch: Channel, upd: dict,
                           f"offset NOT advanced, Telegram will redeliver")
                 raise
         conn.commit()
+
+        # 2a-bis. held_commitment #964: page the operator ONCE for a TERMINAL
+        # media failure, AFTER the row is durable — never page about a row that
+        # could still roll back. Own try/except with a LOUD line: a paging
+        # failure must not cost the ingest of the message itself, and must not
+        # be silent either (dead-man's switch, §2 of the charter).
+        if stored_media_status == "unrecoverable" and media_meta:
+            try:
+                _page_unrecoverable_once(conn, ch, upd_id, op_msg_id,
+                                         media_meta.get("kind") or "media",
+                                         media_meta.get("unrecoverable") or "unclassified")
+            except Exception as e:                             # noqa: BLE001
+                _log_line(f"{ch.key}: UNRECOVERABLE-MEDIA page FAILED for op#{op_msg_id} "
+                          f"({type(e).__name__}: {e}) — row IS marked unrecoverable but the "
+                          f"operator was NOT told; page it manually")
 
     # 2b. PRE-GATE — self-serve invite deep-link bind (op#34846): a '/start'
     # while an unused+unexpired invite is outstanding on this token is

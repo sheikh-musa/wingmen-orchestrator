@@ -74,15 +74,19 @@ FROM_AGENT = "media-reaper"
 # proxy for "this has been retried a lot and still isn't landing."
 ESCALATE_AFTER = _dt.timedelta(hours=2)
 
-# DESIGN ITEM (cc-quality obs-2, bus #74111, not actioned in this change): a
-# Telegram file_id is not eternal — the CDN can expire it independently of
-# any transient network failure this reaper retries against. Today a
-# permanently-expired file_id just keeps re-escalating past ESCALATE_AFTER
-# forever (ok — it pages, nobody silently loses the item — but it never
-# reaches a terminal state). A future fix would need a way to tell "expired"
-# apart from "transient" (Telegram's getFile error code on an expired file_id
-# is distinguishable from a network reset) and a terminal media_status (e.g.
-# 'expired') so this stops re-paging on something no retry will ever fix.
+# DESIGN ITEM — ✅ BUILT 2026-10-31 (held_commitment #964, bus #85768;
+# cc-quality obs-2, bus #74111). A Telegram file_id is not eternal, and two
+# getFile answers can never be fixed by retrying: 400 "file is too big" (the
+# Bot API cannot download over 20 MB) and 400 "invalid file_id" / expired file
+# reference, plus 404. Those now map to the TERMINAL media_status
+# 'unrecoverable' (migration 141) instead of 'failed':
+#   - ingest._unrecoverable_reason(exc) is the single classifier, shared by
+#     ingest.py and this reaper so the two can never disagree;
+#   - a terminal row leaves RETRYABLE_STATUSES, so it stops being retried here;
+#   - and it is paged ONCE at classification (here, and in ingest for the
+#     first-attempt case), so terminal does NOT mean silent.
+# Transient failures (Errno 54 resets, timeouts, DNS) remain 'failed' and keep
+# retrying — the classifier keys off HTTPError only, never OSError.
 
 RETRYABLE_STATUSES = ("pending", "failed")
 
@@ -92,6 +96,41 @@ MAX_ROWS_PER_RUN = 200   # cheap safety cap -- a stuck CDN outage must not turn
 
 def _dsn() -> str | None:
     return os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+
+
+def _store_failure_status(cur, msg_id: int, terminal: str | None) -> str:
+    """Write the retry-failure status; return what was ACTUALLY stored.
+
+    cc-quality F1 on PR#786 — the reaper half of the deploy-ordering guard.
+    ingest already refuses to let a schema that lacks migration 141 take down a
+    message; this daemon wrote the same terminal value with no guard, so on a
+    silo without 141 the UPDATE raised CheckViolation from inside the `except`
+    handler and killed the whole run. Because due rows are selected ORDER BY
+    created_at, ONE such row crashed the reaper on every tick and starved every
+    newer row of its retry — the opposite of "degrades safely".
+
+    Same shape as ingest's guard: explicit SAVEPOINT, downgrade only OUR
+    constraint, re-raise anything else. Returns 'unrecoverable' or 'failed' so
+    the CALLER pages only for a status that really landed.
+    """
+    status = "unrecoverable" if terminal else "failed"
+    cur.execute("SAVEPOINT media_status_terminal")
+    try:
+        cur.execute("UPDATE operator_messages SET media_status=%s WHERE id=%s",
+                    (status, msg_id))
+        return status
+    except psycopg.errors.CheckViolation as e:
+        if (status != "unrecoverable"
+                or getattr(getattr(e, "diag", None), "constraint_name", None)
+                != _ingest._MEDIA_STATUS_CONSTRAINT):
+            raise
+        cur.execute("ROLLBACK TO SAVEPOINT media_status_terminal")
+        print(f"[schema-drift] #{msg_id}: migration 141 not applied on this silo — "
+              f"{_ingest._MEDIA_STATUS_CONSTRAINT} rejects 'unrecoverable'; storing "
+              f"'failed' and continuing (the row keeps retrying until the migration "
+              f"lands; this is NOT silent)", file=sys.stderr)
+        cur.execute("UPDATE operator_messages SET media_status='failed' WHERE id=%s", (msg_id,))
+        return "failed"
 
 
 def _notify(subject: str, body: str, priority: str = "P2") -> int:
@@ -189,12 +228,35 @@ def reap(fire: bool) -> int:
                     path = _ingest._download_media(
                         token, row["file_id"], row["file_unique_id"], channel_key, row["id"])
                 except Exception as e:
-                    cur.execute(
-                        "UPDATE operator_messages SET media_status='failed' WHERE id=%s",
-                        (row["id"],))
+                    # held_commitment #964: a PERMANENT failure (file too big for
+                    # the Bot API, invalid/expired file_id, 404) must become the
+                    # TERMINAL 'unrecoverable' — otherwise this row re-enters the
+                    # retry loop forever and re-pages every ESCALATE_AFTER about
+                    # something no retry can fix. Transient failures (Errno 54,
+                    # timeouts) stay 'failed' and keep retrying.
+                    # after_retry=True: THIS call is already a retry of ingest's
+                    # own getFile, so an ambiguous "wrong file_id or the file is
+                    # temporarily unavailable" is no longer credible as a
+                    # transient blip (cc-quality F2 on PR#786).
+                    terminal = _ingest._unrecoverable_reason(e, after_retry=True)
+                    stored = _store_failure_status(cur, row["id"], terminal)
                     conn.commit()
-                    print(f"[retry-failed] #{row['id']} — {type(e).__name__}: {e}")
-                    if age > ESCALATE_AFTER:
+                    terminal = terminal if stored == "unrecoverable" else None
+                    print(f"[retry-failed] #{row['id']} — {type(e).__name__}: {e}"
+                          + (f" — TERMINAL, will not retry: {terminal}" if terminal else ""))
+                    if terminal:
+                        _notify(
+                            f"MEDIA #{row['id']} UNRECOVERABLE — operator must resend or "
+                            f"confirm redundant",
+                            f"operator_messages #{row['id']} (tag={row['tag']}, kind="
+                            f"{row['media_kind']}, age={age}) can NEVER be downloaded: "
+                            f"{terminal}. Marked terminal, so this reaper will NOT retry it "
+                            f"again and there will be no further pages for this row. One "
+                            f"action, once: ask the operator to resend it smaller (the Bot "
+                            f"API cannot download anything over 20 MB), or confirm it was "
+                            f"redundant/already covered and close the message without it.")
+                        escalated += 1
+                    elif age > ESCALATE_AFTER:
                         _notify(
                             f"MEDIA #{row['id']} STILL FAILING after {age}",
                             f"operator_messages #{row['id']} (tag={row['tag']}, kind="

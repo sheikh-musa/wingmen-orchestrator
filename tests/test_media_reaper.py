@@ -48,8 +48,7 @@ _DDL = (
 )
 
 
-@pytest.fixture
-def reaper_dsn(pg_dsn, monkeypatch):
+def _build_schema(pg_dsn, monkeypatch, *, with_141: bool):
     monkeypatch.setenv("DATABASE_URL", pg_dsn)
     # Default scope covers every channel_key the existing tests in this file
     # seed ("nazim-console", "client-x"); a test proving the scope FILTER
@@ -60,11 +59,26 @@ def reaper_dsn(pg_dsn, monkeypatch):
         cur.execute("DROP SCHEMA public CASCADE")
         cur.execute("CREATE SCHEMA public")
         cur.execute("GRANT USAGE ON SCHEMA public TO PUBLIC")
-        cur.execute("SELECT 1 FROM pg_roles WHERE rolname='service_role'")
-        if cur.fetchone() is None:
-            cur.execute("CREATE ROLE service_role")
+        # Migrations 117/122 GRANT to the Supabase web roles. CI's bootstrap
+        # creates them; a bare local ephemeral cluster does not, and the whole
+        # fixture used to die on `role "anon" does not exist` — which silently
+        # cost this file ALL of its coverage outside CI.
+        for role in ("anon", "authenticated", "service_role"):
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+            if cur.fetchone() is None:
+                cur.execute(f'CREATE ROLE "{role}" NOLOGIN')
         for ddl in _DDL:
             cur.execute(ddl)
+        if with_141:
+            # migration 141's CHECK, so the reaper's UPDATE to 'unrecoverable'
+            # is validated by the real constraint here (held_commitment #964).
+            cur.execute((MIGRATIONS_DIR /
+                         "141_operator_messages_media_status_unrecoverable.sql").read_text())
+        else:
+            # The 115-era predicate: THIS silo has not been migrated yet.
+            cur.execute("ALTER TABLE operator_messages ADD CONSTRAINT "
+                        "operator_messages_media_status_check CHECK (media_status IS NULL "
+                        "OR media_status IN ('pending','ok','failed'))")
         cur.execute("INSERT INTO agents (id, display_name, status) "
                     "VALUES ('media-reaper', 'reaper', 'active'), "
                     "('orch-console', 'console', 'active')")
@@ -72,6 +86,19 @@ def reaper_dsn(pg_dsn, monkeypatch):
         cur.execute((MIGRATIONS_DIR / "117_durable_inbox_ack_additive.sql").read_text())
         cur.execute((MIGRATIONS_DIR / "122_post_agent_message_optional_params.sql").read_text())
     return pg_dsn
+
+
+@pytest.fixture
+def reaper_dsn(pg_dsn, monkeypatch):
+    return _build_schema(pg_dsn, monkeypatch, with_141=True)
+
+
+@pytest.fixture
+def reaper_dsn_pre_141(pg_dsn, monkeypatch):
+    """A silo where migration 141 has NOT been applied yet — the deploy-ordering
+    window ingest guards with a savepoint and (before cc-quality F1) the reaper
+    did not."""
+    return _build_schema(pg_dsn, monkeypatch, with_141=False)
 
 
 def _seed_channel(dsn, channel_key, tag, token_env_key="FAKE_BOT_TOKEN"):
@@ -265,3 +292,147 @@ def test_media_reaper_channels_resolving_to_no_known_channel_refuses_loudly(reap
     monkeypatch.setenv("MEDIA_REAPER_CHANNELS", "no-such-channel-key")
     assert media_reaper.reap(fire=False) == 2
     assert "MEDIA_REAPER_CHANNELS" in capsys.readouterr().err
+
+
+# ── TERMINAL failures (held_commitment #964, migration 141) ─────────────────
+# A getFile answer that no retry can fix must flip the row to the TERMINAL
+# 'unrecoverable' (leaving RETRYABLE_STATUSES, so the loop stops) AND tell the
+# operator ONCE (so "terminal" never means "silently dropped").
+
+def _telegram_http_error(code, description):
+    import json as _json
+    from io import BytesIO
+    from urllib.error import HTTPError
+    body = _json.dumps({"ok": False, "error_code": code,
+                        "description": description}).encode()
+    return HTTPError("https://api.telegram.org/botTOK/getFile", code,
+                     description, {}, BytesIO(body))
+
+
+def _console_pages(dsn, subject_like="%"):
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT subject, body FROM agent_messages "
+                    "WHERE to_agent='orch-console' AND from_agent='media-reaper' "
+                    "AND subject LIKE %s", (subject_like,))
+        return cur.fetchall()
+
+
+def test_permanent_getfile_error_marks_the_row_unrecoverable(reaper_dsn, monkeypatch):
+    _seed_channel(reaper_dsn, "nazim-console", "nazim-console")
+    monkeypatch.setenv("FAKE_BOT_TOKEN", "tok")
+    msg_id = _seed_message(
+        reaper_dsn, tag="nazim-console", text="sent a FILE (download failed: boom)",
+        file_id="F8", file_unique_id="U8", media_kind="document", media_status="failed")
+
+    def _too_big(*a, **k):
+        raise _telegram_http_error(400, "Bad Request: file is too big")
+    monkeypatch.setattr(_ingest, "_download_media", _too_big)
+
+    assert media_reaper.reap(fire=True) == 0
+
+    assert _row(reaper_dsn, msg_id)["media_status"] == "unrecoverable"
+    pages = _console_pages(reaper_dsn, "%UNRECOVERABLE%")
+    assert len(pages) == 1
+    assert "resend" in pages[0][1].lower(), "the operator must be told WHAT to do"
+    assert "20 MB" in pages[0][1]
+
+
+def test_an_unrecoverable_row_is_never_selected_again(reaper_dsn, monkeypatch):
+    """The whole point: the terminal state must actually terminate the loop.
+    If 'unrecoverable' leaked back into the retry set, this daemon would keep
+    hitting Telegram forever and re-paging every 2h."""
+    _seed_channel(reaper_dsn, "nazim-console", "nazim-console")
+    monkeypatch.setenv("FAKE_BOT_TOKEN", "tok")
+    msg_id = _seed_message(
+        reaper_dsn, tag="nazim-console", text="sent a FILE (download failed: boom)",
+        file_id="F9", file_unique_id="U9", media_kind="document",
+        media_status="failed", age=_dt.timedelta(hours=5))
+
+    def _too_big(*a, **k):
+        raise _telegram_http_error(400, "Bad Request: file is too big")
+    monkeypatch.setattr(_ingest, "_download_media", _too_big)
+    assert media_reaper.reap(fire=True) == 0
+    assert _row(reaper_dsn, msg_id)["media_status"] == "unrecoverable"
+    assert len(_console_pages(reaper_dsn)) == 1
+
+    # Second tick: the row is out of scope. Any network attempt here is a bug.
+    monkeypatch.setattr(_ingest, "_download_media",
+                        lambda *a, **k: pytest.fail("terminal row must not be retried"))
+    assert media_reaper.reap(fire=True) == 0
+
+    assert _row(reaper_dsn, msg_id)["media_status"] == "unrecoverable"
+    assert len(_console_pages(reaper_dsn)) == 1, "exactly one page, ever"
+
+
+def test_a_transient_failure_is_NOT_marked_terminal(reaper_dsn, monkeypatch):
+    """The expensive mistake is the opposite one: calling a recoverable file
+    dead. An Errno 54 reset must keep its retry."""
+    _seed_channel(reaper_dsn, "nazim-console", "nazim-console")
+    monkeypatch.setenv("FAKE_BOT_TOKEN", "tok")
+    msg_id = _seed_message(
+        reaper_dsn, tag="nazim-console", text="sent a photo (download failed: boom)",
+        file_id="F10", file_unique_id="U10", media_kind="photo", media_status="failed")
+
+    def _reset(*a, **k):
+        raise ConnectionResetError(54, "Connection reset by peer")
+    monkeypatch.setattr(_ingest, "_download_media", _reset)
+
+    assert media_reaper.reap(fire=True) == 0
+
+    assert _row(reaper_dsn, msg_id)["media_status"] == "failed"
+    assert _console_pages(reaper_dsn) == []      # too fresh for the 2h floor
+
+
+def test_ambiguous_wrong_file_id_is_terminal_when_the_reaper_retries(reaper_dsn, monkeypatch):
+    """cc-quality F2: ingest keeps this retryable (the wording says
+    "temporarily"), the reaper — which IS the second attempt — does not."""
+    _seed_channel(reaper_dsn, "nazim-console", "nazim-console")
+    monkeypatch.setenv("FAKE_BOT_TOKEN", "tok")
+    msg_id = _seed_message(
+        reaper_dsn, tag="nazim-console", text="sent a FILE (download failed: boom)",
+        file_id="F11", file_unique_id="U11", media_kind="document", media_status="failed")
+
+    def _wrong_id(*a, **k):
+        raise _telegram_http_error(
+            400, "Bad Request: wrong file_id or the file is temporarily unavailable")
+    monkeypatch.setattr(_ingest, "_download_media", _wrong_id)
+
+    assert media_reaper.reap(fire=True) == 0
+
+    assert _row(reaper_dsn, msg_id)["media_status"] == "unrecoverable"
+    assert len(_console_pages(reaper_dsn, "%UNRECOVERABLE%")) == 1
+
+
+# ── cc-quality F1: the reaper must survive a silo without migration 141 ─────
+
+def test_reaper_degrades_instead_of_crashing_when_141_is_missing(reaper_dsn_pre_141, monkeypatch, capsys):
+    """Without the guard the terminal UPDATE raised CheckViolation out of the
+    `except` handler and killed the whole run — and because due rows are
+    selected ORDER BY created_at, ONE such row crash-looped the daemon and
+    starved every NEWER row of its retry. So this asserts the crash is gone
+    AND that the newer row behind it still gets processed."""
+    dsn = reaper_dsn_pre_141
+    _seed_channel(dsn, "nazim-console", "nazim-console")
+    monkeypatch.setenv("FAKE_BOT_TOKEN", "tok")
+    older = _seed_message(
+        dsn, tag="nazim-console", text="sent a FILE (download failed: boom)",
+        file_id="F12", file_unique_id="U12", media_kind="document",
+        media_status="failed", age=_dt.timedelta(hours=3))
+    newer = _seed_message(
+        dsn, tag="nazim-console", text="sent a photo (download failed: boom)",
+        file_id="F13", file_unique_id="U13", media_kind="photo",
+        media_status="failed")
+
+    def _dispatch(token, file_id, file_unique_id, channel_key, upd_id, name=None):
+        if file_unique_id == "U12":
+            raise _telegram_http_error(400, "Bad Request: file is too big")
+        return f"/media/{file_unique_id}"
+    monkeypatch.setattr(_ingest, "_download_media", _dispatch)
+
+    assert media_reaper.reap(fire=True) == 0, "must not raise"
+
+    assert _row(dsn, older)["media_status"] == "failed", \
+        "downgraded, not dropped, and it keeps its retry"
+    assert _row(dsn, newer)["media_status"] == "ok", \
+        "the newer row must NOT be starved by the older poison row"
+    assert "141" in capsys.readouterr().err, "the drift must be LOUD, not silent"
