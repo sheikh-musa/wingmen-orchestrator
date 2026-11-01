@@ -18,10 +18,18 @@ honestly reported reach=None (the gap) rather than a dead hop.
 UPDATE (Nazim 43610/43612, 2026-09-27): a dedicated fleet-ops key + ssh-config alias `gzb`
 (gazzai@100.77.251.8 Tailscale-direct, ~/.ssh/gzb_fleet) RESTORED a read/probe + nudge reach
 to the gzb hub, so the gzbai branch now returns a real reach again. The dict also exposes
-`ssh_target` (a runnable ssh destination: "gzb" for gzbai, "root@91.107.235.77" for
-wingmen-core, None when unknown) so callers (console panes, reset paths) resolve the host path
-HERE instead of re-hardcoding it. A hard reset still needs root (the key has no sudo) → that
-step stays operator/vault-gated.
+`ssh_target` (a runnable ssh destination: "gzb" for gzbai, None when unknown or retired) so
+callers (console panes, reset paths) resolve the host path HERE instead of re-hardcoding it.
+A hard reset still needs root (the key has no sudo) → that step stays operator/vault-gated.
+
+UPDATE (Musa op37138, orch-console 89343, 2026-11-01): the wingmen-core VPS is RETIRED —
+decommissioned, and its host key has since changed, so any remaining path that can still reach
+`91.107.235.77` is a hazard rather than merely a dead hop. `hub_reach_for_holder("wingmen-core")`
+now REFUSES BY NAME (reach=None, ssh_target=None, `retired=True`, a remedy that says so and does
+not repeat the address) instead of advertising the old direct-VPS reach, and
+`is_reach_host_current()` fail-closes for it even when a stale lease still names it. The aliases
+stay in `_VPS_ALIASES` deliberately: recognizing the name is what lets the refusal be stated,
+and a silent drop would read as "unknown host" instead of "do not go there".
 """
 from __future__ import annotations
 
@@ -29,7 +37,15 @@ from __future__ import annotations
 # map the various spellings/IPs to one canonical key so callers never string-compare
 # a raw host. Extend here (one place) if the hub relocates again.
 _GZB_ALIASES = {"gzbai", "gzb", "192.168.1.114"}
+
+# RETIRED hub hosts (Musa op37138, orch-console 89343, 2026-11-01). These spellings are kept
+# ONLY so a stale lease, an old runbook or a copy-pasted IP can be REFUSED BY NAME — never to
+# build a reach. wingmen-core (91.107.235.77) was decommissioned AND its host key has since
+# changed, so a path that still connects there may now be talking to a different machine.
+# Removing the aliases outright would turn such a reference back into "unknown host", which
+# reads as a routine gap instead of a refusal; a silent drop is the failure mode this prevents.
 _VPS_ALIASES = {"wingmen-core", "hermes-vps", "91.107.235.77"}
+_RETIRED_CANON = "wingmen-core"
 
 
 def _canon(holder_host: "str | None") -> "str | None":
@@ -76,19 +92,27 @@ def hub_reach_for_holder(holder_host: "str | None") -> dict:
                   "use reset_hub_remote.sh (it targets the decommissioned wingmen-core and "
                   "correctly refuses a gzb holder).")
         return {"known": True, "host": "gzbai", "tmux": "orch", "reach": reach,
-                "remedy": remedy, "ssh_target": "gzb"}
-    if canon == "wingmen-core":
-        reach = ("ssh root@91.107.235.77 (hub-vps) -> tmux 'orch' (user wingmen)")
-        remedy = (f"REMEDY: reach the hub directly on the VPS — {reach}; forced typed-nudge / "
-                  f"reset_orch.sh runs there. Console pen.")
-        return {"known": True, "host": "wingmen-core", "tmux": "orch", "reach": reach,
-                "remedy": remedy, "ssh_target": "root@91.107.235.77"}
+                "remedy": remedy, "ssh_target": "gzb", "retired": False}
+    if canon == _RETIRED_CANON:
+        # FAIL-CLOSED REFUSAL, not a silent drop (op37138 / console 89343). The host is still
+        # RECOGNIZED (known=True) so the refusal can be stated by name, but it carries NO
+        # reach and NO ssh_target — there is nothing for a caller to accidentally run.
+        # Deliberately does not repeat the IP: a refusal that prints the address is the exact
+        # string someone copy-pastes into a terminal under pressure.
+        remedy = ("REFUSED: hub host 'wingmen-core' is RETIRED — decommissioned, and its host "
+                  "key has since changed, so anything still connecting there may reach a "
+                  "DIFFERENT machine. No reach is provided. Re-read orch_lease.holder_host "
+                  "(the live hub reports gzbai) and act on that holder instead. If the lease "
+                  "itself still says wingmen-core, treat the lease as stale and escalate to "
+                  "the console rather than connecting.")
+        return {"known": True, "host": _RETIRED_CANON, "tmux": "orch", "reach": None,
+                "remedy": remedy, "ssh_target": None, "retired": True}
     # unknown / unset / unrecognized: fail-safe — name NO host.
     remedy = ("REMEDY: the hub's holder_host is unknown/unset — resolve it from "
               "orch_lease.holder_host before reaching; do NOT assume a host (a stale one "
               "may be decommissioned).")
     return {"known": False, "host": None, "tmux": "orch", "reach": None,
-            "remedy": remedy, "ssh_target": None}
+            "remedy": remedy, "ssh_target": None, "retired": False}
 
 
 def is_reach_host_current(target_host: "str | None", holder_host: "str | None") -> bool:
@@ -98,6 +122,11 @@ def is_reach_host_current(target_host: "str | None", holder_host: "str | None") 
     we cannot confirm is the current lease holder (the decommissioned-box guard)."""
     ct = _canon(target_host)
     ch = _canon(holder_host)
+    # A RETIRED host is never a valid MUTATING target, even if a stale lease still names it
+    # (op37138 / console 89343): its host key changed, so "the same host" cannot be confirmed
+    # cryptographically any more — resetting it could reset someone else's machine.
+    if ct == _RETIRED_CANON or ch == _RETIRED_CANON:
+        return False
     return ct is not None and ch is not None and ct == ch
 
 
