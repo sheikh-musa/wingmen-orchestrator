@@ -325,6 +325,17 @@ def test_every_named_boot_path_carries_the_guard():
         body = (REPO / "scripts" / name).read_text()
         assert "session_provider_guard.sh" in body, f"{name} boots a session unguarded"
         assert "spg_check" in body, f"{name} sources the shim but never calls it"
+    # breakglass_studio_orch.sh revives the Studio hub with `claude --continue` from a
+    # REMOTE heredoc — it does not go through launch_dangerous_cc.sh, so the funnel does
+    # not cover it. Gated on 2026-11-01 (cc-substrate track B): it was the last
+    # transcript-replaying boot path with no provider check.
+    glass = (REPO / "scripts" / "breakglass_studio_orch.sh").read_text()
+    assert "session_provider_guard.sh" in glass, "breakglass boots a session unguarded"
+    assert "spg_check" in glass, "breakglass sources the shim but never calls it"
+    assert glass.index("spg_check") < glass.index('"$CLAUDE_BIN" --dangerously-skip-permissions'), (
+        "the resume guard is wired AFTER the breakglass launch line")
+    assert "_CONTINUE_FLAG" in glass, (
+        "a refused resume must boot FRESH, not silently keep the resume flag")
 
 
 def _guard_block() -> str:

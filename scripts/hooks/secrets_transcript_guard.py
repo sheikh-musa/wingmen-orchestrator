@@ -150,6 +150,8 @@ from secret_shape_patterns import SECRET_VALUE_PATTERNS, find_hits  # noqa: E402
 # updating this comment's pinned hash if ihsanos's copy ever changes; never
 # hand-edit the vendored copy to diverge from theirs.
 from ddl_detect import is_ddl_shaped  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+from scripts.lib.remote_shell import extract_remote_script  # noqa: E402
 
 BLOCK_MESSAGE = "secret would enter the transcript -- hash it or use the value without printing."
 LITERAL_SECRET_MESSAGE = (
@@ -944,58 +946,11 @@ PGREP_LEADING_RE = re.compile(r"^(?:pgrep|pkill)\b")
 # `ssh hub-vps "sshpass ... ssh gazzai@<host> 'ps eww -u gazzai -o pid,command'"` --
 # invisible to a leading-command check on the OUTER segment, whose leading command is
 # `ssh`, never `ps`. `bash -c`/`sh -c`/`zsh -c` wrap a sub-shell script the same way.
-SSH_WRAPPER_LEADING_RE = re.compile(r"^(?:ssh|sshpass)\b")
-SHELL_DASH_C_LEADING_RE = re.compile(r"^(?:bash|sh|zsh)\s+(?:-\w*\s+)*-\w*c\w*\b")
-SSH_FLAGS_WITH_ARG = {"-p", "-i", "-o", "-l", "-F", "-J", "-L", "-R", "-D", "-c", "-m", "-w", "-B", "-b", "-E", "-e"}
-
-
-def _extract_remote_script(segment: str, lead: str) -> str | None:
-    """Best-effort extraction of the remote/sub-shell command text wrapped by
-    ssh/sshpass/bash -c/sh -c/zsh -c, whether it arrived as ONE quoted shell token
-    (`ssh host 'ps eww'`, the Sep-24 shape) or as several separate UNQUOTED words
-    (`ssh host ps eww ...`, bus #49064 gap #3) -- shlex has already stripped quoting
-    by the time we see tokens, so both shapes look identical: a run of tokens after
-    the host (or after `-c`) is the remote script, rejoined with spaces. Not a full
-    ssh-argv parser -- best-effort skip of ssh's own flags and their single-token
-    arguments, same documented-limitation posture as the rest of this file's shell
-    parsing."""
-    if not (SSH_WRAPPER_LEADING_RE.match(lead) or SHELL_DASH_C_LEADING_RE.match(lead)):
-        return None
-    try:
-        tokens = shlex.split(segment)
-    except ValueError:
-        return None
-    if not tokens:
-        return None
-    if SHELL_DASH_C_LEADING_RE.match(lead):
-        last_c_flag = None
-        for i, tok in enumerate(tokens):
-            if tok.startswith("-") and "c" in tok:
-                last_c_flag = i
-        if last_c_flag is None or last_c_flag + 1 >= len(tokens):
-            return None
-        return " ".join(tokens[last_c_flag + 1:])
-    # ssh/sshpass: sshpass always wraps a real `ssh` invocation for our purposes --
-    # find that `ssh` token, skip its own flags (and single-token flag arguments) and
-    # the host argument; everything left is the remote command.
-    i = 0
-    n = len(tokens)
-    while i < n and tokens[i] != "ssh":
-        i += 1
-    if i >= n:
-        return None
-    i += 1
-    while i < n and tokens[i].startswith("-"):
-        flag = tokens[i]
-        i += 1
-        if flag in SSH_FLAGS_WITH_ARG and i < n:
-            i += 1
-    if i >= n:
-        return None
-    i += 1  # the host argument itself
-    if i >= n:
-        return None
-    return " ".join(tokens[i:])
+#
+# The parser moved to scripts/lib/remote_shell.py on 2026-11-01 (cc-substrate, track B)
+# so credential_store_guard can share it instead of growing a second copy: the same
+# wrapper hid a client-store read (`ssh host "wp option list --search='wc_facebook_*'"`)
+# from that guard's leading-command anchor. Imported below; still used HERE first.
 
 # cc-quality PR#245 review (bus #48441 LOW #3): non-shell print of a sensitive var by
 # NAME -- `python3 -c "print(os.environ['TOKEN'])"` / `awk 'BEGIN{print ENVIRON["TOKEN"]}'`
@@ -1179,7 +1134,7 @@ def _trigger_kind(segment: str, lead: str, _depth: int = 0) -> str | None:
         return "prints a secret env var"
     if _depth >= 6:
         return None
-    inner = _extract_remote_script(segment, lead)
+    inner = extract_remote_script(segment, lead)
     if inner is None:
         return None
     for inner_statement in _split_statements(inner):
