@@ -1,6 +1,15 @@
--- DRAFT -- hc#95 exec_broker_access_log.gate_ref (cutover spec bus #89814 §3.5, B2/--ref).
--- PROPOSE-ONLY: orch-console applies via direct psycopg after gating (never `supabase db push`).
--- NOT applied. Migration NNN assigned by CORE at apply.
+-- 142_hc95_exec_broker_gate_ref.sql
+-- ledger: silo=tscuymavysscrvoberrr
+-- (orchestrator substrate)
+--
+-- hc#95 exec_broker_access_log: gate_ref + executed_prologue/executed_sql_sha256 (bus #89814 §3.5; amended ruling C bus #89846).
+-- Apply via scripts/apply_migration.py with a --gate decision row citing this
+-- file's sha12 (direct psycopg, same-transaction ledger write) -- NEVER
+-- `supabase db push` (decision 962). hc#95 broker apply order: 142 -> 143 ->
+-- 144 -> 145 -> 146; this is 1 of 5.
+-- PREREQUISITE: exec_broker_access_log exists (live on the substrate; created
+-- by migrations/drafts/hc95_exec_broker_access_log.sql, outside the numbered chain).
+-- No REVOKE / DROP FUNCTION in this file -> no `-- assert:` lines are required.
 --
 -- WHY: a ref-only gate (op#N/hc#N/q#N/cp#N, no migration/PR) carries no
 -- schema_migrations stamp, so the broker's own audit row must record which ref

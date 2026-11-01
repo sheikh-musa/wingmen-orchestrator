@@ -359,12 +359,12 @@ def test_take_has_no_reason_parameter():
 
 
 def test_heartbeat_draft_adds_the_open_row_index_and_leaves_gate_ref_alone():
-    drafts = Path(__file__).resolve().parents[2] / "migrations" / "drafts"
-    hb = (drafts / "hc95_exec_broker_heartbeat.sql").read_text()
+    migrations = Path(__file__).resolve().parents[2] / "migrations"
+    hb = (migrations / "144_hc95_exec_broker_heartbeat.sql").read_text()
     assert ("CREATE INDEX IF NOT EXISTS exec_broker_access_log_open_idx\n"
             "  ON exec_broker_access_log (ts_start) WHERE ts_end IS NULL;") in hb
     assert "taken_over_from_host text" in hb
-    assert "exec_broker_access_log_open_idx" not in (drafts / "hc95_exec_broker_gate_ref.sql").read_text()
+    assert "exec_broker_access_log_open_idx" not in (migrations / "142_hc95_exec_broker_gate_ref.sql").read_text()
 
 
 def test_oversized_all_whitespace_line_is_too_large_not_the_probe_answer():

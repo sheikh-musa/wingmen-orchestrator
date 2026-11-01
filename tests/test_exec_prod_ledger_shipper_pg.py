@@ -1,4 +1,4 @@
-"""Real-PG proof for the exec_prod ledger shipper + migrations/drafts/exec_prod_ledger.sql,
+"""Real-PG proof for the exec_prod ledger shipper + migrations/145_exec_prod_ledger.sql,
 against the repo's sanctioned ephemeral Postgres fixture (pg_dsn) -- never a real
 substrate. Proves the draft applies (twice), the real ON CONFLICT makes re-shipping
 a no-op, and the CHECKs hold."""
@@ -19,7 +19,7 @@ _spec = importlib.util.spec_from_file_location("exec_prod_ledger_shipper_pg", _R
 shipper = importlib.util.module_from_spec(_spec)
 sys.modules["exec_prod_ledger_shipper_pg"] = shipper
 _spec.loader.exec_module(shipper)
-_DRAFT = _ROOT / "migrations" / "drafts" / "exec_prod_ledger.sql"
+_DRAFT = _ROOT / "migrations" / "145_exec_prod_ledger.sql"
 
 
 @pytest.fixture

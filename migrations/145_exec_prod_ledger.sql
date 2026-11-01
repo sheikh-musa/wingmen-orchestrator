@@ -1,8 +1,46 @@
--- DRAFT -- exec_prod_ledger: fleet-bus copy of exec_prod's append-only JSONL ledger
--- (queue row 271; hc#95 B4 direct-path half). Written by
--- scripts/exec_prod_ledger_shipper.py on the exec host.
--- PROPOSE-ONLY: orch-console applies via direct psycopg after gating (never `supabase db push`).
--- NOT applied. Migration NNN assigned by CORE at apply. Target: the fleet-bus DB.
+-- 145_exec_prod_ledger.sql
+-- ledger: silo=tscuymavysscrvoberrr
+-- (orchestrator substrate)
+--
+-- exec_prod_ledger + exec_prod_ledger_shipper_runs: fleet-bus copy of exec_prod's JSONL ledger (queue row 271; hc#95 B4). Written by scripts/exec_prod_ledger_shipper.py on the exec host.
+-- Apply via scripts/apply_migration.py with a --gate decision row citing this
+-- file's sha12 (direct psycopg, same-transaction ledger write) -- NEVER
+-- `supabase db push` (decision 962). hc#95 broker apply order: 142 -> 143 ->
+-- 144 -> 145 -> 146; this is 4 of 5.
+-- Target: the fleet-bus DB.
+-- assert: no_table_privilege authenticated public.exec_prod_ledger SELECT
+-- assert: no_table_privilege authenticated public.exec_prod_ledger INSERT
+-- assert: no_table_privilege authenticated public.exec_prod_ledger UPDATE
+-- assert: no_table_privilege authenticated public.exec_prod_ledger DELETE
+-- assert: no_table_privilege anon public.exec_prod_ledger SELECT
+-- assert: no_table_privilege anon public.exec_prod_ledger INSERT
+-- assert: no_table_privilege anon public.exec_prod_ledger UPDATE
+-- assert: no_table_privilege anon public.exec_prod_ledger DELETE
+-- assert: no_table_privilege service_role public.exec_prod_ledger SELECT
+-- assert: no_table_privilege service_role public.exec_prod_ledger INSERT
+-- assert: no_table_privilege service_role public.exec_prod_ledger UPDATE
+-- assert: no_table_privilege service_role public.exec_prod_ledger DELETE
+-- assert: no_sequence_privilege authenticated public.exec_prod_ledger_id_seq USAGE
+-- assert: no_sequence_privilege authenticated public.exec_prod_ledger_id_seq SELECT
+-- assert: no_sequence_privilege authenticated public.exec_prod_ledger_id_seq UPDATE
+-- assert: no_sequence_privilege anon public.exec_prod_ledger_id_seq USAGE
+-- assert: no_sequence_privilege anon public.exec_prod_ledger_id_seq SELECT
+-- assert: no_sequence_privilege anon public.exec_prod_ledger_id_seq UPDATE
+-- assert: no_sequence_privilege service_role public.exec_prod_ledger_id_seq USAGE
+-- assert: no_sequence_privilege service_role public.exec_prod_ledger_id_seq SELECT
+-- assert: no_sequence_privilege service_role public.exec_prod_ledger_id_seq UPDATE
+-- assert: no_table_privilege authenticated public.exec_prod_ledger_shipper_runs SELECT
+-- assert: no_table_privilege authenticated public.exec_prod_ledger_shipper_runs INSERT
+-- assert: no_table_privilege authenticated public.exec_prod_ledger_shipper_runs UPDATE
+-- assert: no_table_privilege authenticated public.exec_prod_ledger_shipper_runs DELETE
+-- assert: no_table_privilege anon public.exec_prod_ledger_shipper_runs SELECT
+-- assert: no_table_privilege anon public.exec_prod_ledger_shipper_runs INSERT
+-- assert: no_table_privilege anon public.exec_prod_ledger_shipper_runs UPDATE
+-- assert: no_table_privilege anon public.exec_prod_ledger_shipper_runs DELETE
+-- assert: no_table_privilege service_role public.exec_prod_ledger_shipper_runs SELECT
+-- assert: no_table_privilege service_role public.exec_prod_ledger_shipper_runs INSERT
+-- assert: no_table_privilege service_role public.exec_prod_ledger_shipper_runs UPDATE
+-- assert: no_table_privilege service_role public.exec_prod_ledger_shipper_runs DELETE
 --
 -- One row per ledger LINE: every exec writes a START line (ts_end NULL) and an
 -- END line (ts_end set) sharing exec_id; line_kind is derived from that.
@@ -76,4 +114,4 @@ REVOKE ALL ON exec_prod_ledger_shipper_runs FROM PUBLIC, authenticated, anon, se
 --     SELECT on exec_prod_ledger_shipper_runs (its own run-heartbeat upsert).
 --   * cc-fleet-health's WATCHDOG / reconcile read role needs SELECT on
 --     exec_prod_ledger and exec_prod_ledger_shipper_runs (granted to
---     broker_watch_readonly by migrations/drafts/hc95_broker_watch_readonly.sql).
+--     broker_watch_readonly by migrations/146_hc95_broker_watch_readonly.sql).

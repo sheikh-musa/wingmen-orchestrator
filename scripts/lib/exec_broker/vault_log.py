@@ -31,7 +31,7 @@ class VaultLogEntry:
     # ref-only approval stays auditable after the fact. None for every caller
     # that does not send `ref` -- and then the INSERT below is byte-identical
     # to the pre-amendment one (no gate_ref column referenced), so the
-    # gate_ref column (migrations/drafts/hc95_exec_broker_gate_ref.sql) only
+    # gate_ref column (migrations/142_hc95_exec_broker_gate_ref.sql) only
     # has to exist before the first ref-carrying call. Until it is applied, a
     # ref-carrying call fails at this INSERT -> INTERNAL_ERROR, before any
     # validation or mgmt-API call: fail closed, nothing executes.
@@ -73,7 +73,7 @@ def record_executed(cur, row_id: int, executed_prologue: str, executed_sql_sha25
     binding, unchanged); this records what actually ran, so the audit never
     implies it executed bytes it did not. Both columns stay NULL when the
     received bytes were executed unchanged (every gated statement).
-    Columns: migrations/drafts/hc95_exec_broker_gate_ref.sql."""
+    Columns: migrations/142_hc95_exec_broker_gate_ref.sql."""
     cur.execute(
         "UPDATE exec_broker_access_log SET executed_prologue = %s, executed_sql_sha256 = %s WHERE id = %s",
         (executed_prologue, executed_sql_sha256, row_id),
@@ -103,7 +103,7 @@ def log_finalized(
 # B3 single-use (bus #89814 §4.2-4.3, CONTRACT AMENDMENT -- see protocol.py):
 # the FIRST execution whose gate fully validates consumes that gate_id, bound
 # to this row's exec_ledger_id. Enforced by the DATABASE, not by a
-# check-then-write in Python: migrations/drafts/hc95_exec_broker_gate_single_use.sql
+# check-then-write in Python: migrations/143_hc95_exec_broker_gate_single_use.sql
 # adds gate_consumed + a partial UNIQUE index on (gate_id) WHERE gate_consumed,
 # so a second row (any other exec_ledger_id, or a concurrent duplicate) trying
 # to consume the same gate_id raises unique_violation (SQLSTATE 23505) -- a

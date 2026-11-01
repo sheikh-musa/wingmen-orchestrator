@@ -1,6 +1,22 @@
--- DRAFT -- hc#95 exec-broker B3 single-use gates (cutover spec bus #89814 §4.2-4.3).
--- PROPOSE-ONLY: orch-console applies via direct psycopg after gating (never `supabase db push`).
--- NOT applied. Migration NNN assigned by CORE at apply.
+-- 143_hc95_exec_broker_gate_single_use.sql
+-- ledger: silo=tscuymavysscrvoberrr
+-- (orchestrator substrate)
+--
+-- hc#95 exec-broker B3 single-use gates (cutover spec bus #89814 §4.2-4.3).
+-- Apply via scripts/apply_migration.py with a --gate decision row citing this
+-- file's sha12 (direct psycopg, same-transaction ledger write) -- NEVER
+-- `supabase db push` (decision 962). hc#95 broker apply order: 142 -> 143 ->
+-- 144 -> 145 -> 146; this is 2 of 5.
+-- PREREQUISITE: 142 applied (and exec_broker_access_log live).
+--
+-- The guard trigger function's REVOKE is verified (CAI-RESP-1397 #5). The
+-- DROP TRIGGER IF EXISTS just before CREATE TRIGGER re-creates the trigger, so
+-- there is nothing to assert 'dropped' for (and apply_migration only requires
+-- asserts for REVOKE / DROP FUNCTION, not DROP TRIGGER).
+-- assert: no_execute authenticated public.exec_broker_access_log_gate_consumed_guard()
+-- assert: no_execute anon public.exec_broker_access_log_gate_consumed_guard()
+-- assert: no_execute service_role public.exec_broker_access_log_gate_consumed_guard()
+-- assert: search_path public.exec_broker_access_log_gate_consumed_guard()
 -- CONTRACT AMENDMENT: supersedes the v1 "no exec_ledger_id replay check" omission
 -- (scripts/lib/exec_broker/protocol.py) -- console must confirm before this lands.
 --
@@ -14,7 +30,7 @@
 -- first transaction commits (then fails) or rolls back (then may proceed) --
 -- there is no check-then-write window to race.
 --
--- DEPLOY ORDER: apply hc95_exec_broker_gate_ref.sql, then THIS, BEFORE deploying
+-- DEPLOY ORDER: apply 142_hc95_exec_broker_gate_ref.sql, then THIS, BEFORE deploying
 -- the B3 broker code. If the code lands first, consume_gate's UPDATE fails on the
 -- missing column -> INTERNAL_ERROR for every gated call, before any mgmt-API
 -- call (fail closed, but an outage for gated calls until this is applied).
