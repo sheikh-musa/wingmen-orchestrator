@@ -1551,3 +1551,22 @@ reply path: prefer `sub_tag`, else the base id.
 
 **Queued, no separate PR (console 89417):** the `scripts/reset_orch.sh` header line that still
 spells `ssh root@<old ip>` — fold into the next docs touch.
+
+**CORRECTION to the routing advice above (09429/89434):** addressing a fanned-out lane at its
+BASE id does not work — `scripts/bus_send.py refuse_if_base_has_live_instances` REFUSES the
+send when live instances exist (instances poll their own address; the guard exists because
+orch-console lost 5 rows that way, bus #49675). The correct target is the LIVE INSTANCE
+(`cc-substrate-2`), re-resolved after any relaunch; the base id is only valid when no instance
+is live. Verified in code, not taken on trust.
+
+**CORRECTION to the offender list (89384 -> 89434):** cc-quality was NOT a credential offender.
+Its inherited env holds the pre-rotation value, but it sources `~/.wingmen/orchestrator/.env`
+file-first on every command, so the stale value never reaches the pooler; the breaker was its
+only blocker (the console had 89416 from cc-quality saying the same). cc-quality-2 remains open.
+Generalised lesson: a stale value in a process env makes a lane a CANDIDATE, not a proven
+dialer — env tells you what it holds, not what it connects with. The remaining nine names are
+candidates, and removing them is a reasonable way to stop the traffic, not proof each dials.
+
+**Also closed:** stale RR row 37835 (56 days) — the 059 migration work was completed the same
+day (37836 PR#95, 37840 PASS, 37841 APPLIED, 37842 ledgered); only the opening row was never
+stamped. Closed with evidence (89436).
