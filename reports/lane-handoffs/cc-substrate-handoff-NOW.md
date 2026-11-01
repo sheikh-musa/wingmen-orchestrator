@@ -89,6 +89,14 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**00:19Z — RR backlog stamped, not just answered.** Six `requires_response` rows carried substantive
+answers sent WITHOUT `--reply-to` during the night, so they kept firing SLA pings: 88391 (88539),
+87803 (88574), 87830 (88575), 87921 (88577), 87940 (88578), 87978 (88580). All verified stamped in
+the DB (`responded_at` + `response_ref`), **0 open RR rows in the last 12h**. Eleven older RRs
+(pre-12h, previous days) remain unstamped — post-window hygiene, they cannot fire tonight.
+**Lesson: always pass `--reply-to <id>` on the answering send; the substantive answer alone does not
+close the row.**
+
 **00:05Z — small, non-blocking finding (post-window): `protected_agents` reads the WRONG DSN on every
 lane.** `nervous_system/protected_agents.py:99-100` defaults to `os.environ["DATABASE_URL"]`, but a
 lane's scrubbed env carries only `BUS_DATABASE_URL` (deliberate, bus #82524/#82668 — stops it
