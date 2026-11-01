@@ -112,11 +112,23 @@ class BrokerServer:
         except (socket.timeout, OSError):
             self._respond(conn, encode_error(ErrorCode.INTERNAL_ERROR, "request timeout"))
             return
-        if not line:
-            self._respond(conn, encode_error(ErrorCode.INTERNAL_ERROR, "empty request"))
-            return
         if len(line) > _MAX_REQUEST_BYTES:
+            # Size check FIRST (cc-fleet-health review): an oversized line --
+            # even an all-whitespace one -- is reported as too large, never as
+            # the blank-line probe answer below.
             self._respond(conn, encode_error(ErrorCode.INTERNAL_ERROR, "request too large"))
+            return
+        if not line.strip():
+            # EOF or a BLANK line (b"\n" is the heartbeat's own liveness probe,
+            # cc-fleet-health bus #89888): answered BEFORE the ACL check, with
+            # no DB connection, no exec_broker_access_log row and no log line.
+            # Not a bypass: a blank line carries no request, so nothing past
+            # this point (ACL, parse, audit, gate, mgmt API) is reachable by
+            # it -- it only proves accept()+respond ran. Answering it before
+            # the ACL just avoids a per-tick ACL_DENIED WARNING for the
+            # daemon's own uid without widening the ACL. Any non-blank line
+            # still hits the ACL first, exactly as before.
+            self._respond(conn, encode_error(ErrorCode.INTERNAL_ERROR, "empty request"))
             return
 
         try:
