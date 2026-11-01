@@ -292,7 +292,10 @@ def test_failed_ship_still_writes_an_exit_1_run_row_when_the_db_allows(monkeypat
     t.fail = True
     t.fail_runs = False
     assert _main(monkeypatch, tmp_path, t) == 1
-    assert t.runs["gzb"]["exit_code"] == 1 and t.runs["gzb"]["cursor_offset"] is None
+    run = t.runs["gzb"]
+    assert run["exit_code"] == 1
+    # what was already known is passed through: nothing committed -> offset 0
+    assert run["cursor_offset"] == 0 and run["ledger_size"] == (tmp_path / "ledger.jsonl").stat().st_size
 
 
 def test_db_down_exits_1_with_no_run_row(monkeypatch, tmp_path):
@@ -347,3 +350,59 @@ def test_cron_alternative_is_comment_only_and_flock_wrapped():
     svc = (_PATH.parent.parent / "deploy" / "wingmen-exec-prod-ledger-shipper.service").read_text()
     cron = [line for line in svc.splitlines() if "*/5" in line]
     assert cron and all(line.lstrip().startswith("#") and "flock -n" in line for line in cron)
+
+
+
+# --- second cc-fleet-health review --------------------------------------------
+
+def test_failed_ship_run_row_carries_the_committed_offset_not_the_failed_batch(monkeypatch, tmp_path):
+    monkeypatch.setattr(shipper, "BATCH_LINES", 2)
+    lines = [_entry(f"e{i}") for i in range(5)]
+    (tmp_path / "ledger.jsonl").write_text("".join(lines))
+
+    class _FailsOnThirdLine(FakeTable):
+        def __call__(self):
+            conn = FakeTable.__call__(self)
+            table = self
+            real_cursor = conn.cursor
+
+            def cursor():
+                cur = real_cursor()
+                real_execute = cur.execute
+
+                def execute(sql, row):
+                    if sql == shipper.INSERT_SQL and row["exec_id"] == "e2":
+                        raise RuntimeError("db fell over mid-run")
+                    return real_execute(sql, row)
+
+                cur.execute = execute
+                return cur
+
+            conn.cursor = cursor
+            return conn
+
+    t = _FailsOnThirdLine()
+    assert _main(monkeypatch, tmp_path, t) == 1
+    run = t.runs["gzb"]
+    first_batch_end = len("".join(lines[:2]).encode())
+    assert run["exit_code"] == 1 and run["cursor_offset"] == first_batch_end
+    assert run["shipped"] == 2 and run["conflicted"] == 0
+    assert shipper.read_cursor(tmp_path / "cursor.json")["offset"] == first_batch_end
+
+
+def test_dry_run_summary_reports_inserted_and_conflicted_as_na(monkeypatch, tmp_path, capsys):
+    import fleet_host_id
+    monkeypatch.setattr(fleet_host_id, "fleet_host_id", lambda: "gzb")
+    monkeypatch.setattr(shipper, "_conn_factory", FakeTable())
+    (tmp_path / "ledger.jsonl").write_text(_entry("e1") + _entry("e2"))
+    assert shipper.main(["--ledger", str(tmp_path / "ledger.jsonl"),
+                         "--cursor", str(tmp_path / "cursor.json"), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "inserted=n/a conflicted=n/a" in out and "conflicted=2" not in out
+
+
+def test_service_pins_the_canonical_host_label():
+    svc = (_PATH.parent.parent / "deploy" / "wingmen-exec-prod-ledger-shipper.service").read_text()
+    assert "Environment=FLEET_HOST_ID=gzbai" in svc
+    hosts = json.loads((_PATH.parent / "lib" / "fleet_hosts.json").read_text())
+    assert "gzbai" in json.dumps(hosts)

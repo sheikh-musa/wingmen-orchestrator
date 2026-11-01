@@ -13,6 +13,12 @@ Requires=wingmen-fetch-secrets.service
 [Service]
 Type=oneshot
 User=gazzai
+# Pin the canonical host label (scripts/lib/fleet_hosts.json "gzbai") so
+# fleet_host_id() takes its durable FLEET_HOST_ID path. Without it the unit
+# falls back to alias-matching gethostname() with a 'host not pinned' warning
+# every run -- and exec_prod_ledger.host / exec_prod_ledger_shipper_runs.host
+# must be one stable label for the reconcile and the run heartbeat to key on.
+Environment=FLEET_HOST_ID=gzbai
 WorkingDirectory=/home/gazzai/wingmen/orchestrator
 ExecStart=/home/gazzai/wingmen/orchestrator/.venv/bin/python scripts/exec_prod_ledger_shipper.py
 

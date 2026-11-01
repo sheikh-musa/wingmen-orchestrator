@@ -198,7 +198,7 @@ def start_offset(cursor: dict, size: int, inode: int) -> "tuple[int, str | None]
 class Report:
     shipped_lines: int = 0      # lines attempted (parsed OK and sent to INSERT)
     inserted: int = 0           # rows actually inserted (sum of cur.rowcount)
-    ledger_size: int = 0
+    ledger_size: "int | None" = None   # None until the ledger was stat()ed
     malformed: list = field(default_factory=list)   # [(byte_offset, reason)]
     restarted: "str | None" = None
     start: int = 0
@@ -221,8 +221,11 @@ def iter_complete_lines(data: bytes, base: int):
         pos = nl + 1
 
 
-def ship(*, ledger: Path, cursor_path: Path, host: str, conn_factory, dry_run: bool = False) -> Report:
-    report = Report()
+def ship(*, ledger: Path, cursor_path: Path, host: str, conn_factory, dry_run: bool = False,
+         report: "Report | None" = None) -> Report:
+    """Ship new complete lines. Pass `report` to keep the partial state if this
+    raises: report.end is only ever advanced to the end of a COMMITTED batch."""
+    report = report if report is not None else Report()
     try:
         st = ledger.stat()
     except FileNotFoundError:
@@ -277,9 +280,11 @@ def _conn_factory():
 def write_run_row(conn_factory, *, host: str, exit_code: int, rep: "Report | None") -> bool:
     """Upsert this host's run-heartbeat row. Best effort: returns False (never
     raises) if the DB is unreachable -- the stale row is then the signal."""
+    seen = rep is not None and rep.ledger_size is not None
     params = {
         "host": host, "exit_code": exit_code,
-        "cursor_offset": rep.end if rep else None, "ledger_size": rep.ledger_size if rep else None,
+        # cursor_offset = end of the last COMMITTED batch (never past a failed one)
+        "cursor_offset": rep.end if seen else None, "ledger_size": rep.ledger_size if seen else None,
         "shipped": rep.shipped_lines if rep else None,
         "malformed": len(rep.malformed) if rep else None,
         "conflicted": rep.conflicted if rep else None,
@@ -328,19 +333,24 @@ def main(argv=None) -> int:
             print("exec_prod_ledger_shipper: another run holds the lock -- skipping (it writes the run row)")
             return 0
     try:
+        rep = Report()
         try:
-            rep = ship(ledger=a.ledger, cursor_path=a.cursor, host=host,
-                       conn_factory=_conn_factory, dry_run=a.dry_run)
+            ship(ledger=a.ledger, cursor_path=a.cursor, host=host,
+                 conn_factory=_conn_factory, dry_run=a.dry_run, report=rep)
         except Exception as e:  # noqa: BLE001 -- report the class only (never a DSN)
             print(f"exec_prod_ledger_shipper: ship failed ({e.__class__.__name__}) -- cursor not advanced "
                   "past the failed batch", file=sys.stderr)
             if not a.dry_run:
-                write_run_row(_conn_factory, host=host, exit_code=1, rep=None)
+                # whatever is already known: committed cursor_offset, ledger_size, counts so far
+                write_run_row(_conn_factory, host=host, exit_code=1, rep=rep)
             return 1
         code = 2 if rep.malformed else 0
         print(f"exec_prod_ledger_shipper: host={host} bytes {rep.start}..{rep.end} "
               f"ledger_size={rep.ledger_size} shipped_lines={rep.shipped_lines} "
-              f"inserted={rep.inserted} conflicted={rep.conflicted} malformed={len(rep.malformed)}"
+              # dry-run attempts no INSERT, so inserted/conflicted are not knowable
+              + ("inserted=n/a conflicted=n/a" if a.dry_run
+                 else f"inserted={rep.inserted} conflicted={rep.conflicted}")
+              + f" malformed={len(rep.malformed)}"
               + (f" restart={rep.restarted}" if rep.restarted else "")
               + (" (dry-run)" if a.dry_run else ""))
         for off, why in rep.malformed:
