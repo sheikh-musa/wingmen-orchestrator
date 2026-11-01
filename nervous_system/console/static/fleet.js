@@ -458,7 +458,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v94';
+  var APP_BUILD = 'fc-v95';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -1009,14 +1009,14 @@
     var s = esc(e.session);
     var ctrls = "";
     if (r.token_settable) {
+      // STATIC LABEL ONLY (orch-console 89062): the per-lane token dropdown and its
+      // Preview/Apply pair are gone. A control that cannot act should not be there --
+      // the token group is shown, not offered. The dock group switch is the live token
+      // control; a per-lane token change happens at relaunch. Model controls below are
+      // unchanged (they DO act), and the server endpoints are untouched.
       var tlabel = r.token_group ? ("Token · " + esc(r.token_group) + " group")
         : (r.token_pointer === ".lane_default_token" ? "Token · all lanes" : "Token");
-      var topts = '<option value="">— default —</option>' + (ttRegistry.tokens || []).map(function (t) {
-        var sel = (r.token_pointer_name === t.name) ? " selected" : "";
-        var dis = t.available ? "" : " disabled";
-        return '<option value="' + esc(t.name) + '"' + sel + dis + '>' + esc(t.name) + (t.fp ? " (" + esc(t.fp) + ")" : "") + '</option>';
-      }).join("");
-      ctrls += '<label><span>' + tlabel + '</span><select data-kind="token" data-session="' + s + '">' + topts + '</select></label>';
+      ctrls += '<div class="qctlnote">' + tlabel + '</div>';
     } else {
       ctrls += '<div class="qctlnote">token: .env default (not pointer-settable)</div>';
     }
@@ -1030,10 +1030,6 @@
       ctrls += '<div class="qctlnote">model: env-driven at boot (not pointer-settable)</div>';
     }
     var ab = "";
-    if (r.token_settable) {
-      ab += '<div class="b prev" data-apply="token" data-session="' + s + '">Preview token</div>';
-      ab += '<div class="b arm" data-armapply="token" data-session="' + s + '">Apply token</div>';
-    }
     if (r.model_settable) {
       ab += '<div class="b prev" data-apply="model" data-session="' + s + '">Preview model</div>';
       ab += '<div class="b arm" data-armapply="model" data-session="' + s + '">Apply model</div>';
