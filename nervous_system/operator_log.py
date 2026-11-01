@@ -587,24 +587,37 @@ _ECHO_LOOKBACK_DAYS = 7  # clients quote lists from days back, not just the last
 
 _NOTICE_FILE_MARK = "sent a FILE →"
 _NOTICE_FILE_CAP = "  | caption: "
-_NOTICE_FAIL_MARK = "sent a file (download failed:"
+# F1 on PR #796 (cc-quality, bus #89033): the download-failure notice is built by
+# SIX ingest sites, not one -- photo (ingest.py:292), animation (:304), document
+# (:312), voice note (:323), video (:337), video note (:348) -- and every one of
+# them appends the same "(download failed: {e})" tail with the same " | <caption>"
+# separator. Covering only the document sample left the identical misfire live for
+# the other five: each is a "sent a <kind> (download failed: HTTP Error 400 ...)"
+# row whose \berror\b opens a 24h chase for a client who asked nothing. Matching
+# the SHAPE they share closes the class, and a seventh media kind cannot reopen it.
+#
+# Still anchored and still our own literal marker: a client would have to type
+# "sent a photo (download failed: " verbatim. Any caption after the separator is
+# returned intact, so this only ever removes text we can prove is ours.
+_NOTICE_FAIL_RE = re.compile(
+    r"^sent (?:a|an) [A-Za-z][A-Za-z0-9 ]*? \(download failed: ")
 _NOTICE_FAIL_CAP = ") | "
 
 
 def strip_system_notice(text: str) -> str:
     """Return only the part of an ingest-generated media notice the CLIENT typed.
 
-    Exact-prefix match on the two strings ingest.py:309/312 build; no fuzzy
+    Anchored match on the strings ingest.py's media paths build; no fuzzy
     matching (orch-console #89013). A notice with no caption yields ""."""
     t = (text or "").strip()
-    if t.startswith(_NOTICE_FILE_MARK):
-        i = t.find(_NOTICE_FILE_CAP)
-        return t[i + len(_NOTICE_FILE_CAP):].strip() if i >= 0 else ""
-    if t.startswith(_NOTICE_FAIL_MARK):
+    if _NOTICE_FAIL_RE.match(t):
         # the failure notice appends the caption as " | <caption>"; the error repr
         # before it ends at a ')' followed by that separator.
         i = t.find(_NOTICE_FAIL_CAP)
         return t[i + len(_NOTICE_FAIL_CAP):].strip() if i >= 0 else ""
+    if t.startswith(_NOTICE_FILE_MARK):
+        i = t.find(_NOTICE_FILE_CAP)
+        return t[i + len(_NOTICE_FILE_CAP):].strip() if i >= 0 else ""
     return text
 
 
