@@ -1,6 +1,7 @@
 """Static check: migrations/drafts/hc95_broker_watch_readonly.sql grants ONLY
 SELECT, on EXACTLY exec_broker_heartbeat / exec_broker_access_log /
-exec_prod_ledger, to broker_watch_readonly (console ruling bus #89906)."""
+exec_prod_ledger / exec_prod_ledger_shipper_runs, to broker_watch_readonly
+(console ruling bus #89906; shipper run table added per bus #89909)."""
 from __future__ import annotations
 
 import re
@@ -8,7 +9,8 @@ from pathlib import Path
 
 _DRAFTS = Path(__file__).resolve().parent.parent / "migrations" / "drafts"
 _SQL = (_DRAFTS / "hc95_broker_watch_readonly.sql").read_text()
-_TABLES = {"exec_broker_heartbeat", "exec_broker_access_log", "exec_prod_ledger"}
+_TABLES = {"exec_broker_heartbeat", "exec_broker_access_log", "exec_prod_ledger",
+           "exec_prod_ledger_shipper_runs"}
 
 
 def _code() -> str:
@@ -20,13 +22,13 @@ def _grants() -> list:
     return re.findall(r"(?is)\bGRANT\s+(.+?)\s+ON\s+(.+?)\s+TO\s+([a-z_]+)\s*;", _code())
 
 
-def test_grants_select_only_on_exactly_the_three_tables():
+def test_grants_select_only_on_exactly_the_four_tables():
     table_grants = [(p.strip().upper(), on.strip(), to) for p, on, to in _grants()
                     if not on.strip().upper().startswith("SCHEMA")]
     assert all(to == "broker_watch_readonly" for _, _, to in table_grants)
     assert all(priv == "SELECT" for priv, _, _ in table_grants), table_grants
     assert {on.replace("public.", "") for _, on, _ in table_grants} == _TABLES
-    assert len(table_grants) == 3
+    assert len(table_grants) == 4
 
 
 def test_only_other_grant_is_usage_on_schema_public():
@@ -54,6 +56,7 @@ def test_every_rls_enabled_table_gets_a_select_policy():
         "exec_broker_heartbeat": "hc95_exec_broker_heartbeat.sql",
         "exec_broker_access_log": "hc95_exec_broker_access_log.sql",
         "exec_prod_ledger": "exec_prod_ledger.sql",
+        "exec_prod_ledger_shipper_runs": "exec_prod_ledger.sql",
     }
     code = _code()
     for table, fname in drafts.items():
