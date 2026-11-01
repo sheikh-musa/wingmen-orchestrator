@@ -79,10 +79,6 @@ B1 + B2 + --ref ANCHOR (cc-fleet-health cutover spec, bus #89814, 2026-11-01):
     SPECIFIC anchor -- ref, migration or pr matched against the gate text --
     exactly as exec_prod requires; a bare silo-mentioning gate never
     authorizes arbitrary DML (same cross-authorization class as #70929).
-  * Ruling C (console #89827/#89841): exec_prod's wrapped reads are exempt
-    ONLY when the broker proves the statement is exactly the byte-pinned
-    canonical wrapper around a plain read (canonical_wrapper.py). DML/DDL
-    inside the wrapper is not a plain read and stays gated.
 """
 from __future__ import annotations
 
@@ -90,7 +86,6 @@ import hashlib
 import re
 from datetime import datetime, timezone
 
-from .canonical_wrapper import is_wrapped_plain_read
 from .ddl_detect import is_ddl_shaped
 from .lexical_hazard import is_lexically_hazardous
 from .protocol import ErrorCode
@@ -297,14 +292,7 @@ def require_gate(
 
     hazardous = is_lexically_hazardous(guarded_sql)
     ddl = is_ddl_shaped(guarded_sql)
-    if not ddl and not hazardous and (
-        is_plain_read(guarded_sql) or is_wrapped_plain_read(guarded_sql)
-    ):
-        # Ruling C (console #89827/#89841): a raw plain read, OR exactly the
-        # byte-pinned canonical exec_prod wrapper around a plain read --
-        # decided here from the bytes alone, never from a caller flag (see
-        # canonical_wrapper.py). The whole-statement DDL/hazard checks above
-        # still apply to the wrapped form.
+    if not ddl and not hazardous and is_plain_read(guarded_sql):
         return False
 
     if (ddl or hazardous) and ref and not (migration or pr):
