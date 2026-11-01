@@ -113,8 +113,16 @@ IGNORED_FIELDS = {
                   "import_batch_role", "import_batch_enriched_fields"},
     # sch_student_parents structural/bookkeeping cols (NOT deep-PII): link FKs, contact-flag,
     # relationship label, timestamps. CAI-1030: enumerated so any OTHER link col fails closed.
+    #
+    # second_parent_visible (mig488, hc#463, Shuq/Wan billing feature; applied by coord 89036):
+    # was a FALSE P0 on 2026-11-01 (bus 89038/89039). It is a visibility TOGGLE -- "does the
+    # second parent see the invoices" -- a NOT NULL DEFAULT false boolean, so the generic
+    # IS NOT NULL test below counted all 2286 link rows the instant the column existed, with
+    # zero true. Exactly the class of `restricted`/`is_primary_contact` (coord #56215): a flag's
+    # EXISTENCE is not a deep-PII fact. Ignored by name; every other unclassified link column
+    # still fails CLOSED (test_mig488_ignore_does_not_widen_the_loop is the guard on that).
     _K_PARENTS: {"id", "org_id", "parent_person_id", "student_id", "relationship",
-                 "is_primary_contact", "created_at", "updated_at"},
+                 "is_primary_contact", "second_parent_visible", "created_at", "updated_at"},
 }
 # CAI-1030 EXPANSION (Nazim #41337): parent persons are the SAME PII class as student persons PLUS
 # guardian CONTACT (the "parent graph" Musa authorized 21193 — the same class already in-envelope as

@@ -492,3 +492,58 @@ def test_cai1030_plaintext_parent_contact_still_forbidden(monkeypatch, pg_dsn):
             f"PLAINTEXT parent contact must STILL trip (ciphertext-only floor); got {breaches}"
     finally:
         conn.rollback(); conn.close()
+
+
+# ── mig488 second_parent_visible: a false P0 on a NOT-NULL-DEFAULT-FALSE toggle (bus 89039) ──
+def test_mig488_second_parent_visible_does_not_trip_the_fail_closed_loop(monkeypatch, pg_dsn):
+    """mig488 / hc#463 (applied by coord 89036, ruled on in bus 89039): second_parent_visible
+    is a visibility toggle -- does the second parent see the invoices -- NOT deep PII.
+
+    Because it is NOT NULL DEFAULT false, the generic IS NOT NULL test in count_forbidden
+    counted every link row the moment the column existed: 2286 links, 0 true, a P0 that
+    measured the column's existence rather than any PII. Same class as restricted
+    (coord #56215). The fix is a name-level IGNORE, not a ceiling gate: there is no value of
+    this column that is a PII fact."""
+    conn = _cai1030_conn(pg_dsn); cur = conn.cursor()
+    try:
+        _cai1030_standin(cur, extra_parents=", second_parent_visible boolean NOT NULL DEFAULT false")
+        _cai1030_point(monkeypatch)
+        org = _CAI1030_ORG
+        sid, _ = _mk_student(cur, org)
+        _mk_parent_link(cur, org, sid)   # takes the default false, i.e. IS NOT NULL is true
+
+        f = M.count_forbidden(cur, org)
+        assert "_sre_parents2.second_parent_visible" not in f, \
+            "an ignored toggle must not even be counted (counting it is what P0'd on 2286 links)"
+        breaches, _ = M.classify_forbidden(f)
+        assert not [l for l, _ in breaches if "second_parent_visible" in l], \
+            f"second_parent_visible must not breach; got {breaches}"
+    finally:
+        conn.rollback(); conn.close()
+
+
+def test_mig488_ignore_does_not_widen_the_loop(monkeypatch, pg_dsn):
+    """NEGATIVE CONTROL for the same change (required by the 89039 ruling): with
+    second_parent_visible ignored, a NEW unclassified link column of a different name must
+    STILL fail closed. An ignore that swallowed its neighbours would be worse than the
+    false P0 it fixes -- it would silence the fail-closed-unknown guard that keeps a future
+    mig-added PII column from reading green."""
+    conn = _cai1030_conn(pg_dsn); cur = conn.cursor()
+    try:
+        _cai1030_standin(cur, extra_parents=(
+            ", second_parent_visible boolean NOT NULL DEFAULT false"
+            ", surprise_flag boolean NOT NULL DEFAULT false"))
+        _cai1030_point(monkeypatch)
+        org = _CAI1030_ORG
+        sid, _ = _mk_student(cur, org)
+        _mk_parent_link(cur, org, sid)
+        cur.execute("UPDATE _sre_parents2 SET surprise_flag=true")
+
+        breaches, _ = M.classify_forbidden(M.count_forbidden(cur, org))
+        labels = {l for l, _ in breaches}
+        assert "_sre_parents2.surprise_flag" in labels, \
+            f"an unknown link column must STILL fail closed; got {breaches}"
+        assert not any("second_parent_visible" in l for l in labels), \
+            f"the ignored toggle must stay ignored; got {breaches}"
+    finally:
+        conn.rollback(); conn.close()
