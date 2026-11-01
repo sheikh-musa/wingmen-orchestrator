@@ -1093,23 +1093,77 @@ def owner_of(from_agent: str) -> str:
     return from_agent
 
 
+def _addressee_down(to_agent, down_addressees, live_bases):
+    """PURE: is this row's ADDRESSEE a lane the registry has stopped?
+
+    orch-console #90244 (2026-11-01): the aged-rr net keys on read_at, so a row
+    addressed to a lane that is desired_state='down' can never be read and re-pages
+    its issuer's owner every cadence forever (89685/89772/89780, all to
+    cc-hifz-1 while lane 'hifz' was stopped). Hold such rows instead of paging.
+
+    Two guards keep this from hiding a real stall:
+      - `down_addressees` is matched on the addressee AND on its instance-stripped
+        base ('cc-hifz-1' -> 'cc-hifz'), because fleet_lanes records the lane and
+        its base, never the live instance id;
+      - a base with a LIVE instance on any host is NOT held. Registry down-ness is
+        this host's intent, not liveness: the Mini's 'irsyad-coord' row reads down
+        while cc-irsyad-coord-1 runs on gzb, and holding that row would silence a
+        genuine stall. Same reasoning as resolve_recipient().
+    """
+    if not down_addressees:
+        return False
+    to_agent = to_agent or ""
+    base = re.sub(r"-\d+$", "", to_agent)
+    if to_agent not in down_addressees and base not in down_addressees:
+        return False
+    return base not in (live_bases or ())
+
+
+def _aged_rr_eligible(r, *, repage_after_min, watermark_id):
+    """PURE: every reason a row is in the aged-rr net's SCOPE, before the per-row
+    cadence and the down-addressee hold. Split out so the held log can name exactly
+    the rows the hold suppressed -- not rows that were never due anyway (read,
+    answered, too young, or below the backfill watermark)."""
+    return bool(r.get("priority") in ESCALATE_PRIORITIES
+                and r.get("requires_response")
+                and r.get("responded_at") is None
+                and r.get("read_at") is None
+                and (r.get("elapsed_minutes") or 0) >= repage_after_min
+                and (watermark_id is None or (r.get("id") or 0) > watermark_id))
+
+
+def held_down_addressees(rows, *, down_addressees, live_bases,
+                         repage_after_min=REPAGE_AFTER_MIN, watermark_id=None):
+    """PURE: the rows the re-page net WILL HOLD because their addressee is a stopped
+    lane — i.e. only rows that would otherwise have been paged. Separate from
+    aged_rr_repage_targets so the caller can LOG what it held: a detector that
+    silently drops rows is the failure mode this whole file exists to avoid.
+    Returns [] (never an exception) when the guard sets are unavailable."""
+    return [r for r in rows
+            if _aged_rr_eligible(r, repage_after_min=repage_after_min,
+                                 watermark_id=watermark_id)
+            and _addressee_down(r.get("to_agent"), down_addressees, live_bases)]
+
+
 def aged_rr_repage_targets(rows, *, now, repage_state, repage_after_min=REPAGE_AFTER_MIN,
-                           repage_every_min=REPAGE_EVERY_MIN, watermark_id=None):
+                           repage_every_min=REPAGE_EVERY_MIN, watermark_id=None,
+                           down_addressees=None, live_bases=None):
     """PURE: P0/P1 requires_response rows that are unanswered (responded_at NULL) AND
     still UNREAD (read_at NULL) and aged >= repage_after_min, due for a re-page under
     the every-repage_every_min cadence. `repage_state` maps str(id)->last-repage epoch;
     a row is due when never re-paged or (now - last) >= the cadence. Each returned row
     carries its `owner` (owner_of(from_agent)). `watermark_id` (pinned to max(id) at
     enable-time) excludes the entire pre-existing backlog by construction, so turning the
-    net on pages ZERO history — only stalls crossing the floor going forward re-page."""
+    net on pages ZERO history — only stalls crossing the floor going forward re-page.
+
+    `down_addressees` / `live_bases` (orch-console #90244) hold out rows addressed to a
+    stopped lane — see _addressee_down(). Both default to None, which holds nothing:
+    a caller that cannot read the registry keeps the OLD behaviour (page), because a
+    guard that fails closed on itself would silence the net."""
     due = []
     for r in rows:
-        if (r.get("priority") in ESCALATE_PRIORITIES
-                and r.get("requires_response")
-                and r.get("responded_at") is None
-                and r.get("read_at") is None
-                and (r.get("elapsed_minutes") or 0) >= repage_after_min
-                and (watermark_id is None or (r.get("id") or 0) > watermark_id)):
+        if (_aged_rr_eligible(r, repage_after_min=repage_after_min, watermark_id=watermark_id)
+                and not _addressee_down(r.get("to_agent"), down_addressees, live_bases)):
             last = repage_state.get(str(r.get("id")), 0) or 0
             if (now - last) >= repage_every_min * 60:
                 t = dict(r)
@@ -1273,6 +1327,25 @@ def fetch_recipient_resolution(conn):
         for (aid,) in cur.fetchall():
             live_instances.setdefault(re.sub(r"-\d+$", "", aid), []).append(aid)
     return valid_agent_ids, tmux_to_agent, down_lanes, live_instances
+
+
+def fetch_live_bases(conn) -> set:
+    """Impure: the bases that are ACTUALLY live right now — every agent_status row
+    with a fresh heartbeat, instance-suffixed ids folded onto their base.
+
+    Used ONLY by the down-addressee hold (#90244). It must not rely on
+    fetch_recipient_resolution()'s live_instances, which deliberately contains
+    instance ids alone: a BASE singleton (cc-fleet-health) never appears there, so
+    a stale desired_state='down' row on a base that is alive would otherwise hold
+    every row addressed to it. Live today: fleet_lanes says fleet-health is down
+    (since 2026-10-07) while agent_status says cc-fleet-health is working — exactly
+    the over-suppression this function prevents."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT agent_id FROM agent_status "
+            "WHERE COALESCE(status,'') <> 'offline' "
+            "AND last_heartbeat > now() - interval '20 minutes'")
+        return {re.sub(r"-\d+$", "", a) for (a,) in cur.fetchall() if a}
 
 
 def dry_identity_guard(conn) -> bool:
@@ -2425,6 +2498,21 @@ def run(dry: bool, injected: list[dict] | None = None,
         except Exception as e:  # fail LOUD, keep the scan alive (KeepAlive re-runs)
             log(f"read-parked-escalate ERROR: {e!r}")
 
+        # recipient-resolve guard (bus#67757/#67841/#67958/#67965, 2026-10-15):
+        # one cheap query per scan shared by the aged-rr net below AND both chase
+        # nets, so a chase owner that is a lane-name-not-agents.id or a down lane
+        # is SKIPPED (logged, not silently dropped) rather than FK-violating at
+        # insert time or paging a lane that structurally cannot act. A fetch
+        # failure here degrades to the OLD behavior (attempt the send, let the DB
+        # catch it) rather than silently skipping every chase this scan. Moved
+        # above the aged-rr net for orch-console #90244: that net now needs the
+        # down-lane set to hold rows addressed to a STOPPED lane.
+        try:
+            recipient_resolution = fetch_recipient_resolution(conn)
+        except Exception as e:  # noqa: BLE001 — fail loud, degrade not crash
+            log(f"recipient-resolve guard ERROR (degrading to no-guard this scan): {e!r}")
+            recipient_resolution = None
+
         # Ruling-3 (Nazim 2026-09-16): the aged unanswered rr RE-PAGE net — the #40129
         # fix. A P0/P1 rr the hub or SRE issued that ages past 6h while still UNREAD
         # re-pages the OWNER body (issuer; never the operator) at P1 every 6h until read.
@@ -2440,9 +2528,35 @@ def run(dry: bool, injected: list[dict] | None = None,
                 log(f"aged-rr-repage backfill-guard ARMED: watermark id={wm} "
                     f"(entire pre-existing backlog excluded)")
             repage_state = state.setdefault("aged_repage", {})
-            targets = aged_rr_repage_targets(
-                _fetch_aged_rr(conn), now=now, repage_state=repage_state,
+            # orch-console #90244: hold rows addressed to a STOPPED lane. Guard
+            # sets come from the shared resolution above; if it failed this scan
+            # they stay None, which holds nothing (fail toward paging, never
+            # toward silence). Held rows are logged so a suppression is on the
+            # record, not a silent disappearance.
+            down_addressees = live_bases = None
+            if recipient_resolution:
+                _, _, down_addressees, live_instances = recipient_resolution
+                try:
+                    # instance ids AND live base singletons -- a base is never in
+                    # live_instances, and a stale desired_state='down' on a live
+                    # base would otherwise hold that base's mail (see fetch_live_bases)
+                    live_bases = set(live_instances) | fetch_live_bases(conn)
+                except Exception as e:  # noqa: BLE001 — fail toward PAGING, never silence
+                    log(f"aged-rr-repage hold DISABLED this scan (live-base read failed, "
+                        f"degrading to the old page-everything behaviour): {e!r}")
+                    down_addressees = live_bases = None
+            aged_rows = _fetch_aged_rr(conn)
+            held = held_down_addressees(
+                aged_rows, down_addressees=down_addressees, live_bases=live_bases,
                 watermark_id=(wm if wm is not None else None))
+            if held:
+                log(f"aged-rr-repage HELD (addressee is desired_state=down, no live "
+                    f"instance): " + ", ".join(f"#{h.get('id')}->{h.get('to_agent')}"
+                                               for h in held))
+            targets = aged_rr_repage_targets(
+                aged_rows, now=now, repage_state=repage_state,
+                watermark_id=(wm if wm is not None else None),
+                down_addressees=down_addressees, live_bases=live_bases)
             if targets:
                 n = repage_aged_owners(
                     targets, dry=ar_dry, now=now, repage_state=repage_state,
@@ -2457,19 +2571,6 @@ def run(dry: bool, injected: list[dict] | None = None,
                     + ", ".join(f"#{t['id']}->{t['owner']}" for t in targets))
         except Exception as e:  # fail LOUD, keep the scan alive
             log(f"aged-rr-repage ERROR: {e!r}")
-
-        # recipient-resolve guard (bus#67757/#67841/#67958/#67965, 2026-10-15):
-        # one cheap query per scan shared by both chase nets below, so a chase
-        # owner that is a lane-name-not-agents.id or a down lane is SKIPPED
-        # (logged, not silently dropped) rather than FK-violating at insert
-        # time or paging a lane that structurally cannot act. A fetch failure
-        # here degrades to the OLD behavior (attempt the send, let the DB
-        # catch it) rather than silently skipping every chase this scan.
-        try:
-            recipient_resolution = fetch_recipient_resolution(conn)
-        except Exception as e:  # noqa: BLE001 — fail loud, degrade not crash
-            log(f"recipient-resolve guard ERROR (degrading to no-guard this scan): {e!r}")
-            recipient_resolution = None
 
         # op#22669 asks-chase net (piece 4): waiting_on_operator asks (migration
         # 072) overdue past chase_by (or ASKS_CHASE_GRACE_MIN with none set) get
