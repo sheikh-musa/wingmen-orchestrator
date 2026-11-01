@@ -39,7 +39,12 @@ def conn(request):
         for role in ("authenticated", "anon", "service_role", "exec_broker_role"):
             c.execute(f"DO $$ BEGIN CREATE ROLE {role}; EXCEPTION WHEN duplicate_object THEN NULL; END $$")
         c.execute("DROP TABLE IF EXISTS exec_broker_heartbeat")
-        # the draft also indexes exec_broker_access_log (watchdog open-row probe)
+        # PREREQUISITE (stated in the draft header): the draft also indexes
+        # exec_broker_access_log, so apply the REAL migration that creates that
+        # table first -- never a hand-written stub. It is CREATE TABLE IF NOT
+        # EXISTS and shared session-wide with test_exec_broker_access_log_isolation,
+        # so it is not dropped on teardown (only this file's index is).
+        c.execute("GRANT USAGE ON SCHEMA public TO PUBLIC")
         c.execute((_ROOT / "migrations" / "drafts" / "hc95_exec_broker_access_log.sql").read_text())
         c.execute(_DRAFT.read_text())
         c.execute(_DRAFT.read_text())   # idempotent re-apply
@@ -47,6 +52,7 @@ def conn(request):
         yield c
     with psycopg.connect(dsn, autocommit=True) as c:
         c.execute("DROP TABLE IF EXISTS exec_broker_heartbeat")
+        c.execute("DROP INDEX IF EXISTS exec_broker_access_log_open_idx")
 
 
 def _take(c, host, boot):

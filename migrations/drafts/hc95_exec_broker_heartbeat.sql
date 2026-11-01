@@ -3,6 +3,13 @@
 -- NOT applied. Migration NNN assigned by CORE at apply. Target: the fleet-bus DB
 -- (same database as exec_broker_access_log -- the broker's single DSN).
 --
+-- PREREQUISITE: exec_broker_access_log must already exist (it is LIVE on the
+-- substrate; created by migrations/drafts/hc95_exec_broker_access_log.sql). This
+-- file adds a partial index to it (exec_broker_access_log_open_idx, bottom of the
+-- file), so applying it to a DB without that table fails and rolls back.
+-- Apply order within hc#95: gate_ref -> single_use -> THIS -> exec_prod_ledger ->
+-- broker_watch_readonly.
+--
 -- One row per GATED ref (the broker's standing EXEC_BROKER_LIVE_GATED_REFS set).
 -- Writer: scripts/lib/exec_broker/heartbeat.py, started by exec_broker_daemon.py
 -- before it serves. Shape mirrors migrations/023_fleet_health_lease.sql: CAS take
