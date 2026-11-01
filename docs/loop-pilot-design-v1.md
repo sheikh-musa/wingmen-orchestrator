@@ -717,3 +717,39 @@ lanes" specifically; (2) if the goal is "does a cheap reviewer catch what an
 expensive one catches," which is the narrower question this mutation pass
 tried and mostly failed to get traction on, for lack of a test-set weak
 enough to need a reviewer's judgment at all.
+
+### 10. STATUS UPDATE (2026-11-01): path (1) already ran -- this section was stale
+
+Everything above this line was written before path (1) was tried. It has
+since been run, finished, and reported -- if you are picking this branch up
+cold, read this section FIRST so you don't re-run a $15-20 live trial that
+already happened.
+
+- Path (1) ("real pass rate of DeepSeek-built PRs at cc-quality, on a small
+  live trial") was executed 2026-10-30: 9 small real orchestrator-repo items
+  built end-to-end by DeepSeek (real branches/PRs, normal cc-quality review,
+  merged on normal PASS), plus a same-day Claude-opus-4-8 baseline on the
+  identical 9 briefs for a fair comparison, reviewed by cc-quality without
+  the model being named in either batch.
+- **Result: identical first-pass finding profile on both** -- 0 findings on
+  8/9 items, the same single MED finding on item 2 for both models,
+  independently. DeepSeek ~1.5x slower on wall time; Claude drew ~33% less
+  total quota (cache-inclusive). Two real infra bugs found along the way,
+  both fixed and merged (PR#707, PR#708). Recommendation: not a fleet-wide
+  move yet -- run one real DeepSeek builder lane for a week under a tighter
+  blind, gated on substrate 2.0 being fully operational.
+- **The full report lives at `~/wingmen/loop-pilot-state/live-trial/FINAL-REPORT-DRAFT.md`
+  (NOT in this repo, NOT linked from anywhere else in git)** and was
+  delivered to orch-console via agent_messages id 85326 ("op#35690: final
+  report finalized with all 4 fixes applied", 2026-10-30 21:24Z). No bus
+  reply closing the loop was found in a search of messages between id
+  85326 and 86278, at which point orch-console redirected this lane to an
+  unrelated task (op#36531/36535). Treat op#35690 as DELIVERED, not
+  explicitly closed.
+- **Open commitment, not yet due:** the report's rolling-intake window (any
+  new small LOW/MED orchestrator finding, run through the same harness and
+  appended as an addendum) is stated as OPEN until **Thu 5 Nov 2026
+  12:00Z**, with 0 qualifying items as of the report's writing. Nothing in
+  this repo currently tracks or watches for that deadline -- whoever or
+  whatever is driving this lane when that date arrives needs to either
+  action it or explicitly let it lapse with orch-console's sign-off.
