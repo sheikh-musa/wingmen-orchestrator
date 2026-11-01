@@ -460,3 +460,22 @@ def test_start_heartbeat_takes_then_starts_the_writer(monkeypatch):
         assert writer._thread is not None and writer._thread.is_alive()
     finally:
         writer.stop()
+
+
+def test_main_refuses_boot_cleanly_on_a_heartbeat_value_error(monkeypatch, tmp_path, capsys):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+
+    def _bad(**kw):
+        raise ValueError("heartbeat needs at least one gated ref")
+
+    monkeypatch.setattr(daemon, "_start_heartbeat", _bad)
+    assert daemon.main([]) == 1
+    assert "heartbeat needs at least one gated ref" in capsys.readouterr().err
+
+
+def test_real_start_heartbeat_with_no_refs_raises_value_error(monkeypatch):
+    import fleet_host_id
+    monkeypatch.setattr(fleet_host_id, "fleet_host_id", lambda: "gzb")
+    with pytest.raises(ValueError):
+        _real_start_heartbeat(db_conn_factory=lambda: None, refs=frozenset(), interval_seconds=60)

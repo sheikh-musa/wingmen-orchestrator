@@ -368,7 +368,7 @@ def main(argv=None) -> int:
             db_conn_factory=_db_conn_factory, refs=live_gated_refs, interval_seconds=heartbeat_interval,
             sock_path=os.environ["EXEC_BROKER_SOCKET"],
         )
-    except RuntimeError as e:
+    except (RuntimeError, ValueError) as e:  # ValueError: HeartbeatWriter config (e.g. no refs)
         print(f"exec_broker_daemon: {e}", file=sys.stderr)
         return 1
     server.serve_forever()

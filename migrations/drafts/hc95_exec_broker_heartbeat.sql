@@ -31,8 +31,9 @@ CREATE TABLE IF NOT EXISTS exec_broker_heartbeat (
   beat_seq         bigint      NOT NULL DEFAULT 0,   -- beats since started_at
   interval_seconds integer     NOT NULL CHECK (interval_seconds BETWEEN 10 AND 900),
   ttl_seconds      integer     NOT NULL CHECK (ttl_seconds >= interval_seconds),
-  taken_over_from  text,                             -- prior holder_host:pid on a cross-host take
-  takeover_reason  text,
+  taken_over_from  text,                             -- previous holder's boot_id, stamped on ANY boot_id change
+  takeover_reason  text CHECK (takeover_reason IS NULL
+                               OR takeover_reason IN ('same_host_new_boot', 'host_change')),
   -- Listener self-probe (cc-fleet-health bus #89888): each beat also records
   -- whether the daemon's OWN accept loop answered a b"\n" probe with a
   -- well-formed response line. NULL until the first tick after boot.

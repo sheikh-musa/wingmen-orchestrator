@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
 
 from exec_broker import heartbeat  # noqa: E402
-from exec_broker.heartbeat import HeartbeatWriter, is_stale, may_take, ttl_for  # noqa: E402
+from exec_broker.heartbeat import HeartbeatWriter, is_stale, may_take, takeover_stamp, ttl_for  # noqa: E402
 
 _NOW = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
 _QA = "oovskwogvefnznfowjky"
@@ -329,4 +329,41 @@ def test_non_blank_request_from_an_unlisted_uid_is_still_acl_denied():
                   b'"caller": "c", "exec_ledger_id": "e"}\n')
         resp = _json.loads(c.makefile("rb").readline())
     assert resp["error"]["code"] == "ACL_DENIED"
+    assert db.cursor_obj.calls == []
+
+
+
+# --- cc-fleet-health review fixes ------------------------------------------
+
+def test_same_host_second_boot_take_is_stamped_with_the_first_boot_id():
+    first = {"holder_host": "gzbai", "boot_id": "boot-1", "taken_over_from": None, "takeover_reason": None}
+    assert takeover_stamp(first, "gzbai", "boot-2") == ("boot-1", "same_host_new_boot")
+    assert takeover_stamp(first, "other", "boot-2") == ("boot-1", "host_change")
+    assert takeover_stamp(first, "gzbai", "boot-1") == (None, None)        # same boot re-take: unchanged
+    assert takeover_stamp(None, "gzbai", "boot-1") == (None, None)
+
+
+def test_take_sql_stamps_on_any_boot_id_change():
+    sql = heartbeat._TAKE_SQL
+    assert "CASE WHEN exec_broker_heartbeat.boot_id <> EXCLUDED.boot_id" in sql
+    assert "THEN exec_broker_heartbeat.boot_id::text" in sql
+    assert "'same_host_new_boot'" in sql and "'host_change'" in sql
+    assert "%(reason)s" not in sql
+
+
+def test_oversized_all_whitespace_line_is_too_large_not_the_probe_answer():
+    import json as _json
+    from exec_broker import server as srv
+    uid = os.getuid()
+    path, db = _real_server(frozenset({uid}), uid)
+    deadline = time.monotonic() + 2
+    while not os.path.exists(path) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.05)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+        c.settimeout(5)
+        c.connect(path)
+        c.sendall(b" " * (srv._MAX_REQUEST_BYTES + 10) + b"\n")
+        resp = _json.loads(c.makefile("rb").readline())
+    assert resp["error"]["message"] == "request too large"
     assert db.cursor_obj.calls == []

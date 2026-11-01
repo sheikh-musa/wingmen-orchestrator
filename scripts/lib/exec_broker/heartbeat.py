@@ -24,8 +24,9 @@ TABLE (migrations/drafts/hc95_exec_broker_heartbeat.sql), one row per gated ref:
   beat_seq         bigint    beats since started_at (0 at take)
   interval_seconds integer   promised cadence
   ttl_seconds      integer   stale threshold (default 3 x interval)
-  taken_over_from  text      prior holder_host:pid when a different host took over
-  takeover_reason  text
+  taken_over_from  text      previous holder's boot_id, stamped whenever a take
+                             changes boot_id (same host OR a different host)
+  takeover_reason  text      'same_host_new_boot' | 'host_change' 
   loop_ok          boolean   last self-probe of the daemon's OWN listener got a
                              well-formed response line (NULL until the first tick)
   loop_checked_at  timestamptz  DB now() when that probe result was written
@@ -84,6 +85,20 @@ def is_stale(row: "dict | None", now: datetime) -> bool:
     return now > row["beat_at"] + timedelta(seconds=row["ttl_seconds"])
 
 
+def takeover_stamp(row: "dict | None", host: str, boot_id: str) -> "tuple[str | None, str | None]":
+    """(taken_over_from, takeover_reason) a successful take writes -- mirrors
+    _TAKE_SQL (cc-fleet-health review): stamped whenever the boot_id changes,
+    so a second daemon on the SAME host re-taking the row is visible
+    ('same_host_new_boot'), not only a cross-host take ('host_change').
+    taken_over_from is the previous holder's boot_id."""
+    if row is None:
+        return None, None
+    if row.get("boot_id") == boot_id:
+        return row.get("taken_over_from"), row.get("takeover_reason")
+    reason = "same_host_new_boot" if row.get("holder_host") == host else "host_change"
+    return str(row.get("boot_id")), reason
+
+
 def may_take(row: "dict | None", host: str, now: datetime) -> bool:
     """CAS-acquire rule (fleet_health_lease.apply_take): no row, or held by this
     host (a restart of the same body), or expired."""
@@ -101,11 +116,13 @@ _TAKE_SQL = (
     "  holder_host = EXCLUDED.holder_host, broker_pid = EXCLUDED.broker_pid, "
     "  boot_id = EXCLUDED.boot_id, started_at = now(), beat_at = now(), beat_seq = 0, "
     "  interval_seconds = EXCLUDED.interval_seconds, ttl_seconds = EXCLUDED.ttl_seconds, "
-    "  taken_over_from = CASE WHEN exec_broker_heartbeat.holder_host <> EXCLUDED.holder_host "
-    "      THEN exec_broker_heartbeat.holder_host || ':' || exec_broker_heartbeat.broker_pid "
+    "  taken_over_from = CASE WHEN exec_broker_heartbeat.boot_id <> EXCLUDED.boot_id "
+    "      THEN exec_broker_heartbeat.boot_id::text "
     "      ELSE exec_broker_heartbeat.taken_over_from END, "
-    "  takeover_reason = CASE WHEN exec_broker_heartbeat.holder_host <> EXCLUDED.holder_host "
-    "      THEN %(reason)s ELSE exec_broker_heartbeat.takeover_reason END "
+    "  takeover_reason = CASE "
+    "      WHEN exec_broker_heartbeat.boot_id = EXCLUDED.boot_id THEN exec_broker_heartbeat.takeover_reason "
+    "      WHEN exec_broker_heartbeat.holder_host = EXCLUDED.holder_host THEN 'same_host_new_boot' "
+    "      ELSE 'host_change' END "
     "WHERE exec_broker_heartbeat.holder_host = EXCLUDED.holder_host "
     "   OR exec_broker_heartbeat.beat_at + make_interval(secs => exec_broker_heartbeat.ttl_seconds) < now() "
     "RETURNING boot_id"
@@ -157,7 +174,7 @@ def take(cur, *, project_ref: str, host: str, pid: int, boot_id: str,
          interval_seconds: int, ttl_seconds: int, reason: str = "broker boot") -> bool:
     """CAS acquire. True iff this boot now holds the row."""
     cur.execute(_TAKE_SQL, {"ref": project_ref, "host": host, "pid": pid, "boot": boot_id,
-                            "interval": interval_seconds, "ttl": ttl_seconds, "reason": reason})
+                            "interval": interval_seconds, "ttl": ttl_seconds})
     return cur.fetchone() is not None
 
 
