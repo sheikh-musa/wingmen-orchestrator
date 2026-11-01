@@ -30,12 +30,13 @@ def _entry_row(i, age_h=10.0, pri="P1", frm="orch-console", subj="a question"):
             "subject": subj, "age_h": age_h}
 
 
-def _patch(monkeypatch, agents, rows_by_agent, pane, base_rows=None):
+def _patch(monkeypatch, agents, rows_by_agent, pane, base_rows=None, lanes=None):
     monkeypatch.setattr(d, "live_agents", lambda cur, mh: agents)
     monkeypatch.setattr(d, "read_unanswered", lambda cur, a, h, p: rows_by_agent.get(a, []))
     monkeypatch.setattr(d, "read_unanswered_any",
                         lambda cur, ids, h, p: (base_rows or {}).get(ids[0], []))
-    monkeypatch.setattr(d, "lane_map", lambda cur: {"cc-a": "sess-a", "cc-b": "sess-b"})
+    monkeypatch.setattr(d, "lane_map",
+                        lambda cur: {"cc-a": "sess-a", "cc-b": "sess-b"} if lanes is None else lanes)
     monkeypatch.setattr(d, "pane_state", lambda s: pane.get(s, "probe_error"))
     monkeypatch.setattr(d, "local_hostnames", lambda: {"Sheikhs-Mini"})
 
@@ -177,3 +178,38 @@ def test_singleton_running_as_its_base_is_not_double_reported(monkeypatch):
     out = d.collect(cur=None)
     assert [e["agent"] for e in out["idle"]] == ["cc-a"]
     assert len(out["idle"]) == 1
+
+
+# ── Follow-up to #790: an INSTANCE may key fleet_lanes by its own id ──
+# agent_status.base_agent_id is not always the fleet_lanes key. cc-quality-2
+# carries base 'cc-quality' in agent_status while fleet_lanes and its own env both
+# say 'cc-quality-2' (orch-console #88758). Resolving the pane from the base alone
+# probes the wrong lane's pane, so the digest reports one lane's activity as
+# evidence about another's.
+
+def test_instance_with_its_own_lane_row_probes_its_own_pane(monkeypatch):
+    """Own-lane row wins over the base's: the instance is drained, the base is busy."""
+    _patch(monkeypatch,
+           [("cc-a-2", "cc-a", "Sheikhs-Mini", 1)],
+           {"cc-a-2": [_row(1)]},
+           {"sess-inst": "drained", "sess-base": "busy"},
+           lanes={"cc-a": "sess-base", "cc-a-2": "sess-inst"})
+    out = d.collect(cur=None)
+    assert [e["agent"] for e in out["idle"]] == ["cc-a-2"], "own pane wins over the base's"
+    assert out["idle"][0]["session"] == "sess-inst"
+    assert out["busy"] == 0
+
+
+def test_base_pass_probes_each_sibling_on_its_own_pane(monkeypatch):
+    """A busy sibling must be seen as busy even when the BASE's session is drained.
+    Reading one base session for every member made a busy sibling look idle."""
+    _patch(monkeypatch,
+           [("cc-a-1", "cc-a", "Sheikhs-Mini", 1),
+            ("cc-a-2", "cc-a", "Sheikhs-Mini", 2)],
+           {},                                        # no instance-addressed mail
+           {"sess-1": "drained", "sess-2": "busy", "sess-a": "drained"},
+           base_rows={"cc-a": [_row(5)]},
+           lanes={"cc-a": "sess-a", "cc-a-1": "sess-1", "cc-a-2": "sess-2"})
+    out = d.collect(cur=None)
+    assert out["idle"] == [], "sibling 2 is busy -> the base is busy, never idle"
+    assert out["busy"] == 1
