@@ -230,7 +230,17 @@ _hub_db() {  # $1 = beat | offline — best-effort, never breaks the boot
     [[ -x "$ORCH_DIR/.venv/bin/python3" ]] || return 0
     "$ORCH_DIR/.venv/bin/python3" - "${1:-beat}" <<'PYHB' 2>/dev/null || true
 import os, sys, psycopg
-dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+# Re-read the DSN from the env FILE at use time (dsn_at_use, op#24342), never the value
+# this loop inherited at boot: after a substrate password rotation the inherited value
+# is DEAD, and a failing beat both hides a live hub and feeds the pooler's auth-failure
+# counter until Supavisor trips ECIRCUITBREAKER fleet-wide (2026-11-01 outage).
+try:
+    sys.path.insert(0, os.path.expanduser("~/wingmen/orchestrator/scripts/lib"))
+    from dsn_at_use import dsn as _dsn_now
+except Exception:
+    def _dsn_now():
+        return os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+dsn = _dsn_now()
 if not dsn:
     sys.exit(0)
 mode = sys.argv[1] if len(sys.argv) > 1 else "beat"
