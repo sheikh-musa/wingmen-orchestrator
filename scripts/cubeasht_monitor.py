@@ -325,7 +325,8 @@ def build_metrics(ps: dict, wsl: Optional[dict], runner: Optional[dict],
                   runners_by_name: Optional[dict] = None) -> dict:
     """Normalise one reachable sample into the stored metrics shape."""
     errs = dict(probe_errors or {})
-    for k in ("os_error", "cpu_error", "disk_error", "gpu_error", "disks_error", "lhm_error", "vmmem_error"):
+    for k in ("os_error", "cpu_error", "disk_error", "gpu_error", "disks_error", "lhm_error", "vmmem_error",
+              "pagefile_error", "compressed_error"):
         if ps.get(k):
             errs[k.replace("_error", "")] = str(ps[k])[:300]
 
@@ -378,6 +379,14 @@ def build_metrics(ps: dict, wsl: Optional[dict], runner: Optional[dict],
     m["last_boot"] = ps.get("last_boot")
     vm = _num(ps.get("vmmem_ws_bytes"))
     m["vmmem_ws_mb"] = round(vm / 1048576) if vm is not None else None
+    # ADDITIVE (orch-console #89662): the swap + compression half of "real use".
+    # None (not 0) when Windows does not report them, so a consumer can tell
+    # "nothing swapped" apart from "not measured".
+    pfa, pfu = _num(ps.get("pagefile_alloc_mb")), _num(ps.get("pagefile_used_mb"))
+    m["pagefile_alloc_mb"] = int(pfa) if pfa is not None else None
+    m["pagefile_used_mb"] = int(pfu) if pfu is not None else None
+    cws = _num(ps.get("compressed_ws_bytes"))
+    m["compressed_mb"] = round(cws / 1048576) if cws is not None else None
     m["wsl"] = wsl
     m["runner"] = runner
     # ADDITIVE (op#35970/bus #86104): per-distro WSL memory + per-runner GH
