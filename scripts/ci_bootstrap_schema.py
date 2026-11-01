@@ -692,6 +692,31 @@ def _apply_file(dsn: str, path: Path) -> None:
     _apply_sql(dsn, sql_text, str(path.relative_to(ROOT)), tolerate=tolerate, assertions=assertions)
 
 
+# hc#95 (migrations 142-146): exec_broker_access_log is LIVE on the orchestrator
+# substrate, but it was created by migrations/drafts/hc95_exec_broker_access_log.sql
+# (applied by orch-console before the broker migrations were numbered), i.e. OUTSIDE
+# the numbered chain -- the same "exists live, zero CREATE in migrations/*.sql" class
+# the bedrock files stand in for. 142/143/144 ALTER/index that table, so a from-scratch
+# replay needs it first. Applied right before the migrations/*.sql walk, from the REAL
+# draft file (never a hand-written copy), with the same assert discipline as every
+# other file: its REVOKEs are verified by these in-code asserts (the draft itself is
+# not modified -- it is the exact text that was applied live).
+HC95_ACCESS_LOG_STANDIN = ROOT / "migrations" / "drafts" / "hc95_exec_broker_access_log.sql"
+_HC95_ACCESS_LOG_STANDIN_ASSERTS = "\n".join(
+    [f"-- assert: no_table_privilege {r} public.exec_broker_access_log {p}"
+     for r in ("authenticated", "anon", "service_role") for p in ("SELECT", "INSERT", "UPDATE", "DELETE")]
+    + [f"-- assert: no_sequence_privilege {r} public.exec_broker_access_log_id_seq USAGE"
+       for r in ("authenticated", "anon", "service_role")]
+)
+
+
+def apply_hc95_access_log_standin(dsn: str) -> None:
+    sql_text = HC95_ACCESS_LOG_STANDIN.read_text()
+    assertions = am.parse_assert_lines(_HC95_ACCESS_LOG_STANDIN_ASSERTS)
+    am.check_required_assertions(am.strip_txn_control(sql_text), assertions)
+    _apply_sql(dsn, sql_text, str(HC95_ACCESS_LOG_STANDIN.relative_to(ROOT)), assertions=assertions)
+
+
 def apply_platform_shim(dsn: str) -> None:
     _apply_sql(dsn, PLATFORM_SHIM_SQL, "platform-object shim")
 
@@ -715,6 +740,9 @@ def apply_full_schema(dsn: str, *, verbose: bool = True) -> None:
     for f in supa_files:
         log(f"  {f.name}")
         _apply_file(dsn, f)
+
+    log(f"applying {HC95_ACCESS_LOG_STANDIN.relative_to(ROOT)} (live, outside the numbered chain)")
+    apply_hc95_access_log_standin(dsn)
 
     mig_files = sorted((ROOT / "migrations").glob("*.sql"))
     log(f"applying migrations/*.sql ({len(mig_files)} files)")

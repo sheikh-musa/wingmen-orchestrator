@@ -14,7 +14,7 @@ shipper = importlib.util.module_from_spec(_spec)
 sys.modules["exec_prod_ledger_shipper"] = shipper
 _spec.loader.exec_module(shipper)
 
-_MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "drafts" / "exec_prod_ledger.sql"
+_MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "145_exec_prod_ledger.sql"
 
 
 def _entry(exec_id, *, end=False, reason="unit", outcome=None, **extra):

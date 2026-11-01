@@ -7,7 +7,7 @@ exec_broker_access_log against the DIRECT-path exec_prod ledger for the same
 window. That ledger lives only on the exec host
 (~/.local/state/wingmen/agent_exec_ledger.jsonl, written by ihsanos-irsyad
 scripts/db/exec_prod.py _append_ledger). This copies it, line for line, into
-the fleet-bus table exec_prod_ledger (migrations/drafts/exec_prod_ledger.sql)
+the fleet-bus table exec_prod_ledger (migrations/145_exec_prod_ledger.sql)
 so the reconcile can row-match them.
 
 RECONCILE KEY (state it exactly; cc-fleet-health bus #89909):

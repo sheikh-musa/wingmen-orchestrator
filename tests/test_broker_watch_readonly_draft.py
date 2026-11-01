@@ -1,4 +1,4 @@
-"""Static check: migrations/drafts/hc95_broker_watch_readonly.sql grants ONLY
+"""Static check: migrations/146_hc95_broker_watch_readonly.sql grants ONLY
 SELECT, on EXACTLY exec_broker_heartbeat / exec_broker_access_log /
 exec_prod_ledger / exec_prod_ledger_shipper_runs, to broker_watch_readonly
 (console ruling bus #89906; shipper run table added per bus #89909)."""
@@ -7,8 +7,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_DRAFTS = Path(__file__).resolve().parent.parent / "migrations" / "drafts"
-_SQL = (_DRAFTS / "hc95_broker_watch_readonly.sql").read_text()
+_MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
+_SQL = (_MIGRATIONS / "146_hc95_broker_watch_readonly.sql").read_text()
 _TABLES = {"exec_broker_heartbeat", "exec_broker_access_log", "exec_prod_ledger",
            "exec_prod_ledger_shipper_runs"}
 
@@ -53,14 +53,14 @@ def test_every_rls_enabled_table_gets_a_select_policy():
     """A grant without a policy on an RLS table is deny-all: every one of the
     three tables whose draft ENABLEs RLS must get a FOR SELECT policy here."""
     drafts = {
-        "exec_broker_heartbeat": "hc95_exec_broker_heartbeat.sql",
-        "exec_broker_access_log": "hc95_exec_broker_access_log.sql",
-        "exec_prod_ledger": "exec_prod_ledger.sql",
-        "exec_prod_ledger_shipper_runs": "exec_prod_ledger.sql",
+        "exec_broker_heartbeat": "144_hc95_exec_broker_heartbeat.sql",
+        "exec_broker_access_log": "drafts/hc95_exec_broker_access_log.sql",
+        "exec_prod_ledger": "145_exec_prod_ledger.sql",
+        "exec_prod_ledger_shipper_runs": "145_exec_prod_ledger.sql",
     }
     code = _code()
     for table, fname in drafts.items():
-        path = _DRAFTS / fname
+        path = _MIGRATIONS / fname
         if not path.exists():
             continue   # e.g. exec_prod_ledger lands in a sibling PR; asserted there
         rls_on = re.search(rf"(?i)ALTER TABLE\s+{table}\s+ENABLE ROW LEVEL SECURITY", path.read_text())

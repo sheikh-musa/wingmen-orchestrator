@@ -1,6 +1,26 @@
--- DRAFT -- hc95_broker_watch_readonly.sql
+-- 146_hc95_broker_watch_readonly.sql
 -- ledger: silo=tscuymavysscrvoberrr
--- (orchestrator substrate / fleet bus)
+-- (orchestrator substrate)
+--
+-- hc#95 broker_watch_readonly: SELECT-only role for the broker watchdog / reconcile (console ruling bus #89906).
+-- Apply via scripts/apply_migration.py with a --gate decision row citing this
+-- file's sha12 (direct psycopg, same-transaction ledger write) -- NEVER
+-- `supabase db push` (decision 962). hc#95 broker apply order: 142 -> 143 ->
+-- 144 -> 145 -> 146; this is 5 of 5 (LAST).
+-- No REVOKE here; the asserts below verify the role cannot WRITE any of the four
+-- tables it reads (SELECT-only by construction, checked post-apply).
+-- assert: no_table_privilege broker_watch_readonly public.exec_broker_heartbeat INSERT
+-- assert: no_table_privilege broker_watch_readonly public.exec_broker_heartbeat UPDATE
+-- assert: no_table_privilege broker_watch_readonly public.exec_broker_heartbeat DELETE
+-- assert: no_table_privilege broker_watch_readonly public.exec_broker_access_log INSERT
+-- assert: no_table_privilege broker_watch_readonly public.exec_broker_access_log UPDATE
+-- assert: no_table_privilege broker_watch_readonly public.exec_broker_access_log DELETE
+-- assert: no_table_privilege broker_watch_readonly public.exec_prod_ledger INSERT
+-- assert: no_table_privilege broker_watch_readonly public.exec_prod_ledger UPDATE
+-- assert: no_table_privilege broker_watch_readonly public.exec_prod_ledger DELETE
+-- assert: no_table_privilege broker_watch_readonly public.exec_prod_ledger_shipper_runs INSERT
+-- assert: no_table_privilege broker_watch_readonly public.exec_prod_ledger_shipper_runs UPDATE
+-- assert: no_table_privilege broker_watch_readonly public.exec_prod_ledger_shipper_runs DELETE
 --
 -- WHY (console ruling bus #89906): cc-fleet-health's broker watchdog (hc#1001)
 -- and the B4 daily reconcile need to READ four tables, and nothing else:
@@ -14,12 +34,12 @@
 -- fleet's write roles.
 --
 -- APPLY ORDER: LAST -- after
---   1. migrations/drafts/hc95_exec_broker_gate_ref.sql
---   2. migrations/drafts/hc95_exec_broker_gate_single_use.sql
---   3. migrations/drafts/hc95_exec_broker_heartbeat.sql
---   4. migrations/drafts/exec_prod_ledger.sql
+--   1. migrations/142_hc95_exec_broker_gate_ref.sql
+--   2. migrations/143_hc95_exec_broker_gate_single_use.sql
+--   3. migrations/144_hc95_exec_broker_heartbeat.sql
+--   4. migrations/145_exec_prod_ledger.sql
 -- This file needs all four tables to exist (the GRANTs fail otherwise, and
--- the whole transaction rolls back); exec_prod_ledger.sql creates the last two.
+-- the whole transaction rolls back); 145_exec_prod_ledger.sql creates the last two.
 -- Apply via scripts/apply_migration.py on substrate tscuymavysscrvoberrr, with a
 -- decision gate row citing this file + its sha12 -- NEVER `supabase db push`
 -- (decision 962).

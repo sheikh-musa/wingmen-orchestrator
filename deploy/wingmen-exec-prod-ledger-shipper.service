@@ -4,7 +4,7 @@
 # exec_prod_ledger (queue row 271; hc#95 B4). Runs on the EXEC host (gzb), as
 # the user whose home holds the ledger. Idempotent: safe to run any number of
 # times. Exit 2 = shipped, but malformed ledger lines were found (see journal).
-# Requires migrations/drafts/exec_prod_ledger.sql applied first.
+# Requires migrations/145_exec_prod_ledger.sql applied first.
 [Unit]
 Description=Wingmen exec_prod ledger shipper (JSONL -> exec_prod_ledger) — gzb
 After=network-online.target wingmen-fetch-secrets.service

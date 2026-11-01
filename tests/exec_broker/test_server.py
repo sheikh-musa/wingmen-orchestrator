@@ -57,7 +57,7 @@ class FakeCursor:
             self._pending_fetch = {"id": row_id}
         elif upper.startswith("UPDATE EXEC_BROKER_ACCESS_LOG SET GATE_CONSUMED"):
             # Simulates the partial UNIQUE index on (gate_id) WHERE gate_consumed
-            # (migrations/drafts/hc95_exec_broker_gate_single_use.sql).
+            # (migrations/143_hc95_exec_broker_gate_single_use.sql).
             (row_id,) = params
             gate_id = self._gate_ids[row_id]
             if self.consume_error is not None:
