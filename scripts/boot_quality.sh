@@ -191,8 +191,20 @@ _quality_heartbeat_loop() {
     while true; do
         sleep 300
         "$VENV_PY" - <<'PY' 2>/dev/null || true
-import os, psycopg
-dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+import os, sys, psycopg
+# Re-read the DSN from the env FILE at use time (dsn_at_use, op#24342). The inherited
+# DATABASE_URL was captured when this loop started; after a substrate password
+# rotation it is DEAD, and every beat then fails auth against the pooler. That is not
+# a slow leak: Supavisor counts the failures and trips ECIRCUITBREAKER, which blocks
+# NEW connections fleet-wide (2026-11-01 outage; cc-quality and cc-quality-2 were the
+# two hammering loops). Same pattern as boot_cai.sh and boot_fleet_health.sh.
+try:
+    sys.path.insert(0, os.path.expanduser("~/wingmen/orchestrator/scripts/lib"))
+    from dsn_at_use import dsn as _dsn_now
+except Exception:
+    def _dsn_now():
+        return os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+dsn = _dsn_now()
 if not dsn:
     raise SystemExit
 try:
