@@ -1499,3 +1499,39 @@ KEK, and its Linux branch hardcodes `return "hub-vps"` for ANY Linux host. The K
 local file (`/etc/wingmen-vault-kek`), so nothing is lost fleet-wide, but the comment now names a
 decommissioned box. Whoever owns the vault should decide whether a second Linux KEK identity is
 needed at all — do not change crypto-adjacent code as drive-by cleanup.
+
+## 2026-11-01 ~08:10Z — PR 805 PASSED; PR 803 confirmed landed; a mail-routing gap found
+
+**PR #805: PASS.** cc-quality bus 89400, `VERDICT: PASS | sheikh-musa/wingmen-orchestrator |
+PR#805 | 507d9366caf91b34d2a24147e4fb52c95cc14cee`, reviewed at the pinned head with a negative
+control (removing the strip/lower normalization breaks the alias test; removing the retired
+guard breaks the host-match test). CI `Lint & Test` PASS 1h08m51s; GitHub MERGEABLE / CLEAN.
+Merge is the console's via merge_pinned. Two non-blocking reviewer notes accepted as designed:
+the mirror override stays unguarded (read-only path), and `scripts/reset_orch.sh` header still
+shows an `ssh root@<old ip>` line in a comment — queued as a doc scrub, not a behaviour change.
+
+**PR #803 DID land** — as a SQUASH, commit `22fc07a` on `fable/substrate-safe-fixes`, 4 files.
+My earlier "803 is still unmerged" was a FALSE NEGATIVE: I checked
+`git merge-base --is-ancestor 4b0ca05 origin/...`, which is always false after a squash merge.
+Check the base tree content (`git show origin/...:CLAUDE.md | grep ...`) or the squashed commit,
+never commit ancestry, before calling a PR unmerged. Same family as [[reference_merged_not_in_prod]].
+
+**Mail-routing gap (real, cost me three rows).** orch-console 89401, cc-quality 89400 and
+cc-fleet-health 89405 were addressed to `cc-substrate-1`; this body is `cc-substrate-2` and
+`my_inbox.py` reads the base id plus the CURRENT instance only — so the wake reader showed
+0 unread while a merge-critical PASS and a console directive sat addressed to the old id. Found
+by querying `agent_messages` directly. Reported to the console (89408) with two options: address
+lane mail to the base id, or widen the lookup to instances of my base that are not themselves
+registered bases (a raw prefix sweep is exactly how a lane reads another lane family mail).
+**Interim behaviour: on every wake, also read `to_agent='cc-substrate-1'` directly.**
+
+**Hash reconciliation (prevent a phantom second rotation):** fleet-health quotes
+`834f16681187`, I quote `e055e28bca55`. Same credential — the first is sha256 of the PASSWORD,
+the second sha256 of the full DSN string. Verified in one step against `.env`.
+
+**Measurement role (console 89401):** measurement-only; fleet-health is the single executor of
+the rolling relaunch (no gzb tmux server restart). Report only if the Mini rate has not gone to
+zero 10 minutes after fleet-health reports the last lane. 20 min to 08:07Z: 46 failures, ALL
+Mini, 2.3/min, **gzb now zero** (it stopped around fleet-health STEP 3, the tmux global env
+fix). A background watcher (`/tmp/dsn_authwatch.py`, not repo-tracked) exits when the trailing
+10-minute window is empty twice in a row, or reports what is left after ~90 minutes.
