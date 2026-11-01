@@ -220,3 +220,17 @@ def test_parse_request_ref_present_is_passed_through_unvalidated():
 def test_parse_request_ref_empty_or_non_string_raises(bad):
     with pytest.raises(MalformedRequest):
         parse_request(json.dumps({**_BASE, "ref": bad}))
+
+
+# --- B3 amendment (console #89841): optional reason on errors ---------------
+
+def test_encode_error_without_reason_is_byte_identical_to_v1():
+    assert encode_error(ErrorCode.GATE_INVALID, "m") == (
+        b'{"error": {"code": "GATE_INVALID", "message": "m"}, "status": "error"}\n'
+    )
+
+
+def test_encode_error_with_reason_adds_the_key_and_prefixes_the_message():
+    obj = json.loads(encode_error(ErrorCode.GATE_INVALID, "m", "gate_already_consumed"))
+    assert obj == {"status": "error", "error": {"code": "GATE_INVALID", "reason": "gate_already_consumed",
+                                                 "message": "gate_already_consumed: m"}}

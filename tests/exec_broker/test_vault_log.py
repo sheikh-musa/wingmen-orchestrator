@@ -7,7 +7,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
 
-from exec_broker.vault_log import VaultLogEntry, log_finalized, log_started, record_executed  # noqa: E402
+import pytest  # noqa: E402
+
+from exec_broker.vault_log import (  # noqa: E402
+    VaultLogEntry,
+    consume_gate,
+    log_finalized,
+    log_started,
+    record_executed,
+)
 
 
 class FakeCursor:
@@ -101,6 +109,39 @@ def test_log_started_records_gate_ref_when_present():
     assert params[column_list.index("gate_id")] == "56485"
 
 
+# --- B3 single-use (bus #89814 §4.2-4.3) ------------------------------------
+
+def test_consume_gate_is_a_conditional_update_of_the_same_row():
+    cur = FakeCursor()
+    cur.rowcount = 1
+    consume_gate(cur, 42)
+    sql, params = cur.calls[0]
+    assert sql.strip().upper().startswith("UPDATE EXEC_BROKER_ACCESS_LOG SET GATE_CONSUMED = TRUE")
+    assert "gate_id IS NOT NULL" in sql and "gate_consumed = false" in sql
+    assert params == (42,)
+
+
+def test_consume_gate_refuses_when_no_row_was_consumed():
+    cur = FakeCursor()
+    cur.rowcount = 0
+    with pytest.raises(RuntimeError):
+        consume_gate(cur, 42)
+
+
+def test_log_finalized_without_reason_is_byte_identical_to_pre_b3():
+    cur = FakeCursor()
+    log_finalized(cur, 42, "error", "GATE_INVALID")
+    sql, params = cur.calls[0]
+    assert sql == "UPDATE exec_broker_access_log SET status = %s, error_code = %s, ts_end = now() WHERE id = %s"
+    assert params == ("error", "GATE_INVALID", 42)
+
+
+def test_log_finalized_records_the_reason_when_given():
+    cur = FakeCursor()
+    log_finalized(cur, 42, "error", "GATE_INVALID", "gate_already_consumed")
+    sql, params = cur.calls[0]
+    assert "error_reason = %s" in sql
+    assert params == ("error", "GATE_INVALID", "gate_already_consumed", 42)
 def test_record_executed_updates_the_same_row_with_prologue_and_executed_hash():
     cur = FakeCursor()
     record_executed(cur, 42, "SET TRANSACTION READ ONLY; ", "abc")

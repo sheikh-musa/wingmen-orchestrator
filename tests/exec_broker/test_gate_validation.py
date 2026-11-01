@@ -11,7 +11,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
 
 from exec_broker.gate_validation import (  # noqa: E402
+    DEFAULT_GATE_MAX_AGE_SECONDS,
     DEFAULT_LIVE_GATED_REFS,
+    MAX_GATE_MAX_AGE_SECONDS,
+    MIN_GATE_MAX_AGE_SECONDS,
     BrokerValidationError,
     _text_mentions_ref,
     _validate_ref,
@@ -20,6 +23,19 @@ from exec_broker.gate_validation import (  # noqa: E402
     require_gate,
 )
 from exec_broker.protocol import ErrorCode  # noqa: E402
+
+# B3 cutover floor (console #89841 ruling e): require_gate refuses every gate
+# on a non-QA ref when no floor is configured. Pre-existing tests exercise
+# OTHER properties on non-QA refs, so this module's require_gate defaults a
+# floor far in the past; the floor itself (unset / before / after) is tested
+# explicitly against _raw_require_gate in the B3 section at the end.
+_EPOCH_FLOOR = datetime(2000, 1, 1, tzinfo=timezone.utc)
+_raw_require_gate = require_gate
+
+
+def require_gate(*args, **kwargs):  # noqa: F811 -- deliberate test shim, see above
+    kwargs.setdefault("gate_not_before", _EPOCH_FLOOR)
+    return _raw_require_gate(*args, **kwargs)
 
 
 class FakeCursor:
@@ -150,7 +166,7 @@ def test_require_gate_refuses_lexically_hazardous_dquote_even_with_a_valid_gate(
     # test_require_gate_refuses_even_a_fully_valid_shaped_gate: a hazardous
     # statement with a shape-valid gate is STILL refused (GATE_INVALID), not
     # silently allowed once a gate_id is attached.
-    row = {"from_agent": "orch-console", "message_type": "decision", "subject": "apply to goumlyne", "body": "", "is_past": True}
+    row = {"from_agent": "orch-console", "message_type": "decision", "subject": "apply to goumlyne", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
     with pytest.raises(BrokerValidationError) as exc:
         require_gate('SELECT "x--y"; DROP TABLE t', "56485", "goumlynecruxrlmzlntp", cur=FakeCursor(row))
     assert exc.value.code == ErrorCode.GATE_INVALID
@@ -219,14 +235,14 @@ def test_require_gate_invalid_when_gate_not_found():
 
 
 def test_require_gate_invalid_when_wrong_from_agent():
-    row = {"from_agent": "cc-hc95-broker", "message_type": "decision", "subject": "goumlyne", "body": "", "is_past": True}
+    row = {"from_agent": "cc-hc95-broker", "message_type": "decision", "subject": "goumlyne", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
     with pytest.raises(BrokerValidationError) as exc:
         require_gate("drop table t", "56485", "goumlynecruxrlmzlntp", cur=FakeCursor(row))
     assert exc.value.code == ErrorCode.GATE_INVALID
 
 
 def test_require_gate_invalid_when_wrong_message_type():
-    row = {"from_agent": "orch-console", "message_type": "update", "subject": "goumlyne", "body": "", "is_past": True}
+    row = {"from_agent": "orch-console", "message_type": "update", "subject": "goumlyne", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
     with pytest.raises(BrokerValidationError):
         require_gate("drop table t", "56485", "goumlynecruxrlmzlntp", cur=FakeCursor(row))
 
@@ -239,7 +255,7 @@ def test_require_gate_invalid_when_not_past():
 
 def test_require_gate_invalid_when_wrong_silo_mentioned():
     # cross-silo trap: a real, valid-shaped gate for a DIFFERENT silo must not authorize this one
-    row = {"from_agent": "orch-console", "message_type": "decision", "subject": "apply to ceayj", "body": "", "is_past": True}
+    row = {"from_agent": "orch-console", "message_type": "decision", "subject": "apply to ceayj", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
     with pytest.raises(BrokerValidationError) as exc:
         require_gate("drop table t", "56485", "goumlynecruxrlmzlntp", cur=FakeCursor(row))
     assert exc.value.code == ErrorCode.GATE_INVALID
@@ -253,14 +269,14 @@ def test_require_gate_refuses_even_a_fully_valid_shaped_gate(monkeypatch):
     # was found. This is the exact regression the original (fail-open) fix
     # introduced: a gate approving one migration would otherwise authorize
     # ANY DDL to the same silo.
-    row = {"from_agent": "orch-console", "message_type": "decision", "subject": "apply to goumlyne", "body": "", "is_past": True}
+    row = {"from_agent": "orch-console", "message_type": "decision", "subject": "apply to goumlyne", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
     with pytest.raises(BrokerValidationError) as exc:
         require_gate("drop table t", "56485", "goumlynecruxrlmzlntp", cur=FakeCursor(row))
     assert exc.value.code == ErrorCode.GATE_INVALID
 
 
 def test_require_gate_refuses_even_a_fully_valid_shaped_gate_via_alias_qa():
-    row = {"from_agent": "cai", "message_type": "agreed", "subject": "go for qa", "body": "", "is_past": True}
+    row = {"from_agent": "cai", "message_type": "agreed", "subject": "go for qa", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
     with pytest.raises(BrokerValidationError) as exc:
         require_gate("drop table t", "1", "oovskwogvefnznfowjky", cur=FakeCursor(row))
     assert exc.value.code == ErrorCode.GATE_INVALID
@@ -272,7 +288,7 @@ def test_require_gate_full_match_still_works_once_migration_pr_supplied():
     # match is used INSTEAD of the unconditional refusal, and a genuinely
     # matching gate passes.
     row = {"from_agent": "orch-console", "message_type": "decision",
-           "subject": "apply migration 435 to goumlyne", "body": "", "is_past": True}
+           "subject": "apply migration 435 to goumlyne", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
     require_gate(
         "drop table t", "56485", "goumlynecruxrlmzlntp", cur=FakeCursor(row), migration="435",
     )  # no raise
@@ -289,7 +305,7 @@ def test_hazardous_with_matching_migration_pr_but_no_cited_sha12_is_a_gate_misma
     # is pinned by test_hazardous_passes_when_gate_cites_the_executed_bytes_sha12
     # in the Part A 2/2 section at the bottom of this file.
     row = {"from_agent": "orch-console", "message_type": "decision",
-           "subject": "apply migration 435 to goumlyne", "body": "", "is_past": True}
+           "subject": "apply migration 435 to goumlyne", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
     with pytest.raises(BrokerValidationError) as exc:
         require_gate(
             'SELECT "x--y"; DROP TABLE t', "56485", "goumlynecruxrlmzlntp",
@@ -300,7 +316,7 @@ def test_hazardous_with_matching_migration_pr_but_no_cited_sha12_is_a_gate_misma
 
 def test_require_gate_full_match_rejects_mismatched_migration_once_supplied():
     row = {"from_agent": "orch-console", "message_type": "decision",
-           "subject": "apply migration 435 to goumlyne", "body": "", "is_past": True}
+           "subject": "apply migration 435 to goumlyne", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
     with pytest.raises(BrokerValidationError) as exc:
         require_gate(
             "drop table t", "56485", "goumlynecruxrlmzlntp", cur=FakeCursor(row), migration="999",
@@ -377,7 +393,7 @@ def _bytebound_row(
         "message_type": "decision",
         "subject": f"apply migration {migration} to {_SYNTH_REF}",
         "body": body,
-        "is_past": True,
+        "is_past": True, "is_fresh": True, "after_cutover": True,
     }
 
 
@@ -462,7 +478,7 @@ def test_hazardous_refused_when_only_an_unlabelled_hex_token_is_present():
             # body -- no `wrapped-sha12:` label anywhere.
             cur=FakeCursor({"from_agent": "orch-console", "message_type": "decision",
                             "subject": f"apply migration 435 to {_SYNTH_REF}",
-                            "body": "0123456789ab", "is_past": True}),
+                            "body": "0123456789ab", "is_past": True, "is_fresh": True, "after_cutover": True}),
             migration="435",
         )
     assert exc.value.code == ErrorCode.GATE_MISMATCH
@@ -499,7 +515,7 @@ def test_hazardous_refused_for_an_old_caller_that_supplies_no_migration_or_pr():
 def test_non_hazardous_ddl_cannot_pass_on_a_cited_sha12_alone():
     sql = "drop table t"
     row = {"from_agent": "orch-console", "message_type": "decision",
-           "subject": f"apply to {_SYNTH_REF}", "is_past": True,
+           "subject": f"apply to {_SYNTH_REF}", "is_past": True, "is_fresh": True, "after_cutover": True,
            "body": f"wrapped-sha12: {_sha12(sql)}"}
     with pytest.raises(BrokerValidationError) as exc:
         require_gate(sql, "56485", _SYNTH_REF, cur=FakeCursor(row))
@@ -521,7 +537,7 @@ def _ref_row(**overrides) -> dict:
         "message_type": "decision",
         "subject": "GO data correction op#36027",
         "body": f"GO: apply the op#36027 tin-amount correction on {_SYNTH_REF}. No DDL.",
-        "is_past": True,
+        "is_past": True, "is_fresh": True, "after_cutover": True,
     }
     row.update(overrides)
     return row
@@ -548,7 +564,7 @@ def test_b1_dml_without_gate_is_gate_required_on_qa_too():
 def test_b1_dml_with_valid_ref_anchored_gate_passes_and_reports_a_gate_was_used():
     cur = FakeCursor(_ref_row())
     assert require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=cur, ref="op#36027") is True
-    assert len(cur.calls) == 1 and cur.calls[0][1] == (83934,)
+    assert len(cur.calls) == 1 and cur.calls[0][1] == (86400, _EPOCH_FLOOR, 83934)
 
 
 def test_b1_dml_with_gate_not_mentioning_the_silo_is_gate_invalid():
@@ -615,7 +631,7 @@ def test_ref_a_data_fix_with_matching_ref_passes():
     for sql in (_DO_DATA_FIX, _DML_UPDATE, _DO_PURE_DML):
         cur = FakeCursor(_ref_row())
         assert require_gate(sql, "83934", _SYNTH_REF, cur=cur, ref="op#36027") is True
-        assert cur.calls[0][1] == (83934,)
+        assert cur.calls[0][1] == (86400, _EPOCH_FLOOR, 83934)
 
 
 def test_ref_b_mismatched_ref_refused_digit_boundary():
@@ -831,3 +847,160 @@ def test_check_project_ref_narrowed_standing_set_drops_qa():
 def test_check_project_ref_empty_standing_set_denies_everything():
     with pytest.raises(BrokerValidationError):
         check_project_ref("oovskwogvefnznfowjky", allowed_refs=frozenset())
+
+
+# --- B3 (bus #89814 §4.1): gate max age + canonical gate_id ----------------
+
+def test_b3_stale_gate_is_gate_invalid():
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=FakeCursor(_ref_row(is_fresh=False)), ref="op#36027")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+    assert "max gate age" in exc.value.message
+
+
+def test_b3_row_without_a_freshness_verdict_fails_closed():
+    row = _ref_row()
+    del row["is_fresh"]
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=FakeCursor(row), ref="op#36027")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+
+
+def test_b3_stale_gate_refused_on_ddl_and_hazardous_paths_too():
+    row = {"from_agent": "orch-console", "message_type": "decision",
+           "subject": "apply migration 435 to goumlyne", "body": "", "is_past": True, "is_fresh": False}
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate("drop table t", "56485", "goumlynecruxrlmzlntp", cur=FakeCursor(row), migration="435")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_HAZ, "56485", _SYNTH_REF, cur=FakeCursor({**_bytebound_row(), "is_fresh": False}),
+                     migration="435")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+
+
+def test_b3_max_age_is_computed_by_the_db_clock_with_a_24h_default():
+    cur = FakeCursor(_ref_row())
+    require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=cur, ref="op#36027")
+    sql, params = cur.calls[0]
+    assert "make_interval(secs => %s)" in sql and "now()" in sql
+    assert params == (DEFAULT_GATE_MAX_AGE_SECONDS, _EPOCH_FLOOR, 83934)
+    assert DEFAULT_GATE_MAX_AGE_SECONDS == 86400
+
+
+def test_b3_configured_max_age_is_passed_to_the_db():
+    cur = FakeCursor(_ref_row())
+    require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=cur, ref="op#36027", gate_max_age_seconds=3600)
+    assert cur.calls[0][1] == (3600, _EPOCH_FLOOR, 83934)
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "86400", 1.5, 72 * 3600 + 1, 10 ** 9])
+def test_b3_misconfigured_max_age_refuses_every_gate_before_the_bus(bad):
+    cur = FakeCursor(_ref_row())
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=cur, ref="op#36027", gate_max_age_seconds=bad)
+    assert exc.value.code == ErrorCode.GATE_INVALID
+    assert cur.calls == []
+
+
+@pytest.mark.parametrize("gid", ["083934", "00083934", "0"])
+def test_b3_non_canonical_gate_id_refused_before_the_bus(gid):
+    # "0" is canonical digits but never a real bus id; it reaches the lookup and
+    # is refused there as not-found. Leading-zero spellings never reach the bus.
+    cur = FakeCursor(None)
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DML_UPDATE, gid, _SYNTH_REF, cur=cur, ref="op#36027")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+    if gid != "0":
+        assert cur.calls == []
+        assert "canonical" in exc.value.message
+
+
+def test_b3_plain_read_never_checks_freshness():
+    cur = FakeCursor(_ref_row(is_fresh=False))
+    assert require_gate("select 1", "83934", _SYNTH_REF, cur=cur) is False
+    assert cur.calls == []
+
+
+# --- B3 rulings (console #89827/#89841): reasons, 72h ceiling, cutover floor -
+
+_QA = "oovskwogvefnznfowjky"
+
+
+def test_b3_stale_gate_carries_reason_gate_too_old():
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=FakeCursor(_ref_row(is_fresh=False)), ref="op#36027")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+    assert exc.value.reason == "gate_too_old"
+
+
+def test_b3_max_age_bounds_are_hard_coded_1s_to_72h():
+    assert MIN_GATE_MAX_AGE_SECONDS == 1 and MAX_GATE_MAX_AGE_SECONDS == 72 * 3600
+    for ok in (1, 3600, 72 * 3600):
+        assert require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=FakeCursor(_ref_row()),
+                            ref="op#36027", gate_max_age_seconds=ok) is True
+    for bad in (0, -1, 72 * 3600 + 1):
+        with pytest.raises(BrokerValidationError) as exc:
+            require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=FakeCursor(_ref_row()),
+                         ref="op#36027", gate_max_age_seconds=bad)
+        assert exc.value.code == ErrorCode.GATE_INVALID
+        assert exc.value.reason == "gate_config_invalid"
+
+
+def test_b3_no_cutover_floor_refuses_gates_on_non_qa_refs_before_the_bus():
+    for ref in (_SYNTH_REF, _GOUMLYNE, "ceayjeamtmcyzzvqflus"):
+        cur = FakeCursor(_ref_row(body=f"op#36027 on {ref}"))
+        with pytest.raises(BrokerValidationError) as exc:
+            _raw_require_gate(_DML_UPDATE, "83934", ref, cur=cur, ref="op#36027")
+        assert exc.value.code == ErrorCode.GATE_INVALID
+        assert exc.value.reason == "gate_cutover_unset"
+        assert cur.calls == []
+
+
+def test_b3_no_cutover_floor_still_allows_qa_gates():
+    cur = FakeCursor(_ref_row(body="GO op#36027 on qa", after_cutover=None))
+    assert _raw_require_gate(_DML_UPDATE, "83934", _QA, cur=cur, ref="op#36027") is True
+    assert cur.calls[0][1] == (86400, None, 83934)
+
+
+def test_b3_no_cutover_floor_never_affects_plain_reads():
+    cur = FakeCursor()
+    assert _raw_require_gate("select 1", None, _GOUMLYNE, cur=cur) is False
+    assert cur.calls == []
+
+
+def test_b3_gate_created_before_the_cutover_floor_is_refused():
+    floor = datetime(2026, 11, 5, tzinfo=timezone.utc)
+    for row in (_ref_row(after_cutover=False), _ref_row(after_cutover=None)):
+        cur = FakeCursor(row)
+        with pytest.raises(BrokerValidationError) as exc:
+            _raw_require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=cur, ref="op#36027", gate_not_before=floor)
+        assert exc.value.code == ErrorCode.GATE_INVALID
+        assert exc.value.reason == "gate_before_cutover"
+        assert cur.calls[0][1] == (86400, floor, 83934)
+    # also on QA, once a floor IS configured
+    with pytest.raises(BrokerValidationError) as exc:
+        _raw_require_gate(_DML_UPDATE, "83934", _QA,
+                          cur=FakeCursor(_ref_row(body="op#36027 on qa", after_cutover=False)),
+                          ref="op#36027", gate_not_before=floor)
+    assert exc.value.reason == "gate_before_cutover"
+
+
+def test_b3_gate_after_the_cutover_floor_passes():
+    floor = datetime(2026, 11, 5, tzinfo=timezone.utc)
+    assert _raw_require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=FakeCursor(_ref_row()),
+                             ref="op#36027", gate_not_before=floor) is True
+
+
+def test_b3_naive_or_non_datetime_floor_is_refused_as_config_invalid():
+    for bad in (datetime(2026, 11, 5), "2026-11-05T00:00:00Z"):
+        cur = FakeCursor(_ref_row())
+        with pytest.raises(BrokerValidationError) as exc:
+            _raw_require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=cur, ref="op#36027", gate_not_before=bad)
+        assert exc.value.reason == "gate_config_invalid"
+        assert cur.calls == []
+
+
+def test_b3_non_b3_refusals_carry_no_reason():
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=FakeCursor(_ref_row(from_agent="x")), ref="op#36027")
+    assert exc.value.reason is None

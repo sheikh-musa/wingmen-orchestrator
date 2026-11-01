@@ -50,6 +50,20 @@ then renews each every EXEC_BROKER_HEARTBEAT_INTERVAL_SECONDS (default 60,
 bounded 10..900; ttl = 3 x interval). Boot REFUSES if the host identity cannot
 be resolved, the take hits a DB error, or a gated ref is held by another live
 broker -- fail closed.
+
+B3 GATE MAX AGE (bus #89814 §4.1, console #89841 ruling c):
+EXEC_BROKER_GATE_MAX_AGE_SECONDS, an OPTIONAL integer number of seconds, read
+once at boot. Unset/blank -> 24h (gate_validation.DEFAULT_GATE_MAX_AGE_SECONDS).
+Hard-bounded IN CODE to 1s..72h: anything malformed, zero, negative, or above
+the 72h ceiling REFUSES BOOT (never clamped, never "no limit").
+
+B3 CUTOVER FLOOR (console #89841 ruling e): EXEC_BROKER_GATE_NOT_BEFORE, an
+ISO-8601 timestamp set at deploy; any gate whose bus row is older is refused
+(GATE_INVALID, reason gate_before_cutover). Naive -> UTC; malformed refuses
+boot. UNSET: gates on every non-QA ref are refused per call (reason
+gate_cutover_unset), and the daemon REFUSES BOOT if EXEC_BROKER_LIVE_GATED_REFS
+names any non-QA ref -- fail closed, so real refs can never be gated without a
+floor.
 """
 from __future__ import annotations
 
@@ -63,7 +77,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
 from dotenv import load_dotenv  # noqa: E402
 
-from exec_broker.gate_validation import DEFAULT_LIVE_GATED_REFS, SILO_ALIASES  # noqa: E402
+from exec_broker.gate_validation import (  # noqa: E402
+    DEFAULT_GATE_MAX_AGE_SECONDS,
+    DEFAULT_LIVE_GATED_REFS,
+    MAX_GATE_MAX_AGE_SECONDS,
+    MIN_GATE_MAX_AGE_SECONDS,
+    SILO_ALIASES,
+)
 from exec_broker import heartbeat  # noqa: E402
 from exec_broker.mgmt_api import post_to_mgmt_api  # noqa: E402
 from exec_broker.server import BrokerServer  # noqa: E402
@@ -204,6 +224,38 @@ def load_live_gated_refs(raw: "str | None") -> "frozenset[str]":
     return frozenset(refs)
 
 
+def load_gate_max_age_seconds(raw: "str | None") -> int:
+    """Parse EXEC_BROKER_GATE_MAX_AGE_SECONDS. Unset/blank -> the 24h default.
+    Raises ValueError on anything but a positive base-10 integer."""
+    if not raw or not raw.strip():
+        return DEFAULT_GATE_MAX_AGE_SECONDS
+    value = raw.strip()
+    if (
+        not value.isascii() or not value.isdigit()
+        or not MIN_GATE_MAX_AGE_SECONDS <= int(value) <= MAX_GATE_MAX_AGE_SECONDS
+    ):
+        raise ValueError(
+            "EXEC_BROKER_GATE_MAX_AGE_SECONDS must be an integer number of seconds in "
+            f"{MIN_GATE_MAX_AGE_SECONDS}..{MAX_GATE_MAX_AGE_SECONDS} (72h hard ceiling), got {value!r}"
+        )
+    return int(value)
+
+
+def load_gate_not_before(raw: "str | None") -> "datetime | None":
+    """Parse EXEC_BROKER_GATE_NOT_BEFORE (ISO-8601). None if unset/blank;
+    naive -> UTC; malformed raises ValueError (fail loud at boot)."""
+    if not raw or not raw.strip():
+        return None
+    value = raw.strip()
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as e:
+        raise ValueError(f"malformed EXEC_BROKER_GATE_NOT_BEFORE {value!r}: {e}") from e
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def parse_override_expiry(raw: "str | None", *, now: datetime) -> "datetime | None":
     """Parse an ISO8601 expiry for a bounded override. None if unset/blank
     (override inert). Raises ValueError on a malformed non-empty value —
@@ -297,6 +349,32 @@ def main(argv=None) -> int:
         return 1
 
     try:
+        gate_max_age_seconds = load_gate_max_age_seconds(os.environ.get("EXEC_BROKER_GATE_MAX_AGE_SECONDS"))
+    except ValueError as e:
+        print(f"exec_broker_daemon: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        gate_not_before = load_gate_not_before(os.environ.get("EXEC_BROKER_GATE_NOT_BEFORE"))
+    except ValueError as e:
+        print(f"exec_broker_daemon: {e}", file=sys.stderr)
+        return 1
+    if gate_not_before is None and live_gated_refs - DEFAULT_LIVE_GATED_REFS:
+        print(
+            "exec_broker_daemon: EXEC_BROKER_LIVE_GATED_REFS names a non-QA ref but "
+            "EXEC_BROKER_GATE_NOT_BEFORE is unset -- refusing to boot (ruling e: a "
+            "real ref is never gated without a cutover floor)",
+            file=sys.stderr,
+        )
+        return 1
+    if gate_not_before is not None and gate_not_before > datetime.now(timezone.utc):
+        print(
+            f"exec_broker_daemon: EXEC_BROKER_GATE_NOT_BEFORE {gate_not_before.isoformat()} is in "
+            "the future -- every gate is refused until then",
+            file=sys.stderr,
+        )
+
+    try:
         ref_override = resolve_ref_override_alias(os.environ.get("EXEC_BROKER_REF_OVERRIDE_ALIAS"))
     except ValueError as e:
         print(f"exec_broker_daemon: {e}", file=sys.stderr)
@@ -362,6 +440,8 @@ def main(argv=None) -> int:
         ref_override=ref_override,
         ref_override_expires_at=ref_override_expires_at,
         live_gated_refs=live_gated_refs,
+        gate_max_age_seconds=gate_max_age_seconds,
+        gate_not_before=gate_not_before,
     )
     try:
         _start_heartbeat(
