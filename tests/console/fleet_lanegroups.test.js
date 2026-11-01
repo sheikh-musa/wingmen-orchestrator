@@ -74,7 +74,7 @@ function ok(name, fn) {
   catch (e) { console.error("  FAIL - " + name + "\n        " + e.message); process.exitCode = 1; }
 }
 
-const { laneGroups } = loadFleet();
+const { laneGroups, laneGroupOf } = loadFleet();
 
 ok("laneGroups is exported", () => {
   assert.strictEqual(typeof laneGroups, "function");
@@ -125,6 +125,35 @@ ok("every lane lands in exactly one group (no lane vanishes from the page)", () 
   const all = [].concat(g.primary, g.routine, g.down).map(l => l.session).sort();
   eq(all, ["a", "b", "c", "d", "e"]);
   assert.strictEqual(new Set(all).size, all.length, "a lane appeared twice");
+});
+
+// console #90323 N1: the sheet jump opened the WRONG collapsed container for a
+// down lane because the entry said "routine". The fix is one shared classifier;
+// these lock that the two consumers can never disagree again.
+ok("a DOWN lane is never routine (jumping to it must open #down, not the idle group)", () => {
+  assert.strictEqual(laneGroupOf({ bucket: "offline" }), "down");
+  assert.strictEqual(laneGroupOf({ bucket: "down" }), "down");
+  assert.notStrictEqual(laneGroupOf({ bucket: "offline" }), "routine");
+  assert.strictEqual(laneGroupOf({ bucket: "idle" }), "routine");
+  assert.strictEqual(laneGroupOf({ bucket: "working" }), "primary");
+  assert.strictEqual(laneGroupOf({ bucket: "offline", flagged: true }), "primary",
+    "a desired-up lane with no pane is flagged, and lives in the primary list");
+});
+
+ok("laneGroupOf agrees with laneGroups for EVERY bucket (one definition, two consumers)", () => {
+  const cases = [
+    { session: "a", bucket: "working" }, { session: "b", bucket: "idle" },
+    { session: "c", bucket: "offline" }, { session: "d", bucket: "offline", flagged: true },
+    { session: "e", bucket: "unknown-future-bucket" }, { session: "f" },
+  ];
+  const g = laneGroups(cases);
+  const blockOf = (l) => (g.primary.indexOf(l) !== -1 ? "primary"
+    : (g.routine.indexOf(l) !== -1 ? "routine" : "down"));
+  cases.forEach((l) => {
+    assert.strictEqual(laneGroupOf(l), blockOf(l),
+      "entry says " + laneGroupOf(l) + " but the lane renders in " + blockOf(l) +
+      " -- jumpToLane would open the wrong box for " + l.session);
+  });
 });
 
 console.log("fleet_lanegroups.test.js: " + pass + " passed");

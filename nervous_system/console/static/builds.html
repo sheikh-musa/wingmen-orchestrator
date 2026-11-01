@@ -172,6 +172,16 @@
   }
   details.repo-group.quiet .repo-name { color: var(--dim); font-weight: 500; }
   details.repo-group.quiet .chev { color: var(--faint); }
+  /* console #90323: the programme fold and the "more asks in this repo" fold
+     share the quiet treatment but are NOT repo groups (a repo group's own
+     styling, open-state chevron and default-open logic must not apply). */
+  details.prog-fold {
+    background: transparent; border-style: dashed; box-shadow: none;
+  }
+  details.prog-fold .repo-name { color: var(--dim); font-weight: 500; }
+  details.prog-fold .chev { color: var(--faint); }
+  details.prog-fold .items { padding: 0 14px 12px; }
+  details.prog-fold .items .item { margin: 6px 0; }
 
   @media (min-width: 760px) {
     .token-row { width: auto; margin-left: auto; }
@@ -188,7 +198,7 @@
   <a class="navlink" href="/">&larr; Console</a>
   <a class="navlink" href="/asks">Asks</a>
   <a class="navlink" href="/docs">Docs</a>
-  <span id="build" class="build"><span class="d"></span>fc-v97</span>
+  <span id="build" class="build"><span class="d"></span>fc-v98</span>
   <div class="token-row">
     <input id="token" type="password" inputmode="text" placeholder="operator token" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
     <button id="connect">Connect</button>

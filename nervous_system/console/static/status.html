@@ -105,6 +105,19 @@
   }
   .section:first-of-type { margin-top: 4px; }
 
+  /* ---- the folded remainder of the board (console #90323) ----
+     Same native <details> idiom as builds: the summary is the tap target,
+     it always carries the count, and opening it restores every row. */
+  details.fold { padding: 0 14px 16px; }
+  details.fold > summary {
+    list-style: none; cursor: pointer; margin: 8px 0;
+    padding: 11px 14px; border-radius: var(--r); border: 1px dashed var(--hair-2);
+    font: 600 12px/1.4 var(--sans); color: var(--dim);
+  }
+  details.fold > summary::-webkit-details-marker { display: none; }
+  details.fold > summary::before { content: "\25B8"; color: var(--faint); margin-right: 8px; }
+  details.fold[open] > summary::before { content: "\25BE"; }
+
   /* ---- item cards ---- */
   .items { padding: 0 14px 16px; }
   .item {
@@ -150,7 +163,7 @@
   <a class="navlink" href="/asks">Asks</a>
   <a class="navlink" href="/builds">Building</a>
   <a class="navlink" href="/docs">Docs</a>
-  <span id="build" class="build"><span class="d"></span>fc-v97</span>
+  <span id="build" class="build"><span class="d"></span>fc-v98</span>
   <div class="token-row">
     <input id="token" type="password" inputmode="text" placeholder="operator token" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
     <button id="connect">Connect</button>
