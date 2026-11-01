@@ -119,7 +119,9 @@ def test_decide_unclassifiable_none_is_could_not_measure():
 
 # ── PROCESS EXIT CODE (orch-console #89107) ─────────────────────────────────────────
 # An hourly exit=1 that ALSO means "fresh P0" is unreadable from a cron log. The
-# accepted/suppressed steady state must exit 0; anything that paged keeps a non-zero.
+# accepted/suppressed steady state must exit 0; anything THIS TIER paged keeps a
+# non-zero. Scope note: the forbidden/residue gates page off `code` entirely (see
+# exit_code_for), so 0 has never meant "no page was sent" and still does not.
 
 def test_exit_code_suppressed_breach_is_clean():
     assert M.exit_code_for(1, "breach", "suppress") == 0

@@ -370,9 +370,15 @@ def exit_code_for(code: int, kind: str, action: str) -> int:
     indistinguishable, and an operator had to open the bus to tell them apart. A signal
     nobody can read is not a signal.
 
-    Everything that actually paged keeps its non-zero code, so the dead-man's-switch is
-    untouched: exit 0 now means "ran to completion, and paged nothing"; a missing tick
-    (no log line) still means "did not run"; 2 still means "could not measure".
+    SCOPE — this maps the AUTHORIZED-COHORT tier only. The FORBIDDEN out-of-envelope gate
+    and the soft-deleted-residue guard page independently further down main() and never feed
+    `code` (pre-existing, unchanged here). So exit 0 means "this tier paged nothing", NOT
+    "the run paged nothing": a forbidden or residue page is carried by the bus and would sit
+    beside a 0. Do not read exit 0 as "no page was sent".
+
+    Everything THIS tier pages keeps its non-zero code, so the dead-man's-switch is
+    untouched: a missing tick (no log line) still means "did not run"; 2 still means
+    "could not measure"; a fresh or worsening authorized breach still means 1.
     """
     if kind == "breach" and action == "suppress":
         return 0
@@ -678,8 +684,9 @@ def main() -> int:
                   priority="P3", requires_response=False)
         # action == 'suppress' -> no page (identical acknowledged state within window)
         _save_state(new_state)
-        # ...and therefore a CLEAN exit: an unpaged steady state must not wear the same
-        # exit code as a live P0 (orch-console #89107). 'page'/'daily' keep their non-zero.
+        # ...and therefore a CLEAN exit on THIS tier: an unpaged authorized steady state must
+        # not wear the same exit code as a live P0 (orch-console #89107). 'page'/'daily' keep
+        # their non-zero. (The forbidden/residue gates page off `code` -- see exit_code_for.)
         code = exit_code_for(code, kind, action)
     elif kind == "could-not-classify":  # detector uncertainty — UNGATED (stays loud, guardrail #3)
         n = items[0][1]
@@ -697,8 +704,9 @@ def main() -> int:
                   "containment zero is restored. Monitor state cleared + RE-ARMED (a future break pages fresh). "
                   "Counts only.", priority="P3", requires_response=False)
             _save_state({})
-    # 0 = ran clean and paged nothing (all-zero, OR an already-reported/accepted state still
-    # inside its ceiling); 1 = a breach that actually paged; 2 = could-not-measure / connect.
+    # 0 = this tier paged nothing (all-zero, OR an already-reported/accepted state still inside
+    # its ceiling); 1 = a breach that actually paged; 2 = could-not-measure / connect. NB the
+    # FORBIDDEN and residue gates page off `code` -- a 0 here does not mean "no page was sent".
     return code
 
 
