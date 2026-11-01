@@ -798,3 +798,38 @@ def test_b1_default_live_gated_refs_still_rejects_real_refs_end_to_end(tmp_path)
                              "reason": "", "gate_id": "56485", "ref": "op#77",
                              "caller": "c", "exec_ledger_id": "e"})
     assert resp["error"]["code"] == "BAD_PROJECT_REF"
+
+
+# --- ruling C (console #89827/#89841): wrapped plain reads end to end -------
+
+def _canonical_wrap(inner):
+    from exec_broker.canonical_wrapper import PLACEHOLDER, WRAPPER_PATH
+    w = WRAPPER_PATH.read_text(encoding="utf-8")
+    return w.replace(PLACEHOLDER, f"{PLACEHOLDER}\n{inner.rstrip()}\n", 1)
+
+
+def test_c_wrapped_plain_read_needs_no_gate_end_to_end(tmp_path):
+    seen = []
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda sql, ref, tok: seen.append(sql) or [{"n": 1}],
+    )
+    sql = _canonical_wrap("SELECT count(*) FROM t;")
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": sql,
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp == {"status": "ok", "rows": [{"n": 1}]}
+    assert seen == [sql]
+    assert not any(q.strip().upper().startswith("SELECT FROM_AGENT") for q, _ in db.cursor_obj.calls)
+
+
+def test_c_wrapped_dml_is_gate_required_end_to_end(tmp_path):
+    seen = []
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: seen.append(a) or [],
+    )
+    for inner in ("UPDATE t SET a = 1;", "DROP TABLE t;"):
+        resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": _canonical_wrap(inner),
+                                 "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+        assert resp["error"]["code"] == "GATE_REQUIRED"
+    assert seen == []
