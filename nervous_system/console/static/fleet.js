@@ -396,18 +396,27 @@
       // if that tradeoff is ever revisited.
       + '</div>';
   }
-  // ---- DeepSeek pool card (op#35897, orch-console #83397) ------------------
-  // A top SHARED-key row (today's REAL spend location -- every live lane
-  // still draws on DEEPSEEK_CODING_KEY, confirmed live 2026-10-29), then one
-  // row per distinct per-client vault key from deepseek_key_map.json, each
-  // showing a BALANCE (never "spend" -- the endpoint has no spend figure) +
-  // its delta since the last poll + the LIVE lanes mapped to it (never the
-  // pointer file -- app.py's _deepseek_card_payload(), family-matched from
-  // the live-proc scan). A key the vault has never heard of says "key not
-  // created yet" (distinct from "could not read", a key that exists but
-  // failed) -- neither ever shows 0 or $0.00. Backend: nervous_system/
-  // console/deepseek_usage.py (5-min server cache per key; a key never
-  // reaches this payload).
+  // ---- DeepSeek pool card (op#35897, #37213, #37217; console #83397/#90015) --
+  // Collapsed it is ONE line: the shared key's balance plus today's measured
+  // spend against the 7 USD/day fleet line (op#36779, warn at 5). Expanded it
+  // is one row per vault key: balance + its delta since the last poll, that
+  // key's MEASURED cost today and over 7 days, and the LIVE lanes drawing on
+  // it (family-matched from the live-proc scan in app.py's
+  // _deepseek_card_payload(), never the pointer file).
+  //
+  // The spend figures come from dev.wingmen.deepseek-usage-export, which bills
+  // by api_key_name == the family slug. The export's `date` is a PROVIDER day
+  // in UTC+8 (deepseek_console.py _CONSOLE_TZ) -- it is labelled that way and
+  // is NOT anyone's local day (console #90026 corrected an earlier wording).
+  //
+  // Per-LANE cost is not shown because the provider cannot attribute it: every
+  // lane on a key shares one bill, so the honest statement is the note in the
+  // expanded body, not a fabricated split (console #90015).
+  //
+  // A key the vault has never heard of says why (distinct from "could not
+  // read"); neither ever shows 0 or $0.00 -- an unknown is never rendered as a
+  // measured zero. Backend: nervous_system/console/deepseek_usage.py (5-min
+  // server cache per key; a key never reaches this payload).
   function fmtUsd(n) {
     if (n == null) return "—";
     return (n < 0 ? "-" : "") + "$" + Math.abs(n).toFixed(2);
@@ -416,13 +425,35 @@
     return (lanes && lanes.length)
       ? '<span class="dslanes-inline">' + lanes.map(esc).join(", ") + '</span>' : "";
   }
-  function deepseekRow(label, k) {
+  // spend level vs the daily line -> css class + a plain-language verdict
+  function spendLevel(sp) {
+    if (!sp || !sp.available || sp.total_today_usd == null) return "stale";
+    if (sp.budget_line_usd != null && sp.total_today_usd >= sp.budget_line_usd) return "over";
+    if (sp.budget_warn_usd != null && sp.total_today_usd >= sp.budget_warn_usd) return "warn";
+    return "under";
+  }
+  function spendText(sp) {
+    if (!sp) return "";
+    if (!sp.available || sp.total_today_usd == null) return "spend unavailable";
+    var t = fmtUsd(sp.total_today_usd);
+    if (sp.budget_line_usd == null) return t + " today";
+    return t + " today of " + fmtUsd(sp.budget_line_usd) + " line";
+  }
+  function spendCell(sp) {
+    // per-key measured cost; a key with no export row reads "—", not "$0.00"
+    if (!sp) return '<span class="dsspend stale">no cost row</span>';
+    return '<span class="dsspend">' + fmtUsd(sp.today_usd) + ' today'
+      + (sp.last7_usd != null ? ' · ' + fmtUsd(sp.last7_usd) + ' / 7d' : '')
+      + '</span>';
+  }
+  function deepseekRow(label, k, showCost) {
     var laneChips = deepseekLaneChips(k.lanes);
+    var cost = showCost ? spendCell(k.spend) : "";
     if (!k.available) {
       var reason = k.reason || "could not read";
       return '<div class="poolwin stale" title="' + esc(label) + ': ' + esc(reason) + '">'
         + '<span class="poolwl">' + esc(label) + '</span>'
-        + '<b>' + esc(reason) + '</b>' + (laneChips ? ' ' + laneChips : "")
+        + '<b>' + esc(reason) + '</b>' + cost + (laneChips ? ' ' + laneChips : "")
         + '</div>';
     }
     var delta = (k.delta_usd == null) ? "" :
@@ -430,35 +461,67 @@
     return '<div class="poolwin ok" title="' + esc(label) + ' balance'
       + (k.age_s != null ? ", read " + fmtAge(k.age_s) + " ago" : "") + '">'
       + '<span class="poolwl">' + esc(label) + '</span>'
-      + '<b>' + fmtUsd(k.balance_usd) + '</b> balance' + delta
+      + '<b>' + fmtUsd(k.balance_usd) + '</b> balance' + delta + cost
       + (laneChips ? ' ' + laneChips : "")
       + '</div>';
   }
-  function deepseekCard(du) {
+  function deepseekCard(du, open) {
     if (!du) return "";
-    var shared = du.shared, keys = du.keys || [];
+    var shared = du.shared, keys = du.keys || [], sp = du.spend;
     if (!shared && !keys.length) return "";
     var anyAvailable = (shared && shared.available) || keys.some(function (k) { return k.available; });
     var cls = anyAvailable ? "good" : "stale";
-    var rows = (shared ? deepseekRow("Shared key", shared) : "")
-      + keys.map(function (k) {
-        var label = (k.families && k.families.length) ? k.families.join(" / ") : k.key_name;
-        return deepseekRow(label, k);
-      }).join("");
-    return '<div class="poolrow poolcard deepseek ' + cls + '" title="DeepSeek balance">'
-      + '<div class="poolhead"><span class="poolchip ' + cls + '">DeepSeek</span></div>'
-      + rows
-      + '</div>';
+    var lvl = spendLevel(sp);
+    // ONE line when collapsed: balance, today's spend against the line, and the
+    // day basis stated plainly so no one reads it as a local calendar day.
+    var head = '<span class="poolchip ' + cls + '">DeepSeek</span>'
+      + (shared && shared.available ? '<b>' + fmtUsd(shared.balance_usd) + '</b> balance' : '')
+      + (sp ? '<span class="dsspend ' + lvl + '">' + esc(spendText(sp)) + '</span>' : '')
+      + (sp && sp.available ? '<span class="dsday">provider day (UTC+8)</span>' : '');
+    var staleNote = (sp && sp.available && sp.stale)
+      ? '<div class="dsnote">Spend figures are stale — export last written '
+        + (sp.age_s != null ? fmtAge(sp.age_s) + ' ago' : 'at an unknown time') + '.</div>' : '';
+    // A key with no measured cost today AND no live lane is not news: its
+    // balance is the same account balance the active rows already show. They
+    // collapse to a count so the expanded card stays readable (op#37222 asks
+    // for exactly this: the per-key balance rows that never change).
+    var label = function (k) {
+      return (k.families && k.families.length) ? k.families.join(" / ") : k.key_name;
+    };
+    var active = keys.filter(function (k) {
+      return ((k.spend || {}).today_usd > 0) || (k.lanes && k.lanes.length) || k.unmapped
+        || !k.available;   // a key that cannot be read is a finding, always shown
+    });
+    var quiet = keys.filter(function (k) { return active.indexOf(k) < 0; });
+    var rows = (shared ? deepseekRow(shared.families && shared.families.length
+        ? "Shared key · " + shared.families.join(" / ") : "Shared key", shared, !!sp) : "")
+      + active.map(function (k) { return deepseekRow(label(k), k, !!sp); }).join("");
+    var quietLine = quiet.length
+      ? '<div class="dsnote">' + quiet.length + ' key(s) with no spend today and no live lane'
+        + (quiet.length <= 6 ? ': ' + quiet.map(function (k) { return esc(label(k)); }).join(", ") : "")
+        + '</div>' : "";
+    var note = '<div class="dsnote">Cost is per key, not per lane: every lane on a key draws '
+      + 'from the same bill. Splitting it needs one key per lane — proposed to the operator, '
+      + 'not built.</div>';
+    return '<details class="poolrow poolcard deepseek dspend ' + cls + '"'
+      + (open ? ' open' : '') + '>'
+      + '<summary class="poolhead">' + head + '</summary>'
+      + rows + quietLine + staleNote + note
+      + '</details>';
   }
   function renderPoolUsage(rows, glm, deepseek) {
     var el = $("poolUsage");
     if (!el) return;
+    // collapse state survives the 8s re-render, or the card would snap shut
+    // under the operator's hand every few seconds
+    var prev = el.querySelector ? el.querySelector("details.dspend") : null;
+    var wasOpen = !!(prev && prev.open);
     el.innerHTML = ((rows && rows.length) ? rows.map(poolChip).join("") : "")
-      + glmCard(glm) + deepseekCard(deepseek);
+      + glmCard(glm) + deepseekCard(deepseek, wasOpen);
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v95';
+  var APP_BUILD = 'fc-v96';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");

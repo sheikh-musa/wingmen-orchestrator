@@ -180,6 +180,24 @@
   .poolcard.deepseek .poolwin.stale b { color: var(--dim); }
   .dsdelta { color: var(--faint); font-weight: 400; }
   .ds-lane { font-size: 10px; opacity: .85; }
+  /* op#37213/#37217: the DeepSeek card collapses to ONE line (balance + today's
+     spend against the 7 USD/day line) and expands to per-key cost. Native
+     <details>/<summary> — no inline handler needed inside the IIFE — and its
+     open state is re-applied across the 8s re-render in renderPoolUsage(). */
+  .poolcard.deepseek.dspend { display: block; }
+  .poolcard.deepseek > summary { list-style: none; cursor: pointer; }
+  .poolcard.deepseek > summary::-webkit-details-marker { display: none; }
+  .poolcard.deepseek > summary::after { content: "▸"; margin-left: auto; color: var(--faint); }
+  .poolcard.deepseek[open] > summary::after { content: "▾"; }
+  .poolcard.deepseek > summary b { color: var(--txt); white-space: nowrap; }
+  /* spend level vs the daily line: under / warn (>=5) / over (>=7) / stale */
+  .dsspend { color: var(--dim); white-space: nowrap; }
+  .dsspend.under { color: var(--good); }
+  .dsspend.warn { color: var(--warn); }
+  .dsspend.over { color: var(--bad); }
+  .dsspend.stale { color: var(--faint); }
+  .dsday { color: var(--faint); font-size: 10px; white-space: nowrap; }
+  .dsnote { color: var(--faint); font-size: 10px; line-height: 1.45; white-space: normal; padding: 2px 0 0; }
 
   /* top-bloat glance (op#18542) — worst offenders across the whole fleet. */
   .topbloat { display: none; align-items: center; flex-wrap: wrap; gap: 4px 7px; margin-top: 9px;
