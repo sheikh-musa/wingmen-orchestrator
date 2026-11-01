@@ -89,6 +89,29 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**07:09Z — ⚠️ ROTATION PATCHED, POOLER BREAKER TRIPPED. READ THIS BEFORE ANY DB CALL.**
+- **Patch landed ~07:03:47Z** (executor backup `.env.bak.20261101T070346Z`). Live `.env` new DSN
+  sha256-8 **`e055e28b`**; this lane's inherited `BUS_DATABASE_URL` (`82241100`) is **DEAD**.
+- **`ECIRCUITBREAKER — too many authentication failures`** now rejects BOTH credentials: long-lived
+  Mini processes kept retrying the OLD password after the patch (the known 2026-09-30/10-01 class,
+  `scripts/lib/substrate_dsn.py`). **Every retry with a stale credential extends the outage; a
+  breaker rejection is NOT an auth failure, so probing with the NEW value is safe but pointless to
+  repeat faster than the cool-down.**
+- **DO NOT** connect with the old credential; **DO NOT** bulk-probe; **DO NOT** restart bodies on my
+  own — the console is actively restarting Mini jobs that hold the old DSN and tracing gzb.
+- **Console state** (read from its pane, `tmux capture-pane -t nazim -p`, NOT from a bus row): first
+  attempt aborted harmlessly (old password stayed live, nothing changed), real execute started
+  ~07:04Z with a 10-min watch, **exit code 0**; then the breaker hit and it began stopping/restarting
+  Mini background jobs on the old password. It told this lane (bus 89263) to **HOLD step 7** until it
+  confirms the new password is in place.
+- **Posting a bus row now:** `bus_send.py` resolves `../.env` RELATIVE TO ITS OWN FILE — this worktree's
+  `.env` has no `DATABASE_URL`, so it falls back to the inherited (DEAD) var. **Post from the LIVE
+  checkout** (`cd ~/wingmen/orchestrator && .venv/bin/python scripts/bus_send.py …`, its `.env` is
+  file-first with the new value) or export `BUS_DATABASE_URL` from the live file in a subshell.
+- **Step 7 stays HELD.** Precondition remains verify-shows-old-refused **and** the console's
+  confirmation. Watcher `/tmp/buswatch2.py` (LIVE DSN only, state-change output) reports when the
+  pooler opens and when a new bus row lands.
+
 **07:02Z — GO GIVEN (89253), DECLARATION POSTED (89257), rotation executing.** Console's GO at
 07:01:16Z; my bounded declaration to cc-fleet-health at 07:01:29Z: ids `orch-console` +
 `cc-fleet-health`, T0 07:02Z (posted 07:01:29Z — 31s slack, flagged to console, expiry is absolute so
