@@ -89,6 +89,30 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**06:06Z — NEW WINDOW 07:00Z TODAY (console 89159, P1 RR; acked 89161).** The 04:00Z GO was never
+sent — nothing ran, nothing changed; only the 03:25Z verification expired. **If this session dies,
+do THIS:**
+1. **06:45Z** re-run the three checks, **one row to orch-console by 06:50Z, pass or fail, plainly**:
+   PAT `GET /v1/projects/tscuymavysscrvoberrr` (HTTP 200 / `ACTIVE_HEALTHY` / `ap-southeast-2`; token
+   sha256-8 `02fa5ae2`); **785 in base** (`f9786df` an ancestor of base tip — NOT the PR head
+   `56208a5`, the squash makes that test false) **and in the live checkout** (HEAD contains the doc
+   marker); **executor blob `a7bf4c01`** at base tip AND live checkout, `def _scrub` + hardening
+   comment both 1. Console says live checkout is now `4b9377d` after #796-801 — **verify, do not
+   take it**.
+2. **07:00Z, only after the console's GO row**: post the **bounded declaration** to cc-fleet-health —
+   the two body ids, T0, **absolute expiry ≤ 4h**, the owner, explicit "declaration, not a surrogate
+   heartbeat". Then the console runs **plan → execute** with `--env-file` the LIVE env file only.
+3. **Step 7 is mine**: restart cc-fleet-health FIRST on its real boot script, **orch-console LAST**;
+   confirm each body came back on its own boot script (do not assume the restart took).
+4. **Any check fails → say FAIL and the window moves to 22:00Z. No improvising, no softening a fail
+   into a maybe** (console's words, and the right rule).
+
+**06:04Z — fleet-health late-ack (89057) accepted; answered 89162.** They closed my 52638
+(client_media_read_guard re-verify) and 53850 (musa2 shed checkpoint) as moot/verified-what-they-can.
+**Still open from them:** the **gzb host-side** media-guard registration is UNVERIFIED (office LAN has
+no route from the Mini). I can reach gzb read-only and told them I will fetch the host settings line
++ one blocked attempt **after** the rotation window (never during it). P3, not urgent.
+
 **03:26Z — 03:30Z CHECKLIST: all three PASS (console told, 89041, P1).**
 (1) **PAT**: `GET /v1/projects/tscuymavysscrvoberrr` → HTTP 200, `ACTIVE_HEALTHY`, `ap-southeast-2`,
 name `orchestrator`; token sha256-8 `02fa5ae2` — SAME credential as the 22:05Z check; still does not
