@@ -8,8 +8,25 @@ window. That ledger lives only on the exec host
 (~/.local/state/wingmen/agent_exec_ledger.jsonl, written by ihsanos-irsyad
 scripts/db/exec_prod.py _append_ledger). This copies it, line for line, into
 the fleet-bus table exec_prod_ledger (migrations/drafts/exec_prod_ledger.sql)
-so the reconcile can row-match ledger exec_id == broker exec_ledger_id AND
-sql_sha256.
+so the reconcile can row-match them.
+
+RECONCILE KEY (state it exactly; cc-fleet-health bus #89909):
+  (exec_prod_ledger.exec_id == exec_broker_access_log.exec_ledger_id,
+   project_ref, transport) AND sql_sha256.
+sql_sha256 on BOTH sides is the hash of the bytes exec_prod SENT == the bytes
+the broker RECEIVED (ihsanos #1220 hashes the exact guarded_sql it sends;
+broker #821 keeps sql_sha256 over the received bytes). NEVER compare against
+exec_broker_access_log.executed_sql_sha256 -- that is the SEPARATE hash of
+what the broker actually ran (received bytes + its read-only prologue on a
+gate-free read), and it intentionally differs.
+
+RUN HEARTBEAT: every run that gets past argument parsing upserts ONE row per
+host into exec_prod_ledger_shipper_runs at the END of the run -- empty runs
+and failed runs included where the DB is reachable (last_run_at, last_ok_at
+only on exit 0, cursor_offset, ledger_size, exit_code, shipped_last,
+malformed_last, conflicted_last). If the DB itself is the failure the run
+exits 1 and the row simply goes stale: a stale/missing run row is the
+watchdog's signal.
 
 LEDGER SCHEMA (one JSON object per line): exec_id, ts_start, ts_end, actor,
 project_ref, sql_sha256, reason, gate_id, gate_ref, transport, outcome. Every
@@ -31,6 +48,12 @@ GUARANTEES
     the run exit 2. They never crash the run and are never silently dropped.
   * `reason` (operator free text already present in the ledger) is shipped
     truncated to 200 characters; nothing else free-text is added.
+  * conflicted = lines attempted - rows actually inserted (sum of
+    cur.rowcount), i.e. lines that were already in the table. Reported in the
+    summary line and the run row.
+  * One run at a time per cursor: an exclusive non-blocking flock on
+    <cursor>.lock; a second concurrent run exits 0 without touching anything
+    (the running one writes the run row).
 
 CLI (one-shot; schedule with deploy/wingmen-exec-prod-ledger-shipper.timer):
   exec_prod_ledger_shipper.py [--ledger PATH] [--cursor PATH] [--dry-run]
@@ -40,8 +63,10 @@ Exit codes: 0 shipped cleanly, 2 shipped but malformed lines were found,
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
+import re
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -68,6 +93,26 @@ INSERT_SQL = (
 )
 
 
+RUN_UPSERT_SQL = (
+    "INSERT INTO exec_prod_ledger_shipper_runs "
+    "(host, last_run_at, last_ok_at, cursor_offset, ledger_size, exit_code, "
+    " shipped_last, malformed_last, conflicted_last) "
+    "VALUES (%(host)s, now(), CASE WHEN %(exit_code)s = 0 THEN now() END, %(cursor_offset)s, "
+    " %(ledger_size)s, %(exit_code)s, %(shipped)s, %(malformed)s, %(conflicted)s) "
+    "ON CONFLICT (host) DO UPDATE SET "
+    "  last_run_at = now(), "
+    "  last_ok_at = CASE WHEN EXCLUDED.exit_code = 0 THEN now() "
+    "                    ELSE exec_prod_ledger_shipper_runs.last_ok_at END, "
+    "  cursor_offset = EXCLUDED.cursor_offset, ledger_size = EXCLUDED.ledger_size, "
+    "  exit_code = EXCLUDED.exit_code, shipped_last = EXCLUDED.shipped_last, "
+    "  malformed_last = EXCLUDED.malformed_last, conflicted_last = EXCLUDED.conflicted_last"
+)
+
+# A ledger timestamp must carry a TIME component (cc-fleet-health #89909): a
+# date-only value would silently become midnight and mis-window the reconcile.
+_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
+
+
 class Malformed(ValueError):
     pass
 
@@ -79,6 +124,8 @@ def _ts(value, name: str, *, required: bool) -> "str | None":
         return None
     if not isinstance(value, str):
         raise Malformed(f"{name} not a string")
+    if not _DATETIME_RE.match(value):
+        raise Malformed(f"{name} has no time component")
     try:
         datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
@@ -149,11 +196,17 @@ def start_offset(cursor: dict, size: int, inode: int) -> "tuple[int, str | None]
 
 @dataclass
 class Report:
-    shipped_lines: int = 0
+    shipped_lines: int = 0      # lines attempted (parsed OK and sent to INSERT)
+    inserted: int = 0           # rows actually inserted (sum of cur.rowcount)
+    ledger_size: int = 0
     malformed: list = field(default_factory=list)   # [(byte_offset, reason)]
     restarted: "str | None" = None
     start: int = 0
     end: int = 0
+
+    @property
+    def conflicted(self) -> int:
+        return self.shipped_lines - self.inserted
 
 
 def iter_complete_lines(data: bytes, base: int):
@@ -174,6 +227,7 @@ def ship(*, ledger: Path, cursor_path: Path, host: str, conn_factory, dry_run: b
         st = ledger.stat()
     except FileNotFoundError:
         return report  # nothing written yet -- not an error
+    report.ledger_size = st.st_size
     cursor = read_cursor(cursor_path)
     offset, why = start_offset(cursor, st.st_size, st.st_ino)
     report.restarted, report.start, report.end = why, offset, offset
@@ -186,10 +240,13 @@ def ship(*, ledger: Path, cursor_path: Path, host: str, conn_factory, dry_run: b
         nonlocal batch
         if batch and not dry_run:
             with conn_factory() as conn:
+                inserted = 0
                 with conn.cursor() as cur:
                     for row in batch:
                         cur.execute(INSERT_SQL, row)
+                        inserted += max(getattr(cur, "rowcount", 0) or 0, 0)
                 conn.commit()
+            report.inserted += inserted
         if not dry_run:
             write_cursor(cursor_path, batch_end, st.st_ino)
         report.shipped_lines += len(batch)
@@ -217,6 +274,40 @@ def _conn_factory():
     return psycopg.connect(dsn)
 
 
+def write_run_row(conn_factory, *, host: str, exit_code: int, rep: "Report | None") -> bool:
+    """Upsert this host's run-heartbeat row. Best effort: returns False (never
+    raises) if the DB is unreachable -- the stale row is then the signal."""
+    params = {
+        "host": host, "exit_code": exit_code,
+        "cursor_offset": rep.end if rep else None, "ledger_size": rep.ledger_size if rep else None,
+        "shipped": rep.shipped_lines if rep else None,
+        "malformed": len(rep.malformed) if rep else None,
+        "conflicted": rep.conflicted if rep else None,
+    }
+    try:
+        with conn_factory() as conn:
+            with conn.cursor() as cur:
+                cur.execute(RUN_UPSERT_SQL, params)
+            conn.commit()
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"exec_prod_ledger_shipper: could not write the run row ({e.__class__.__name__})",
+              file=sys.stderr)
+        return False
+
+
+def _acquire_lock(cursor_path: Path):
+    """Exclusive non-blocking lock next to the cursor; None if another run holds it."""
+    cursor_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(str(cursor_path) + ".lock", "a")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+    return fh
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Ship exec_prod's JSONL ledger to the fleet bus.")
     ap.add_argument("--ledger", type=Path,
@@ -230,20 +321,36 @@ def main(argv=None) -> int:
     except Exception as e:  # noqa: BLE001 -- never ship under an unknown identity
         print(f"exec_prod_ledger_shipper: cannot resolve host identity ({e}) -- refusing", file=sys.stderr)
         return 1
+    lock = None
+    if not a.dry_run:
+        lock = _acquire_lock(a.cursor)
+        if lock is None:
+            print("exec_prod_ledger_shipper: another run holds the lock -- skipping (it writes the run row)")
+            return 0
     try:
-        rep = ship(ledger=a.ledger, cursor_path=a.cursor, host=host,
-                   conn_factory=_conn_factory, dry_run=a.dry_run)
-    except Exception as e:  # noqa: BLE001 -- report the class only (never a DSN)
-        print(f"exec_prod_ledger_shipper: ship failed ({e.__class__.__name__}) -- cursor not advanced "
-              "past the failed batch", file=sys.stderr)
-        return 1
-    print(f"exec_prod_ledger_shipper: host={host} bytes {rep.start}..{rep.end} "
-          f"shipped_lines={rep.shipped_lines} malformed={len(rep.malformed)}"
-          + (f" restart={rep.restarted}" if rep.restarted else "")
-          + (" (dry-run)" if a.dry_run else ""))
-    for off, why in rep.malformed:
-        print(f"exec_prod_ledger_shipper: MALFORMED line at byte {off}: {why}", file=sys.stderr)
-    return 2 if rep.malformed else 0
+        try:
+            rep = ship(ledger=a.ledger, cursor_path=a.cursor, host=host,
+                       conn_factory=_conn_factory, dry_run=a.dry_run)
+        except Exception as e:  # noqa: BLE001 -- report the class only (never a DSN)
+            print(f"exec_prod_ledger_shipper: ship failed ({e.__class__.__name__}) -- cursor not advanced "
+                  "past the failed batch", file=sys.stderr)
+            if not a.dry_run:
+                write_run_row(_conn_factory, host=host, exit_code=1, rep=None)
+            return 1
+        code = 2 if rep.malformed else 0
+        print(f"exec_prod_ledger_shipper: host={host} bytes {rep.start}..{rep.end} "
+              f"ledger_size={rep.ledger_size} shipped_lines={rep.shipped_lines} "
+              f"inserted={rep.inserted} conflicted={rep.conflicted} malformed={len(rep.malformed)}"
+              + (f" restart={rep.restarted}" if rep.restarted else "")
+              + (" (dry-run)" if a.dry_run else ""))
+        for off, why in rep.malformed:
+            print(f"exec_prod_ledger_shipper: MALFORMED line at byte {off}: {why}", file=sys.stderr)
+        if not a.dry_run and not write_run_row(_conn_factory, host=host, exit_code=code, rep=rep):
+            return 1
+        return code
+    finally:
+        if lock is not None:
+            lock.close()
 
 
 if __name__ == "__main__":

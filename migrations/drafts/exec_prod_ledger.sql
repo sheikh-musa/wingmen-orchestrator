@@ -5,9 +5,16 @@
 -- NOT applied. Migration NNN assigned by CORE at apply. Target: the fleet-bus DB.
 --
 -- One row per ledger LINE: every exec writes a START line (ts_end NULL) and an
--- END line (ts_end set) sharing exec_id; line_kind is derived from that. The
--- reconcile row-matches exec_id (== broker exec_ledger_id) AND sql_sha256 (the
--- sha256 of the exact guarded_sql bytes exec_prod sent).
+-- END line (ts_end set) sharing exec_id; line_kind is derived from that.
+--
+-- RECONCILE KEY (cc-fleet-health bus #89909):
+--   (exec_prod_ledger.exec_id = exec_broker_access_log.exec_ledger_id,
+--    project_ref, transport) AND sql_sha256.
+-- sql_sha256 on BOTH sides is the hash of the bytes exec_prod SENT = the bytes
+-- the broker RECEIVED (ihsanos #1220 / broker #821). Do NOT compare against
+-- exec_broker_access_log.executed_sql_sha256: that is the SEPARATE hash of what
+-- the broker actually ran (with its read-only prologue on gate-free reads) and
+-- intentionally differs.
 -- Idempotency: UNIQUE (host, exec_id, line_kind) + the shipper's
 -- ON CONFLICT DO NOTHING -- re-shipping is a no-op.
 -- reason is operator free text already present in the ledger, truncated to 200
@@ -36,15 +43,37 @@ CREATE TABLE IF NOT EXISTS exec_prod_ledger (
 
 CREATE INDEX IF NOT EXISTS exec_prod_ledger_ref_ts_idx ON exec_prod_ledger (project_ref, ts_start);
 
+-- RUN HEARTBEAT (cc-fleet-health bus #89909): one row per shipping host,
+-- upserted at the END of every run (empty and failed runs included where the
+-- DB is reachable). last_ok_at moves only on exit 0. A stale last_run_at (or a
+-- missing row) is the watchdog's signal that the shipper is not running or
+-- cannot reach the DB.
+CREATE TABLE IF NOT EXISTS exec_prod_ledger_shipper_runs (
+  host             text PRIMARY KEY,                -- fleet_host_id() of the exec host
+  last_run_at      timestamptz NOT NULL,
+  last_ok_at       timestamptz,                     -- only advanced on exit_code = 0
+  cursor_offset    bigint,                          -- byte offset after the run (NULL if the run failed early)
+  ledger_size      bigint,                          -- ledger file size seen by the run
+  exit_code        integer NOT NULL CHECK (exit_code IN (0, 1, 2)),
+  shipped_last     integer,                         -- lines attempted this run
+  malformed_last   integer,
+  conflicted_last  integer                          -- attempted - inserted (already present)
+);
+
 -- Same Supabase default-privileges lesson as hc95_exec_broker_access_log.sql
 -- (bus #72301): name every platform role explicitly.
 REVOKE ALL ON exec_prod_ledger FROM PUBLIC, authenticated, anon, service_role;
 REVOKE ALL ON SEQUENCE exec_prod_ledger_id_seq FROM PUBLIC, authenticated, anon, service_role;
+REVOKE ALL ON exec_prod_ledger_shipper_runs FROM PUBLIC, authenticated, anon, service_role;
+-- RLS is NOT enabled on exec_prod_ledger or exec_prod_ledger_shipper_runs (same as
+-- exec_broker_access_log); access is by explicit GRANT only.
 
 -- GRANT-READY (orch-console, at apply time -- role names are provisioning
 -- decisions, deliberately not hard-coded here):
 --   * the SHIPPER's role (whatever DSN the exec host's shipper uses) needs
---     INSERT + SELECT on exec_prod_ledger and USAGE on exec_prod_ledger_id_seq;
---     never UPDATE/DELETE (append-only by omission).
+--     INSERT + SELECT on exec_prod_ledger and USAGE on exec_prod_ledger_id_seq
+--     (never UPDATE/DELETE: append-only by omission), plus INSERT + UPDATE +
+--     SELECT on exec_prod_ledger_shipper_runs (its own run-heartbeat upsert).
 --   * cc-fleet-health's WATCHDOG / reconcile read role needs SELECT on
---     exec_prod_ledger.
+--     exec_prod_ledger and exec_prod_ledger_shipper_runs (granted to
+--     broker_watch_readonly by migrations/drafts/hc95_broker_watch_readonly.sql).

@@ -16,5 +16,7 @@ User=gazzai
 WorkingDirectory=/home/gazzai/wingmen/orchestrator
 ExecStart=/home/gazzai/wingmen/orchestrator/.venv/bin/python scripts/exec_prod_ledger_shipper.py
 
-# Cron alternative (also not installed):
-#   */5 * * * * cd /home/gazzai/wingmen/orchestrator && .venv/bin/python scripts/exec_prod_ledger_shipper.py >> ~/.local/state/wingmen/exec_prod_ledger_shipper.log 2>&1
+# Cron alternative -- COMMENT ONLY, not installed. Wrapped in flock -n so two
+# cron runs can never race the cursor (the script also takes its own
+# non-blocking lock on <cursor>.lock; this is belt and braces):
+#   */5 * * * * cd /home/gazzai/wingmen/orchestrator && flock -n ~/.local/state/wingmen/exec_prod_ledger_shipper.cron.lock .venv/bin/python scripts/exec_prod_ledger_shipper.py >> ~/.local/state/wingmen/exec_prod_ledger_shipper.log 2>&1

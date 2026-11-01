@@ -29,11 +29,13 @@ def dsn(pg_dsn):
         for role in ("authenticated", "anon", "service_role"):
             c.execute(f"DO $$ BEGIN CREATE ROLE {role}; EXCEPTION WHEN duplicate_object THEN NULL; END $$")
         c.execute("DROP TABLE IF EXISTS exec_prod_ledger")
+        c.execute("DROP TABLE IF EXISTS exec_prod_ledger_shipper_runs")
         c.execute(_DRAFT.read_text())
         c.execute(_DRAFT.read_text())   # idempotent re-apply
     yield pg_dsn
     with psycopg.connect(pg_dsn, autocommit=True) as c:
         c.execute("DROP TABLE IF EXISTS exec_prod_ledger")
+        c.execute("DROP TABLE IF EXISTS exec_prod_ledger_shipper_runs")
 
 
 def _line(exec_id, end=False, reason="r"):
@@ -66,3 +68,27 @@ def test_checks_reject_inconsistent_rows(dsn):
         with pytest.raises(psycopg.errors.CheckViolation):
             c.execute("INSERT INTO exec_prod_ledger (host, exec_id, line_kind, ts_start, reason) "
                       "VALUES ('h', 'y', 'start', now(), repeat('z', 201))")
+
+
+
+def test_real_run_row_upsert_and_rowcount_conflicts(dsn, tmp_path):
+    ledger = tmp_path / "l.jsonl"
+    ledger.write_text(_line("e1") + _line("e1", end=True))
+    kw = dict(ledger=ledger, cursor_path=tmp_path / "c.json", host="gzb",
+              conn_factory=lambda: psycopg.connect(dsn))
+    rep = shipper.ship(**kw)
+    assert (rep.inserted, rep.conflicted) == (2, 0)
+    (tmp_path / "c.json").unlink()
+    rep = shipper.ship(**kw)
+    assert (rep.inserted, rep.conflicted) == (0, 2)          # real cur.rowcount on ON CONFLICT DO NOTHING
+    factory = lambda: psycopg.connect(dsn)  # noqa: E731
+    assert shipper.write_run_row(factory, host="gzb", exit_code=0, rep=rep)
+    assert shipper.write_run_row(factory, host="gzb", exit_code=2, rep=rep)
+    with psycopg.connect(dsn) as c:
+        row = c.execute("SELECT exit_code, last_ok_at IS NOT NULL, last_ok_at < last_run_at, conflicted_last, "
+                        "count(*) OVER () FROM exec_prod_ledger_shipper_runs").fetchone()
+    assert row == (2, True, True, 2, 1)
+    with psycopg.connect(dsn, autocommit=True) as c:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            c.execute("INSERT INTO exec_prod_ledger_shipper_runs (host, last_run_at, exit_code) "
+                      "VALUES ('h2', now(), 3)")
