@@ -1641,3 +1641,26 @@ INLINE string with no apostrophes; even naming those shapes in prose here trips 
   fixed by then. Re-check at PASS: run ensure_user_global_hooks.py on gzb and quote what
   it reports.
 - PR 807: when cc-quality passes, send the console the HEAD and they run merge_pinned.
+
+### PR 807 PASSED (cc-quality 89507, 08:48Z) — head handed to console 89508
+
+cc-quality PASS bound to head 7214394f0f319ea03c22b566799fa35868ddc714 (base c076ec1b).
+Re-verified at send time: head unchanged, MERGEABLE, CLEAN, Lint and Test SUCCESS. Handed the
+head to the console for merge_pinned (89508) — I do NOT merge it myself.
+
+Their evidence: local-vs-ssh verdict parity on constructed cases; AST-identity of the parser
+extraction (504 tests green across the three suites); a NEGATIVE CONTROL where disabling the
+new recursion fails exactly the two ssh tests; boundary verified by full source read.
+
+TWO RESIDUALS they flagged, left alone deliberately (both stated to the console, not hidden):
+- a store read wrapped 4+ ssh/shell levels deep escapes the depth-3 bound (real incidents were
+  2 levels);
+- an absolute-path ssh binary (/usr/bin/ssh) is not recognised by the anchor — PRE-EXISTING in
+  the shipped parser, not introduced here.
+
+Also closed a 56-day-open requires_response row in this family while sending an unrelated one:
+37820 (058/PR#94 gate). Both of its decisions shipped the same day — DROP not REVOKE in 058
+lines 48-51, bulk_insert_morphology as its own 059. Reply 89509; responded_at now set.
+
+Waiting on: the console merge. Then post-merge verification = content check on the base, the
+17-case harness against the LIVE hook path, and the gzb hook status quoted as it stands then.
