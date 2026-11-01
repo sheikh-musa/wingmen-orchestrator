@@ -1,0 +1,20 @@
+# /etc/systemd/system/wingmen-exec-prod-ledger-shipper.service
+# FILE ONLY -- not installed. Ships exec_prod's append-only JSONL ledger
+# (~/.local/state/wingmen/agent_exec_ledger.jsonl) to the fleet-bus table
+# exec_prod_ledger (queue row 271; hc#95 B4). Runs on the EXEC host (gzb), as
+# the user whose home holds the ledger. Idempotent: safe to run any number of
+# times. Exit 2 = shipped, but malformed ledger lines were found (see journal).
+# Requires migrations/drafts/exec_prod_ledger.sql applied first.
+[Unit]
+Description=Wingmen exec_prod ledger shipper (JSONL -> exec_prod_ledger) — gzb
+After=network-online.target wingmen-fetch-secrets.service
+Requires=wingmen-fetch-secrets.service
+
+[Service]
+Type=oneshot
+User=gazzai
+WorkingDirectory=/home/gazzai/wingmen/orchestrator
+ExecStart=/home/gazzai/wingmen/orchestrator/.venv/bin/python scripts/exec_prod_ledger_shipper.py
+
+# Cron alternative (also not installed):
+#   */5 * * * * cd /home/gazzai/wingmen/orchestrator && .venv/bin/python scripts/exec_prod_ledger_shipper.py >> ~/.local/state/wingmen/exec_prod_ledger_shipper.log 2>&1

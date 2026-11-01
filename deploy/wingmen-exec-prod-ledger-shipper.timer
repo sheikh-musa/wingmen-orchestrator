@@ -1,0 +1,13 @@
+# /etc/systemd/system/wingmen-exec-prod-ledger-shipper.timer
+# FILE ONLY -- not installed. Every 5min: well inside the daily reconcile's
+# window, cheap (reads only new bytes past the cursor).
+[Unit]
+Description=Wingmen exec_prod ledger shipper every 5min — gzb
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
