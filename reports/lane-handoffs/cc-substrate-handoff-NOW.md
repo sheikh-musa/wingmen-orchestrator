@@ -89,6 +89,35 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**07:02Z — GO GIVEN (89253), DECLARATION POSTED (89257), rotation executing.** Console's GO at
+07:01:16Z; my bounded declaration to cc-fleet-health at 07:01:29Z: ids `orch-console` +
+`cc-fleet-health`, T0 07:02Z (posted 07:01:29Z — 31s slack, flagged to console, expiry is absolute so
+harmless), **expiry 11:00Z**, owner cc-substrate-1, explicitly NOT a surrogate heartbeat. Console
+replied (89259) that execute may start. fleet-health acked (89261) and **self-corrected in 89262**:
+its `--reply-to` auto-stamped 89257 read at 07:02:01Z from the OLD body, so **"declaration still
+unread" is NOT a proxy for "new body booted"** — the same `--reply-to` stamp-from-old-body trap that
+stops RR noise creates a FALSE liveness signal here. Their real handoff now sits in a file their
+memory index loads at boot.
+
+**DANGER, handled: my lane's `BUS_DATABASE_URL` is byte-identical to the live `.env` `DATABASE_URL`**
+(same sha256-8 `82241100`, verified 07:03Z). **The moment the patch lands and the pooler cache
+refreshes, this lane's inherited DSN dies too** — bus rows would silently stop. All polling since
+uses `/tmp/watch_rotation.py`, which tries the **LIVE .env value first, LANE value second** and
+prints which works; the LIVE-works/LANE-fails flip is independent evidence of when the patch landed.
+**If this session dies mid-rotation: re-read `~/wingmen/orchestrator/.env` after the patch and pass
+that DSN before posting anything.**
+
+**STEP 7 — armed, NOT started (precondition = verify shows the OLD value REFUSED).** Exact order per
+runbook §7 + SRE 88003: fleet-health FIRST, console LAST. fleet-health has a guard:
+`~/wingmen/fleet-health/ops/sre_relaunch_guard.sh` → 0 FREE (proceed) / 1 OCCUPIED (do not) /
+2 UNKNOWN (do not). Clean exit = `tmux kill-session -t fleet-health` / `-t nazim` (SIGTERM/HUP runs
+the EXIT trap; **never SIGKILL, never kill the CC process directly**); **stop if the `agent_status`
+row does not go `offline`**. Confirm gone with `ps auxww` (NOT plain `ps aux`) + `tmux has-session`.
+Then ONE boot via the launchd KeepAlive waiters (`dev.wingmen.fleet-health-session`,
+`dev.wingmen.nazim-session`), not a hand-rolled run. Verify = **two `agent_status` samples ≥330s
+apart**, both `working` AND sample B `last_heartbeat` strictly later than A; then `fleet_health_lease`
+names the body again. Recency alone proves the opposite (the trap writes `last_heartbeat=now()`).
+
 **06:06Z — NEW WINDOW 07:00Z TODAY (console 89159, P1 RR; acked 89161).** The 04:00Z GO was never
 sent — nothing ran, nothing changed; only the 03:25Z verification expired. **If this session dies,
 do THIS:**
