@@ -11,7 +11,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
 
 from exec_broker.gate_validation import (  # noqa: E402
+    DEFAULT_LIVE_GATED_REFS,
     BrokerValidationError,
+    _text_mentions_ref,
+    _validate_ref,
     check_project_ref,
     ref_override_is_live,
     require_gate,
@@ -501,3 +504,330 @@ def test_non_hazardous_ddl_cannot_pass_on_a_cited_sha12_alone():
     with pytest.raises(BrokerValidationError) as exc:
         require_gate(sql, "56485", _SYNTH_REF, cur=FakeCursor(row))
     assert exc.value.code == ErrorCode.GATE_INVALID
+
+
+# --- B1 (bus #89814 §1): every non-plain-read statement on a gated ref is
+# gated -- DML included. Mirrors exec_prod._require_gate (console #81213).
+# Synthetic silo ref throughout (see the note above _SYNTH_REF).
+
+_DML_UPDATE = "UPDATE tabung_tins SET amount = 12.50 WHERE id = 42;"
+_DO_DATA_FIX = "DO $$\nBEGIN\n  UPDATE tabung_tins SET amount = 12.50 WHERE id = 42;\nEND\n$$;"
+_DO_PURE_DML = "DO $$ BEGIN INSERT INTO t (a) VALUES (1); DELETE FROM t WHERE a = 2; END $$;"
+
+
+def _ref_row(**overrides) -> dict:
+    row = {
+        "from_agent": "orch-console",
+        "message_type": "decision",
+        "subject": "GO data correction op#36027",
+        "body": f"GO: apply the op#36027 tin-amount correction on {_SYNTH_REF}. No DDL.",
+        "is_past": True,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_b1_dml_without_gate_is_gate_required():
+    for sql in (_DML_UPDATE, _DO_DATA_FIX, _DO_PURE_DML, "insert into t values (1)",
+                "delete from t", "with d as (delete from t returning *) select * from d"):
+        cur = FakeCursor()
+        with pytest.raises(BrokerValidationError) as exc:
+            require_gate(sql, None, _SYNTH_REF, cur=cur)
+        assert exc.value.code == ErrorCode.GATE_REQUIRED, sql
+        assert cur.calls == [], "GATE_REQUIRED must refuse before any bus lookup"
+
+
+def test_b1_dml_without_gate_is_gate_required_on_qa_too():
+    # The QA default ref is a gated ref like any other (fail-closed reading of
+    # the spec; see the PR body "Deviations").
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DML_UPDATE, None, "oovskwogvefnznfowjky", cur=FakeCursor())
+    assert exc.value.code == ErrorCode.GATE_REQUIRED
+
+
+def test_b1_dml_with_valid_ref_anchored_gate_passes_and_reports_a_gate_was_used():
+    cur = FakeCursor(_ref_row())
+    assert require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=cur, ref="op#36027") is True
+    assert len(cur.calls) == 1 and cur.calls[0][1] == (83934,)
+
+
+def test_b1_dml_with_gate_not_mentioning_the_silo_is_gate_invalid():
+    row = _ref_row(subject="GO op#36027", body="GO op#36027 data fix on some other silo only.")
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=FakeCursor(row), ref="op#36027")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+    assert "silo" in exc.value.message
+
+
+def test_b1_dml_with_gate_but_no_anchor_on_the_wire_is_gate_invalid():
+    # A gate that merely names the silo must not authorize arbitrary DML
+    # (same cross-authorization class as #70929) -- exec_prod refuses this too.
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=FakeCursor(_ref_row()))
+    assert exc.value.code == ErrorCode.GATE_INVALID
+
+
+def test_b1_dml_with_matching_pr_or_migration_anchor_passes():
+    row = _ref_row(body=f"GO PR#1040 migration 479 on {_SYNTH_REF}")
+    assert require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=FakeCursor(row), pr="1040") is True
+    assert require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=FakeCursor(row), migration="479") is True
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DML_UPDATE, "83934", _SYNTH_REF, cur=FakeCursor(row), pr="999")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+
+
+@pytest.mark.parametrize("sql", [
+    "select 1",
+    "SELECT count(*) FROM t WHERE a = 'x'",
+    "with x as (select id from t) select count(*) from x",
+    "table t",
+    "values (1), (2)",
+])
+def test_b1_plain_read_on_gated_ref_needs_no_gate_and_never_touches_cur(sql):
+    cur = FakeCursor()
+    assert require_gate(sql, None, _SYNTH_REF, cur=cur) is False
+    assert cur.calls == []
+
+
+def test_b1_plain_read_with_a_gate_id_attached_still_reports_no_gate_used():
+    # A gate cited on a plain read is not validated -- and so (B3) not consumed.
+    cur = FakeCursor(_ref_row())
+    assert require_gate("select 1", "83934", _SYNTH_REF, cur=cur) is False
+    assert cur.calls == []
+
+
+@pytest.mark.parametrize("sql", [
+    "select * from t for update",
+    "select nextval('s')",
+    "select set_config('a.b', 'c', true)",
+    "select 1 into tmp_t",
+])
+def test_b1_read_shaped_writes_are_not_plain_reads_and_need_a_gate(sql):
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(sql, None, _SYNTH_REF, cur=FakeCursor())
+    assert exc.value.code == ErrorCode.GATE_REQUIRED
+
+
+# --- --ref anchor (bus #89814 §3), mirroring exec_prod.test.py (a)-(g) ------
+
+def test_ref_a_data_fix_with_matching_ref_passes():
+    """(a) DML / DO-block data correction + ref op#36027, gate names op#36027 + silo."""
+    for sql in (_DO_DATA_FIX, _DML_UPDATE, _DO_PURE_DML):
+        cur = FakeCursor(_ref_row())
+        assert require_gate(sql, "83934", _SYNTH_REF, cur=cur, ref="op#36027") is True
+        assert cur.calls[0][1] == (83934,)
+
+
+def test_ref_b_mismatched_ref_refused_digit_boundary():
+    """(b) gate says op#36027; a prefix, a different prefix, or a suffix-cut ref
+    must NOT match."""
+    for bad in ("op#3602", "hc#36027", "op#6027"):
+        with pytest.raises(BrokerValidationError) as exc:
+            require_gate(_DO_DATA_FIX, "83934", _SYNTH_REF, cur=FakeCursor(_ref_row()), ref=bad)
+        assert exc.value.code == ErrorCode.GATE_INVALID
+        assert "does not mention ref" in exc.value.message
+    assert _text_mentions_ref("see op#36027.", "op#36027")
+    assert _text_mentions_ref("(OP#36027)", "op#36027")
+    assert not _text_mentions_ref("op#36027", "op#3602")
+    assert not _text_mentions_ref("faq#210 is unrelated", "q#210")
+    assert not _text_mentions_ref("hcp#5", "cp#5")
+    assert not _text_mentions_ref("op#360270", "op#36027")
+
+
+def test_ref_op51_and_op510_never_cross_match():
+    assert not _text_mentions_ref("GO op#510 on qa", "op#51")
+    assert not _text_mentions_ref("GO op#51 on qa", "op#510")
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DML_UPDATE, "1", _SYNTH_REF,
+                     cur=FakeCursor(_ref_row(subject="GO op#510", body=f"op#510 on {_SYNTH_REF}")),
+                     ref="op#51")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DML_UPDATE, "1", _SYNTH_REF,
+                     cur=FakeCursor(_ref_row(subject="GO op#51", body=f"op#51 on {_SYNTH_REF}")),
+                     ref="op#510")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+    # control: the exact token passes
+    assert require_gate(_DML_UPDATE, "1", _SYNTH_REF,
+                        cur=FakeCursor(_ref_row(subject="GO op#51", body=f"op#51 on {_SYNTH_REF}")),
+                        ref="op#51") is True
+
+
+_DDL_INNER = "ALTER TABLE t ADD COLUMN x int;"
+_GRANT_INNER = "GRANT SELECT ON t TO authenticated;"
+_DO_DDL_LITERAL = "DO $$ BEGIN CREATE TABLE z (a int); END $$;"
+_DO_DYNAMIC_DDL = "DO $$ BEGIN EXECUTE 'DROP TABLE z'; END $$;"
+
+
+def test_ref_c_ddl_with_only_ref_refused_before_the_bus_lookup():
+    """(c) DDL -- top-level, GRANT, inside a DO body, via dynamic EXECUTE -- with
+    ref as the only anchor is refused even when the gate names the ref + silo."""
+    row = _ref_row(body=f"GO op#36027 on {_SYNTH_REF}, mig999, PR#1040")
+    for sql in (_DDL_INNER, _GRANT_INNER, _DO_DDL_LITERAL, _DO_DYNAMIC_DDL):
+        cur = FakeCursor(row)
+        with pytest.raises(BrokerValidationError) as exc:
+            require_gate(sql, "83934", _SYNTH_REF, cur=cur, ref="op#36027")
+        assert exc.value.code == ErrorCode.GATE_INVALID, sql
+        assert "only a gate anchor" in exc.value.message
+        assert cur.calls == [], "DDL + ref-only must refuse before the bus lookup"
+    # ...and with no gate at all it is still the ref refusal, not GATE_REQUIRED
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DDL_INNER, None, _SYNTH_REF, cur=FakeCursor(), ref="op#36027")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+
+
+def test_ref_only_on_lexically_hazardous_sql_refused_before_the_bus_lookup():
+    for sql in (_HAZ, "SELECT col$1 FROM t", "UPDATE t SET a = E'\\x41'"):
+        cur = FakeCursor(_ref_row(body=f"op#36027 on {_SYNTH_REF} wrapped-sha12: {_sha12(sql)}"))
+        with pytest.raises(BrokerValidationError) as exc:
+            require_gate(sql, "83934", _SYNTH_REF, cur=cur, ref="op#36027")
+        assert exc.value.code == ErrorCode.GATE_INVALID, sql
+        assert cur.calls == []
+
+
+def test_ref_c2_ddl_with_ref_plus_pr_still_needs_pr_match():
+    """ref never anchors DDL: with pr also passed, the PR must still match."""
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DDL_INNER, "83934", _SYNTH_REF, cur=FakeCursor(_ref_row()),
+                     ref="op#36027", pr="1040")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+    assert "does not mention migration" in exc.value.message
+    row = _ref_row(body=f"GO op#36027 PR#1040 on {_SYNTH_REF}")
+    assert require_gate(_DDL_INNER, "83934", _SYNTH_REF, cur=FakeCursor(row),
+                        ref="op#36027", pr="1040") is True
+    # ...and the ref, once passed, must ALSO match even though PR anchors DDL
+    row = _ref_row(subject="GO", body=f"GO PR#1040 on {_SYNTH_REF}")
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DDL_INNER, "83934", _SYNTH_REF, cur=FakeCursor(row),
+                     ref="op#36027", pr="1040")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+
+
+def test_ref_d_gate_naming_ref_but_not_silo_refused():
+    """(d) gate names op#36027 but not the target silo."""
+    row = _ref_row(subject="GO op#36027", body="GO op#36027 data fix on the QA silo only.")
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DO_DATA_FIX, "83934", _SYNTH_REF, cur=FakeCursor(row), ref="op#36027")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+    assert "does not mention the target silo" in exc.value.message
+
+
+_BAD_REF_SHAPES = (
+    "op#", "op#12a", " op#12", "OP#12", "op#12 ",               # bus #89814 §3 list
+    "36027", "#36027", "op#36027\n", "op#36027;", "xx#1", "op 36027",
+    "op#٣", "op#1 OR 1=1", "Op#1", "op##1", "",
+)
+
+
+@pytest.mark.parametrize("bad", _BAD_REF_SHAPES)
+def test_ref_e_bad_ref_shape_refused_before_the_bus(bad):
+    """(e) anything not exactly <op|hc|q|cp>#<ascii digits> is refused -- before
+    the bus, for DML, for a plain read, and even when pr is also present."""
+    for sql, kw in ((_DO_DATA_FIX, {}), ("select 1", {}), (_DML_UPDATE, {"pr": "1040"})):
+        cur = FakeCursor(_ref_row())
+        with pytest.raises(BrokerValidationError) as exc:
+            require_gate(sql, "83934", _SYNTH_REF, cur=cur, ref=bad, **kw)
+        assert exc.value.code == ErrorCode.GATE_INVALID
+        assert "ref must look like" in exc.value.message
+        assert cur.calls == []
+
+
+def test_ref_e_good_shapes_accepted():
+    for good in ("op#36027", "hc#944", "q#210", "cp#7"):
+        assert _validate_ref(good) == good
+
+
+def test_ref_f_gate_type_sender_and_time_checks_still_apply():
+    """(f) ref loosens nothing else: sender, message_type, is_past, gate-id shape,
+    not-found, and a missing gate are all still enforced."""
+    for row in (_ref_row(from_agent="cc-irsyad-coord"), _ref_row(message_type="info"),
+                _ref_row(is_past=False), None):
+        with pytest.raises(BrokerValidationError) as exc:
+            require_gate(_DO_DATA_FIX, "83934", _SYNTH_REF, cur=FakeCursor(row), ref="op#36027")
+        assert exc.value.code == ErrorCode.GATE_INVALID
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DO_DATA_FIX, None, _SYNTH_REF, cur=FakeCursor(), ref="op#36027")
+    assert exc.value.code == ErrorCode.GATE_REQUIRED
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DO_DATA_FIX, "op#36027", _SYNTH_REF, cur=FakeCursor(), ref="op#36027")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+
+
+def test_ref_f2_existing_migration_and_pr_anchors_unchanged():
+    """(f) migration/pr behave exactly as before when ref is absent, and a gate
+    that names only a ref cannot satisfy a pr/migration-only exec."""
+    row = _ref_row(subject="apply PR#1040", body=f"PR#1040 on {_SYNTH_REF}")
+    assert require_gate(_DML_UPDATE, "56485", _SYNTH_REF, cur=FakeCursor(row), pr="1040") is True
+    with pytest.raises(BrokerValidationError):
+        require_gate(_DML_UPDATE, "56485", _SYNTH_REF, cur=FakeCursor(row), pr="999")
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_DO_DATA_FIX, "83934", _SYNTH_REF, cur=FakeCursor(_ref_row()), pr="1040")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+
+
+def test_ref_g_ref_plus_migration_refused_before_the_bus():
+    """(g) ref + migration together is an ambiguous anchor -- refused outright,
+    for DML and DDL alike, before the bus lookup."""
+    row = _ref_row(body=f"GO op#36027 mig479 on {_SYNTH_REF}")
+    for sql in (_DO_DATA_FIX, _DDL_INNER, "select 1"):
+        cur = FakeCursor(row)
+        with pytest.raises(BrokerValidationError) as exc:
+            require_gate(sql, "83934", _SYNTH_REF, cur=cur, ref="op#36027", migration="479")
+        assert exc.value.code == ErrorCode.GATE_INVALID
+        assert "together" in exc.value.message
+        assert cur.calls == []
+
+
+def test_ref_g_ref_anchored_statement_may_never_stamp_schema_migrations():
+    """(g) no schema_migrations stamp under a ref-only gate."""
+    stamp = (
+        "UPDATE t SET a = 1;\n"
+        "INSERT INTO supabase_migrations.schema_migrations (version, name) "
+        "VALUES ('479', 'x') ON CONFLICT (version) DO NOTHING;"
+    )
+    cur = FakeCursor(_ref_row())
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(stamp, "83934", _SYNTH_REF, cur=cur, ref="op#36027")
+    assert exc.value.code == ErrorCode.GATE_INVALID
+    assert "schema_migrations" in exc.value.message
+    assert cur.calls == []
+
+
+def test_ref_plus_pr_on_hazardous_sql_still_needs_the_byte_binding():
+    # ref never weakens the hazardous path: ref must match, migration/pr must
+    # match, AND the wrapped-sha12 must bind the exact bytes.
+    body = f"op#36027 PR#1040 on {_SYNTH_REF}\nwrapped-sha12: {_sha12(_HAZ)}"
+    assert require_gate(_HAZ, "1", _SYNTH_REF, cur=FakeCursor(_ref_row(body=body)),
+                        ref="op#36027", pr="1040") is True
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(_HAZ + " ", "1", _SYNTH_REF, cur=FakeCursor(_ref_row(body=body)),
+                     ref="op#36027", pr="1040")
+    assert exc.value.code == ErrorCode.GATE_MISMATCH
+
+
+# --- B1 config: check_project_ref honours the boot-loaded standing set -----
+
+def test_check_project_ref_default_allowlist_is_qa_only_when_unconfigured():
+    assert DEFAULT_LIVE_GATED_REFS == frozenset({"oovskwogvefnznfowjky"})
+    check_project_ref("oovskwogvefnznfowjky", allowed_refs=None)
+    with pytest.raises(BrokerValidationError):
+        check_project_ref(_GOUMLYNE, allowed_refs=None)
+
+
+def test_check_project_ref_widened_standing_set_allows_its_refs_only():
+    widened = frozenset({"oovskwogvefnznfowjky", _GOUMLYNE})
+    check_project_ref(_GOUMLYNE, allowed_refs=widened)
+    with pytest.raises(BrokerValidationError) as exc:
+        check_project_ref("ceayjeamtmcyzzvqflus", allowed_refs=widened)
+    assert exc.value.code == ErrorCode.BAD_PROJECT_REF
+
+
+def test_check_project_ref_narrowed_standing_set_drops_qa():
+    with pytest.raises(BrokerValidationError) as exc:
+        check_project_ref("oovskwogvefnznfowjky", allowed_refs=frozenset({_GOUMLYNE}))
+    assert exc.value.code == ErrorCode.BAD_PROJECT_REF
+
+
+def test_check_project_ref_empty_standing_set_denies_everything():
+    with pytest.raises(BrokerValidationError):
+        check_project_ref("oovskwogvefnznfowjky", allowed_refs=frozenset())

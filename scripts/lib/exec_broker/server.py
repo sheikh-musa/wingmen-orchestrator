@@ -52,6 +52,7 @@ class BrokerServer:
         uid_override_expires_at: "datetime | None" = None,
         ref_override: "str | None" = None,
         ref_override_expires_at: "datetime | None" = None,
+        live_gated_refs: "frozenset[str] | None" = None,
     ) -> None:
         self.sock_path = sock_path
         self.allowed_uids = allowed_uids
@@ -66,6 +67,10 @@ class BrokerServer:
         self.uid_override_expires_at = uid_override_expires_at
         self.ref_override = ref_override
         self.ref_override_expires_at = ref_override_expires_at
+        # B1 (bus #89814): the standing LIVE_GATED_REFS call-allowlist, loaded
+        # once at daemon boot. None -> gate_validation.DEFAULT_LIVE_GATED_REFS
+        # (QA only), identical to the pre-B1 hard-coded allowlist.
+        self.live_gated_refs = live_gated_refs
 
     def serve_forever(self) -> None:
         if os.path.exists(self.sock_path):
@@ -149,6 +154,7 @@ class BrokerServer:
                     guarded_sql=req.guarded_sql,
                     reason=req.reason,
                     gate_id=req.gate_id,
+                    gate_ref=req.ref,
                 )
                 row_id = log_started(cur, entry)
                 db_conn.commit()
@@ -167,6 +173,7 @@ class BrokerServer:
                         override_ref=self.ref_override,
                         override_expires_at=self.ref_override_expires_at,
                         now=now,
+                        allowed_refs=self.live_gated_refs,
                     )
                     check_read_only_override(
                         req.guarded_sql,
@@ -177,7 +184,7 @@ class BrokerServer:
                     )
                     require_gate(
                         req.guarded_sql, req.gate_id, req.project_ref, cur,
-                        migration=req.migration, pr=req.pr,
+                        migration=req.migration, pr=req.pr, ref=req.ref,
                     )
                 except BrokerValidationError as e:
                     log_finalized(cur, row_id, "error", e.code.value)

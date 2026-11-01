@@ -66,3 +66,36 @@ def test_log_finalized_error_records_code():
     _, params = cur.calls[0]
     assert "GATE_INVALID" in params
     assert "error" in params
+
+
+# --- B2/--ref (bus #89814 §3.5): the ledger row records gate_ref ------------
+
+def test_log_started_without_gate_ref_is_byte_identical_to_pre_amendment():
+    cur = FakeCursor(fetchone_result={"id": 1})
+    entry = VaultLogEntry(
+        exec_ledger_id="e1", caller="c", project_ref="p", guarded_sql="select 1", reason="", gate_id=None,
+    )
+    log_started(cur, entry)
+    sql, params = cur.calls[0]
+    assert sql == (
+        "INSERT INTO exec_broker_access_log "
+        "(exec_ledger_id, caller, project_ref, sql_sha256, reason, gate_id, status, ts_start) "
+        "VALUES (%s, %s, %s, %s, %s, %s, 'started', now()) RETURNING id"
+    )
+    assert "gate_ref" not in sql
+    assert len(params) == 6
+
+
+def test_log_started_records_gate_ref_when_present():
+    cur = FakeCursor(fetchone_result={"id": 7})
+    entry = VaultLogEntry(
+        exec_ledger_id="e1", caller="c", project_ref="p", guarded_sql="update t set a = 1",
+        reason="", gate_id="56485", gate_ref="op#51",
+    )
+    assert log_started(cur, entry) == 7
+    sql, params = cur.calls[0]
+    column_list = [c.strip() for c in sql.split("(", 1)[1].split(")", 1)[0].split(",")]
+    assert "gate_ref" in column_list and "id" not in column_list
+    assert len(params) == 7
+    assert params[column_list.index("gate_ref")] == "op#51"
+    assert params[column_list.index("gate_id")] == "56485"

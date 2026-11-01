@@ -192,3 +192,31 @@ def test_gate_mismatch_error_code_exists_and_encodes():
     assert ErrorCode.GATE_MISMATCH.value == "GATE_MISMATCH"
     payload = json.loads(encode_error(ErrorCode.GATE_MISMATCH, "bytes differ").decode("utf-8"))
     assert payload == {"status": "error", "error": {"code": "GATE_MISMATCH", "message": "bytes differ"}}
+
+
+# --- B2 (bus #89814 §2): `ref` is a third OPTIONAL key ----------------------
+
+_BASE = {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "update t set a = 1",
+         "reason": "r", "gate_id": "56485", "caller": "c", "exec_ledger_id": "e"}
+
+
+def test_parse_request_ref_absent_defaults_to_none():
+    # An old (pre-B2) caller is unaffected.
+    assert parse_request(json.dumps(_BASE)).ref is None
+
+
+def test_parse_request_ref_explicit_null_is_none():
+    assert parse_request(json.dumps({**_BASE, "ref": None})).ref is None
+
+
+def test_parse_request_ref_present_is_passed_through_unvalidated():
+    # Shape is validated in require_gate (GATE_INVALID, after the audit row is
+    # written), never silently normalised here.
+    assert parse_request(json.dumps({**_BASE, "ref": "op#51"})).ref == "op#51"
+    assert parse_request(json.dumps({**_BASE, "ref": "OP#51"})).ref == "OP#51"
+
+
+@pytest.mark.parametrize("bad", ["", 51, ["op#51"], {"r": "op#51"}, True])
+def test_parse_request_ref_empty_or_non_string_raises(bad):
+    with pytest.raises(MalformedRequest):
+        parse_request(json.dumps({**_BASE, "ref": bad}))

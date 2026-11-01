@@ -57,6 +57,28 @@ not verified by the broker. Refusals on that axis are the additive
 GATE_MISMATCH code; every failure the ruling lists as "unchanged" (expired /
 out-of-scope / unauthorized gate, ungated hazardous SQL) still refuses, and a
 byte match does NOT replace the migration/PR specificity check.
+
+B1 + B2 + --ref ANCHOR (cc-fleet-health cutover spec, bus #89814, 2026-11-01):
+  * B1 -- the call-allowlist is now a STANDING set loaded at daemon boot
+    (EXEC_BROKER_LIVE_GATED_REFS, silo aliases; see exec_broker_daemon.py),
+    defaulting to ALLOWED_PROJECT_REFS (QA only). Every ref on it is GATED:
+    the old "no-op for DML" early return is gone, so ANY statement that is
+    not a plain read (read_only.is_plain_read -- the SAME classifier the RO
+    override uses) needs a valid gate. This mirrors exec_prod._require_gate
+    (console #81213): DML is a data change and is gated on every silo.
+  * B2 -- the wire request carries an optional `ref` key (protocol.py),
+    threaded into require_gate(ref=...).
+  * --ref -- an independent gate ANCHOR (op#N/hc#N/q#N/cp#N), ported
+    verbatim in behaviour from ihsanos-irsyad scripts/db/exec_prod.py
+    (_validate_ref/_text_mentions_ref, @ a1dc75f9): shape validated first
+    and unconditionally; refused together with `migration`; never anchors
+    DDL-shaped or lexically hazardous SQL on its own; must appear as an
+    exact token in the gate text; a ref-anchored statement may never write
+    schema_migrations (no stamp under a ref-only gate).
+  * A NON-plain-read, non-DDL, non-hazardous statement (DML) still needs a
+    SPECIFIC anchor -- ref, migration or pr matched against the gate text --
+    exactly as exec_prod requires; a bare silo-mentioning gate never
+    authorizes arbitrary DML (same cross-authorization class as #70929).
 """
 from __future__ import annotations
 
@@ -103,7 +125,16 @@ SILO_ALIASES = {
 # control itself, not a stand-in for the daemon simply being un-provisioned
 # for goumlyne/ceayj — do not widen this set without that step-(c) work landing
 # first, and do not rely on provisioning alone to keep real refs out of reach.
-ALLOWED_PROJECT_REFS = {SILO_ALIASES["qa"]}
+ALLOWED_PROJECT_REFS = frozenset({SILO_ALIASES["qa"]})
+
+# B1 (bus #89814): the standing LIVE_GATED_REFS set is CONFIG, not a code
+# constant -- exec_broker_daemon.load_live_gated_refs() resolves
+# EXEC_BROKER_LIVE_GATED_REFS (silo aliases) at boot and hands the result to
+# BrokerServer(live_gated_refs=...). Unset/blank -> this default, which is
+# ALLOWED_PROJECT_REFS itself (QA only), so an un-configured daemon behaves
+# exactly as before. Widening is an env edit + restart; narrowing takes
+# effect on restart. Every ref in the set is fully gated (require_gate).
+DEFAULT_LIVE_GATED_REFS = ALLOWED_PROJECT_REFS
 
 # BOUNDED OVERRIDE (op#34322/#76985/#76989, 2026-10-26, orch-console gate) —
 # THIS is the step-(c)-shaped amendment the comment above anticipated: a
@@ -139,13 +170,19 @@ def check_project_ref(
     override_ref: "str | None" = None,
     override_expires_at: "datetime | None" = None,
     now: "datetime | None" = None,
+    allowed_refs: "frozenset[str] | None" = None,
 ) -> None:
     """§4.1 — exact-string allowlist. QA-only for milestone (a); see
     ALLOWED_PROJECT_REFS's comment before widening this. A still-live bounded
     override (override_ref + override_expires_at, both required and
     unexpired) additionally allows that ONE exact ref — see the module-level
-    comment above ALLOWED_PROJECT_REFS."""
-    if project_ref in ALLOWED_PROJECT_REFS:
+    comment above ALLOWED_PROJECT_REFS.
+
+    allowed_refs (B1, bus #89814) is the daemon's boot-loaded standing
+    LIVE_GATED_REFS set; None means DEFAULT_LIVE_GATED_REFS (QA only) --
+    never "allow everything"."""
+    allowlist = DEFAULT_LIVE_GATED_REFS if allowed_refs is None else allowed_refs
+    if project_ref in allowlist:
         return
     # Liveness first: a live override_ref is non-None by construction, so the
     # equality below can never pass for a None project_ref.
@@ -180,6 +217,40 @@ def _text_mentions_silo(text: str, project_ref: str) -> bool:
     return False
 
 
+# --ref anchor (bus #89814 §3), ported verbatim in behaviour from ihsanos-irsyad
+# scripts/db/exec_prod.py @ a1dc75f9 (_REF_RE / _validate_ref /
+# _text_mentions_ref, console #83951). Strict shape; anything else refused.
+# fullmatch (a bare `$` would accept a trailing \n); ASCII [0-9] (\d also
+# matches non-ASCII digits). Re-sync by re-reading that file if it changes.
+_REF_RE = re.compile(r"(?:op|hc|q|cp)#[0-9]+")
+
+# A ref-anchored statement must never touch schema_migrations (bus #89814 §3.5:
+# no stamp under a ref-only gate). Raw-text, case-insensitive, whole-word --
+# deliberately over-refuses (a comment mentioning it is refused too).
+_SCHEMA_MIGRATIONS_RE = re.compile(r"(?i)\bschema_migrations\b")
+
+
+def _validate_ref(ref: str) -> str:
+    """Return the ref unchanged if it is exactly <op|hc|q|cp>#<digits>
+    (lower-case prefix), else raise GATE_INVALID. No normalisation at all --
+    ' op#1', 'OP#1', 'op#12a', 'op#12 ', '36027' all refuse."""
+    if not isinstance(ref, str) or not _REF_RE.fullmatch(ref):
+        raise BrokerValidationError(
+            ErrorCode.GATE_INVALID,
+            f"ref must look like op#N, hc#N, q#N or cp#N (digits only after #), got {ref!r}",
+        )
+    return ref
+
+
+def _text_mentions_ref(text: str, ref: str) -> bool:
+    """The gate must contain the EXACT ref token (exec_prod, console #83951).
+    A TRAILING digit guard so `op#51` does not match a gate saying `op#510`,
+    and a LEADING guard so the prefix is a whole word (`q#210` must not match
+    inside `faq#210`, nor `cp#5` inside `hcp#5`)."""
+    r = _validate_ref(ref)
+    return re.search(rf"(?<![a-z0-9_]){re.escape(r)}(?!\d)", text.lower()) is not None
+
+
 def require_gate(
     guarded_sql: str,
     gate_id: str | None,
@@ -187,23 +258,63 @@ def require_gate(
     cur,
     migration: str | None = None,
     pr: str | None = None,
-) -> None:
-    """§4 — no-op for DML-only SQL. For DDL-shaped SQL -- OR for SQL
-    is_lexically_hazardous flags as unable to safely classify (rollout step
-    (c), bus #79161: the SAME pre-screen read_only.is_plain_read uses on the
-    RO-override path, reused here so the two never drift) -- re-fetches
-    gate_id from the fleet bus via `cur` (a psycopg cursor opened with
-    row_factory=psycopg.rows.dict_row) and re-validates from_agent,
-    message_type, is_past, and silo-mention. Raises BrokerValidationError on
-    any failure, BEFORE any mgmt-API call."""
+    ref: str | None = None,
+) -> bool:
+    """§4 re-validation, run for every call on a (gated) allowlisted ref.
+
+    Returns False -- without touching `cur` -- ONLY for a plain read
+    (read_only.is_plain_read: not DDL-shaped, not lexically hazardous, every
+    statement a SELECT/WITH/TABLE/VALUES with no write tokens). Every other
+    statement (DML, DO blocks, DDL, anything hazardous) needs a gate (B1, bus
+    #89814): re-fetches gate_id from the fleet bus via `cur` (a psycopg
+    cursor opened with row_factory=psycopg.rows.dict_row), re-validates
+    from_agent, message_type, is_past and silo-mention, then requires a
+    SPECIFIC anchor (ref / migration / pr) matched in the gate text. Returns
+    True when a gate was required and fully validated. Raises
+    BrokerValidationError on any failure, BEFORE any mgmt-API call."""
+    # Lazy import: read_only imports BrokerValidationError/ref_override_is_live
+    # from this module, so a module-level import would be circular.
+    from .read_only import is_plain_read
+
+    if ref is not None:
+        # Shape refusal before anything else, even for a plain read, even when
+        # migration/pr is also present (exec_prod parity).
+        ref = _validate_ref(ref)
+        # ref + migration is an ambiguous anchor (cc-quality #83972): a
+        # migration apply never carries a ref, a ref data-fix has no migration.
+        if migration:
+            raise BrokerValidationError(
+                ErrorCode.GATE_INVALID,
+                f"ref {ref} and migration {migration} together -- a migration apply "
+                "must not carry a ref, and a ref data correction has no migration; "
+                "drop one",
+            )
+
     hazardous = is_lexically_hazardous(guarded_sql)
-    if not is_ddl_shaped(guarded_sql) and not hazardous:
-        return
+    ddl = is_ddl_shaped(guarded_sql)
+    if not ddl and not hazardous and is_plain_read(guarded_sql):
+        return False
+
+    if (ddl or hazardous) and ref and not (migration or pr):
+        raise BrokerValidationError(
+            ErrorCode.GATE_INVALID,
+            f"ref {ref} is only a gate anchor for NON-DDL, non-hazardous data "
+            "corrections -- this statement is DDL-shaped or lexically hazardous "
+            "and needs a migration or PR matching the gate",
+        )
+    if ref and _SCHEMA_MIGRATIONS_RE.search(guarded_sql):
+        raise BrokerValidationError(
+            ErrorCode.GATE_INVALID,
+            f"ref {ref} anchors a data correction, which must never write "
+            "schema_migrations (no stamp under a ref gate) -- a migration apply "
+            "carries migration, not ref",
+        )
 
     if not gate_id:
         raise BrokerValidationError(
             ErrorCode.GATE_REQUIRED,
-            "inner SQL is DDL-shaped or lexically hazardous -- a gate_id is required",
+            "inner SQL is not a plain read (DML, DDL, DO block, or lexically "
+            "hazardous) -- a gate_id is required",
         )
     if not gate_id.isdigit():
         raise BrokerValidationError(
@@ -238,6 +349,11 @@ def require_gate(
         raise BrokerValidationError(
             ErrorCode.GATE_INVALID,
             f"gate {gate_id} does not mention the target silo {project_ref!r}",
+        )
+    if ref and not _text_mentions_ref(text, ref):
+        raise BrokerValidationError(
+            ErrorCode.GATE_INVALID,
+            f"gate {gate_id} does not mention ref {ref!r} (exact token, digit-boundary matched)",
         )
 
     if hazardous:
@@ -288,18 +404,42 @@ def require_gate(
                 f"{sorted(cited)} -- the statement being executed is not the one "
                 "the gate authorized (bus #79477)",
             )
-        return
+        return True
+
+    if not ddl:
+        # B1 (bus #89814): a non-plain-read, non-DDL, non-hazardous statement
+        # -- DML or a pure-DML DO block. It still needs a SPECIFIC anchor, as
+        # exec_prod._require_gate requires: a gate that merely names the silo
+        # must never authorize arbitrary data changes to it (the same
+        # cross-authorization class #70929 closed for DDL). ref was already
+        # exact-token matched above; migration/pr get the digit-boundary match.
+        if ref:
+            return True
+        if migration or pr:
+            if not _text_mentions_migration_or_pr(text, migration, pr):
+                raise BrokerValidationError(
+                    ErrorCode.GATE_INVALID,
+                    f"gate {gate_id} does not mention migration {migration!r} or PR {pr!r}",
+                )
+            return True
+        raise BrokerValidationError(
+            ErrorCode.GATE_INVALID,
+            f"gate {gate_id} is shape-valid but this data change carries no ref, "
+            "migration or pr anchor on the wire, so the gate's specificity cannot "
+            "be independently verified -- refused, not allowed by default (bus #89814)",
+        )
 
     if migration or pr:
         # Forward-compat path for rollout step (c), once the wire contract
         # carries migration/pr: do the full independent match instead of the
-        # unconditional refusal below.
+        # unconditional refusal below. (A ref, if also present, was already
+        # matched above -- it never anchors DDL on its own.)
         if not _text_mentions_migration_or_pr(text, migration, pr):
             raise BrokerValidationError(
                 ErrorCode.GATE_INVALID,
                 f"gate {gate_id} does not mention migration {migration!r} or PR {pr!r}",
             )
-        return
+        return True
 
     # Milestone (a), FAIL CLOSED (bus #70929): migration/pr were not supplied
     # (today, NEVER are -- see module docstring), so this gate's SPECIFICITY

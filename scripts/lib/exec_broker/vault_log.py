@@ -27,24 +27,42 @@ class VaultLogEntry:
     guarded_sql: str
     reason: str
     gate_id: str | None
+    # B2/--ref (bus #89814 §3.5): the gate's ref anchor, recorded so a
+    # ref-only approval stays auditable after the fact. None for every caller
+    # that does not send `ref` -- and then the INSERT below is byte-identical
+    # to the pre-amendment one (no gate_ref column referenced), so the
+    # gate_ref column (migrations/drafts/hc95_exec_broker_gate_ref.sql) only
+    # has to exist before the first ref-carrying call. Until it is applied, a
+    # ref-carrying call fails at this INSERT -> INTERNAL_ERROR, before any
+    # validation or mgmt-API call: fail closed, nothing executes.
+    gate_ref: str | None = None
 
 
 def log_started(cur, entry: VaultLogEntry) -> int:
     """INSERT one row, status='started'. Returns the new row's id (never
     computed locally — read back via RETURNING id)."""
-    cur.execute(
-        "INSERT INTO exec_broker_access_log "
-        "(exec_ledger_id, caller, project_ref, sql_sha256, reason, gate_id, status, ts_start) "
-        "VALUES (%s, %s, %s, %s, %s, %s, 'started', now()) RETURNING id",
-        (
-            entry.exec_ledger_id,
-            entry.caller,
-            entry.project_ref,
-            hashlib.sha256(entry.guarded_sql.encode("utf-8")).hexdigest(),
-            entry.reason,
-            entry.gate_id,
-        ),
+    params = (
+        entry.exec_ledger_id,
+        entry.caller,
+        entry.project_ref,
+        hashlib.sha256(entry.guarded_sql.encode("utf-8")).hexdigest(),
+        entry.reason,
+        entry.gate_id,
     )
+    if entry.gate_ref is None:
+        cur.execute(
+            "INSERT INTO exec_broker_access_log "
+            "(exec_ledger_id, caller, project_ref, sql_sha256, reason, gate_id, status, ts_start) "
+            "VALUES (%s, %s, %s, %s, %s, %s, 'started', now()) RETURNING id",
+            params,
+        )
+    else:
+        cur.execute(
+            "INSERT INTO exec_broker_access_log "
+            "(exec_ledger_id, caller, project_ref, sql_sha256, reason, gate_id, gate_ref, status, ts_start) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'started', now()) RETURNING id",
+            params + (entry.gate_ref,),
+        )
     return cur.fetchone()["id"]
 
 

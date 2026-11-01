@@ -28,6 +28,15 @@ ref, and the console is the sole gzb-root holder who arms this). Both
 expiries are clamped to a 24h cap in code (parse_override_expiry) and
 re-evaluated against wall-clock time on every request, so the exception
 reverts by construction the moment it expires.
+
+B1 STANDING LIVE_GATED_REFS (cc-fleet-health cutover spec bus #89814 §1):
+EXEC_BROKER_LIVE_GATED_REFS is an OPTIONAL comma-separated list of silo
+ALIASES (same alias-not-raw-ref rule as the ref override, same reason) that
+replaces the hard-coded QA-only call-allowlist. Unset/blank -> the default
+(QA only, identical to before). Read ONCE at boot: widening is an env edit +
+restart, never a code edit; narrowing takes effect on restart. Every ref in
+the set is fully gated by gate_validation.require_gate (every non-plain-read
+statement needs a gate). An unknown alias fails loud at boot.
 """
 from __future__ import annotations
 
@@ -40,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
 from dotenv import load_dotenv  # noqa: E402
 
-from exec_broker.gate_validation import SILO_ALIASES  # noqa: E402
+from exec_broker.gate_validation import DEFAULT_LIVE_GATED_REFS, SILO_ALIASES  # noqa: E402
 from exec_broker.mgmt_api import post_to_mgmt_api  # noqa: E402
 from exec_broker.server import BrokerServer  # noqa: E402
 from substrate_dsn import dsn_from_env_file  # noqa: E402
@@ -103,6 +112,30 @@ def resolve_ref_override_alias(raw: "str | None") -> "str | None":
             f"EXEC_BROKER_REF_OVERRIDE_ALIAS {alias!r} is not a known silo alias "
             f"(one of {sorted(SILO_ALIASES)})"
         ) from None
+
+
+def load_live_gated_refs(raw: "str | None") -> "frozenset[str]":
+    """Resolve EXEC_BROKER_LIVE_GATED_REFS (comma-separated silo ALIASES) to
+    the standing set of project refs the broker will call, every one of them
+    gated. Unset/blank -> DEFAULT_LIVE_GATED_REFS (QA only). Fails loud
+    (ValueError) on an empty entry or an unknown alias -- never silently
+    drops a typo (that would look like a narrowing nobody intended) and never
+    accepts a raw ref (see resolve_ref_override_alias for why)."""
+    if not raw or not raw.strip():
+        return DEFAULT_LIVE_GATED_REFS
+    refs = set()
+    for part in raw.split(","):
+        alias = part.strip().lower()
+        if not alias:
+            raise ValueError("EXEC_BROKER_LIVE_GATED_REFS has an empty entry")
+        try:
+            refs.add(SILO_ALIASES[alias])
+        except KeyError:
+            raise ValueError(
+                f"EXEC_BROKER_LIVE_GATED_REFS entry {alias!r} is not a known silo alias "
+                f"(one of {sorted(SILO_ALIASES)})"
+            ) from None
+    return frozenset(refs)
 
 
 def parse_override_expiry(raw: "str | None", *, now: datetime) -> "datetime | None":
@@ -179,6 +212,12 @@ def main(argv=None) -> int:
         return 1
 
     try:
+        live_gated_refs = load_live_gated_refs(os.environ.get("EXEC_BROKER_LIVE_GATED_REFS"))
+    except ValueError as e:
+        print(f"exec_broker_daemon: {e}", file=sys.stderr)
+        return 1
+
+    try:
         ref_override = resolve_ref_override_alias(os.environ.get("EXEC_BROKER_REF_OVERRIDE_ALIAS"))
     except ValueError as e:
         print(f"exec_broker_daemon: {e}", file=sys.stderr)
@@ -243,6 +282,7 @@ def main(argv=None) -> int:
         uid_override_expires_at=uid_override_expires_at,
         ref_override=ref_override,
         ref_override_expires_at=ref_override_expires_at,
+        live_gated_refs=live_gated_refs,
     )
     server.serve_forever()
     return 0
