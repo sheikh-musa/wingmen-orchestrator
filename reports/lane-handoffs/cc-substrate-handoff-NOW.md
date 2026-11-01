@@ -1684,3 +1684,25 @@ force-pushed with lease, re-ran tests after the rebase. Corpus: 204,042 commands
 false positives. Review requested 89515, head-change note 89516.
 
 Depth-3 wrapper bound: documented, NOT fixed, per console 89510.
+
+### Track B COMPLETE (2026-11-01, 09:04Z) — PR 810 merged, live path verified
+
+cc-quality PASS 89536 pinned to head 08f5160 (also cleared the shared-parser question:
+secrets_transcript_guard now judges abs-path-ssh-wrapped commands too, i.e. the STRICTER
+direction; ssh-keygen/ssh-add/sshfs/scp unaffected because the basename pivot requires an
+exact "ssh" token). Console merged it: merge commit b2f8a40 at 09:04:04Z, CI run
+41290705204 green at that head. Mini live checkout fast-forwarded to b2f8a40.
+
+POST-MERGE VERIFICATION against the LIVE user-global PreToolUse path (not the worktree):
+6/6 as intended — /usr/bin/ssh store-read DENY, /bin/sshpass -p x /usr/bin/ssh DENY,
+bare ssh still DENY, abs-path ordinary work ALLOW, abs-path ssh-keygen ALLOW, local
+store-file read DENY (control). Probe script: /tmp/trackb_live_probe.py.
+
+gzb AS IT STANDS at 09:12Z: guard WIRED user-globally (hub apply, settings 08:45Z) but
+checkout 75329fdd (#808) = PR 807 wrapper handling, NO abs-path anchor — /usr/bin/ssh
+still slips there while bare ssh is caught. 75329fdd is an ANCESTOR of b2f8a40 (3 behind,
+no divergence) so the fast-forward the console asked the hub for (89521) is clean and
+closes it. Reported as 89549.
+
+Open/parked: reset_orch.sh header naming an old ssh root@<ip> (89417 — fold into the next
+docs touch, no separate PR). 4-level wrapper depth documented, not fixed (89510).
