@@ -1630,3 +1630,14 @@ rather than on a command line; (b) a gh pr create body built by command substitu
 blocked by bash_message_commandsub_guard, and the file-backed gh body flag is blocked by
 console_irsyad_guard (fleet-wide exfil rule), so the PR body must be a single-quoted
 INLINE string with no apostrophes; even naming those shapes in prose here trips the guards.
+
+### Console decision on the gzb hook gap (89489, 08:41Z)
+
+- gzb hook wiring is NOT mine: routed to cc-orchestrator (the hub owns gzb and the irsyad
+  lanes), with a PER-HOOK safety check before applying — live_checkout_edit_guard,
+  lane_prod_key_guard and console_irsyad_guard could refuse legitimate irsyad actions
+  there. Nothing for me to run on gzb.
+- Track B PASS must state the gzb status AS IT STANDS at PASS time, never assume it is
+  fixed by then. Re-check at PASS: run ensure_user_global_hooks.py on gzb and quote what
+  it reports.
+- PR 807: when cc-quality passes, send the console the HEAD and they run merge_pinned.
