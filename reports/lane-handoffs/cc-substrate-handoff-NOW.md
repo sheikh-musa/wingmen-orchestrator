@@ -1492,3 +1492,10 @@ tripwire/PR 802 work).
 cc-quality-2 are BOTH stale, so they cannot read the bus or the PR, which blocks the #805
 review; (b) PR #803 and #805 merges (console); (c) gzb tmux server stale env — restarting it
 kills every session incl. the hub, console decides; (d) reconcile inbox first.
+
+**Follow-up found while retiring the reach (NOT done — reads secrets, console 89295 excluded it):**
+`nervous_system/vault.py` still describes `wingmen-core/hub-vps` as the only Linux host issued a
+KEK, and its Linux branch hardcodes `return "hub-vps"` for ANY Linux host. The KEK itself is a
+local file (`/etc/wingmen-vault-kek`), so nothing is lost fleet-wide, but the comment now names a
+decommissioned box. Whoever owns the vault should decide whether a second Linux KEK identity is
+needed at all — do not change crypto-adjacent code as drive-by cleanup.
