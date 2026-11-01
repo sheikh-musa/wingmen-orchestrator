@@ -51,6 +51,91 @@ _DEBOUNCE_S = 45
 _CAP_LIMIT = 5            # CAI-RESP-259 Q4: hard cap...
 _CAP_WINDOW_S = 300      # ...of 5 wakes per 5 min per agent; cap-hit must fail LOUD.
 _SIGNAL = "[wake] new inbox item — read your agent_messages inbox and act"
+
+# PROVENANCE IN THE DOORBELL (orch-console #89713). Until 2026-11-01 this signal was the
+# constant above: no sender, no message id. So a lane asked to trust it had nothing to check
+# it against, and a CLAUDE.md saying "this pane line is legitimate, not an injection" is
+# circular -- one claim asserting another. cc-hifz-1 refused every wake on exactly that
+# ground ("an automated line and self-justifying file content") and was right to; the file
+# was already correct by then.
+#
+# The line now names the row and its sender. It carries NO subject and NO body, by
+# construction: `build_wake_signal` has no parameter through which content could reach it,
+# so a doorbell can never become a content-delivery channel (R1 nudge rule). The lane's
+# remedy is to look the row up itself -- which is the point.
+_PROVENANCE_SQL = (
+    "SELECT m.from_agent, "
+    " (SELECT count(*) FROM agent_messages u WHERE u.to_agent = m.to_agent"
+    "  AND u.read_at IS NULL AND coalesce(u.is_test, false) = false), "
+    " (SELECT u.id FROM agent_messages u WHERE u.to_agent = m.to_agent"
+    "  AND u.read_at IS NULL AND coalesce(u.is_test, false) = false"
+    "  ORDER BY u.id DESC LIMIT 1), "
+    " (SELECT u.from_agent FROM agent_messages u WHERE u.to_agent = m.to_agent"
+    "  AND u.read_at IS NULL AND coalesce(u.is_test, false) = false"
+    "  ORDER BY u.id DESC LIMIT 1) "
+    "FROM agent_messages m WHERE m.id = %s"
+)
+
+
+def build_wake_signal(row_id=None, provenance: dict | None = None) -> str:
+    """The doorbell text. Pure, so the exact bytes a lane will read are testable.
+
+    `provenance` is {"sender", "unread", "newest_id", "newest_sender"}. Anything missing
+    degrades to the plain id form; with no id at all it degrades to the legacy constant.
+    Degrading is deliberate: a doorbell that cannot describe itself must still RING.
+    """
+    if row_id is None:
+        return _SIGNAL
+    try:
+        rid = int(row_id)
+    except (TypeError, ValueError):
+        return _SIGNAL
+    p = provenance or {}
+    unread = p.get("unread")
+    newest_id = p.get("newest_id") or rid
+    newest_sender = p.get("newest_sender") or p.get("sender")
+
+    def _who(i, s):
+        return f"bus message {i} from {s}" if s else f"bus message {i}"
+
+    # A backlog is coalesced into ONE line carrying the count and the newest row, so three
+    # pending rows read as "3 unread", not as three identical doorbells (the storm that made
+    # cc-hifz-1 read the signal as a loop rather than a bell).
+    if isinstance(unread, int) and unread > 1:
+        return f"[wake] {unread} unread, newest {_who(newest_id, newest_sender)} is addressed to you"
+    return f"[wake] {_who(rid, p.get('sender'))} is addressed to you"
+
+
+def _wake_provenance(row_id: int) -> dict | None:
+    """Sender + backlog summary for the row that rang. None when unmeasurable.
+
+    Read-only, one round trip. It NEVER selects subject or body -- the assertion that the
+    signal carries no content is a property of this query, not of the formatter's restraint.
+    """
+    if not _DSN:
+        return None
+    with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+        cur.execute(_PROVENANCE_SQL, (row_id,))
+        row = cur.fetchone()
+    if not row:
+        return None
+    return {"sender": row[0], "unread": int(row[1] or 0),
+            "newest_id": row[2], "newest_sender": row[3]}
+
+
+def _signal_for_wake(row_id, provenance_of=None) -> str:
+    """Never raises. A failed provenance read falls back to the legacy signal: the wake
+    must still happen, it just stops being self-describing."""
+    if row_id is None:
+        return _SIGNAL
+    lookup = provenance_of or _wake_provenance
+    try:
+        return build_wake_signal(row_id, lookup(row_id))
+    except Exception as e:  # noqa: BLE001 -- fail-safe: an unexplained doorbell beats silence
+        logging.getLogger("wingmen.agent_wake").warning(
+            "wake-signal: provenance read failed for row %s; falling back to the legacy "
+            "signal (the wake still fires): %s", row_id, e)
+        return _SIGNAL
 _SUBTAG_RE = re.compile(r"-\d+$")
 
 # CAI-RESP-259 Q1 trigger policy (the wake doorbell fires iff this is true).
@@ -703,8 +788,9 @@ def _wake_agent_inner(agent_id: str, reason: str, dry_run: bool, now: float | No
         return {"woke": False, "session": session, **gate}
     if _pane_busy(session, nudge_safe=True):
         return {"woke": False, "why": "busy (mid-turn)", "session": session}
+    signal = _signal_for_wake(row_id)
     if dry_run:
-        return {"woke": False, "why": "dry-run", "session": session, "signal": _SIGNAL}
+        return {"woke": False, "why": "dry-run", "session": session, "signal": signal}
     # CAI-817: a raw `send-keys -l SIGNAL` + a single unverified `Enter` was the bug —
     # the lone Enter can fail to commit (TUI focus / dim composer), the wake sits
     # STAGED-UNSUBMITTED, the body wedges idle, and we used to still return woke=True
@@ -712,7 +798,7 @@ def _wake_agent_inner(agent_id: str, reason: str, dry_run: bool, now: float | No
     # submit (scripts/lane_nudge.sh: ghost-aware composer guard -> C-u clear -> type
     # -> Enter -> confirm-it-left-the-composer -> extra-Enter retry) and REPORT the
     # real outcome. Fail LOUD, never silent (charter #1).
-    rc = _verified_submit(session, _SIGNAL, row_id=row_id)
+    rc = _verified_submit(session, signal, row_id=row_id)
     if rc == 0:
         _record_wake(agent_id, now)
         return {"woke": True, "session": session, "reason": reason}

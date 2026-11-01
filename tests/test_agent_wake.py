@@ -414,3 +414,96 @@ def test_non_singleton_family_query_unchanged(monkeypatch):
                         lambda *a, **k: _FakeConn(captured, [("cc-irsyad-1", "s1", "online")]))
     agent_wake._candidate_sessions("cc-irsyad")
     assert "(agent_id=%s OR base_agent_id=%s)" in captured["sql"]
+
+
+# ── PROVENANCE IN THE DOORBELL (orch-console #89713) ─────────────────────────
+# The signal was a constant with no sender and no message id, so a lane had nothing to
+# verify it against. cc-hifz-1 refused every wake for exactly that reason while its
+# CLAUDE.md was already correct -- "an automated line and self-justifying file content".
+
+def test_signal_names_the_row_and_its_sender():
+    sig = agent_wake.build_wake_signal(89685, {"sender": "cc-fleet-health", "unread": 1})
+    assert sig == "[wake] bus message 89685 from cc-fleet-health is addressed to you"
+
+
+def test_a_backlog_is_coalesced_into_one_line_not_a_storm():
+    """Three pending rows used to ring three IDENTICAL bells, which is what made the lane
+    read the doorbell as a loop. One line carries the count and the newest row."""
+    sig = agent_wake.build_wake_signal(
+        88625, {"sender": "cc-fleet-health", "unread": 3,
+                "newest_id": 89685, "newest_sender": "orch-console"})
+    assert sig == "[wake] 3 unread, newest bus message 89685 from orch-console is addressed to you"
+    assert sig.count("[wake]") == 1
+
+
+def test_signal_degrades_without_dying():
+    """A doorbell that cannot describe itself must still RING."""
+    assert agent_wake.build_wake_signal(None) == agent_wake._SIGNAL
+    assert agent_wake.build_wake_signal("not-an-id") == agent_wake._SIGNAL
+    assert agent_wake.build_wake_signal(89685) == "[wake] bus message 89685 is addressed to you"
+
+
+def test_signal_never_carries_subject_or_body():
+    """R1 nudge rule: provenance only. The formatter has no parameter for content, and the
+    query that feeds it never selects content -- assert BOTH, because either one alone
+    would be a convention rather than a guarantee."""
+    hostile = {"sender": "cc-fleet-health", "unread": 1,
+               "newest_id": 89685, "newest_sender": "cc-fleet-health",
+               # fields that must be structurally unreachable:
+               "subject": "SECRET SUBJECT", "body": "SECRET BODY",
+               "message_type": "decision"}
+    for rid, prov in ((89685, hostile), (88625, {**hostile, "unread": 4})):
+        sig = agent_wake.build_wake_signal(rid, prov)
+        assert "SECRET" not in sig
+        assert "subject" not in sig.lower() and "body" not in sig.lower()
+
+    sql = agent_wake._PROVENANCE_SQL.lower()
+    for forbidden in ("m.subject", "u.subject", "m.body", "u.body", "message_type"):
+        assert forbidden not in sql
+
+
+def test_provenance_failure_still_wakes_with_the_legacy_signal(wake_dir, monkeypatch):
+    """Fail-SAFE, not fail-closed: an unmeasurable sender degrades the wording, it never
+    suppresses the wake. Silence is the one outcome the SRE cannot tolerate."""
+    monkeypatch.setattr(agent_wake, "resolve_tmux_session", lambda a: "sess")
+    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s, **_: False)
+
+    def _boom(_rid):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(agent_wake, "_wake_provenance", _boom)
+    sent = []
+    monkeypatch.setattr(agent_wake, "_verified_submit",
+                        lambda s, sig, row_id=None: sent.append(sig) or 0)
+    r = agent_wake.wake_agent("cc-hifz-1", "msg #89685", now=1000.0, row_id=89685)
+    assert r["woke"] is True
+    assert sent == [agent_wake._SIGNAL]
+
+
+@pytest.mark.parametrize("reason,row_id", [
+    ("msg #89685", 89685),          # the realtime path (agent_messages_realtime)
+    ("backstop-sweep", 88625),      # the backstop sweep path
+])
+def test_both_wake_paths_deliver_the_provenance_line(wake_dir, monkeypatch, reason, row_id):
+    """Realtime and backstop both funnel through wake_agent with a row_id, which is what
+    makes one derivation sufficient for both."""
+    monkeypatch.setattr(agent_wake, "resolve_tmux_session", lambda a: "sess")
+    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s, **_: False)
+    monkeypatch.setattr(agent_wake, "_wake_provenance", lambda rid: {
+        "sender": "cc-fleet-health", "unread": 1,
+        "newest_id": rid, "newest_sender": "cc-fleet-health"})
+    sent = []
+    monkeypatch.setattr(agent_wake, "_verified_submit",
+                        lambda s, sig, row_id=None: sent.append(sig) or 0)
+    r = agent_wake.wake_agent("cc-hifz-1", reason, now=1000.0, row_id=row_id)
+    assert r["woke"] is True
+    assert sent == [f"[wake] bus message {row_id} from cc-fleet-health is addressed to you"]
+
+
+def test_dry_run_reports_the_line_it_would_actually_type(wake_dir, monkeypatch):
+    """A dry run that shows a different string from the real one is worse than no dry run."""
+    monkeypatch.setattr(agent_wake, "resolve_tmux_session", lambda a: "sess")
+    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s, **_: False)
+    monkeypatch.setattr(agent_wake, "_wake_provenance", lambda rid: {
+        "sender": "orch-console", "unread": 1, "newest_id": rid, "newest_sender": "orch-console"})
+    res = agent_wake.wake_agent("cc-hifz-1", "msg #89685", dry_run=True, now=1000.0, row_id=89685)
+    assert res["signal"] == "[wake] bus message 89685 from orch-console is addressed to you"
