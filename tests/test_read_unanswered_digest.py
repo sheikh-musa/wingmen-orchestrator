@@ -302,3 +302,39 @@ def test_status_session_wins_over_fleet_lanes(monkeypatch):
     assert out["idle"][0]["session"] == "sess-real", "must probe the instance's own pane"
     assert [e["agent"] for e in out["idle"]] == ["cc-a-2"]
     assert out["busy"] == 0
+
+
+# ── Live finding 2026-11-01: a BASE-AS-BODY plus a live SIBLING double-counted ──
+# cc-quality runs as an instance whose agent_id IS the base id (host NULL) while
+# cc-quality-2 shares that base. Step 1 emitted the base-as-body under its own id and
+# step 2 emitted the base again, because step 2 only skips a LONE base-as-body. The
+# two entries carried the IDENTICAL 26 row ids, so the report claimed 52 rows and
+# two lanes. Found by running the real digest minutes after #793 merged.
+
+def test_base_as_body_with_a_live_sibling_is_reported_once(monkeypatch):
+    _patch(monkeypatch,
+           [("cc-a", "cc-a", "Sheikhs-Mini", 1),
+            ("cc-a-2", "cc-a", "Sheikhs-Mini", 2)],
+           {"cc-a": [_row(1)]},                       # base-addressed mailbox
+           {"sess-a": "drained", "sess-2": "drained"},
+           base_rows={"cc-a": [_row(1)]},             # same mailbox, base pass
+           sessions={"cc-a": "sess-a", "cc-a-2": "sess-2"})
+    out = d.collect(cur=None)
+    agents = [e["agent"] for e in out["idle"] + out["not_probeable"]]
+    assert agents.count("cc-a") == 1, agents
+    assert len(out["idle"] + out["not_probeable"]) == 1
+
+
+def test_base_as_body_with_a_busy_sibling_is_not_idle(monkeypatch):
+    """The once-only rule must not lose the sibling guard: base-addressed mail may be
+    worked on the sibling's pane, so one busy sibling keeps the base out of idle."""
+    _patch(monkeypatch,
+           [("cc-a", "cc-a", "Sheikhs-Mini", 1),
+            ("cc-a-2", "cc-a", "Sheikhs-Mini", 2)],
+           {"cc-a": [_row(1)]},
+           {"sess-a": "drained", "sess-2": "busy"},
+           base_rows={"cc-a": [_row(1)]},
+           sessions={"cc-a": "sess-a", "cc-a-2": "sess-2"})
+    out = d.collect(cur=None)
+    assert out["idle"] == []
+    assert out["busy"] == 1
