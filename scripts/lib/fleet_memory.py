@@ -134,9 +134,15 @@ def read_facts(
     clients=(),
     include_expired: bool = False,
     dsn: str | None = None,
+    timeout_s: float | None = None,
 ) -> list[Fact]:
     """Facts visible to a session working on `repos` / `clients`, plus
-    fleet-wide ones. Retired rows are always excluded."""
+    fleet-wide ones. Retired rows are always excluded.
+
+    `timeout_s` bounds the whole read (connect + query) for callers that
+    cannot afford to wait -- the boot hook runs on every session start, so a
+    cold or wedged DB must cost it a fraction of a second, not a stall.
+    """
     sql = (
         f"{_SELECT} WHERE retired_at IS NULL "
         "AND (%s OR expires_at IS NULL OR expires_at > now()) "
@@ -145,7 +151,11 @@ def read_facts(
         "     OR (scope = 'client' AND scope_key = ANY(%s))) "
         "ORDER BY id"
     )
-    with psycopg.connect(_dsn(dsn)) as conn, conn.cursor() as cur:
+    kwargs = {}
+    if timeout_s is not None:
+        kwargs["connect_timeout"] = max(1, int(timeout_s))
+        kwargs["options"] = f"-c statement_timeout={int(timeout_s * 1000)}"
+    with psycopg.connect(_dsn(dsn), **kwargs) as conn, conn.cursor() as cur:
         cur.execute(sql, (include_expired, list(repos), list(clients)))
         return [Fact(*row) for row in cur.fetchall()]
 
