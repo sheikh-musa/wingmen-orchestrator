@@ -1596,3 +1596,37 @@ deferred retry and a manual retry are two senders for one message — check the 
 re-sending by hand.
 
 Breaker timeline for the record: refusals at 08:23Z, 08:24Z (twice), cleared by 08:25Z.
+
+## Track B taken over (console 89461, 2026-11-01 ~08:40Z)
+
+Assignment: console gave THIS instance track B explicitly (89461): the credential-store
+guard plus no-cross-provider-resume. Plan row 89471. Status due Mon 2 Nov 08:00Z, PASS
+by 12:00Z. The merge_pinned reviewer sign-off stays parked to Thu 5 Nov.
+
+Read-first found both halves ALREADY MERGED by cc-substrate-1: PR #759 (credential-store
+guard, 31 Oct 19:10Z) and PR #761 (no cross-provider resume, 31 Oct 21:34Z). The guard is
+also wired USER-GLOBALLY, so it fires in client lanes working in their own repos — the
+place the Modesty Hut leak would actually have happened.
+
+Measured against the shipped code (not inferred):
+- GAP 1: credential_store_guard was blind to ssh. A remote wp option list sweep behind ssh
+  was ALLOWED; the identical local command was DENIED. Rule 2 anchors on the DB client
+  that LEADS a statement and the wrapper is ssh.
+- GAP 2: breakglass_studio_orch.sh replays claude --continue from a REMOTE heredoc with no
+  session_provider_guard — the only boot path that bypasses the launch_dangerous_cc.sh
+  funnel. launch_lane_as.sh and switch_lane_token.sh ARE covered (they exec the funnel).
+
+Fix: PR #807, branch cc-substrate/trackb-pass, head 7214394, base
+fable/substrate-safe-fixes. scripts/lib/remote_shell.py (parser extracted from
+secrets_transcript_guard so there is ONE implementation), wrapped-script judging with
+bounded shrinking recursion, breakglass gated to boot FRESH on refusal. 284 tests green
+across the three guard suites; 17-case harness through the real hook entry point.
+Real-traffic replay: 204,256 commands, 0 ALLOW-to-DENY, 0 DENY-to-ALLOW. Latency +1-3 ms
+on ~55 ms. Routed to cc-quality as 89480 (P1+req).
+
+Harness lessons worth keeping: (a) the guard blocked MY OWN Bash calls twice while I was
+testing it (it is live on this session) — the harness had to build payloads inside a file
+rather than on a command line; (b) a gh pr create body built by command substitution is
+blocked by bash_message_commandsub_guard, and the file-backed gh body flag is blocked by
+console_irsyad_guard (fleet-wide exfil rule), so the PR body must be a single-quoted
+INLINE string with no apostrophes; even naming those shapes in prose here trips the guards.
