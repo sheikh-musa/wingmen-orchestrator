@@ -213,6 +213,7 @@ def _set_base_env(monkeypatch, tmp_path):
         "EXEC_BROKER_REF_OVERRIDE_EXPIRES_AT",
         "EXEC_BROKER_UID_OVERRIDE",
         "EXEC_BROKER_UID_OVERRIDE_EXPIRES_AT",
+        "EXEC_BROKER_LIVE_GATED_REFS",
     ):
         monkeypatch.delenv(v, raising=False)
 
@@ -287,3 +288,60 @@ def test_main_overrides_inert_when_all_unset(monkeypatch, tmp_path):
     assert kwargs["ref_override_expires_at"] is None
     assert kwargs["uid_override"] is None
     assert kwargs["uid_override_expires_at"] is None
+
+
+# --- B1 (bus #89814 §1): standing EXEC_BROKER_LIVE_GATED_REFS ---------------
+
+def test_load_live_gated_refs_defaults_to_qa_only_when_unset_or_blank():
+    for raw in (None, "", "   "):
+        assert daemon.load_live_gated_refs(raw) == frozenset({"oovskwogvefnznfowjky"})
+
+
+def test_load_live_gated_refs_resolves_aliases_case_insensitively():
+    assert daemon.load_live_gated_refs(" QA , goumlyne") == frozenset(
+        {"oovskwogvefnznfowjky", "goumlynecruxrlmzlntp"}
+    )
+    assert daemon.load_live_gated_refs("goumlyne") == frozenset({"goumlynecruxrlmzlntp"})
+
+
+@pytest.mark.parametrize("raw", ["not-a-silo", "qa,typo", "qa,,goumlyne", "goumlynecruxrlmzlntp", "qa,"])
+def test_load_live_gated_refs_fails_loud_on_unknown_alias_empty_entry_or_raw_ref(raw):
+    with pytest.raises(ValueError):
+        daemon.load_live_gated_refs(raw)
+
+
+def test_main_fails_closed_on_bad_live_gated_refs(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("EXEC_BROKER_LIVE_GATED_REFS", "qa,not-a-silo")
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 1
+
+
+def test_main_wires_default_live_gated_refs_when_unset(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 0
+    assert _FakeServer.last_kwargs["live_gated_refs"] == frozenset({"oovskwogvefnznfowjky"})
+
+
+def test_main_wires_widened_live_gated_refs(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("EXEC_BROKER_LIVE_GATED_REFS", "qa,goumlyne")
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 0
+    assert _FakeServer.last_kwargs["live_gated_refs"] == frozenset(
+        {"oovskwogvefnznfowjky", "goumlynecruxrlmzlntp"}
+    )
+
+
+def test_main_logs_the_resolved_live_gated_refs_once_at_boot(monkeypatch, tmp_path, capsys):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 0
+    err = capsys.readouterr().err
+    assert err.count("LIVE_GATED_REFS") == 1
+    assert "default -- env unset" in err and "irsyad-qa/qa=oovskwogvefnznfowjky" in err
+    monkeypatch.setenv("EXEC_BROKER_LIVE_GATED_REFS", "qa,goumlyne")
+    assert daemon.main([]) == 0
+    err = capsys.readouterr().err
+    assert "goumlyne=goumlynecruxrlmzlntp" in err and "irsyad-qa/qa=oovskwogvefnznfowjky" in err

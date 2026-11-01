@@ -59,7 +59,17 @@ _REQUIRED_KEYS = ("project_ref", "guarded_sql", "reason", "gate_id", "caller", "
 # working unchanged (absent -> None -> require_gate's existing unconditional
 # DDL refusal, unaffected), and a new caller gets the real migration/PR
 # match the moment both sides are up.
-_OPTIONAL_KEYS = ("migration", "pr")
+#
+# §2 amendment B2 (cc-fleet-health cutover spec bus #89814 §2, 2026-11-01):
+# `ref` joins migration/pr as a third OPTIONAL key, for the same
+# deploy-decoupling reason. It is the --ref gate anchor (op#N/hc#N/q#N/cp#N)
+# exec_prod already accepts on the direct path (console #83951); its SHAPE is
+# validated in gate_validation.require_gate (GATE_INVALID), not here, so a
+# malformed ref is still audited to exec_broker_access_log before refusal.
+# Contract change, recorded with the commit that lands it: a new OPTIONAL
+# request key; no new error code; response shape unchanged. An old caller
+# that omits it is unaffected.
+_OPTIONAL_KEYS = ("migration", "pr", "ref")
 
 
 @dataclass(frozen=True)
@@ -72,6 +82,7 @@ class BrokerRequest:
     exec_ledger_id: str
     migration: str | None = None
     pr: str | None = None
+    ref: str | None = None
 
 
 def parse_request(line: str) -> BrokerRequest:
@@ -123,6 +134,7 @@ def parse_request(line: str) -> BrokerRequest:
         exec_ledger_id=string_fields["exec_ledger_id"],
         migration=optional_fields["migration"],
         pr=optional_fields["pr"],
+        ref=optional_fields["ref"],
     )
 
 

@@ -141,8 +141,14 @@ jobs:
         # file's header for the tracked-follow-up contract (cp#83/backlog#68,
         # decision pending cc-orchestrator per bus #53227). The list must only
         # shrink; a fixed test's line is deleted in the same PR as its fix.
+        #
+        # WINGMEN_REQUIRE_PG_PROOFS=1 (console #89841/#89875): the hc#95 exec-broker
+        # real-PG proofs FAIL instead of skipping if the pg17 server binaries are
+        # missing here, so a runner without them can never turn those proofs into a
+        # silent pass.
         env:
           WINGMEN_PG17_BIN: /usr/lib/postgresql/17/bin
+          WINGMEN_REQUIRE_PG_PROOFS: "1"
         run: |
           deselect_args=()
           while IFS= read -r nodeid; do

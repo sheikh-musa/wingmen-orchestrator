@@ -44,6 +44,11 @@ class FakeCursor:
             self._next_id += 1
             self.vault_rows[row_id] = {"status": "started"}
             self._pending_fetch = {"id": row_id}
+        elif upper.startswith("UPDATE EXEC_BROKER_ACCESS_LOG SET EXECUTED_PROLOGUE"):
+            prologue, executed_sha, row_id = params
+            self.vault_rows[row_id]["executed_prologue"] = prologue
+            self.vault_rows[row_id]["executed_sql_sha256"] = executed_sha
+            self._pending_fetch = None
         elif upper.startswith("UPDATE EXEC_BROKER_ACCESS_LOG"):
             status, error_code, row_id = params
             self.vault_rows[row_id]["status"] = status
@@ -595,13 +600,22 @@ def test_ref_override_readonly_allows_cte_read_end_to_end(tmp_path):
     assert resp == {"status": "ok", "rows": [{"n": 1}]}
 
 
+# B1 (bus #89814): every non-plain-read statement on a gated ref -- QA
+# included -- now needs a gate with a specific anchor, mirroring
+# exec_prod._require_gate (console #81213). The four write tests below pin
+# OVERRIDE SCOPING, not gating, so they now carry a valid ref-anchored gate;
+# the ungated-write refusal itself is pinned in the B1 section at the end.
+_QA_REF_GATE_ROW = {"from_agent": "orch-console", "message_type": "decision",
+                    "subject": "GO data fix op#51 on qa", "body": "", "is_past": True}
+
+
 def test_ref_override_readonly_scoped_to_override_ref_baseline_write_passes(tmp_path):
     # SCOPE RULING (cc-fleet-health bus #79039, 2026-10-28 — supersedes the
     # broker-wide reading of GO #78974): while the override is armed, a write
     # to the ALWAYS-ALLOWED QA ref passes exactly as it does today — RO binds
     # only requests targeting the override's ref.
     seen = []
-    db = FakeDb()
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
     _, sock_path, db = _make_server(
         tmp_path, frozenset({TEST_UID}), db=db,
         mgmt_api_fn=lambda sql, ref, tok: seen.append((sql, ref)) or [],
@@ -609,7 +623,8 @@ def test_ref_override_readonly_scoped_to_override_ref_baseline_write_passes(tmp_
     )
     resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky",
                              "guarded_sql": "insert into t values (1)",
-                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+                             "reason": "", "gate_id": "56485", "ref": "op#51",
+                             "caller": "c", "exec_ledger_id": "e"})
     assert resp == {"status": "ok", "rows": []}
     assert seen == [("insert into t values (1)", "oovskwogvefnznfowjky")]
     row = list(db.vault_rows.values())[0]
@@ -636,41 +651,256 @@ def test_ref_override_readonly_allowlist_runs_before_ro_pin(tmp_path):
 
 def test_expired_ref_override_lifts_readonly_for_qa_write(tmp_path):
     # Expiry reverts BOTH the ref widening and the RO mode, by construction.
-    db = FakeDb()
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
     _, sock_path, db = _make_server(
         tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [],
         ref_override=_GOUMLYNE, ref_override_expires_at=_PAST,
     )
     resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky",
                              "guarded_sql": "insert into t values (1)",
-                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+                             "reason": "", "gate_id": "56485", "ref": "op#51",
+                             "caller": "c", "exec_ledger_id": "e"})
     assert resp == {"status": "ok", "rows": []}   # QA write unaffected once the override expired
 
 
 def test_uid_override_alone_does_not_impose_readonly(tmp_path):
     # bus #79024 ties RO to the REF override only; a uid-override window
     # must not silently turn the broker read-only.
-    db = FakeDb()
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
     _, sock_path, db = _make_server(
         tmp_path, frozenset({TEST_UID + 1}), db=db, mgmt_api_fn=lambda *a, **k: [],
         uid_override=frozenset({TEST_UID}), uid_override_expires_at=_FUTURE,
     )
     resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky",
                              "guarded_sql": "insert into t values (1)",
-                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+                             "reason": "", "gate_id": "56485", "ref": "op#51",
+                             "caller": "c", "exec_ledger_id": "e"})
     assert resp == {"status": "ok", "rows": []}
 
 
 def test_no_override_write_behavior_unchanged_end_to_end(tmp_path):
-    # No override armed at all: an INSERT reaches the mgmt API exactly as
-    # before this feature existed (byte-for-byte unchanged behavior).
+    # No override armed at all: a GATED INSERT reaches the mgmt API exactly
+    # as before this feature existed (B1 adds the gate requirement, nothing
+    # else about the write path changes).
     seen = []
-    db = FakeDb()
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
     _, sock_path, db = _make_server(
         tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda sql, ref, tok: seen.append((sql, ref)) or [],
     )
     resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky",
                              "guarded_sql": "insert into t values (1)",
-                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+                             "reason": "", "gate_id": "56485", "ref": "op#51",
+                             "caller": "c", "exec_ledger_id": "e"})
     assert resp == {"status": "ok", "rows": []}
     assert seen == [("insert into t values (1)", "oovskwogvefnznfowjky")]
+
+
+# --- B1 + B2 + --ref end to end (bus #89814) --------------------------------
+
+def _insert_params(db):
+    return [p for sql, p in db.cursor_obj.calls if sql.strip().upper().startswith("INSERT INTO EXEC_BROKER_ACCESS_LOG")]
+
+
+def test_b1_ungated_dml_on_default_qa_ref_is_gate_required_end_to_end(tmp_path):
+    seen = []
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: seen.append(a) or [],
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "update t set a = 1",
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp["error"]["code"] == "GATE_REQUIRED"
+    assert seen == [], "a refused statement must never reach the mgmt API"
+    row = list(db.vault_rows.values())[0]
+    assert row == {"status": "error", "error_code": "GATE_REQUIRED"}
+
+
+def test_b2_ref_threads_through_to_require_gate_and_the_ledger_end_to_end(tmp_path):
+    seen = []
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda sql, ref, tok: seen.append(sql) or [],
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "update t set a = 1",
+                             "reason": "", "gate_id": "56485", "ref": "op#51",
+                             "caller": "c", "exec_ledger_id": "e"})
+    assert resp == {"status": "ok", "rows": []}
+    assert seen == ["update t set a = 1"]
+    (params,) = _insert_params(db)
+    assert params[-1] == "op#51"  # gate_ref recorded on the audit row
+
+
+def test_b2_ref_not_in_gate_text_is_gate_invalid_end_to_end(tmp_path):
+    seen = []
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)  # names op#51, never op#510
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: seen.append(a) or [],
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "update t set a = 1",
+                             "reason": "", "gate_id": "56485", "ref": "op#510",
+                             "caller": "c", "exec_ledger_id": "e"})
+    assert resp["error"]["code"] == "GATE_INVALID"
+    assert seen == []
+
+
+def test_b2_ref_plus_migration_refused_end_to_end(tmp_path):
+    db = FakeDb(gate_row={**_QA_REF_GATE_ROW, "body": "migration 479"})
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db)
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "update t set a = 1",
+                             "reason": "", "gate_id": "56485", "ref": "op#51", "migration": "479",
+                             "caller": "c", "exec_ledger_id": "e"})
+    assert resp["error"]["code"] == "GATE_INVALID"
+    assert list(db.vault_rows.values())[0]["error_code"] == "GATE_INVALID"
+
+
+def test_b2_malformed_ref_is_audited_then_refused_end_to_end(tmp_path):
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db)
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "select 1",
+                             "reason": "", "gate_id": None, "ref": "OP#51",
+                             "caller": "c", "exec_ledger_id": "e"})
+    assert resp["error"]["code"] == "GATE_INVALID"
+    assert list(db.vault_rows.values())[0]["status"] == "error"
+
+
+def test_b1_plain_read_on_gated_ref_needs_no_gate_end_to_end(tmp_path):
+    db = FakeDb()
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [{"n": 1}])
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "select count(*) from t",
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp == {"status": "ok", "rows": [{"n": 1}]}
+    # no gate lookup was made for a plain read
+    assert not any(sql.strip().upper().startswith("SELECT FROM_AGENT") for sql, _ in db.cursor_obj.calls)
+
+
+def test_b1_widened_live_gated_refs_allows_and_gates_a_real_ref_end_to_end(tmp_path):
+    goumlyne_gate = {"from_agent": "orch-console", "message_type": "decision",
+                     "subject": "GO op#77 data fix on goumlyne", "body": "", "is_past": True}
+    seen = []
+    db = FakeDb(gate_row=goumlyne_gate)
+    server, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda sql, ref, tok: seen.append(ref) or [],
+    )
+    server.live_gated_refs = frozenset({"oovskwogvefnznfowjky", _GOUMLYNE})
+    # ungated DML on the newly gated ref -> GATE_REQUIRED
+    resp = _send(sock_path, {"project_ref": _GOUMLYNE, "guarded_sql": "update t set a = 1",
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e1"})
+    assert resp["error"]["code"] == "GATE_REQUIRED"
+    # valid ref-anchored gate -> executes
+    resp = _send(sock_path, {"project_ref": _GOUMLYNE, "guarded_sql": "update t set a = 1",
+                             "reason": "", "gate_id": "56485", "ref": "op#77",
+                             "caller": "c", "exec_ledger_id": "e2"})
+    assert resp == {"status": "ok", "rows": []}
+    assert seen == [_GOUMLYNE]
+
+
+def test_b1_default_live_gated_refs_still_rejects_real_refs_end_to_end(tmp_path):
+    db = FakeDb(gate_row={"from_agent": "orch-console", "message_type": "decision",
+                          "subject": "GO op#77 on goumlyne", "body": "", "is_past": True})
+    server, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db)
+    assert server.live_gated_refs is None
+    resp = _send(sock_path, {"project_ref": _GOUMLYNE, "guarded_sql": "update t set a = 1",
+                             "reason": "", "gate_id": "56485", "ref": "op#77",
+                             "caller": "c", "exec_ledger_id": "e"})
+    assert resp["error"]["code"] == "BAD_PROJECT_REF"
+
+
+# --- amended ruling C (console bus #89846/#89875): broker-enforced read-only -
+
+_PROLOGUE = "SET TRANSACTION READ ONLY; "
+
+# exec_prod's agent-actor wrapper SHAPE (not the pinned bytes -- the pin was
+# removed with the exemption): SET TRANSACTION + DO blocks + set_config.
+_WRAPPED_READ = (
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;\n\n"
+    "DO $agent_guard_pre$\nBEGIN\n"
+    "  PERFORM set_config('request.jwt.claim.sub', 'ca2a4a9c-f745-40c3-9536-7a021fd42bb9', true);\n"
+    "END\n$agent_guard_pre$;\n\n"
+    "-- <<< INNER EXEC WORK GOES HERE >>>\n"
+    "SELECT count(*) FROM t;\n\n"
+    "DO $agent_guard_post$\nBEGIN\n  NULL;\nEND\n$agent_guard_post$;\n"
+)
+
+
+def test_c_gate_free_read_is_sent_upstream_with_the_read_only_prologue(tmp_path):
+    seen = []
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda sql, ref, tok: seen.append(sql) or [{"n": 1}],
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "select count(*) from t",
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp == {"status": "ok", "rows": [{"n": 1}]}
+    assert seen == [_PROLOGUE + "select count(*) from t"]
+    row = list(db.vault_rows.values())[0]
+    # the ledger binds the RECEIVED bytes and separately records what RAN
+    (insert_params,) = [p for s, p in db.cursor_obj.calls if s.strip().upper().startswith("INSERT")]
+    assert insert_params[3] == hashlib.sha256(b"select count(*) from t").hexdigest()
+    assert row["executed_prologue"] == _PROLOGUE
+    assert row["executed_sql_sha256"] == hashlib.sha256((_PROLOGUE + "select count(*) from t").encode()).hexdigest()
+    assert row["status"] == "ok"
+
+
+def test_c_gated_statement_is_sent_byte_identical_without_the_prologue(tmp_path):
+    seen = []
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda sql, ref, tok: seen.append(sql) or [],
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "update t set a = 1",
+                             "reason": "", "gate_id": "56485", "ref": "op#51", "caller": "c", "exec_ledger_id": "e"})
+    assert resp["status"] == "ok"
+    assert seen == ["update t set a = 1"]
+    row = list(db.vault_rows.values())[0]
+    assert "executed_prologue" not in row and "executed_sql_sha256" not in row
+
+
+def test_c_wrapped_read_with_no_gate_is_gate_required(tmp_path):
+    # Regression guard: the pinned-wrapper exemption is GONE (amended ruling C).
+    seen = []
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: seen.append(a) or [],
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": _WRAPPED_READ,
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp["error"]["code"] == "GATE_REQUIRED"
+    assert seen == []
+
+
+@pytest.mark.parametrize("sql", [
+    "select 1; commit; insert into t values (1)",
+    "commit; delete from t",
+    "set transaction read write; update t set x=1",
+    "select 1; select 2",
+])
+def test_c_txn_control_or_multi_statement_reads_are_never_sent_ungated(tmp_path, sql):
+    seen = []
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: seen.append(a) or [],
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": sql,
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp["error"]["code"] == "GATE_REQUIRED"
+    assert seen == []
+
+
+def test_c_failure_to_record_the_executed_bytes_means_no_execution(tmp_path):
+    seen = []
+    db = FakeDb()
+    real_execute = db.cursor_obj.execute
+
+    def _execute(sql, params=None):
+        if sql.strip().upper().startswith("UPDATE EXEC_BROKER_ACCESS_LOG SET EXECUTED_PROLOGUE"):
+            raise RuntimeError('column "executed_prologue" does not exist')
+        return real_execute(sql, params)
+
+    db.cursor_obj.execute = _execute
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: seen.append(a) or [],
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "select 1",
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp["error"]["code"] == "INTERNAL_ERROR"
+    assert seen == []

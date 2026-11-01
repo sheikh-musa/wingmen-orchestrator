@@ -115,6 +115,46 @@ _BODY_TOKEN_RE = _word_regex(_FORBIDDEN_BODY_TOKENS)
 
 _HEAD_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
+# Console amended ruling C + addendum (bus #89846/#89875): every gate-free
+# plain read is executed as READ_ONLY_PROLOGUE + sql in ONE mgmt-API query
+# string (one implicit transaction). These transaction-control / session-
+# setting words must therefore never appear in CODE position (outside string
+# literals, dollar bodies, comments and quoted identifiers -- all blanked by
+# the vendored strip_sql_noise first). Deliberately over-refuses: a bare,
+# unquoted column named e.g. `release` or `set` is refused too.
+READ_ONLY_PROLOGUE = "SET TRANSACTION READ ONLY; "
+_TXN_CONTROL_WORD_RE = re.compile(
+    r"(?i)\b(?:commit|rollback|begin|abort|savepoint|release|set|reset|discard)\b"
+)
+_TXN_CONTROL_PHRASE_RE = re.compile(r"(?i)\b(?:start|prepare)\s+transaction\b")
+_END_RE = re.compile(r"(?i)\bend\b")
+_CASE_RE = re.compile(r"(?i)\bcase\b")
+# What strip_sql_noise leaves behind for a CLOSED dollar body.
+_CLOSED_BODY_MARK = " $BODY$ "
+_RAW_DOLLAR_OPEN_RE = re.compile(r"\$(?:[A-Za-z_]\w*)?\$")
+_UNCLOSED_SENTINEL = "\n;select zz_unclosed_sentinel_zz"
+
+
+def _has_unclosed_region(sql: str) -> bool:
+    """True if a string literal, quoted identifier, block comment or dollar
+    body is left open (fail closed: the prologue's protection must never sit
+    in front of text the lexer could not delimit). An open '...', "..." or
+    /* swallows an appended sentinel; an open $tag$ is left raw by
+    strip_sql_noise."""
+    stripped = strip_sql_noise(sql + _UNCLOSED_SENTINEL)
+    if not stripped.endswith("select zz_unclosed_sentinel_zz"):
+        return True
+    return bool(_RAW_DOLLAR_OPEN_RE.search(stripped.replace(_CLOSED_BODY_MARK, " ")))
+
+
+def _has_txn_control(stripped: str) -> bool:
+    """Transaction-control / session-setting keyword in code position. END is
+    allowed only as a CASE terminator: more END tokens than CASE tokens means
+    a bare END (a COMMIT synonym) -- refused."""
+    if _TXN_CONTROL_WORD_RE.search(stripped) or _TXN_CONTROL_PHRASE_RE.search(stripped):
+        return True
+    return len(_END_RE.findall(stripped)) > len(_CASE_RE.findall(stripped))
+
 # Raw "..."-quoted identifier content (doubled "" is the escaped-quote rule),
 # scanned against the ORIGINAL sql -- not the strip_sql_noise output. The
 # vendored lexer's own dquote state (ihsanos PR #1168 re-vendor, bus #79427)
@@ -135,7 +175,7 @@ def is_plain_read(sql: str) -> bool:
     """True iff sql is a plain read: not lexically hazardous, not DDL-shaped
     (is_ddl_shaped), no forbidden write/function token in top-level code
     position, no forbidden function/body token inside any dollar-quoted body,
-    and every top-level statement starts with a read keyword
+    and EXACTLY ONE top-level statement, starting with a read keyword
     (SELECT/WITH/TABLE/VALUES). Empty or whitespace-only sql is NOT a plain
     read."""
     # (0) lexical hazard pre-screen (Critical #1): refuse the input class
@@ -149,9 +189,20 @@ def is_plain_read(sql: str) -> bool:
     if is_ddl_shaped(sql):
         return False
 
+    # (a2) anything the lexer cannot delimit (open string / comment / dollar
+    #      body / quoted identifier) is refused outright (bus #89875).
+    if _has_unclosed_region(sql):
+        return False
+
     # strip_sql_noise blanks comments, single-quoted strings and dollar
     # bodies, so the scans below see only real top-level code tokens.
     stripped = strip_sql_noise(sql)
+
+    # (a3) transaction-control / session-setting keywords in code position
+    #      (bus #89875): COMMIT ROLLBACK BEGIN START TRANSACTION END ABORT
+    #      SAVEPOINT RELEASE PREPARE TRANSACTION SET (any) RESET DISCARD.
+    if _has_txn_control(stripped):
+        return False
 
     # (b)+(c) writes smuggled into a read-shaped statement in code position:
     # data-modifying CTEs, SELECT ... INTO, FOR UPDATE, set_config, nextval...
@@ -174,17 +225,20 @@ def is_plain_read(sql: str) -> bool:
         if _BODY_TOKEN_RE.search(body) or _FUNCTION_TOKEN_RE.search(body):
             return False
 
-    # (e) every top-level statement must start with a read keyword.
-    saw_statement = False
-    for fragment in stripped.split(";"):
-        s = fragment.strip().lstrip("(").strip()
-        if not s:
-            continue
-        saw_statement = True
-        m = _HEAD_RE.match(s)
-        if not m or m.group(0).lower() not in _READ_FIRST_KEYWORDS:
-            return False
-    return saw_statement
+    # (e) EXACTLY ONE top-level statement (trailing ';' allowed), and it must
+    #     start with a read keyword. Single-statement is load-bearing (console
+    #     amended ruling C, bus #89846): the broker prepends
+    #     `SET TRANSACTION READ ONLY;` to every gate-free plain read, and a
+    #     second statement is exactly how that would be escaped
+    #     (`SELECT 1; COMMIT; DELETE ...`, `...; SET TRANSACTION READ WRITE`,
+    #     `...; BEGIN`, `...; RESET ALL`, `...; SET SESSION CHARACTERISTICS ...`).
+    #     Fail closed: any multi-statement input, even all-reads, needs a gate.
+    statements = [f.strip().lstrip("(").strip() for f in stripped.split(";")]
+    statements = [st for st in statements if st]
+    if len(statements) != 1:
+        return False
+    m = _HEAD_RE.match(statements[0])
+    return bool(m) and m.group(0).lower() in _READ_FIRST_KEYWORDS
 
 
 def check_read_only_override(
