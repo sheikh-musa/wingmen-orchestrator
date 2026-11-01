@@ -224,6 +224,44 @@ class PowersUnavailable(Exception):
     """Powers could not be read — the caller must REFUSE, not guess."""
 
 
+def _bus_dsn():
+    """The bus/coordination DSN as it actually reaches this process.
+
+    op#892 (bus #82524/#82668): a LANE's scrubbed env carries the bus DSN only as
+    BUS_DATABASE_URL -- `scripts/lib/lane_env_allowlist.sh` deliberately does not
+    pass a bare DATABASE_URL through, because a bare name would SHADOW a client
+    lane's own `process.env.DATABASE_URL` (TENANT-RESIDENCY-001 commingling), and
+    `launch_dangerous_cc.sh` REFUSES TO BOOT if one would leak through. So in a
+    lane this guard's older `DATABASE_URL`-only lookup could never succeed: it
+    failed closed on EVERY lane that serves a client (cc-cosem-exams-1, #90166).
+    Direct orchestrator-side invocation has no lane scrub and still carries
+    DATABASE_URL, so the fallback stays -- the same precedence as
+    `scripts/bus_send.py::_bus_database_url()`, deliberately in step with it.
+    """
+    return os.environ.get("BUS_DATABASE_URL") or os.environ.get("DATABASE_URL")
+
+
+def _lane_names(base):
+    """Every name this lane may be recorded under in `bot_channels`.
+
+    `owner_lane` is documented above as "a lane or session name
+    ('coffeemedia', 'cosem-exams', 'cc-bariq')" -- i.e. the column does NOT use
+    one spelling, so comparing it to the base id alone silently matches nothing
+    for a lane stored under the session spelling. That is the SECOND half of
+    #90166: `cc-cosem-exams` serves channel `cosem-exams` (owner_lane
+    'cosem-exams', inject_target 'exams'), and neither old clause matched, so
+    even with a working DSN the lane saw ZERO channels and was refused
+    ("channel 'cosem-exams' is not one this lane serves") -- still no Hariz
+    question out. Both columns are now matched against this alias set.
+    """
+    names = {base}
+    names.add(base[3:] if base.startswith("cc-") else "cc-" + base)
+    session = _lane_session(base)
+    if session:
+        names.add(session)
+    return names
+
+
 def served_channels(base_agent_id):
     """{channel_key: raw powers} for every channel this lane serves.
 
@@ -245,16 +283,18 @@ def served_channels(base_agent_id):
                 return dict(table[key] or {})
         return {}
 
-    dsn = os.environ.get("DATABASE_URL")
+    dsn = _bus_dsn()
     if not dsn:
-        raise PowersUnavailable("DATABASE_URL is not set")
+        raise PowersUnavailable(
+            "no bus DSN in the hook env (BUS_DATABASE_URL or DATABASE_URL)")
     try:
         import psycopg
+        names = sorted(_lane_names(base_agent_id))
         with psycopg.connect(dsn, connect_timeout=5) as conn:
             rows = conn.execute(
                 "SELECT channel_key, group_routing->'powers' FROM bot_channels "
-                "WHERE owner_lane = %s OR inject_target = %s",
-                (base_agent_id, _lane_session(base_agent_id)),
+                "WHERE owner_lane = ANY(%s) OR inject_target = ANY(%s)",
+                (names, names),
             ).fetchall()
     except Exception as e:
         raise PowersUnavailable(f"bot_channels unreadable ({e.__class__.__name__})")
