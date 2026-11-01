@@ -74,6 +74,33 @@ def test_missing_token_raises_not_silent_green(monkeypatch):
         t._fetch_authfail_rows()
 
 
+def test_sql_selects_log_attributes_or_attribution_is_blind(monkeypatch):
+    """2026-11-01 rotation regression (orch-console #89311): the SELECT listed only
+    timestamp + event_message, so peer_ip NEVER arrived, every row bucketed to
+    'unattributed', and the P1 page read mini=0 gzb=0 with no host named — while
+    the Mini was failing ~4 connections every few minutes and gzb was bursting too.
+
+    peer_ip is nested INSIDE log_attributes (selecting it as a top-level column
+    returns null; SELECT * returns no rows). All the shape-robustness in
+    _extract_peer_ip is worthless if the query never fetches the field, so pin the
+    SELECT itself — the existing tests mock urlopen and would never catch this.
+    """
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", "dummy")
+    captured = {}
+
+    def fake_urlopen(req, timeout=30):
+        captured["url"] = req.full_url
+        return _mgmt_response([_row(t.HOST_IPS["mini"])])
+
+    monkeypatch.setattr(t.urllib.request, "urlopen", fake_urlopen)
+    rows = t._fetch_authfail_rows()
+    assert rows, "must measure, not silently fail"
+    sql = t.urllib.parse.unquote(captured["url"])
+    assert "log_attributes" in sql, (
+        "peer_ip lives inside log_attributes; without it every failure is "
+        "unattributed and the per-host rates are a permanent 0/0 lie")
+
+
 def test_transient_http_500_is_retried_not_an_immediate_could_not_measure(monkeypatch):
     """bus #84280: a bare Mgmt-API HTTP 500 paged a could-not-measure P1 and cleared on the
     very next manual attempt — the SAME transient-backend class the wrong-shape retry already
