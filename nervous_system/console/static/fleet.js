@@ -320,82 +320,12 @@
       + '<div class="pooladvrow">' + paceAdvisory(p) + '</div>'
       + '</div>';
   }
-  // ---- GLM Coding Plan (z.ai) quota card (op#24597) ------------------------
-  // Sits beside the Claude Max pool cards. Backend: nervous_system/console/
-  // glm_usage.py (5-min server cache; the key never reaches the payload). When
-  // the read failed the card says "GLM usage unavailable" — never stale numbers.
-  // op#25580: pace/projection/runway for the GLM WK window, mirroring the Claude
-  // pool cards (nervous_system/pool_pace.py semantics): 7-day window ending at
-  // resets_at; elapsed fraction clamped to [0,1]; pace = (used/100)/elapsed and
-  // projected = used/elapsed, both null when elapsed <= 0. GLM has no stored
-  // trailing-24h reading pair, so runway uses the WEEK-TO-DATE average rate
-  // (used% / elapsed days) instead of pool_pace's trailing burn: null when not
-  // burning (rate <= 0 -> pool_pace's inf, which the Claude card also hides),
-  // never negative. Returns null when resets_at is missing/past (no window).
-  var GLM_WINDOW_DAYS = 7;
-  function glmPace(usedPct, resets_at, nowMs) {
-    if (usedPct == null || !resets_at) return null;
-    var t = Date.parse(String(resets_at));
-    if (isNaN(t)) return null;
-    var now = nowMs == null ? Date.now() : nowMs;
-    var dtr = (t - now) / 86400000;
-    if (!(dtr > 0)) return null;
-    var ef = Math.max(0, Math.min(1, (GLM_WINDOW_DAYS - dtr) / GLM_WINDOW_DAYS));
-    var used = Number(usedPct);
-    var out = { pace: null, projected_pct: null, runway_days: null, resets_at: resets_at };
-    if (ef > 0) {
-      out.pace = (used / 100) / ef;
-      out.projected_pct = used / ef;
-      var burn = used / (ef * GLM_WINDOW_DAYS);
-      if (burn > 0) out.runway_days = Math.max(0, (100 - used) / burn);
-    }
-    return out;
-  }
-  function glmCard(g) {
-    if (!g) return "";
-    if (!g.available) {
-      return '<div class="poolrow poolcard stale glm" title="z.ai quota read failed — no numbers shown rather than stale ones">'
-        + '<div class="poolhead"><span class="poolchip stale">GLM (z.ai)</span>'
-        + '<span class="poolstatus">GLM usage unavailable</span></div></div>';
-    }
-    var ws = g.windows || [];
-    var worst = 0;
-    ws.forEach(function (w) { if (w.pct != null && w.pct > worst) worst = w.pct; });
-    var cls = poolLevel(worst);
-    var lvl = g.level ? String(g.level) : "";
-    var name = "GLM (z.ai" + (lvl ? " " + lvl.charAt(0).toUpperCase() + lvl.slice(1) : "") + ")";
-    // op#25562: standardized with the Claude pool cards: % + "resets in" only,
-    // no raw token/credit counts and no absolute reset clock (title included).
-    var title = name + " Coding Plan" + ws.map(function (w) {
-      return " · " + w.label + ": " + (w.pct == null ? "—" : Math.round(w.pct) + "%");
-    }).join("") + (g.age_s != null ? " · read " + fmtAge(g.age_s) + " ago" : "");
-    var rows = ws.map(function (w) {
-      var lv = poolLevel(w.pct);
-      var bw = w.pct == null ? 0 : Math.max(0, Math.min(100, Math.round(w.pct)));
-      return '<div class="poolwin ' + lv + '">'
-        + '<span class="poolwl">' + esc(w.label) + '</span>'
-        + '<span class="poolbar"><i style="width:' + bw + '%"></i></span>'
-        + '<b>' + (w.pct == null ? "—" : Math.round(w.pct) + "%") + '</b>'
-        + '<span class="poolreset">resets ' + (minutesToReset(w.resets_at) == null ? "—" : "in " + fmtReset(w.resets_at)) + '</span>'
-        + '</div>';
-    }).join("");
-    // Like the Claude cards: ONE advisory line, from the weekly window only (no 5H pace).
-    var wk = ws.filter(function (w) { return w.label === "wk"; })[0];
-    var pz = wk ? glmPace(wk.pct, wk.resets_at) : null;
-    var adv = pz ? paceAdvisory(pz) : "";
-    return '<div class="poolrow poolcard glm ' + cls + '" title="' + esc(title) + '">'
-      + '<div class="poolhead"><span class="poolchip ' + cls + '">' + esc(name) + '</span>'
-      + (lvl ? '<span class="poolstatus">plan ' + esc(lvl) + '</span>' : "")
-      + '</div>' + rows
-      + (adv ? '<div class="pooladvrow">' + adv + '</div>' : "")
-      // op#24626/op#25357: the key is leak-flagged in the vault, operator accepted
-      // continued use — the persistent card banner is hidden per Musa's explicit
-      // request (op#25357), NOT because the risk is resolved: the backend still
-      // sets g.key_warning (API truth unchanged) and a held_commitment tracks the
-      // actual rotation reminder instead of a standing UI nag. Re-show this line
-      // if that tradeoff is ever revisited.
-      + '</div>';
-  }
+  // ---- GLM (z.ai) card REMOVED (op#37222 stale-console cleanup, console #90041 item 1)
+  // The renderer, its pace maths and tests are gone. The DATA path stays on purpose:
+  // nervous_system/console/glm_usage.py is still read directly by
+  // scripts/glm_overflow_switch.py, so the module is a live dependency, not console
+  // furniture. If GLM is ever surfaced again, rebuild the card against that module
+  // rather than resurrecting this block.
   // ---- DeepSeek pool card (op#35897, #37213, #37217; console #83397/#90015) --
   // Collapsed it is ONE line: the shared key's balance plus today's measured
   // spend against the 7 USD/day fleet line (op#36779, warn at 5). Expanded it
@@ -507,6 +437,12 @@
     var rows = (shared ? deepseekRow(shared.families && shared.families.length
         ? "Shared key · " + shared.families.join(" / ") : "Shared key", shared, !!sp) : "")
       + active.map(function (k) { return deepseekRow(label(k), k, !!sp); }).join("");
+    // op#37222 item 2 (VERIFIED, unchanged): every key is accounted for -- an
+    // unreadable one is always its own row with its reason, and a quiet one is
+    // summarised here (named when there are few). Their per-key balance is
+    // deliberately not repeated: every key draws on the one account balance the
+    // card head already shows, so 11 copies of it carry no extra fact (the
+    // exact duplication console asked to remove). Locked by fleet_deepseek.test.js.
     var quietLine = quiet.length
       ? '<div class="dsnote">' + quiet.length + ' key(s) with no spend today and no live lane'
         + (quiet.length <= 6 ? ': ' + quiet.map(function (k) { return esc(label(k)); }).join(", ") : "")
@@ -520,7 +456,7 @@
       + rows + quietLine + staleNote + note
       + '</details>';
   }
-  function renderPoolUsage(rows, glm, deepseek) {
+  function renderPoolUsage(rows, deepseek) {
     var el = $("poolUsage");
     if (!el) return;
     // collapse state survives the 8s re-render, or the card would snap shut
@@ -528,11 +464,11 @@
     var prev = el.querySelector ? el.querySelector("details.dspend") : null;
     var wasOpen = !!(prev && prev.open);
     el.innerHTML = ((rows && rows.length) ? rows.map(poolChip).join("") : "")
-      + glmCard(glm) + deepseekCard(deepseek, wasOpen);
+      + deepseekCard(deepseek, wasOpen);
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v96';
+  var APP_BUILD = 'fc-v97';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -890,12 +826,34 @@
         (bits.length ? '<span class="csep">·</span>' + bits.join('<span class="csep">·</span>') : "") + '</div>' +
       '<div class="cnames">' + esc(s.names.slice(0, 6).join(", ")) + (s.names.length > 6 ? "…" : "") + '</div></div></div>';
   }
+  // console #90041 item 5: "idle & fine" may only count lanes that are IDLE.
+  // A lane with no live process is DOWN, and counting it as idle-and-fine said
+  // "all good" about lanes nobody had running (the glm-5.3 registrations).
+  // Down lanes keep their own line: visible, but never counted as healthy.
+  function laneGroups(lanes) {
+    var primary = [], routine = [], down = [];
+    (lanes || []).forEach(function (l) {
+      if (l.bucket === "working" || l.flagged) primary.push(l);
+      else if (l.bucket === "idle") routine.push(l);
+      else down.push(l);
+    });
+    return { primary: primary, routine: routine, down: down };
+  }
   function renderLanes(lanes) {
     lastLanes = lanes;
     renderKeyRoll(lanes);
-    var primary = lanes.filter(function (l) { return l.bucket === "working" || l.flagged; });
-    var routine = lanes.filter(function (l) { return !(l.bucket === "working" || l.flagged); });
+    var g = laneGroups(lanes);
+    var primary = g.primary, routine = g.routine, down = g.down;
     var html = primary.map(tileHtml).join("");
+    if (down.length) {
+      var dnames = down.map(function (l) { return l.session || l.agent_id; });
+      html += '<div class="collapsed" id="downToggle" title="registered but no live process — not idle, not fine">' +
+        '<div class="cbody"><div class="cl1"><b>' + down.length + ' lane' + (down.length > 1 ? "s" : "") +
+        '</b> <span>registered, not running</span></div>' +
+        '<div class="cnames">' + esc(dnames.slice(0, 6).join(", ")) + (dnames.length > 6 ? "…" : "") +
+        '</div></div></div>' +
+        '<div id="down" style="display:none">' + down.map(tileHtml).join("") + '</div>';
+    }
     if (routine.length) {
       // op#20716: the collapsed group carries its key split + model split INLINE.
       html += collapsedHtml(routine) +
@@ -903,6 +861,13 @@
     }
     $("lanes").innerHTML = html || '<div class="empty">No lanes.</div>';
     $("lanesCount").textContent = lanes.length + (lanes.length === 1 ? " lane" : " lanes");
+    var dt = $("downToggle");
+    if (dt) dt.addEventListener("click", function () {
+      var box = $("down");
+      if (!box) return;
+      box.style.display = box.style.display === "none" ? "block" : "none";
+      bindTiles();
+    });
     var t = $("routineToggle");
     if (t) t.addEventListener("click", function () {
       routineExpanded = !routineExpanded;
@@ -1605,7 +1570,7 @@
     renderStat(d.pulse || {}, bloatCount);
     renderTopbar(d.pulse || {});   // fc-v86: top-bar Asks badge (asks_waiting)
     renderTopBloat(glance);
-    renderPoolUsage(d.pool_usage || [], d.glm_usage, d.deepseek_usage);
+    renderPoolUsage(d.pool_usage || [], d.deepseek_usage);
     renderNeeds(d.needs_you || []);
     renderCoordinators(d.coordinators || []);
     buildEntries(lanes, d.coordinators || []);
@@ -1695,11 +1660,26 @@
       '<div class="gres' + (p.residency_ack_on_file ? " on" : "") + '">residency ack: ' + (p.residency_ack_on_file ? "on file" : "none on file (never inferred)") + '</div>' +
     '</div>';
   }
+  // op#37222 item 3: when the registry cannot be read, the armed-key box, the
+  // confirm strip and the audit log have nothing to act on — they are dead
+  // controls next to an empty registry (the glm-card-era complaint: the page
+  // looked usable where it was not). Hide them for as long as that is true;
+  // never remove them. A console whose registry DOES load keeps them, and the
+  // next successful load restores them (loadGov retries, so this self-heals).
+  // Hiding the second armed-key input costs no access: the key lives in
+  // localStorage and the lane sheet's field writes the same slot.
+  function govControlsUsable(on) {
+    ["govArmed", "govConfirm", "govLog"].forEach(function (id) {
+      var el = $(id); if (el) el.style.display = on ? "" : "none";
+    });
+  }
   function govUnavailable(msg) {
     var g = $("gov"); if (g) g.innerHTML = '<div class="gunavail">' + esc(msg) + '</div>';
     var c = $("govCount"); if (c) c.textContent = "";
+    govControlsUsable(false);
   }
   function renderGov(d) {
+    govControlsUsable(true);
     var g = $("gov"); if (!g) return;
     var rows = d.projects || [];
     g.innerHTML = rows.length ? rows.map(govCardHtml).join("") : '<div class="empty">no governance rows</div>';
@@ -1976,14 +1956,15 @@
 
   // Node-only: expose the pure helpers for the unit tests (inert in the browser).
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, glmCard: glmCard, glmPace: glmPace, deepseekCard: deepseekCard, paceAdvisory: paceAdvisory, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset, next5hBoundary: next5hBoundary,
+    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, laneGroups: laneGroups, deepseekCard: deepseekCard, paceAdvisory: paceAdvisory, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset, next5hBoundary: next5hBoundary,
       ctxDisplayFrom: ctxDisplayFrom, idleLabel: idleLabel,
       poolOf: poolOf, tokChip: tokChip, poolRollup: poolRollup,
       mdlChip: mdlChip, shortModel: shortModel, routineSummary: routineSummary, collapsedHtml: collapsedHtml,
       tileHtml: tileHtml, coordChip: coordChip, armedHeaders: armedHeaders, ARMED_KEY_LS: ARMED_KEY_LS,
       confirmTyped: confirmTyped, CONFIRM_COPY: CONFIRM_COPY, resetBodyFor: resetBodyFor,
       renderTopbar: renderTopbar,
-      govCardHtml: govCardHtml, govStripCopy: govStripCopy, govStripHtml: govStripHtml, GOV_MONEY_ACK: GOV_MONEY_ACK };
+      govCardHtml: govCardHtml, govStripCopy: govStripCopy, govStripHtml: govStripHtml, GOV_MONEY_ACK: GOV_MONEY_ACK,
+      govUnavailable: govUnavailable, renderGov: renderGov, govControlsUsable: govControlsUsable };
   }
 
   start();

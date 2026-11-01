@@ -373,10 +373,16 @@ console.log("tokenFromHash flow: ok");
     "hero still shows the two headline figures");
   // a clearly-visible chevron, aria-expanded on every summary, matching the
   // group's actual open/closed state.
-  assert.strictEqual((html3.match(/class="chev"/g) || []).length, 3, "every group has a chevron");
+  assert.strictEqual((html3.match(/class="chev"/g) || []).length,
+    (html3.match(/<summary/g) || []).length, "every summary carries a chevron");
+  assert.ok(html3.indexOf('class="repo-group quiet"') !== -1,
+    "op#37222 item 6: repos with no live-verified ship fold behind one toggle");
   assert.ok(html3.indexOf('aria-expanded="true"') !== -1, "the open group is marked expanded");
-  assert.strictEqual((html3.match(/aria-expanded="false"/g) || []).length, 2,
-    "the two collapsed groups are marked not expanded");
+  assert.strictEqual((html3.match(/aria-expanded="true"/g) || []).length, 1,
+    "exactly one group is expanded by default");
+  assert.strictEqual((html3.match(/aria-expanded="(true|false)"/g) || []).length,
+    (html3.match(/<summary/g) || []).length,
+    "every summary (incl. the item-6 fold) carries its aria-expanded state");
   console.log("by_repo grouping: ok");
 
   // fallback: an older/cached server response with no by_repo still renders

@@ -694,3 +694,35 @@ def test_remote_scan_sh_resolves_pid_via_tmux_not_a_broad_pgrep():
     assert "pgrep -f 'claude" not in panes._REMOTE_SCAN_SH
     assert "tmux list-panes" in panes._REMOTE_SCAN_SH
     assert "pane_pid" in panes._REMOTE_SCAN_SH
+
+
+# ── idle lanes must not show the Claude TIP as "activity" (console #90041.4) ──
+# An idle lane's bottom line is whatever the TUI leaves at the prompt. Rendering
+# that as activity claims work nobody observed; there is no last-activity
+# telemetry behind it. Only a past-tense completion summary survives.
+
+def _capture_with(raw):
+    with patch.object(panes, "live_sessions", return_value=["cosem-tdu"]):
+        with patch("subprocess.run", return_value=_run(0, raw)):
+            return panes.capture("cosem-tdu")
+
+
+def test_idle_lane_drops_a_prompt_tip_instead_of_calling_it_activity():
+    raw = "some real work above\n\n※ Tip: use /clear to save tokens"
+    state, _ = _capture_with(raw)
+    assert state["state"] == "idle"
+    assert state["activity"] == "", state["activity"]
+
+
+def test_idle_lane_keeps_a_real_completion_summary():
+    raw = "some real work above\n\n✻ Baked for 3m 12s"
+    state, _ = _capture_with(raw)
+    assert state["state"] == "idle"
+    assert state["activity"] == "Baked for 3m 12s"
+
+
+def test_working_lane_still_reports_its_live_status_line():
+    raw = "doing things\n\n✻ Bloviating… (esc to interrupt)"
+    state, _ = _capture_with(raw)
+    assert state["state"] == "working"
+    assert state["activity"] != ""

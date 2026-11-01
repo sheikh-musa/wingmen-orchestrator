@@ -163,6 +163,15 @@
   }
   details.repo-group .items { padding: 0 14px 12px; }
   details.repo-group .items .item { margin: 6px 0; }
+  /* op#37222 item 6: the fold for quiet material (finished programmes, repos
+     with no ship in 7+ days). Same shape as a repo group, dimmer — it reads as
+     "kept, not needed today", never as a removed section. */
+  details.repo-group.quiet {
+    background: transparent; border-style: dashed;
+    box-shadow: none;
+  }
+  details.repo-group.quiet .repo-name { color: var(--dim); font-weight: 500; }
+  details.repo-group.quiet .chev { color: var(--faint); }
 
   @media (min-width: 760px) {
     .token-row { width: auto; margin-left: auto; }
@@ -179,7 +188,7 @@
   <a class="navlink" href="/">&larr; Console</a>
   <a class="navlink" href="/asks">Asks</a>
   <a class="navlink" href="/docs">Docs</a>
-  <span id="build" class="build"><span class="d"></span>fc-v96</span>
+  <span id="build" class="build"><span class="d"></span>fc-v97</span>
   <div class="token-row">
     <input id="token" type="password" inputmode="text" placeholder="operator token" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
     <button id="connect">Connect</button>

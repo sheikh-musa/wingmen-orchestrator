@@ -223,6 +223,53 @@
     "</div>";
   }
 
+  // op#37222 item 6 (orch-console): the page ran ~20,000 css px on a phone once
+  // a few repo groups were opened (measured: 19,061 with every <details> open
+  // vs 6,581 collapsed, iPhone 13). Fold the things nobody needs daily — a
+  // programme whose every phase is done, and a repo with no live-verified ship
+  // in 7+ days — behind ONE toggle per section. Nothing is deleted, and a
+  // toggle always carries its count, so a fold can never hide "nothing here".
+  //
+  // "Untouched" is deliberately NOT the last render: it is the group's own
+  // latest_delivered_at, a live-verified ship the server measured for that repo
+  // (db.fetch_ask_delivery_times). The substrate carries no last-commit feed —
+  // repo_snapshot's newest row is 2026-06-25 and repo_events is empty — and the
+  // console has no GitHub client, so a ship is the only REAL touch-signal it
+  // holds. The toggle says exactly that rather than implying a commit clock.
+  var QUIET_REPO_DAYS = 7;
+  var DAY_MS = 86400000;
+
+  function isFinishedProgramme(p) {
+    var ph = (p && p.phases) || [];
+    return ph.length > 0 && ph.every(function (x) { return !!x && x.status === "done"; });
+  }
+  function splitProgrammes(progs) {
+    var active = [], finished = [];
+    (progs || []).forEach(function (p) { (isFinishedProgramme(p) ? finished : active).push(p); });
+    return { active: active, finished: finished };
+  }
+  function isQuietRepo(g, nowMs, days) {
+    // never shipped reads as untouched, and is named as such — not as "stale"
+    var d = (days == null ? QUIET_REPO_DAYS : days) * DAY_MS;
+    var t = g && g.latest_delivered_at ? Date.parse(g.latest_delivered_at) : NaN;
+    return isNaN(t) ? true : (nowMs - t) >= d;
+  }
+  function splitRepos(byRepo, nowMs, days) {
+    var live = [], quiet = [];
+    (byRepo || []).forEach(function (g) { (isQuietRepo(g, nowMs, days) ? quiet : live).push(g); });
+    return { live: live, quiet: quiet };
+  }
+  // same <details> idiom as a repo group (native summary = the tap target),
+  // marked .quiet so it reads as a fold rather than a section
+  function quietBlock(title, inner) {
+    return '<details class="repo-group quiet">' +
+      '<summary aria-expanded="false"><span class="repo-left">' +
+        '<span class="chev" aria-hidden="true">&#10148;</span>' +
+        '<span class="repo-name">' + esc(title) + "</span></span></summary>" +
+      inner + "</details>";
+  }
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+
   function paint(body) {
     var main = $("main");
     var progs = (body && body.programmes) || [];
@@ -235,8 +282,18 @@
       main.innerHTML = '<div class="empty">No programmes yet — seed via scripts/seed_build_programmes.py.</div>';
       return;
     }
+    var sp = splitProgrammes(progs);
     var html = '<div class="section">Programmes</div><div class="items">' +
-      progs.map(programmeCard).join("") + "</div>";
+      (sp.active.length ? sp.active.map(programmeCard).join("")
+        : '<div class="item"><div class="meta"><span class="when">every programme is finished — the ' +
+          esc(String(sp.finished.length)) + ' below are kept, not dropped</span></div></div>') +
+      "</div>";
+    if (sp.finished.length) {
+      html += '<div class="items">' + quietBlock(
+        plural(sp.finished.length, "finished programme", "finished programmes") +
+        " — every phase done",
+        '<div class="items">' + sp.finished.map(programmeCard).join("") + "</div>") + "</div>";
+    }
     html += '<div class="section">Ask → live times</div>';
     // orch-console 81075: the hero stays to the two headline figures only —
     // the unattributed count is internal jargon here and wrapped onto its
@@ -249,10 +306,26 @@
     if (byRepo.length) {
       // the server already sorted by_repo most-recent-ship-first; only the
       // group actually holding that ship opens by default (op#35502/35503).
-      var defaultOpenRepo = byRepo[0].latest_delivered_at ? byRepo[0].repo : null;
-      html += '<div class="repo-groups">' + byRepo.map(function (g) {
+      var sr = splitRepos(byRepo, Date.now());
+      // open the most-recent-ship group ONLY when it survives the fold — an
+      // <details open> inside a closed quiet block would look like a bug
+      var head = byRepo[0];
+      var defaultOpenRepo = (head.latest_delivered_at &&
+        sr.live.some(function (g) { return g.repo === head.repo; })) ? head.repo : null;
+      html += '<div class="repo-groups">' + sr.live.map(function (g) {
         return repoSectionHtml(g, g.repo === defaultOpenRepo);
-      }).join("") + "</div>";
+      }).join("");
+      if (sr.quiet.length) {
+        html += quietBlock(
+          plural(sr.quiet.length, "repo", "repos") +
+          " untouched 7+ days — no live-verified ship in that repo",
+          sr.quiet.map(function (g) { return repoSectionHtml(g, g.repo === defaultOpenRepo); }).join(""));
+      }
+      if (!sr.live.length) {
+        html += '<div class="item"><div class="meta"><span class="when">no repo has shipped in the ' +
+          "last 7 days</span></div></div>";
+      }
+      html += "</div>";
     } else {
       // fallback for a server response with no by_repo (older cached build) —
       // the pre-grouping flat render.
@@ -317,6 +390,8 @@
     module.exports = { tokenFromHash: tokenFromHash, esc: esc, fmtAge: fmtAge,
       fmtHours: fmtHours, fmtDate: fmtDate, fmtDay: fmtDay, paint: paint,
       groupPending: groupPending, groupDuplicateDeliveries: groupDuplicateDeliveries,
-      repoSectionHtml: repoSectionHtml };
+      repoSectionHtml: repoSectionHtml, isFinishedProgramme: isFinishedProgramme,
+      splitProgrammes: splitProgrammes, isQuietRepo: isQuietRepo, splitRepos: splitRepos,
+      quietBlock: quietBlock, QUIET_REPO_DAYS: QUIET_REPO_DAYS };
   }
 })();

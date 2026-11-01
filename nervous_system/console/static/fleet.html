@@ -170,9 +170,6 @@
   .poolwin.good b { color: var(--good); } .poolwin.warn b { color: var(--warn); } .poolwin.bad b { color: var(--bad); }
   .poolreset { flex: none; color: var(--dim); white-space: nowrap; }
   .pooladvrow { display: flex; gap: 8px; flex-wrap: wrap; padding-left: 24px; } .pooladvrow:empty { display: none; }
-  /* op#24597: GLM (z.ai) card — wider label ("5h"/"wk"), reset clock in operator TZ + UTC. */
-  .poolcard.glm .poolwl { width: 18px; }
-  .poolcard.glm .glmwarn { flex-basis: 100%; padding-left: 24px; color: var(--dim); white-space: normal; }
   /* op#35897: DeepSeek card — per-client BALANCE label (not a bare %), so the
      fixed poolwl/poolwin-b widths sized for "wk"/"95%" need to flex instead. */
   .poolcard.deepseek .poolwl { width: auto; min-width: 70px; text-transform: none; }
@@ -686,7 +683,7 @@
       <span id="build" class="build" title="build running on this device"></span>
     </div>
     <div id="statRow" class="stat"></div>
-    <div id="poolUsage" class="pools" title="Max weekly-pool usage + pace (op#9770/#12617) + GLM Coding Plan quota (op#24597)"></div>
+    <div id="poolUsage" class="pools" title="Max weekly-pool usage + pace (op#9770/#12617)"></div>
     <div id="topBloat" class="topbloat"></div>
   </header>
 

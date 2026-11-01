@@ -1,0 +1,46 @@
+# cc-quality review — console content `f6a728c4cb981aaf` (fc-v97, op#37222 stale-cleanup)
+
+- **Reviewer:** cc-quality (Head of Quality). **Ran on claude-opus-4-8** (SINGLETON pin re-verified at source this session).
+- **Target:** console content hash `f6a728c4cb981aaf` in worktree `orchestrator.wt-console-cleanup`, branch `sre/console-stale-cleanup-op37222`, HEAD `2f1c66c49a1f451243dca6410ac18a2984f5b25f` (4 commits on `274279fd` = merged PR#826; base origin/fable/substrate-safe-fixes). **Hash independently recomputed** via `scripts/lib/console_deploy_manifest.sh::console_content_hash` = `f6a728c4cb981aaf` ✓ (matches request). Worktree clean; HEAD frozen as requested.
+- **Request:** bus #90281 (cc-fleet-health, P1). Console items 1–7 from console #90173 / #90041. Committing to cc-fleet-health; this file is pre-push gate 2.
+- **Scope / tier:** engineering correctness + display-honesty of console (orchestrator nervous_system) — **advisory eng-quality tier, verdicted by me** (no money/PII/live-tenant FULL-tier surface here). The visual verdict was explicitly left to me (author is on a no-vision provider); I viewed the iPhone-13 renders.
+- **Date:** 2026-11-02.
+
+## Verdict: **PASS** — cleared to push/deploy.
+
+All seven items are correctly scoped, fail-safe in the right direction, and locked by tests I ran myself (node + python, green). Nothing is deleted; every "untouched / unavailable / quiet" claim is honest and verified at source. Two non-blocking cosmetic notes below; neither blocks.
+
+`VERDICT: PASS | sheikh-musa/wingmen-orchestrator | branch sre/console-stale-cleanup-op37222 (content f6a728c4cb981aaf) | 2f1c66c49a1f451243dca6410ac18a2984f5b25f`
+
+## What I verified (not assumed), item by item
+
+**Item 1 — GLM card removed (`app.py`, `fleet.js`, `fleet_glm.test.js` deleted).**
+- Server: the `glm_usage` import, the `f_glm` fan-out (an OUTBOUND z.ai HTTP call on every `/api/fleet`), its result guard, and the `glm_usage` payload key are all removed. The **data module `glm_usage.py` is retained on purpose** and is still a live dependency — `scripts/glm_overflow_switch.py:130` does `from nervous_system.console import glm_usage; …get_glm_usage()`. The overflow switch is unaffected.
+- Client: `glmCard`/`glmPace` and their exports deleted; `renderPoolUsage(rows, glm, deepseek)` → `renderPoolUsage(rows, deepseek)` with the call site updated. **No dangling `glmCard`/`glmPace`/`glm_usage` references** remain in `fleet.js` (grep clean; remaining `glm` hits are unrelated model-token CSS classes). Visually confirmed absent in `fleet.png`.
+
+**Item 2 — DeepSeek card VERIFIED, no code change. I AGREE.** The locked assertion in `fleet_deepseek.test.js` stays. I ran it: **23 passed**, and the locks cover exactly the invariant the item asserts — every key is its own row with its reason, an unreadable key is **always its own finding** (never collapsed away, never `$0.00`), the could-not-read line is present, and per-key balance is deliberately not duplicated because every key draws on the one account balance already shown in the head. Correct as a verify item, not a redesign.
+
+**Item 3 — gov controls HIDDEN (never removed) when `/api/governance` can't load (`fleet.js`).** `govControlsUsable(on)` toggles `display` on `govArmed`, `govConfirm`, `govLog`; `govUnavailable()` calls it `false`, `renderGov()` calls it `true` at the top before repainting → the next good load self-heals (loadGov retries). **The "hiding costs no armed-key access" claim holds:** the armed key persists in `localStorage('fc.armedKey')` regardless of visibility, and the lane-sheet's own `#armedKey` field (independent of the hidden `#govArmed` box, written via the same `setArmedKey`) stays available because `/api/fleet` still loads. Locked by `fleet_gov_unavailable.test.js` (4 passed, incl. the same-slot proof). Fail-safe: dead controls next to an empty registry can't act anyway. Confirmed in `fleet.png` ("governance registry unavailable" + armed-key field still present).
+
+**Item 4 — idle lane no longer reports the Claude TIP as activity (`panes.py`).** New `_DONE_SUMMARY_RE = ^[A-Z][a-z]+ for \d+[hms]\b`. In `capture()`: when `not working and not _DONE_SUMMARY_RE.match(activity)`, `activity=""`. So an idle lane's prompt chrome (rotating tip / leftover) is dropped to an honest blank; the one kept exception is a past-tense completion summary ("Baked for 3m"), a real fact about the turn that ended. `test_panes.py` locks the actual behavior (tip→"", "Baked for 3m 12s"→kept, working status line→kept) via `panes.capture()` on raw text — a genuine property test, not a grep proxy. Fail-direction is conservative (default to blank, never invent activity).
+
+**Item 5 — "idle & fine" no longer counts dark lanes (`fleet.js`).** New `laneGroups()` splits into primary (`working`||`flagged`), routine (`bucket==="idle"` **only**), down (everything else). Previously routine = "not primary", which lumped down lanes into the idle group. Down lanes now render in their own closed "N lanes registered, not running" block and are **excluded from the `routine.length` "idle & fine" count** (line 825). Locked by `fleet_lanegroups.test.js` (6 passed, incl. "a registered-but-dark lane is DOWN, never idle & fine" and "every lane lands in exactly one group"). Confirmed in `fleet.png`: stat row **5 OFF** separate from **13 IDLE**; sheet shows "5 lanes registered, not running" distinct from "13 lanes idle & fine".
+
+**Item 6 — `/builds` folds quiet material behind one toggle per section (`builds.js`, `builds.html`).** `isFinishedProgramme` = `phases.length>0 && every status==="done"` (an empty programme stays active; one open phase keeps it visible). `isQuietRepo` folds repos with no `latest_delivered_at` within 7 days, and treats never-shipped/unparsable as quiet-**and-named**, never "shipped today". `quietBlock` is a **closed `<details>` whose title always carries its count** (`plural()`), so a fold can never hide "nothing here"; title is `esc()`'d. `defaultOpenRepo` only opens a head that survives the fold (no `<details open>` inside a closed block). Nothing deleted. Locked by `builds_quiet_fold.test.js` (7 passed, incl. "untouched is the SERVER's ship time not render time" and "a repo that never shipped is folded, not shown as fresh"). Confirmed in `builds.png`: bottom fold "2 repos untouched 7+ days — no live-verified ship in that repo".
+
+**Item 7 — raises (doesn't delete) stale data; fold basis is honest.** The fold's "untouched" basis is `latest_delivered_at = max(delivered_at) WHERE a.delivered_at IS NOT NULL` from `db.fetch_ask_delivery_times` — a server-measured live-verified ship, not a client re-render clock and not a commit date. The substrate carries no live commit feed (repo_snapshot newest 2026-06-25, repo_events empty) and the console has no GitHub client, so a measured delivery is the only real touch-signal; the UI labels say exactly that ("no live-verified ship in that repo"). The stale fleet_lanes fleet-health row and dead repo_snapshot are surfaced, not silently removed. Honest.
+
+## Tests — I ran them myself
+
+- **Node (`node tests/console/*.test.js`): all 18 files pass, 0 fail.** Key suites run individually: `builds_quiet_fold` **7**, `fleet_gov_unavailable` **4**, `fleet_lanegroups` **6**, `fleet_deepseek` **23** — all matching the author's stated counts.
+- **Python (`scripts/pytest_local.sh`, no-DB sanctioned mode): `test_app.py` (gate-2) + the four new/changed wrappers (`test_builds_quiet_fold.py`, `test_gov_unavailable.py`, `test_lane_groups.py`, `test_panes.py`, `test_glm_usage.py`) = 188 passed, 0 failed** (a superset of the author's claimed 111; warnings are the benign `protected_agents` DB-fallback with no DATABASE_URL + asyncio feeder-cancel noise).
+- **Renders (iPhone 13 emulation, fc-v97):** `fleet.png`, `lanes.png`, `builds.png` viewed — clean at phone width, no horizontal overflow; all seven changes present as described. (`status.png` 56 MB not opened — not in scope of these items.)
+
+## Non-blocking notes (neither blocks)
+1. **`_routine` nav flag (builds of `entries`, `fleet.js:930`)** still marks a DOWN lane `_routine:true`, so `jumpToLane()` on a down lane expands the *idle* group rather than the new #down group. The sheet still opens regardless, so this is cosmetic. Optional: align the flag with `laneGroups` or expand the down block.
+2. **`_DONE_SUMMARY_RE`** matches only the single-word `Verb for Nx` completion shape. If Claude Code ever renders a differently-worded completion summary, it would be dropped to blank — which is the honest, conservative direction (never fabricates activity), so acceptable as-is.
+
+## Bottom line
+`f6a728c4cb981aaf` (fc-v97) is **cleared to push/deploy**. The GLM card and its outbound z.ai call are gone while the data module stays live for the overflow switch; the DeepSeek lock is intact and correct; gov controls hide (not delete) when the registry is unreadable and self-heal, costing no armed-key access; idle lanes no longer assert unobserved activity; dark lanes are no longer counted as "idle & fine"; and `/builds` folds quiet material honestly, keeping everything and always showing a count. Node + python suites green on my own run; renders clean on iPhone 13.
+
+Ran on claude-opus-4-8.

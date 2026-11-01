@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from nervous_system.console import auth, db, deepseek_usage, docs, governance, glm_usage, media, panes, pii, pools
+from nervous_system.console import auth, db, deepseek_usage, docs, governance, media, panes, pii, pools
 from nervous_system.console.feed import Broadcaster, feeder
 from nervous_system.protected_agents import console_protected_identities
 # GAP-B: the shared family helper — the SAME one the token resolver uses to decide
@@ -1734,7 +1734,11 @@ def _fleet_payload():
         f_backlog = ex.submit(db.fetch_backlog)          # operator's "Your asks" tracker
         f_pane = ex.submit(db.fetch_pane_context)        # op#13050-B: FRESH pane-truth bloat feed
         f_pool = ex.submit(db.fetch_pool_usage)          # Max weekly-% per pool (op#9770)
-        f_glm = ex.submit(glm_usage.get_glm_usage)       # op#24597: GLM Coding Plan quota (5-min server cache)
+        # op#37222 (console #90041 item 1): the GLM quota fan-out is gone with
+        # its card. It was an OUTBOUND z.ai HTTP call on every /api/fleet, and
+        # nothing read the payload key once the card was removed. The DATA path
+        # (glm_usage.py) stays -- scripts/glm_overflow_switch.py reads that
+        # module directly and is unaffected.
         f_deepseek = ex.submit(_deepseek_card_payload)   # op#35897: shared + per-client DeepSeek balance (5-min cache)
         f_queue = ex.submit(db.fetch_queue)              # per-lane worklist (lane_tasks — the drain view)
         f_inbox = ex.submit(db.fetch_inbox_backlog)      # fc-v52: unhandled bus inbox per body (drain board)
@@ -1786,13 +1790,6 @@ def _fleet_payload():
         except Exception as e:
             logger.warning("pool_usage failed: %s", e)
             pool_usage = []
-        # op#24597: get_glm_usage never raises and never carries the key; the
-        # guard is belt-and-braces so a bug here can't blank the aggregate.
-        try:
-            glm = f_glm.result()
-        except Exception as e:
-            logger.warning("glm_usage failed: %s", type(e).__name__)
-            glm = {"available": False, "level": None, "windows": []}
         # op#35897: _deepseek_card_payload never raises and never carries a key;
         # the guard is belt-and-braces so a bug here can't blank the aggregate.
         try:
@@ -1968,8 +1965,6 @@ def _fleet_payload():
         # source (workers + coords), so the banner can never contradict the header.
         "bloat_glance": _jsonable(bloat_glance),
         "pool_usage": _jsonable(pool_usage),
-        # op#24597: GLM Coding Plan (z.ai) quota card, rendered beside the Max pools.
-        "glm_usage": _jsonable(glm),
         # op#35897: DeepSeek pool card -- the shared key (today's real spend
         # location) + per-client rows, each carrying the live lanes mapped to
         # it (never the pointer file).

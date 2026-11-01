@@ -284,39 +284,37 @@ def fleet_server(monkeypatch, tmp_path):
 AUTH = {"Authorization": "Bearer test-console-token"}
 
 
-def test_api_fleet_carries_glm_numbers_and_never_the_key(fleet_server, fake_key, monkeypatch, caplog):
-    base, tmp = fleet_server
-    monkeypatch.setattr(glm_usage, "http_get_json", _fake_http([]))
-    with caplog.at_level(logging.DEBUG):
-        r = httpx.get(base + "/api/fleet", headers=AUTH, timeout=10)
-    assert r.status_code == 200
-    g = r.json()["glm_usage"]
-    assert g["available"] is True and [w["label"] for w in g["windows"]] == ["wk", "5h"]
-    assert g["windows"][0]["used"] == 1650 and g["windows"][0]["cap"] == 60000
-    assert FAKE_KEY not in r.text
-    assert all(FAKE_KEY not in rec.getMessage() for rec in caplog.records)
-    access = tmp / "console_access.log"
-    assert not access.exists() or FAKE_KEY not in access.read_text()
+def test_api_fleet_no_longer_fans_out_to_glm(fleet_server, fake_key, monkeypatch):
+    """op#37222 (console #90041 item 1): the GLM card is gone, so its fan-out is
+    gone too. This is the regression that matters -- re-adding the fan-out would
+    put an OUTBOUND z.ai HTTP call back on EVERY /api/fleet render for a card
+    nobody shows, which is pure cost.
 
-
-def test_api_fleet_glm_failure_is_unavailable_not_stale(fleet_server, fake_key, monkeypatch, caplog):
+    The MODULE is still live and still tested above (scripts/glm_overflow_switch.py
+    reads glm_usage directly), which is why this asserts about the PAYLOAD and
+    never that glm_usage.py is gone."""
     base, _ = fleet_server
+    calls = []
 
-    def _down(url, key):
-        raise glm_usage.GlmUsageError("z.ai quota fetch failed (URLError)")
-    monkeypatch.setattr(glm_usage, "http_get_json", _down)
-    with caplog.at_level(logging.DEBUG):
-        r = httpx.get(base + "/api/fleet", headers=AUTH, timeout=10)
-    g = r.json()["glm_usage"]
-    assert g == {"available": False, "level": None, "windows": [], "age_s": None}
+    def _must_not_be_called(url, key):
+        calls.append(url)
+        raise AssertionError("/api/fleet must not read the GLM quota any more")
+
+    monkeypatch.setattr(glm_usage, "http_get_json", _must_not_be_called)
+    r = httpx.get(base + "/api/fleet", headers=AUTH, timeout=10)
+    assert r.status_code == 200
+    assert "glm_usage" not in r.json(), "the payload key was removed with the card"
+    assert calls == [], "the fan-out is back; that is an outbound call per render"
     assert FAKE_KEY not in r.text
-    assert all(FAKE_KEY not in rec.getMessage() for rec in caplog.records)
 
 
-# ---- fleet.js card render (node vm sandbox, same idiom as fleet_pace.test.js) --
+# ---- fleet.js: the card renderer is gone -------------------------------------
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
-def test_fleet_js_glm_card_renders():
-    r = subprocess.run(["node", str(ROOT / "tests" / "console" / "fleet_glm.test.js")],
-                       capture_output=True, text=True, timeout=60)
-    assert r.returncode == 0, r.stdout + r.stderr
+def test_fleet_js_no_longer_carries_a_glm_card():
+    """Removing the renderer is only half the cut: a lingering glmCard/glmPace
+    would let a future caller re-attach a card to a data path that no longer
+    feeds it (the fan-out is gone too). Source-level on purpose -- it must fail
+    loud even where `node` is not installed to run the card suite."""
+    src = (ROOT / "nervous_system" / "console" / "static" / "fleet.js").read_text()
+    for gone in ("glmCard", "glmPace"):
+        assert gone not in src, f"{gone} is back in fleet.js; the GLM card was removed in op#37222"
