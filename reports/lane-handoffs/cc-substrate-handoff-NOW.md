@@ -1587,3 +1587,12 @@ the next wake should retry once (not in a loop) before doing anything else.
 
 Nothing is in flight from this lane. Open items on return: (a) console answer on track B /
 reviewer sign-off; (b) reset_orch.sh header doc scrub, parked for the next docs touch.
+
+**Delivery resolved, with one self-inflicted duplicate.** The deferred retry fired at 08:25:00Z as
+89456 at the same moment a manual retry went out as 89458 — the breaker had cleared. Both say the
+same thing (89449 went to a dark id; track B and the merge_pinned sign-off have no live owner;
+say the word and this instance takes either). Do not send a third. Lesson for next time: a queued
+deferred retry and a manual retry are two senders for one message — check the queue before
+re-sending by hand.
+
+Breaker timeline for the record: refusals at 08:23Z, 08:24Z (twice), cleared by 08:25Z.
