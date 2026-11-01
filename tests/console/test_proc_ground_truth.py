@@ -167,7 +167,17 @@ def test_deepseek_card_payload_maps_live_lanes_onto_their_key_row_by_family(monk
     """orch-console #83397: once a key-row's families match a live lane's
     family (via the SAME family_of() the real per-client routing uses), that
     lane's session must appear on the row -- so Musa can see the split the
-    moment a real per-client secret is provisioned, no console change needed."""
+    moment a real per-client secret is provisioned, no console change needed.
+
+    CONTRACT CHANGED (orch-console #90081.2, PR#825): the shared row is now the
+    TRUE COMPLEMENT of the per-key rows, not "every live DeepSeek lane". The
+    old assertion here -- `shared.lanes == ["bariq"]` while the bariq key row
+    also held `["bariq"]` -- *was* the duplication console saw in the render:
+    cosem lanes appeared under both the shared key and the cosem key. Each lane
+    must appear under exactly ONE key, so a lane whose family maps to its own
+    key is no longer listed on the shared row. The invariant asserted now is
+    the one that matters on a cost card: every live lane appears exactly once
+    across the shared row and the key rows -- never twice, never nowhere."""
     _reset_proc_cache()
     monkeypatch.setattr(console_app.panes, "token_ground_truth",
                          lambda include_remote=False: _fake_rows())
@@ -186,5 +196,10 @@ def test_deepseek_card_payload_maps_live_lanes_onto_their_key_row_by_family(monk
     oeh_row = next(k for k in payload["keys"] if k["key_name"] == "DEEPSEEK_KEY_OEH")
     assert bariq_row["lanes"] == ["bariq"]
     assert oeh_row["lanes"] == []                 # no live oeh lane in the fixture
-    assert payload["shared"]["lanes"] == ["bariq"]  # every live deepseek lane, regardless of family
+    assert payload["shared"]["lanes"] == []       # bariq is on its own key row -> not duplicated here
     assert payload["shared"]["balance_usd"] == 46.87
+    # the invariant behind the change: exactly once, never twice, never nowhere
+    live = {l["session"] for l in console_app._deepseek_lanes()}
+    shown = [s for k in payload["keys"] for s in k["lanes"]] + payload["shared"]["lanes"]
+    assert sorted(shown) == sorted(live)
+    assert len(shown) == len(set(shown))

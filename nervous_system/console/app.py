@@ -755,8 +755,68 @@ def _deepseek_card_payload() -> dict:
         families = set(k.get("families") or [])
         k["lanes"] = sorted(sess for sess, fam in lane_family.items() if fam in families)
     shared = deepseek_usage.get_shared_key_usage()
-    shared["lanes"] = sorted(lane_family)
-    return {"shared": shared, "keys": usage.get("keys", [])}
+
+    # op#37213 (orch-console #90015): MEASURED cost per key, joined onto the
+    # balance rows. The export attributes by api_key_name, which is the family
+    # slug (verified against the live file: substrate/cosem/fleet/loop/
+    # angullia/finance/second), so families are summed onto their vault key.
+    # An export name that matches no family in the map is NOT dropped -- it
+    # becomes its own row flagged unmapped, because a key the console knows
+    # about and we do not is a real signal, not noise to hide.
+    spend = deepseek_usage.get_spend()
+    fam_to_key = deepseek_usage.family_to_key()
+    spend_by_key: dict = {}
+    unmapped: list = []
+    for fam, row in (spend.get("by_family") or {}).items():
+        key_name = fam_to_key.get(fam)
+        if key_name:
+            acc = spend_by_key.setdefault(key_name, {"today_usd": 0.0, "last7_usd": 0.0,
+                                                     "today_requests": 0})
+            acc["today_usd"] += row.get("today_usd") or 0.0
+            acc["last7_usd"] += row.get("last7_usd") or 0.0
+            acc["today_requests"] += row.get("today_requests") or 0
+        else:
+            unmapped.append({
+                "key_name": fam, "families": [fam], "unmapped": True,
+                "available": False, "balance_usd": None, "delta_usd": None,
+                "age_s": None, "reason": "key not in deepseek_key_map.json",
+                "lanes": sorted(s for s, f in lane_family.items() if f == fam),
+                "spend": {"today_usd": row.get("today_usd") or 0.0,
+                          "last7_usd": row.get("last7_usd") or 0.0,
+                          "today_requests": row.get("today_requests") or 0},
+            })
+
+    keys = usage.get("keys", [])
+    # The shared key is rendered as its own row (`shared`, read from the
+    # poller's history, since its vault key is leak-flagged). get_deepseek_usage()
+    # still returns a row for it -- same key, different read path -- and showing
+    # both put "leak-flagged; not using it" beside a good balance for one key
+    # (orch-console op#37222: remove the duplicate per-key balance rows).
+    keys = [k for k in keys if k.get("key_name") != deepseek_usage.SHARED_KEY_NAME]
+    for k in keys:
+        k["spend"] = spend_by_key.get(k.get("key_name"))
+    shared["families"] = sorted(f for f, kn in fam_to_key.items() if kn == deepseek_usage.SHARED_KEY_NAME)
+    shared["spend"] = spend_by_key.get(deepseek_usage.SHARED_KEY_NAME)
+    # Highest cost first -- the operator's ask is "where is the money going",
+    # so the expensive key must be the first thing visible. Unpriced rows sink.
+    keys.extend(unmapped)
+    keys.sort(key=lambda k: (-((k.get("spend") or {}).get("today_usd") or 0.0),
+                             str(k.get("key_name") or "")))
+    # The shared row is the TRUE COMPLEMENT of the per-key rows: every live lane
+    # that no specific key row lists. Two failure modes this closes:
+    #   - the pre-split behaviour listed EVERY lane under shared, so each lane
+    #     appeared twice once families got their own keys (orch-console #90081.2,
+    #     op#37222);
+    #   - filtering shared by "family is None or family maps to the shared key"
+    #     (the first fix) silently DROPPED a lane whose family is present but
+    #     maps to no key at all -- it appeared under neither row
+    #     (cc-quality-2 advisory, review of 31f4887b). On a cost-governance
+    #     card a vanished lane is untracked spend attribution.
+    # Computed last, over the FINAL rows, so "a live lane appears exactly once"
+    # is structural rather than a property of today's data.
+    shown = {sess for k in keys for sess in (k.get("lanes") or [])}
+    shared["lanes"] = sorted(sess for sess in lane_family if sess not in shown)
+    return {"shared": shared, "keys": keys, "spend": spend}
 
 
 def _boot_model(current_task) -> "str | None":

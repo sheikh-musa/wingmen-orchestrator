@@ -301,6 +301,14 @@ def fleet_server(monkeypatch, tmp_path):
         {"session": "bariq", "model": "deepseek-flash", "model_label": "DeepSeek-V4.1-Flash-1017"},
     ])
     monkeypatch.setattr(console_app, "_family_of", lambda sess: sess)
+    # op#37213: get_spend() reads a REAL export file out of the SRE state dir,
+    # so it is stubbed for every /api/fleet test -- these tests must not depend
+    # on this host's spend data (and must not read it either).
+    monkeypatch.setattr(ds, "get_spend", lambda now=None: {
+        "available": True, "day": "2026-11-01", "day_label": "provider day (UTC+8)",
+        "total_today_usd": 0.0, "total_7d_usd": 0.0, "budget_line_usd": 7.0,
+        "budget_warn_usd": 5.0, "updated_at": None, "age_s": 1, "stale": False,
+        "by_family": {}})
     srv = console_app.make_server(host="127.0.0.1", port=0)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
@@ -330,7 +338,12 @@ def test_api_fleet_carries_deepseek_shared_row_per_client_rows_lanes_never_a_key
     body = r.json()
     du = body["deepseek_usage"]
     assert du["shared"]["available"] is True and du["shared"]["balance_usd"] == 46.68
-    assert du["shared"]["lanes"] == ["bariq"]
+    # A lane appears on the shared row only if its family still maps to the
+    # shared key (or its family is unknown); a lane with its own key must NOT
+    # also be listed under shared (op#37222: the duplicate lane listing).
+    shared_fams = {f for f, kn in ds._key_map().items() if kn == ds.SHARED_KEY_NAME}
+    expected_shared_lanes = ["bariq"] if "bariq" in shared_fams else []
+    assert du["shared"]["lanes"] == expected_shared_lanes
     # bariq's row is whatever key the shipped map names for its family -- the
     # split is one row per PR (orch-console bus #87091/#87110), so pinning
     # "bariq is on the shared key" would go red on bariq's own flip PR.
@@ -372,7 +385,218 @@ def test_api_fleet_deepseek_per_client_key_not_provisioned_is_distinct_from_shar
                       "reason": "key not created yet", "fetched_at": bariq["fetched_at"],
                       "key_name": bariq_key,
                       "families": expected_families,
-                      "age_s": None, "lanes": ["bariq"]}
+                      "age_s": None, "lanes": ["bariq"],
+                      "spend": None}
+
+
+# ---- get_spend: the provider's per-key export (op#37213, console #90015) -----
+
+def _use_export(monkeypatch, tmp_path, rows, raw=None):
+    """Point the spend reader at a temp export file (never the live one)."""
+    p = tmp_path / "usage.jsonl"
+    p.write_text(raw if raw is not None else
+                 "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    monkeypatch.setattr(ds, "_USAGE_EXPORT_PATH", p)
+    return p
+
+
+def _export_row(name, day, cost, requests=10, updated_at="2026-11-01T14:20:00+00:00"):
+    return {"api_key_name": name, "date": day, "cost_usd": cost, "currency": "USD",
+            "updated_at": updated_at, "model": "deepseek-flash", "source": "export",
+            "usage": {"request_count": requests, "input_cache_hit_tokens": 1,
+                      "input_cache_miss_tokens": 2, "output_tokens": 3}}
+
+
+def test_provider_day_flips_at_1600Z_not_midnight_utc():
+    """The export's day is the provider's UTC+8 calendar day (deepseek_console.py
+    _CONSOLE_TZ), and it is NOT the operator's local day -- Musa is UTC+4
+    (console #90026). 15:59Z is still the 1st, 16:00Z is the 2nd."""
+    def at(iso):
+        return ds.provider_day(datetime.fromisoformat(iso).timestamp())
+    assert at("2026-11-01T09:00:00+00:00") == "2026-11-01"
+    assert at("2026-11-01T15:59:00+00:00") == "2026-11-01"
+    assert at("2026-11-01T16:00:00+00:00") == "2026-11-02"
+
+
+def test_get_spend_sums_today_and_the_7_day_window_per_family(monkeypatch, tmp_path):
+    now = datetime.fromisoformat("2026-11-01T14:20:00+00:00").timestamp()
+    day = ds.provider_day(now)
+    _use_export(monkeypatch, tmp_path, [
+        _export_row("substrate", day, 8.56, requests=12000),
+        _export_row("substrate", day, 0.44, requests=500),        # same day, same key -> summed
+        _export_row("substrate", "2026-10-30", 3.00, requests=700),
+        _export_row("cosem", day, 2.00, requests=900),
+    ])
+    sp = ds.get_spend(now=now)
+    assert sp["available"] is True
+    assert sp["day"] == day and sp["day_label"] == "provider day (UTC+8)"
+    assert sp["by_family"]["substrate"]["today_usd"] == pytest.approx(9.00)
+    assert sp["by_family"]["substrate"]["last7_usd"] == pytest.approx(12.00)
+    assert sp["by_family"]["substrate"]["today_requests"] == 12500
+    assert sp["total_today_usd"] == pytest.approx(11.00)
+    assert sp["total_7d_usd"] == pytest.approx(14.00)
+    assert sp["budget_line_usd"] == 7.0 and sp["budget_warn_usd"] == 5.0
+    assert sp["stale"] is False
+
+
+def test_get_spend_ignores_rows_outside_the_7_day_window(monkeypatch, tmp_path):
+    now = datetime.fromisoformat("2026-11-01T14:20:00+00:00").timestamp()
+    day = ds.provider_day(now)
+    _use_export(monkeypatch, tmp_path, [
+        _export_row("substrate", day, 1.00),
+        _export_row("substrate", "2026-10-01", 99.00),
+    ])
+    sp = ds.get_spend(now=now)
+    assert sp["total_today_usd"] == pytest.approx(1.00)
+    assert sp["total_7d_usd"] == pytest.approx(1.00)
+
+
+def test_get_spend_skips_malformed_lines_never_zeroes_them(monkeypatch, tmp_path):
+    now = datetime.fromisoformat("2026-11-01T14:20:00+00:00").timestamp()
+    day = ds.provider_day(now)
+    raw = ("\n".join([
+        json.dumps(_export_row("substrate", day, 2.50)),
+        '{"api_key_name": "second", "date": "' + day + '"',   # truncated
+        '{"no_cost": true}',                                   # missing keys
+        "",
+    ]) + "\n")
+    _use_export(monkeypatch, tmp_path, None, raw=raw)
+    sp = ds.get_spend(now=now)
+    assert sp["available"] is True
+    assert sp["total_today_usd"] == pytest.approx(2.50)
+    assert "second" not in sp["by_family"]
+
+
+def test_get_spend_missing_export_is_unavailable_never_zero(monkeypatch, tmp_path):
+    """An absent export must read as 'we cannot see', never as '$0 spent'."""
+    monkeypatch.setattr(ds, "_USAGE_EXPORT_PATH", tmp_path / "nope.jsonl")
+    sp = ds.get_spend(now=0.0)
+    assert sp["available"] is False and sp["reason"]
+    assert "total_today_usd" not in sp
+    assert sp["by_family"] == {}
+
+
+def test_get_spend_flags_a_stale_export_without_hiding_the_figure(monkeypatch, tmp_path):
+    now = datetime.fromisoformat("2026-11-01T14:20:00+00:00").timestamp()
+    day = ds.provider_day(now)
+    _use_export(monkeypatch, tmp_path, [
+        _export_row("substrate", day, 2.00, updated_at="2026-11-01T06:00:00+00:00"),
+    ])
+    sp = ds.get_spend(now=now)
+    assert sp["available"] is True and sp["stale"] is True
+    assert sp["total_today_usd"] == pytest.approx(2.00)   # real, just old -- labelled, not dropped
+    assert sp["age_s"] > ds._USAGE_STALE_AFTER_S
+
+
+def test_family_to_key_is_the_shipped_map_verbatim():
+    assert ds.family_to_key() == ds._key_map()
+    assert ds.family_to_key() is not ds._key_map()   # a copy, not a handle on module state
+
+
+def test_api_fleet_joins_per_family_spend_onto_each_key_row(fleet_server, monkeypatch):
+    """The export bills by api_key_name == family slug, so the card's per-KEY
+    rows must SUM every family that shares a key (and surface an export name the
+    map does not know rather than dropping it)."""
+    base, _ = fleet_server
+    day = "2026-11-01"
+    fam_today = {"substrate": 5.00, "hifz": 3.00, "ghostkey": 3.99}
+    monkeypatch.setattr(ds, "get_spend", lambda now=None: {
+        "available": True, "day": day, "day_label": "provider day (UTC+8)",
+        "total_today_usd": 11.99, "total_7d_usd": 41.30, "budget_line_usd": 7.0,
+        "budget_warn_usd": 5.0, "updated_at": None, "age_s": 60, "stale": False,
+        "by_family": {
+            "substrate": {"today_usd": 5.00, "last7_usd": 20.0, "today_requests": 100},
+            "hifz": {"today_usd": 3.00, "last7_usd": 10.0, "today_requests": 50},
+            "ghostkey": {"today_usd": 3.99, "last7_usd": 11.3, "today_requests": 7},
+        },
+    })
+    r = httpx.get(base + "/api/fleet", headers=AUTH, timeout=10)
+    du = r.json()["deepseek_usage"]
+    # every family the map sends to the shared key sums into the shared row
+    shared_fams = sorted(f for f, k in ds._key_map().items() if k == ds.SHARED_KEY_NAME)
+    expected = sum(v for f, v in fam_today.items() if f in shared_fams)
+    assert du["shared"]["spend"]["today_usd"] == pytest.approx(expected)
+    assert du["shared"]["families"] == shared_fams
+    # an export name with no map row becomes its own flagged row, never dropped
+    ghost = [k for k in du["keys"] if k["key_name"] == "ghostkey"]
+    assert len(ghost) == 1 and ghost[0]["unmapped"] is True
+    assert ghost[0]["spend"]["today_usd"] == pytest.approx(3.99)
+    # keys are ordered by today's cost, dearest first
+    costs = [(k.get("spend") or {}).get("today_usd") or 0.0 for k in du["keys"]]
+    assert costs == sorted(costs, reverse=True), costs
+    assert du["spend"]["total_today_usd"] == pytest.approx(11.99)
+
+
+def test_card_payload_puts_every_live_lane_under_exactly_one_key(monkeypatch, fake_key):
+    """console #90081.2: the render showed cosem-adcda / cosem-exams* under the
+    shared key AND under cosem. The payload builder must be disjoint: one lane,
+    one key -- including the shared row, which used to list every live lane."""
+    lanes = ["fleet-health", "cosem-adcda", "cosem-exams", "wingmen-sites", "mystery-lane"]
+    monkeypatch.setattr(console_app, "_deepseek_lanes",
+                        lambda: [{"session": s, "model": "deepseek-flash",
+                                  "model_label": "DeepSeek-V4.1-Flash-1017"} for s in lanes])
+    monkeypatch.setattr(console_app, "_family_of",
+                        lambda sess: {"fleet-health": "fleet", "cosem-adcda": "cosem",
+                                      "cosem-exams": "cosem", "wingmen-sites": "wingmen",
+                                      # unknown family -> falls back to the shared key at boot
+                                      }.get(sess))
+    monkeypatch.setattr(ds, "http_get_json", _fake_http([]))
+    recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    _write_history(ds._SHARED_HISTORY_PATH, {"ts": recent, "balance_usd": 46.68})
+    monkeypatch.setattr(ds, "get_spend", lambda now=None: {
+        "available": True, "day": "2026-11-01", "day_label": "provider day (UTC+8)",
+        "total_today_usd": 1.0, "total_7d_usd": 2.0, "budget_line_usd": 7.0,
+        "budget_warn_usd": 5.0, "updated_at": None, "age_s": 1, "stale": False,
+        "by_family": {}})
+
+    payload = console_app._deepseek_card_payload()
+    seen = {}
+    rows = [payload["shared"]] + payload["keys"]
+    for row in rows:
+        for lane in row.get("lanes") or []:
+            seen.setdefault(lane, []).append(row.get("key_name"))
+    dupes = {lane: keys for lane, keys in seen.items() if len(keys) > 1}
+    assert not dupes, f"lane(s) under more than one key: {dupes}"
+    # and no lane silently vanishes: every live lane is on exactly one row
+    assert sorted(seen) == sorted(lanes), (sorted(seen), sorted(lanes))
+
+
+def test_a_lane_whose_family_maps_to_no_key_falls_to_shared_never_vanishes(monkeypatch, fake_key):
+    """cc-quality-2 advisory on the 31f4887b review, folded in here.
+
+    The first fix filtered the shared row by `family is None or family in
+    <shared families>`. That caught a lane with NO family, but a lane whose
+    family EXISTS and maps to no key at all appeared under neither the shared
+    row nor a key row -- it vanished. On a cost card a vanished lane is
+    untracked spend attribution, and it holds by construction only if the
+    shared row is the true complement of the per-key rows.
+
+    `ghostfam` is deliberately a real string that is absent from the shipped
+    deepseek_key_map.json, which is exactly the case the None-family test does
+    not exercise."""
+    lanes = ["fleet-health", "ghost-lane"]
+    monkeypatch.setattr(console_app, "_deepseek_lanes",
+                        lambda: [{"session": s, "model": "deepseek-flash",
+                                  "model_label": "DeepSeek-V4.1-Flash-1017"} for s in lanes])
+    monkeypatch.setattr(console_app, "_family_of",
+                        lambda sess: {"fleet-health": "fleet",
+                                      "ghost-lane": "ghostfam"}.get(sess))
+    monkeypatch.setattr(ds, "http_get_json", _fake_http([]))
+    recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    _write_history(ds._SHARED_HISTORY_PATH, {"ts": recent, "balance_usd": 46.68})
+    monkeypatch.setattr(ds, "get_spend", lambda now=None: {
+        "available": True, "day": "2026-11-01", "day_label": "provider day (UTC+8)",
+        "total_today_usd": 1.0, "total_7d_usd": 2.0, "budget_line_usd": 7.0,
+        "budget_warn_usd": 5.0, "updated_at": None, "age_s": 1, "stale": False,
+        "by_family": {}})
+
+    assert "ghostfam" not in ds._key_map(), "fixture broke: ghostfam must not be a mapped family"
+    payload = console_app._deepseek_card_payload()
+    assert "ghost-lane" in payload["shared"]["lanes"], payload["shared"]["lanes"]
+
+    shown = [s for k in payload["keys"] for s in k["lanes"]] + payload["shared"]["lanes"]
+    assert sorted(shown) == sorted(lanes)      # exactly once each ...
+    assert len(shown) == len(set(shown))       # ... never twice
 
 
 # ---- fleet.js card render (node vm sandbox, same idiom as fleet_glm.test.js) --

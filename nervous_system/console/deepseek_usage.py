@@ -48,7 +48,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -337,6 +337,150 @@ def get_shared_key_usage(now: Optional[float] = None) -> Dict[str, Any]:
                    "fetched_at": last["ts"], "age_s": int(age_s)}
     out["key_name"] = SHARED_KEY_NAME
     return out
+
+
+# ---- spend, per key, per PROVIDER day (op#37213, orch-console #90015) ------
+# The balance endpoint is account-level and carries no cost figure, so the only
+# measured cost source is deepseek_console.py's `usage-export` JSONL (written
+# every 2h by dev.wingmen.deepseek-usage-export). Two properties of it matter
+# and both are easy to get wrong:
+#
+#  1. Its `date` is a PROVIDER day, not a local one. The console states "All
+#     dates and times are GMT+8" and the exporter builds the day in UTC+8
+#     (_CONSOLE_TZ in scripts/deepseek_console.py), so a day boundary here is
+#     16:00Z. It is also NOT the operator's local day -- Musa is in Abu Dhabi,
+#     UTC+4 (orch-console #90026, after this module's own earlier wording
+#     wrongly implied "his day"). Every label this feeds must say "provider day
+#     (UTC+8)" and nothing else.
+#  2. It has NO lane dimension. Cost is attributed to an api_key_name, and
+#     several lanes share one key, so per-LANE dollars cannot be derived from
+#     it at all. get_spend() therefore reports per FAMILY only, and callers
+#     must not manufacture a per-lane split from it.
+_USAGE_EXPORT_PATH = (
+    Path.home() / "wingmen" / "fleet-health" / "state" / "deepseek_usage_by_key.jsonl"
+)
+PROVIDER_TZ = timezone(timedelta(hours=8))
+BUDGET_LINE_USD = 7.0   # Musa op#36779: under this DeepSeek beats another Claude plan
+BUDGET_WARN_USD = 5.0
+SPEND_DAYS = 7
+# The exporter runs every 2h. Two consecutive misses is worth flagging rather
+# than silently presenting an old figure as today's.
+_USAGE_STALE_AFTER_S = 4 * 3600
+
+
+def provider_day(now: Optional[float] = None) -> str:
+    """The provider's (UTC+8) calendar day for `now`, as YYYY-MM-DD."""
+    now = time.time() if now is None else now
+    return datetime.fromtimestamp(now, tz=PROVIDER_TZ).date().isoformat()
+
+
+def _read_usage_export() -> List[Dict[str, Any]]:
+    """Rows from the usage export. Malformed lines are skipped, never zeroed --
+    a row we cannot parse must not contribute a fabricated cost."""
+    try:
+        text = _USAGE_EXPORT_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    out: List[Dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+            name = str(row["api_key_name"]).strip().lower()
+            day = str(row["date"])[:10]
+            cost = float(row["cost_usd"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if not name or len(day) != 10:
+            continue
+        usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
+        out.append({"family": name, "date": day, "cost_usd": cost,
+                    "requests": int(usage.get("request_count") or 0)})
+    return out
+
+
+def get_spend(now: Optional[float] = None) -> Dict[str, Any]:
+    """Per-family cost for the current PROVIDER day plus the 7-day window.
+
+    Never raises. An unreadable/absent export reports available=False with a
+    reason -- never 0.00, which would read as "we spent nothing" when the truth
+    is "we cannot see". A figure older than _USAGE_STALE_AFTER_S is still
+    returned (it is real, just old) but flagged stale so the caller can label
+    it rather than pass it off as current.
+    """
+    now = time.time() if now is None else now
+    day = provider_day(now)
+    today_d = datetime.fromtimestamp(now, tz=PROVIDER_TZ).date()
+    window = [(today_d - timedelta(days=i)).isoformat() for i in range(SPEND_DAYS)]
+    window_set = set(window)
+
+    rows = _read_usage_export()
+    if not rows:
+        return {"available": False, "day": day, "day_label": "provider day (UTC+8)",
+                "reason": "usage export not readable", "budget_line_usd": BUDGET_LINE_USD,
+                "budget_warn_usd": BUDGET_WARN_USD, "by_family": {}}
+
+    by_family: Dict[str, Dict[str, Any]] = {}
+    total_today = 0.0
+    total_7d = 0.0
+    for r in rows:
+        fam = by_family.setdefault(
+            r["family"],
+            {"today_usd": 0.0, "last7_usd": 0.0, "today_requests": 0, "last7_requests": 0},
+        )
+        if r["date"] == day:
+            fam["today_usd"] += r["cost_usd"]
+            fam["today_requests"] += r["requests"]
+            total_today += r["cost_usd"]
+        if r["date"] in window_set:
+            fam["last7_usd"] += r["cost_usd"]
+            fam["last7_requests"] += r["requests"]
+            total_7d += r["cost_usd"]
+
+    # Freshness comes from the export's own updated_at, which is UTC.
+    updated_at = None
+    try:
+        text = _USAGE_EXPORT_PATH.read_text(encoding="utf-8")
+        stamps = []
+        for line in text.splitlines():
+            try:
+                stamps.append(json.loads(line).get("updated_at"))
+            except (ValueError, AttributeError):
+                continue
+        stamps = [s for s in stamps if s]
+        updated_at = max(stamps) if stamps else None
+    except OSError:
+        pass
+    age_s = None
+    if updated_at:
+        try:
+            age_s = int(now - datetime.fromisoformat(updated_at).timestamp())
+        except ValueError:
+            age_s = None
+
+    return {
+        "available": True,
+        "day": day,
+        "day_label": "provider day (UTC+8)",
+        "days": window,
+        "total_today_usd": round(total_today, 4),
+        "total_7d_usd": round(total_7d, 4),
+        "budget_line_usd": BUDGET_LINE_USD,
+        "budget_warn_usd": BUDGET_WARN_USD,
+        "updated_at": updated_at,
+        "age_s": age_s,
+        "stale": bool(age_s is not None and age_s > _USAGE_STALE_AFTER_S),
+        "by_family": by_family,
+    }
+
+
+def family_to_key() -> Dict[str, str]:
+    """{family: vault key name} -- the shipped map, verbatim. Public so the
+    console can join per-family spend onto its per-KEY rows without reaching
+    into _key_map()."""
+    return dict(_key_map())
 
 
 def _reset_for_tests(clear_state_file: bool = True) -> None:
