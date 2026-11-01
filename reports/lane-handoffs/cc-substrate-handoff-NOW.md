@@ -89,6 +89,16 @@ runbook as step 7 plus a dedicated section.
 | 761 | `cc-substrate/no-cross-provider-resume` | `672d01d` | **MERGED by me 21:34Z** via merge_pinned (rebase-confirm 88138) |
 | 776 | `cc-substrate/rotation-runbook` | `1888a79` | **PASS 88145** (docs-only, every code-checkable claim verified against executor@cee1dd40); merge blocked on CI |
 
+**00:05Z — small, non-blocking finding (post-window): `protected_agents` reads the WRONG DSN on every
+lane.** `nervous_system/protected_agents.py:99-100` defaults to `os.environ["DATABASE_URL"]`, but a
+lane's scrubbed env carries only `BUS_DATABASE_URL` (deliberate, bus #82524/#82668 — stops it
+shadowing a client lane's own DSN). So every lane call raises `KeyError('DATABASE_URL')`, prints a
+`UserWarning` + `_safe_registry_rows` source line, and silently uses the **static floor** instead of
+the live `protected_agents` table. Seen on every `bus_send.py` run tonight (`rows = _safe_registry_rows(dsn)`
+in stdout). The designed fallback firing universally = wiring bug, not degradation-by-design. Fix
+shape: fall back `DATABASE_URL` → `BUS_DATABASE_URL`, or have callers pass the dsn. Not touched
+tonight (pre-window, no pushes).
+
 **23:01Z — 785 LANDED and verified (squash `f9786dfc881af9c7a7fc453a66f07c852fff6187`, merged
 23:00:36Z).** Base tip == merge commit == **live checkout HEAD** (someone fast-forwarded it already),
 so step zero is live in the doc the 04:00Z operator opens. Executor blob at base tip AND in the live
