@@ -14,7 +14,7 @@ see the method note at the bottom.
 - `irsyad-ground-truth.md` — status: **living**. "Every irsyad agent reads on boot," Nazim-owned, actively kept current.
 - `lock-namespace.md` — status: **living**. Referenced by `scripts/lib/auto_agent_id.py`, `scripts/ci/check_lock_keys.sh`, `tests/test_check_lock_keys.py`.
 - `migration-file-triage-manifest.md` — status: **historical**. Point-in-time file classification for the orch→gzb migration (op17195); the classification is done, not an ongoing reference.
-- `orch-move-runbook.md` — status: **living**. The active runbook for the in-progress Mac Mini → gzb/wingmen-core migration (Musa op17195/17198) — this is the move Nazim's PR gating has been "paced behind" all through this cleanup.
+- `orch-move-runbook.md` — status: **historical (compute half executed)**. The Mac Mini → gzb migration record (Musa op17195/17198). The compute move landed (hub holder_host = `gzbai`); the "secrets → wingmen-core" half was retired on 2026-11-01 (op37138) — there is no wingmen-core secrets server, the fleet `.env` is on the Mac Mini `100.83.21.34`. See the correction banner at the top of the file.
 - `secrets-dr-registry.md` — status: **living**. Canonical "is secret X backed up" lookup; explicitly designed to be kept current, not a snapshot.
 - `self-improvement-loop-spec.md` — status: **living**. "Proposal, first slice building" as of 2026-08-15 — in-progress, not yet historical.
 - `send-keys-automation-census-2026-07-03.md` — status: **living**. Actively maintained (tombstoned rows 5-7 in PR #85, 2026-09-05) rather than a frozen snapshot.
