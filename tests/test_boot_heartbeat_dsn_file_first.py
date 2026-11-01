@@ -37,6 +37,12 @@ HEARTBEAT_FUNCTIONS = {
     "boot_cai.sh": "_heartbeat_loop",
     "boot_quality.sh": "_quality_heartbeat_loop",
     "boot_fleet_health.sh": "_heartbeat_loop",
+    # boot_nazim.sh was already file-first when this test was written, so it was left out
+    # and therefore UNPINNED — the rotation runbook (§2) and dsn_at_use.py's docstring both
+    # name it as carrying the heartbeat trap, but nothing failed if that function were
+    # reverted to the inherited read. Pinning it closes the last hole in this class
+    # (cc-quality on #806/#809, orch-console bus #89532).
+    "boot_nazim.sh": "_console_heartbeat_loop",
 }
 
 # A direct assignment of the INHERITED value to the DSN the heartbeat connects with.

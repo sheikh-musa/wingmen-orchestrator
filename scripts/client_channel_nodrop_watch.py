@@ -290,14 +290,32 @@ def load_channels(dsn) -> list:
 
 
 def fetch_recent(dsn: str, tag: str, limit: int = FETCH_LIMIT) -> list:
-    """Recent messages for a channel, NEWEST-FIRST. Raises CouldNotMeasure on any DB failure."""
+    """Recent messages for a channel's CONVERSATION, NEWEST-FIRST. Raises CouldNotMeasure on
+    any DB failure.
+
+    THE CONVERSATION IS THE CHAT, NOT THE TAG (orch-console #89533, after op#37148). An
+    outbound reply is not always stamped with the channel tag: on cosem-exams the two
+    replies to Hariz landed as `attempts-staff-20261101` and `role-assignment-20261101`,
+    because the sender tags by topic. Selecting `WHERE tag=%s` therefore could not see
+    them, and the watch read a well-answered client message as unanswered — 1851 outbound
+    rows fleet-wide carry a tag that appears on no inbound row, so this is a class, not an
+    incident. The channel's chat_id is stable across every row in the conversation, so
+    resolve the chat ids from rows bearing the tag and read the whole chat.
+
+    The second clause keeps tag-only rows whose chat_id is NULL (older data) readable, so
+    this cannot lose a channel entirely — losing one silently is worse than a false page.
+    """
     try:
         with psycopg2.connect(dsn) as c, c.cursor() as cur:
             cur.execute(
                 "SELECT id, direction, EXTRACT(EPOCH FROM created_at), from_name, LEFT(text, 240), "
                 "from_user_id "
-                "FROM operator_messages WHERE tag=%s ORDER BY created_at DESC LIMIT %s",
-                (tag, limit),
+                "FROM operator_messages "
+                "WHERE chat_id IN (SELECT DISTINCT chat_id FROM operator_messages "
+                "                  WHERE tag=%s AND chat_id IS NOT NULL) "
+                "   OR (tag=%s AND chat_id IS NULL) "
+                "ORDER BY created_at DESC LIMIT %s",
+                (tag, tag, limit),
             )
             rs = cur.fetchall()
     except Exception as e:  # noqa: BLE001 — fail-closed

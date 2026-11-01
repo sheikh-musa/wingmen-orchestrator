@@ -350,3 +350,101 @@ def test_a_captionless_photo_still_counts_as_a_client_message():
     rows = [_row(37200, "inbound", 600, "📷 Photo received (image/jpeg) — saved as media/abc.jpg")]
     w = nd.latest_unanswered_inbound(rows)
     assert w is not None and w["id"] == 37200
+
+
+# ---- the conversation is the CHAT, not the tag (orch-console #89533) -------------------
+# THE miss: replies to Hariz were sent under topic tags (attempts-staff-20261101,
+# role-assignment-20261101) while his message carried the channel tag, so `WHERE tag=%s`
+# could not see them and a well-answered message read as unanswered. The chat_id is the
+# same across every row of the conversation; the tag is not.
+class _ChatFakeCursor:
+    def __init__(self, rows):
+        self.rows, self.sql, self.params = rows, None, None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.sql, self.params = sql, params
+
+    def fetchall(self):
+        return self.rows
+
+
+class _ChatFakeConn:
+    def __init__(self, cur):
+        self._cur = cur
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def cursor(self):
+        return self._cur
+
+
+def _fetch_with(monkeypatch, rows):
+    cur = _ChatFakeCursor(rows)
+    monkeypatch.setattr(nd.psycopg2, "connect", lambda *a, **k: _ChatFakeConn(cur))
+    return nd.fetch_recent("postgresql://ignored", "cosem-exams"), cur
+
+
+def test_fetch_recent_selects_the_chat_not_tag_alone(monkeypatch):
+    _rows, cur = _fetch_with(monkeypatch, [])
+    sql = " ".join(cur.sql.split())
+    assert "chat_id IN (SELECT DISTINCT chat_id" in sql, (
+        "fetch_recent must read the whole CONVERSATION: an outbound reply stamped with a "
+        "topic tag (attempts-staff-*, role-assignment-*) is invisible to a tag-only select, "
+        "which is how op#37148 read as unanswered after it had been answered twice"
+    )
+    # the channel tag must still be the anchor that resolves the chat
+    assert "WHERE tag=%s" in sql
+    # ...and tag-only rows with no chat_id must not be dropped
+    assert "chat_id IS NULL" in sql
+
+
+def test_fetch_recent_still_parses_rows(monkeypatch):
+    rows = [(37150, "outbound", 1762000000.5, "coord", "One addition to point 5", None),
+            (37148, "inbound", 1761999000.25, "Hariz", None, "1"),
+            ]
+    out, _cur = _fetch_with(monkeypatch, rows)
+    assert [r["id"] for r in out] == [37150, 37148]
+    assert out[0]["created_epoch"] == 1762000000.5
+    assert out[1]["text"] == ""      # None body must not become the string "None"
+
+
+def test_a_topic_tagged_reply_answers_the_channel(monkeypatch):
+    """End-to-end through the pure core: the fixtures are the REAL 11-01 rows, with the
+    replies carrying topic tags. Before the chat-scoped fetch these replies were never
+    even loaded, so latest_unanswered_inbound saw an unanswered channel."""
+    rows = [
+        _row(37155, "inbound", 60, "[non-text update 50118302 — keys: chat,date,from,message_id,pinned_message]"),
+        _row(37150, "outbound", 300, "One addition to point 5, on how a role gets assigned"),
+        _row(37149, "outbound", 360, "Answers, all read from the live system at 07:50 UTC"),
+        _row(37148, "inbound", 600, "As of today may i know the list of assigned staffer"),
+    ]
+    assert nd.latest_unanswered_inbound(rows) is None
+
+
+def test_a_reply_in_a_different_chat_cannot_answer_this_channel(monkeypatch):
+    """NEGATIVE CONTROL for the chat scope (orch-console #89534).
+
+    The fetch is anchored on the tag→chat mapping, so a chat that never carried this
+    channel's tag cannot contribute rows. On 11-01 the cosem-exams conversation was chat
+    -5390372474 while the operator's own traffic shared tag-adjacent rows in chat
+    286619815; without the anchor, an outbound in ANY chat could 'answer' a client.
+    """
+    _rows, cur = _fetch_with(monkeypatch, [])
+    sql = " ".join(cur.sql.split())
+    assert "chat_id IN (SELECT DISTINCT chat_id FROM operator_messages WHERE tag=%s AND chat_id IS NOT NULL)" in sql, (
+        "the chat set must be derived from rows carrying THIS channel's tag; a bare "
+        "chat_id with no anchor lets another chat's outbound clear the page"
+    )
+    assert cur.params[0] == "cosem-exams" and cur.params[1] == "cosem-exams", (
+        "both the chat-resolution and the NULL-chat_id fallback must be scoped to this tag"
+    )
