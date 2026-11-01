@@ -180,6 +180,12 @@ def live_sessions() -> List[str]:
 # working-detection on RAW text (below); the cleaner peels these off, which is
 # exactly why working-detection can't run on cleaned text.
 _SPINNER_GLYPHS = "✻✳✶✷✸✹✺✽❋⚹"
+# A COMPLETED turn's summary, as Claude Code draws it between turns: a past-tense
+# verb, "for", then a duration ("Baked for 3m", "Thought for 5s", "Cooked for 4m").
+# The cleaner strips the leading glyph, so match the words. This is the ONLY
+# idle-state line trusted as activity (console #90041 item 4) -- it is a fact
+# about the turn that just ended, not a hint about what to type next.
+_DONE_SUMMARY_RE = re.compile(r"^[A-Z][a-z]+ for \d+[hms]\b")
 
 
 def _raw_capture(session: str) -> Optional[str]:
@@ -239,9 +245,20 @@ def capture(session: str, live: Optional[set] = None):
         return None, None
     cleaned = _clean_pane_text(raw)
     activity = cleaned.splitlines()[-1][:140] if cleaned else ""
+    working = _is_working(raw)
+    if not working and not _DONE_SUMMARY_RE.match(activity):
+        # console #90041 item 4: an IDLE lane's bottom cleaned line is whatever
+        # Claude Code leaves at the prompt -- a rotating TIP, a hint fragment, a
+        # leftover -- and rendering that as the lane's "activity" asserts work
+        # nobody observed. There is no last-activity telemetry behind it, so the
+        # honest answer is NOTHING. The one exception kept is the past-tense
+        # completion summary ("Baked for 3m"), which IS a fact about the turn
+        # that just ended; anything else is chrome and is dropped rather than
+        # guessed at.
+        activity = ""
     state = {
         "running": True,
-        "state": "working" if _is_working(raw) else "idle",
+        "state": "working" if working else "idle",
         "activity": activity,
     }
     return state, cleaned
