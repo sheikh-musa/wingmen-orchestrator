@@ -246,3 +246,49 @@ def test_the_blind_case_still_gets_the_original_instruction():
     miss = find_address_variant_misses([row], now=NOW)[0]
     assert "blind to its own inbox" in page_subject(miss)
     assert "to_agent IN (base, instance)" in lane_nudge_message(miss)
+
+
+def _soft_row(unread_age_min):
+    """A miss in the soft (prior instance read) shape, at a given row age."""
+    row = _row("cc-cosem-adcda-2", "cc-cosem-adcda", unread_age_min=unread_age_min,
+               base_read_age_min=5)
+    row["last_instance_read_at"] = row["oldest_unread_created_at"] - timedelta(minutes=2)
+    return row
+
+
+def test_the_row_carries_how_many_cooldowns_it_has_survived_from_its_own_age():
+    """Derived from the ROW's age, not wall-clock or page history, so a daemon
+    restart cannot reset the escalation (cc-quality 89642)."""
+    miss = find_address_variant_misses([_soft_row(unread_age_min=500)], now=NOW)[0]
+    assert abs(miss["cooldowns_unread"] - 500 / 240) < 1e-9
+
+
+def test_a_young_soft_row_still_gets_the_plain_soft_diagnosis():
+    miss = find_address_variant_misses([_soft_row(unread_age_min=30)], now=NOW)[0]
+    assert "cooldown" not in page_body(miss)
+    assert "regressed" not in page_body(miss)
+    assert "still unread after" not in page_subject(miss)
+
+
+def test_a_soft_row_past_the_escalation_bar_names_the_regression_risk():
+    miss = find_address_variant_misses([_soft_row(unread_age_min=500)], now=NOW)[0]
+    assert "STILL unread" in page_body(miss)
+    assert "regressed to base-only" in page_body(miss)
+    assert "Verify the lane's filter" in page_body(miss)
+    assert "check for a reader regression" in page_subject(miss)
+    # the lane itself is told the same thing, in second person
+    assert "stop assuming the stopped-turn story" in lane_nudge_message(miss)
+
+
+def test_the_escalation_never_affects_whether_it_fires():
+    """A silencer must fail toward still-alerting: the escalated row is the SAME
+    miss, still returned, still paged."""
+    for age in (30, 500, 5000):
+        assert len(find_address_variant_misses([_soft_row(unread_age_min=age)], now=NOW)) == 1
+
+
+def test_the_blind_branch_is_untouched_by_the_escalation():
+    row = _row("cc-scholar-1", "cc-scholar", unread_age_min=5000, base_read_age_min=5)
+    miss = find_address_variant_misses([row], now=NOW)[0]
+    assert page_subject(miss) == "address-variant miss: cc-scholar-1 blind to its own inbox"
+    assert "cooldown" not in page_body(miss)

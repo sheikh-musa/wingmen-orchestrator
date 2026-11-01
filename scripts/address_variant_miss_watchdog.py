@@ -54,6 +54,11 @@ LOG_FILE = ORCH / "logs" / "address_variant_miss_watchdog.log"
 UNREAD_MIN_AGE_MIN = int(os.environ.get("AVM_UNREAD_MIN_AGE_MIN", "20"))
 BASE_READ_RECENCY_MIN = int(os.environ.get("AVM_BASE_READ_RECENCY_MIN", "20"))
 PAGE_COOLDOWN_MIN = int(os.environ.get("AVM_PAGE_COOLDOWN_MIN", "240"))
+# How many page cooldowns a row may survive before the "you read it first, you probably
+# took it and did not answer" diagnosis stops being the most likely story (see
+# page_body). Derived from the ROW's own age, never from wall-clock or page history,
+# so a daemon restart cannot reset the escalation.
+ESCALATE_AFTER_COOLDOWNS = float(os.environ.get("AVM_ESCALATE_AFTER_COOLDOWNS", "2"))
 PAGE_MESSAGE_TYPE = "blocker"
 
 
@@ -121,6 +126,7 @@ def find_address_variant_misses(
     now: datetime,
     unread_min_age_min: int = UNREAD_MIN_AGE_MIN,
     base_read_recency_min: int = BASE_READ_RECENCY_MIN,
+    page_cooldown_min: int = PAGE_COOLDOWN_MIN,
 ) -> list[dict]:
     """PURE: rows -> the subset that are a genuine address-variant miss.
 
@@ -175,6 +181,10 @@ def find_address_variant_misses(
             None if last_instance_read is None
             else (oldest - last_instance_read).total_seconds() / 60.0
         )
+        # How many page cooldowns this ROW has survived, from its own age. Restart-safe:
+        # nothing here reads page history or wall-clock, so the escalation below cannot
+        # be reset by the daemon coming back up.
+        miss["cooldowns_unread"] = unread_age_min / page_cooldown_min if page_cooldown_min else 0.0
         misses.append(miss)
     return misses
 
@@ -199,10 +209,22 @@ def _fetch_rows(conn) -> list[dict]:
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+def _escalated(miss: dict) -> bool:
+    """PURE: has this ROW outlived the soft diagnosis? True when it has survived at
+    least ESCALATE_AFTER_COOLDOWNS page cooldowns unread."""
+    try:
+        return float(miss.get("cooldowns_unread") or 0.0) >= ESCALATE_AFTER_COOLDOWNS
+    except (TypeError, ValueError):
+        return False
+
+
 def page_subject(miss: dict) -> str:
     """PURE: the console page headline. Names what is OBSERVED (unread mail on the
     instance address) and only claims blindness when the evidence supports it."""
     if miss.get("prior_instance_read_age_min") is not None:
+        if _escalated(miss):
+            return (f"address-variant miss: {miss['instance_id']} still unread after "
+                    f"{miss['cooldowns_unread']:.0f} cooldowns — check for a reader regression since its last read")
         return f"address-variant miss: {miss['instance_id']} unread on its instance address (not blindness — it read that address first)"
     return f"address-variant miss: {miss['instance_id']} blind to its own inbox"
 
@@ -211,7 +233,7 @@ def page_body(miss: dict) -> str:
     """PURE: the console page body for a miss row (see find_address_variant_misses)."""
     instance_id = miss["instance_id"]
     if miss.get("prior_instance_read_age_min") is not None:
-        return (
+        soft = (
             f"TL;DR: {instance_id} has {miss['unread_count']} unread message(s) addressed "
             f"to its instance id, oldest since {miss['oldest_unread_created_at']}. This is "
             f"NOT a base-only reader: the instance read mail addressed to its OWN id at "
@@ -222,6 +244,16 @@ def page_body(miss: dict) -> str:
             f"checking what the lane was doing between those two timestamps before "
             f"changing any reader."
         )
+        if _escalated(miss):
+            soft += (
+                f" That was {miss['cooldowns_unread']:.0f} page cooldown(s) ago and it is "
+                f"STILL unread, so the stopped-turn story is getting stale: a reader that "
+                f"regressed to base-only after that read would never stamp it and would "
+                f"look exactly like this forever. Verify the lane's filter now "
+                f"(my_inbox.py resolves to_agent IN (base, instance)) rather than assuming "
+                f"it took the mail and chose not to answer."
+            )
+        return soft
     base_id = miss["base_agent_id"]
     return (
         f"TL;DR: {instance_id} has {miss['unread_count']} unread message(s) addressed "
@@ -260,7 +292,7 @@ def lane_nudge_message(miss: dict) -> str:
     second person rather than describing it to an observer.
     """
     if miss.get("prior_instance_read_age_min") is not None:
-        return (
+        soft = (
             f"[address-variant-miss] you have {miss['unread_count']} unread "
             f"message(s) addressed to your instance id ({miss['instance_id']}), "
             f"oldest since {miss['oldest_unread_created_at']}. This is probably NOT "
@@ -274,6 +306,14 @@ def lane_nudge_message(miss: dict) -> str:
             f"addressed to {miss['instance_id']}, then it is the base-only filter "
             f"(bus #51166 regression class) and fix the filter."
         )
+        if _escalated(miss):
+            soft += (
+                f" This row has now survived {miss['cooldowns_unread']:.0f} page "
+                f"cooldown(s), so stop assuming the stopped-turn story: if my_inbox.py "
+                f"does not list it, your reader has regressed since that read and the "
+                f"filter is what needs fixing."
+            )
+        return soft
     return (
         f"[address-variant-miss] you have {miss['unread_count']} unread "
         f"message(s) addressed to your instance id ({miss['instance_id']}), "
