@@ -271,7 +271,12 @@ def collect(cur, min_age_h=DEFAULT_MIN_AGE_H, priorities=DEFAULT_PRIORITIES,
         rows = read_unanswered(cur, agent_id, min_age_h, priorities)
         if not rows:
             continue
-        session = lmap.get(base)
+        # Prefer THIS instance's own fleet_lanes row before falling back to the
+        # base's. agent_status.base_agent_id is not always the fleet_lanes key:
+        # cc-quality-2 carries base 'cc-quality' in agent_status while fleet_lanes
+        # and its own env both say 'cc-quality-2', so a base-only lookup probed
+        # cc-quality's pane for cc-quality-2's rows (orchestrator#790 follow-up).
+        session = lmap.get(agent_id) or lmap.get(base)
         states = ["not_probeable"] if not (probe and (host or "") in hosts and session) \
             else [pane_state(session)]
         _file(_entry(agent_id, base, host, hb_age, session,
@@ -293,10 +298,14 @@ def collect(cur, min_age_h=DEFAULT_MIN_AGE_H, priorities=DEFAULT_PRIORITIES,
         session = lmap.get(base)
         states = []
         for _aid, host, _hb in members:
-            if not (probe and (host or "") in hosts and session):
+            # Each sibling is probed on ITS OWN pane — the same instance-before-base
+            # resolution as step 1. Using one base session for every member would
+            # read sibling A's pane as evidence about sibling B.
+            m_session = lmap.get(_aid) or session
+            if not (probe and (host or "") in hosts and m_session):
                 states.append("not_probeable")
             else:
-                states.append(pane_state(session))
+                states.append(pane_state(m_session))
         host = members[0][1] if len({m[1] for m in members}) == 1 else "mixed"
         hb_age = min((m[2] if m[2] is not None else 10 ** 9) for m in members)
         _file(_entry(base, base, host, hb_age, session,
