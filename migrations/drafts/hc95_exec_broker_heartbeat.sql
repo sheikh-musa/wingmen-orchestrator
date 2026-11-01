@@ -14,6 +14,10 @@
 -- Absence of a broker must never read as "no executions happened": a missing row
 -- for a gated ref is stale, not healthy.
 --
+-- NOT SERVING (page too, distinct cause): the row is FRESH but loop_ok IS NOT TRUE
+-- (false, or NULL past the first tick) -- the process is alive and reaching the
+-- DB, but its accept loop did not answer the self-probe.
+--
 -- DEPLOY ORDER: apply THIS before deploying the heartbeat daemon code -- the daemon
 -- REFUSES TO BOOT if it cannot take its heartbeat rows (fail closed).
 
@@ -28,8 +32,21 @@ CREATE TABLE IF NOT EXISTS exec_broker_heartbeat (
   interval_seconds integer     NOT NULL CHECK (interval_seconds BETWEEN 10 AND 900),
   ttl_seconds      integer     NOT NULL CHECK (ttl_seconds >= interval_seconds),
   taken_over_from  text,                             -- prior holder_host:pid on a cross-host take
-  takeover_reason  text
+  takeover_reason  text,
+  -- Listener self-probe (cc-fleet-health bus #89888): each beat also records
+  -- whether the daemon's OWN accept loop answered a b"\n" probe with a
+  -- well-formed response line. NULL until the first tick after boot.
+  loop_ok          boolean,
+  loop_checked_at  timestamptz,                      -- DB now() when the probe result was written
+  loop_latency_ms  integer,
+  loop_error       text CHECK (loop_error IS NULL OR char_length(loop_error) <= 120)
 );
+
+-- Idempotent column adds, in case an earlier revision of this draft was applied.
+ALTER TABLE exec_broker_heartbeat ADD COLUMN IF NOT EXISTS loop_ok boolean;
+ALTER TABLE exec_broker_heartbeat ADD COLUMN IF NOT EXISTS loop_checked_at timestamptz;
+ALTER TABLE exec_broker_heartbeat ADD COLUMN IF NOT EXISTS loop_latency_ms integer;
+ALTER TABLE exec_broker_heartbeat ADD COLUMN IF NOT EXISTS loop_error text;
 
 ALTER TABLE exec_broker_heartbeat ENABLE ROW LEVEL SECURITY;
 

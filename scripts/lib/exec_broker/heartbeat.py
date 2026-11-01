@@ -26,7 +26,14 @@ TABLE (migrations/drafts/hc95_exec_broker_heartbeat.sql), one row per gated ref:
   ttl_seconds      integer   stale threshold (default 3 x interval)
   taken_over_from  text      prior holder_host:pid when a different host took over
   takeover_reason  text
+  loop_ok          boolean   last self-probe of the daemon's OWN listener got a
+                             well-formed response line (NULL until the first tick)
+  loop_checked_at  timestamptz  DB now() when that probe result was written
+  loop_latency_ms  integer   probe round-trip
+  loop_error       text      short reason when loop_ok is false (NULL on ok)
 STALE := row missing  OR  now() > beat_at + make_interval(secs => ttl_seconds).
+NOT SERVING := fresh row AND loop_ok IS NOT TRUE  (process alive, accept loop not
+responding) -- distinct from STALE (process dead / cannot reach the DB).
 Every timestamp is the DATABASE clock, never the broker host's.
 
 FAILURE POLICY: boot refuses (fail closed) if any gated ref cannot be taken --
@@ -37,15 +44,23 @@ finds the row taken over (renew misses) does NOT steal it back unless the CAS
 take would succeed (same host or expired). A dead or wedged daemon simply stops
 beating, which is exactly what the watchdog detects.
 
-KNOWN LIMITATION: the writer is a thread inside the daemon process, so it
-proves the PROCESS is alive and can reach the DB -- not that the accept loop
-is serving. A hung accept loop with a live thread keeps beating. Compensating
-control: the B4 daily reconcile (out of scope here) compares executions.
+LISTENER SELF-PROBE (cc-fleet-health bus #89888): each tick, BEFORE writing
+the beat, the thread connects to the daemon's own unix socket, sends one b"\n",
+and reads ONE response line (2s timeout). loop_ok is true only if a well-formed
+broker error response came back -- proof that accept() AND respond ran. A bare
+connect is NOT the signal: the kernel completes the handshake into the listen
+backlog even when accept() is wedged. The blank line is answered by server.py
+before the ACL with no DB work and no audit row. A failed probe never stops the
+beat: beat_at is still written (process alive) with loop_ok=false, so the
+watchdog can tell "dead process" (stale) from "alive but not serving".
 """
 from __future__ import annotations
 
+import json
 import logging
+import socket
 import threading
+import time
 from datetime import datetime, timedelta
 
 logger = logging.getLogger("exec_broker.heartbeat")
@@ -97,9 +112,45 @@ _TAKE_SQL = (
 )
 
 _RENEW_SQL = (
-    "UPDATE exec_broker_heartbeat SET beat_at = now(), beat_seq = beat_seq + 1 "
-    "WHERE project_ref = %s AND boot_id = %s RETURNING beat_seq"
+    "UPDATE exec_broker_heartbeat SET beat_at = now(), beat_seq = beat_seq + 1, "
+    "  loop_ok = %(loop_ok)s, loop_checked_at = now(), loop_latency_ms = %(latency)s, "
+    "  loop_error = %(error)s "
+    "WHERE project_ref = %(ref)s AND boot_id = %(boot)s RETURNING beat_seq"
 )
+
+PROBE_TIMEOUT_SECONDS = 2.0
+_LOOP_ERROR_MAX = 120
+
+
+def probe_listener(sock_path: "str | None", timeout: float = PROBE_TIMEOUT_SECONDS) -> "tuple[bool, int | None, str | None]":
+    """Connect to the daemon's own socket, send b"\n", read ONE line. Returns
+    (loop_ok, latency_ms, loop_error). Never raises."""
+    if not sock_path:
+        return False, None, "probe not configured"
+    start = time.monotonic()
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(sock_path)
+            s.sendall(b"\n")
+            line = s.makefile("rb").readline(4096)
+        latency = int((time.monotonic() - start) * 1000)
+        if not line:
+            return False, latency, "no response (closed without a reply)"
+        try:
+            obj = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return False, latency, "malformed response line"
+        if not (isinstance(obj, dict) and obj.get("status") == "error"
+                and isinstance(obj.get("error"), dict) and isinstance(obj["error"].get("code"), str)):
+            return False, latency, "unexpected response shape"
+        return True, latency, None
+    except socket.timeout:
+        return False, int((time.monotonic() - start) * 1000), f"timeout after {timeout:g}s (accept loop not responding)"
+    except OSError as e:
+        return False, int((time.monotonic() - start) * 1000), f"{e.__class__.__name__}"[:_LOOP_ERROR_MAX]
+    except Exception as e:  # noqa: BLE001 -- the probe must never kill the beat
+        return False, None, f"probe error {e.__class__.__name__}"[:_LOOP_ERROR_MAX]
 
 
 def take(cur, *, project_ref: str, host: str, pid: int, boot_id: str,
@@ -110,9 +161,13 @@ def take(cur, *, project_ref: str, host: str, pid: int, boot_id: str,
     return cur.fetchone() is not None
 
 
-def renew(cur, *, project_ref: str, boot_id: str) -> bool:
-    """Beat. True iff this boot still holds the row (never acquires)."""
-    cur.execute(_RENEW_SQL, (project_ref, boot_id))
+def renew(cur, *, project_ref: str, boot_id: str, loop_ok: "bool | None" = None,
+          loop_latency_ms: "int | None" = None, loop_error: "str | None" = None) -> bool:
+    """Beat (+ the latest listener-probe result). True iff this boot still
+    holds the row (never acquires)."""
+    cur.execute(_RENEW_SQL, {"ref": project_ref, "boot": boot_id, "loop_ok": loop_ok,
+                             "latency": loop_latency_ms,
+                             "error": loop_error[:_LOOP_ERROR_MAX] if loop_error else None})
     return cur.fetchone() is not None
 
 
@@ -121,7 +176,8 @@ class HeartbeatWriter:
     psycopg connection (context manager), resolved per call like the server's."""
 
     def __init__(self, db_conn_factory, refs, *, host: str, pid: int, boot_id: str,
-                 interval_seconds: int = DEFAULT_INTERVAL_SECONDS) -> None:
+                 interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
+                 sock_path: "str | None" = None, probe=probe_listener) -> None:
         if not (MIN_INTERVAL_SECONDS <= interval_seconds <= MAX_INTERVAL_SECONDS):
             raise ValueError(f"heartbeat interval {interval_seconds}s outside "
                              f"{MIN_INTERVAL_SECONDS}..{MAX_INTERVAL_SECONDS}")
@@ -134,6 +190,8 @@ class HeartbeatWriter:
         self.boot_id = boot_id
         self.interval_seconds = interval_seconds
         self.ttl_seconds = ttl_for(interval_seconds)
+        self.sock_path = sock_path
+        self._probe = probe
         self._stop = threading.Event()
         self._thread: "threading.Thread | None" = None
 
@@ -158,11 +216,20 @@ class HeartbeatWriter:
         """One tick: renew every ref (re-take only via the same CAS if renew
         misses). Never raises; returns {ref: outcome} for logging/tests."""
         outcomes: "dict[str, str]" = {}
+        try:
+            loop_ok, latency, loop_error = self._probe(self.sock_path)
+        except Exception as e:  # noqa: BLE001 -- a probe failure never stops the beat
+            loop_ok, latency, loop_error = False, None, f"probe error {e.__class__.__name__}"
+        self.last_probe = (loop_ok, latency, loop_error)
+        if not loop_ok:
+            logger.error("exec_broker heartbeat: listener self-probe FAILED (%s) -- beating with "
+                         "loop_ok=false", loop_error)
         for ref in self.refs:
             try:
                 with self.db_conn_factory() as conn:
                     with conn.cursor() as cur:
-                        if renew(cur, project_ref=ref, boot_id=self.boot_id):
+                        if renew(cur, project_ref=ref, boot_id=self.boot_id, loop_ok=loop_ok,
+                                 loop_latency_ms=latency, loop_error=loop_error):
                             outcomes[ref] = "beat"
                         elif self._take(cur, ref):
                             outcomes[ref] = "retaken"

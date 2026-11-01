@@ -153,7 +153,8 @@ def load_heartbeat_interval(raw: "str | None") -> int:
     return int(value)
 
 
-def _start_heartbeat(*, db_conn_factory, refs, interval_seconds: int) -> "heartbeat.HeartbeatWriter":
+def _start_heartbeat(*, db_conn_factory, refs, interval_seconds: int,
+                     sock_path: "str | None" = None) -> "heartbeat.HeartbeatWriter":
     """Take every gated ref's heartbeat row (CAS) and start the writer thread.
     Raises RuntimeError on any reason boot must be refused."""
     import fleet_host_id  # scripts/lib is on sys.path (top of this file)
@@ -164,7 +165,7 @@ def _start_heartbeat(*, db_conn_factory, refs, interval_seconds: int) -> "heartb
         raise RuntimeError(f"cannot resolve a stable host identity for the heartbeat: {e}") from e
     writer = heartbeat.HeartbeatWriter(
         db_conn_factory, refs, host=host, pid=os.getpid(), boot_id=str(uuid.uuid4()),
-        interval_seconds=interval_seconds,
+        interval_seconds=interval_seconds, sock_path=sock_path,
     )
     try:
         failed = writer.take_all()
@@ -365,6 +366,7 @@ def main(argv=None) -> int:
     try:
         _start_heartbeat(
             db_conn_factory=_db_conn_factory, refs=live_gated_refs, interval_seconds=heartbeat_interval,
+            sock_path=os.environ["EXEC_BROKER_SOCKET"],
         )
     except RuntimeError as e:
         print(f"exec_broker_daemon: {e}", file=sys.stderr)

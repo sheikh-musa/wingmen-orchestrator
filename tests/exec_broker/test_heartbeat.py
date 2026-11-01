@@ -57,7 +57,7 @@ class FakeCursor:
                 raise RuntimeError("db down")
             self._next = {"boot_id": params["boot"]} if self.take_ok.get(ref, True) else None
         elif sql.startswith("UPDATE exec_broker_heartbeat"):
-            ref = params[0]
+            ref = params["ref"]
             if ref in self.raise_for:
                 raise RuntimeError("db down")
             self._next = {"beat_seq": 1} if self.renew_ok.get(ref, True) else None
@@ -94,10 +94,14 @@ class FakeConn:
         return False
 
 
-def _writer(cur, refs=(_QA, _G), interval=60):
+def _ok_probe(sock_path):
+    return True, 3, None
+
+
+def _writer(cur, refs=(_QA, _G), interval=60, probe=_ok_probe):
     conn = FakeConn(cur)
     return HeartbeatWriter(lambda: conn, refs, host="gzb", pid=4242, boot_id="b-1",
-                           interval_seconds=interval), conn
+                           interval_seconds=interval, sock_path="/nonexistent.sock", probe=probe), conn
 
 
 def test_take_sql_is_a_cas_that_never_steals_a_fresh_foreign_holder():
@@ -110,7 +114,8 @@ def test_take_sql_is_a_cas_that_never_steals_a_fresh_foreign_holder():
 
 def test_renew_only_touches_this_boots_row_and_uses_the_db_clock():
     sql = heartbeat._RENEW_SQL
-    assert "beat_at = now()" in sql and "WHERE project_ref = %s AND boot_id = %s" in sql
+    assert "beat_at = now()" in sql and "WHERE project_ref = %(ref)s AND boot_id = %(boot)s" in sql
+    assert "loop_checked_at = now()" in sql and "loop_ok = %(loop_ok)s" in sql
 
 
 def test_take_all_takes_every_gated_ref_in_one_committed_transaction():
@@ -141,7 +146,9 @@ def test_beat_once_renews_every_ref():
     cur = FakeCursor()
     w, conn = _writer(cur)
     assert w.beat_once() == {_G: "beat", _QA: "beat"}
-    assert [p for s, p in cur.calls if s.startswith("UPDATE")] == [(_G, "b-1"), (_QA, "b-1")]
+    renews = [p for s, p in cur.calls if s.startswith("UPDATE")]
+    assert [(p["ref"], p["boot"]) for p in renews] == [(_G, "b-1"), (_QA, "b-1")]
+    assert all(p["loop_ok"] is True and p["latency"] == 3 and p["error"] is None for p in renews)
     assert conn.commits == 2
 
 
@@ -177,3 +184,149 @@ def test_thread_beats_on_its_interval_and_stops(monkeypatch):
         pass
     w.stop()
     assert len(beats) >= 3
+
+
+# --- listener self-probe (cc-fleet-health bus #89888) ------------------------
+
+import os  # noqa: E402
+import socket  # noqa: E402
+import tempfile  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+from exec_broker.heartbeat import probe_listener  # noqa: E402
+
+
+def _short_sock_path():
+    return os.path.join(tempfile.mkdtemp(prefix="hb-"), "s.sock")
+
+
+def test_probe_failure_still_writes_the_beat_with_loop_ok_false():
+    cur = FakeCursor()
+    w, _ = _writer(cur, probe=lambda p: (False, 2000, "timeout after 2s (accept loop not responding)"))
+    assert w.beat_once() == {_G: "beat", _QA: "beat"}
+    renews = [p for s, p in cur.calls if s.startswith("UPDATE")]
+    assert len(renews) == 2
+    assert all(p["loop_ok"] is False and p["error"].startswith("timeout") for p in renews)
+
+
+def test_a_probe_that_raises_never_stops_the_beat():
+    def _boom(p):
+        raise RuntimeError("bug")
+    cur = FakeCursor()
+    w, _ = _writer(cur, probe=_boom)
+    assert w.beat_once() == {_G: "beat", _QA: "beat"}
+    assert all(p["loop_ok"] is False for s, p in cur.calls if s.startswith("UPDATE"))
+
+
+def test_unconfigured_probe_target_is_loop_ok_false():
+    assert probe_listener(None) == (False, None, "probe not configured")
+
+
+def test_probe_against_a_wedged_accept_loop_times_out_even_though_connect_succeeds():
+    """listen() but never accept(): the kernel completes connect() into the
+    backlog, so a bare connect would look healthy -- the probe must not."""
+    path = _short_sock_path()
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(5)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:   # bare connect succeeds
+            c.connect(path)
+        ok, latency, err = probe_listener(path, timeout=0.3)
+        assert ok is False and "timeout" in err and latency >= 250
+    finally:
+        srv.close()
+
+
+def test_wedged_loop_end_to_end_beat_written_with_loop_ok_false():
+    path = _short_sock_path()
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(5)
+    try:
+        cur = FakeCursor()
+        conn = FakeConn(cur)
+        w = HeartbeatWriter(lambda: conn, (_QA,), host="gzb", pid=1, boot_id="b-1",
+                            interval_seconds=60, sock_path=path,
+                            probe=lambda p: probe_listener(p, timeout=0.3))
+        assert w.beat_once() == {_QA: "beat"}
+        (renew_params,) = [p for s, p in cur.calls if s.startswith("UPDATE")]
+        assert renew_params["loop_ok"] is False and "timeout" in renew_params["error"]
+    finally:
+        srv.close()
+
+
+def test_probe_rejects_a_listener_that_answers_garbage_or_closes():
+    for reply in (b"", b"not json\n", b'{"status": "ok", "rows": []}\n'):
+        path = _short_sock_path()
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(path)
+        srv.listen(1)
+
+        def _serve():
+            c, _ = srv.accept()
+            c.recv(16)
+            if reply:
+                c.sendall(reply)
+            c.close()
+
+        t = threading.Thread(target=_serve, daemon=True)
+        t.start()
+        try:
+            ok, _, err = probe_listener(path, timeout=2.0)
+            assert ok is False and err
+        finally:
+            t.join(2)
+            srv.close()
+
+
+def _real_server(allowed_uids, peer_uid):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from test_server import FakeDb  # the broker's own fake DB (records every cursor call)
+    from exec_broker.server import BrokerServer
+
+    path = _short_sock_path()
+    db = FakeDb()
+    server = BrokerServer(sock_path=path, allowed_uids=allowed_uids, db_conn_factory=db,
+                          token="t", mgmt_api_fn=lambda *a, **k: [], peer_uid_fn=lambda c: peer_uid)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    deadline = time.monotonic() + 2
+    while not os.path.exists(path) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return path, db
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+def test_probe_against_the_real_broker_is_loop_ok_and_leaves_no_audit_row(allowed, caplog):
+    uid = os.getuid()
+    path, db = _real_server(frozenset({uid}) if allowed else frozenset({uid + 1}), uid)
+    deadline = time.monotonic() + 2
+    ok = False
+    while time.monotonic() < deadline and not ok:
+        ok, latency, err = probe_listener(path)
+        if not ok:
+            time.sleep(0.02)
+    assert ok is True and err is None
+    assert db.cursor_obj.calls == [] and db.vault_rows == {}       # no DB work, no log_started
+    assert db.conn.commits == 0
+    assert not [r for r in caplog.records if "ACL denied" in r.getMessage()]   # no per-tick ACL noise
+
+
+def test_non_blank_request_from_an_unlisted_uid_is_still_acl_denied():
+    """The blank-line early answer is not a bypass: any real request still hits the ACL."""
+    uid = os.getuid()
+    path, db = _real_server(frozenset({uid + 1}), uid)
+    import json as _json
+    deadline = time.monotonic() + 2
+    while not os.path.exists(path) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.05)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+        c.settimeout(2)
+        c.connect(path)
+        c.sendall(b'{"project_ref": "x", "guarded_sql": "select 1", "reason": "", "gate_id": null, '
+                  b'"caller": "c", "exec_ledger_id": "e"}\n')
+        resp = _json.loads(c.makefile("rb").readline())
+    assert resp["error"]["code"] == "ACL_DENIED"
+    assert db.cursor_obj.calls == []
