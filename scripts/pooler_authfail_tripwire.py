@@ -69,7 +69,15 @@ def _fetch_authfail_rows():
         raise RuntimeError("SUPABASE_ACCESS_TOKEN absent — cannot measure")
     end = datetime.datetime.utcnow()
     start = end - datetime.timedelta(minutes=WINDOW_MIN)
-    sql = ("SELECT timestamp, event_message FROM logs "
+    # log_attributes MUST be selected: peer_ip lives INSIDE that object, not as a
+    # top-level column (selecting `peer_ip` directly returns null, and `SELECT *`
+    # returns no rows for this endpoint). Without it _extract_peer_ip always
+    # returns None, every failure buckets to "unattributed", and the per-host
+    # rates print mini=0 gzb=0 even during a real burst — which is exactly how
+    # the 2026-11-01 rotation outage was misreported as "no host over threshold"
+    # (orch-console bus #89311). Verified live: with log_attributes selected, a
+    # 25-minute window attributed 86 failures to the Mini and 51 to gzb.
+    sql = ("SELECT timestamp, event_message, log_attributes FROM logs "
            "WHERE event_message ILIKE '%password authentication failed%' "
            "ORDER BY timestamp DESC LIMIT 500")
     qs = urllib.parse.urlencode({
@@ -104,9 +112,11 @@ def _fetch_authfail_rows():
         last = rows
         time.sleep(2)
     # Shape-guard: Mgmt API returns {"result": [...]} on success, {"error": "..."} on a bad
-    # query (e.g. selecting the nested log_attributes column -> "Table ... does not exist").
-    # Return ONLY a result LIST; anything else RAISES so main fails LOUD (could-not-measure)
-    # rather than iterating a dict's string keys (the #256 'str' object has no attribute get).
+    # query. Return ONLY a result LIST; anything else RAISES so main fails LOUD
+    # (could-not-measure) rather than iterating a dict's string keys (the #256 'str' object
+    # has no attribute get). NOTE: the older "selecting the nested log_attributes column ->
+    # Table ... does not exist" failure no longer reproduces (verified 2026-11-01) — nesting
+    # log_attributes in the SELECT is the CORRECT and required form, see _fetch_authfail_rows.
     raise RuntimeError("Mgmt API returned no result list after 3 tries: %s" % json.dumps(last)[:200])
 
 
