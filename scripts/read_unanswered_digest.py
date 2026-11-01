@@ -30,6 +30,11 @@ from the PANE, via the fleet's own proven `lane_is_drained()` in
 `scripts/lib/composer_capture.sh` (empty composer, no 'esc to interrupt', no
 waiting-on-background-agents, no running background shell).
 
+MAIL CAN BE BASE-ADDRESSED (cc-quality F1, #789 review): a row addressed to `cc-irsyad`
+while four live instances run is the same class this digest exists to catch. It is
+fetched too, and attributed EXACTLY ONCE per base — never N-fold across siblings — with
+the base only called drained when every live sibling is drained.
+
 REPORT-ONLY BY DESIGN. It never nudges, never mutates a lane, never pages. Console
 explicitly ruled out widening PHASE1_LANES into a live fleet-wide nudge net
 (#88660); a digest cannot wake-storm. `--post` sends one P3 row to orch-console.
@@ -128,25 +133,42 @@ def live_agents(cur, max_heartbeat_min):
     return cur.fetchall()
 
 
-def read_unanswered(cur, agent_id, min_age_h, priorities):
-    """Rows addressed to agent_id that were READ, require a response, never got one,
-    and have been sitting at least min_age_h hours since they were read."""
-    cur.execute(
-        "SELECT id, from_agent, message_type, priority, subject, "
-        "       round(EXTRACT(EPOCH FROM (now() - read_at)) / 3600.0, 1) "
-        "FROM agent_messages "
-        "WHERE to_agent = %s "
-        "  AND requires_response "
-        "  AND responded_at IS NULL "
-        "  AND read_at IS NOT NULL "
-        "  AND read_at < now() - (%s * interval '1 hour') "
-        "  AND priority = ANY(%s) "
-        "  AND coalesce(is_test, false) = false "
-        "  AND from_agent <> ALL(%s) "
-        "ORDER BY read_at",
-        (agent_id, min_age_h, list(priorities), list(WRITE_ONLY_PRODUCERS)),
-    )
+_RU_SQL = (
+    "SELECT id, from_agent, message_type, priority, subject, "
+    "       round(EXTRACT(EPOCH FROM (now() - read_at)) / 3600.0, 1) "
+    "FROM agent_messages "
+    "WHERE to_agent = ANY(%s) "
+    "  AND requires_response "
+    "  AND responded_at IS NULL "
+    "  AND read_at IS NOT NULL "
+    "  AND read_at < now() - (%s * interval '1 hour') "
+    "  AND priority = ANY(%s) "
+    "  AND coalesce(is_test, false) = false "
+    "  AND from_agent <> ALL(%s) "
+    "ORDER BY read_at"
+)
+
+
+def read_unanswered_any(cur, agent_ids, min_age_h, priorities):
+    """Read-but-unanswered rows addressed to ANY of agent_ids.
+
+    Takes a LIST because a lane's mail can arrive at its live instance id OR at its
+    BASE id. bus_send refuses a base id when a live -N exists, so new mail is
+    instance-addressed — but a lot of legacy mail is base-addressed, and keying the
+    digest on the exact instance id made all of it structurally invisible (cc-quality
+    F1). Both forms are fetched here; the CALLER decides attribution.
+    """
+    ids = [a for a in agent_ids if a]
+    if not ids:
+        return []
+    cur.execute(_RU_SQL, (ids, min_age_h, list(priorities),
+                          list(WRITE_ONLY_PRODUCERS)))
     return cur.fetchall()
+
+
+def read_unanswered(cur, agent_id, min_age_h, priorities):
+    """Rows addressed to exactly agent_id — one instance's own mailbox."""
+    return read_unanswered_any(cur, [agent_id], min_age_h, priorities)
 
 
 def pane_state(session):
@@ -198,40 +220,87 @@ def collect(cur, min_age_h=DEFAULT_MIN_AGE_H, priorities=DEFAULT_PRIORITIES,
     lmap = lane_map(cur)
     idle, not_probeable, busy = [], [], 0
 
-    for agent_id, base_agent_id, host, hb_age in live_agents(cur, max_heartbeat_min):
-        if not include_self and agent_id == SELF_AGENT:
-            continue
-        rows = read_unanswered(cur, agent_id, min_age_h, priorities)
-        if not rows:
-            continue
-        base = base_agent_id or agent_id
-        session = lmap.get(base)
-        on_this_host = (host or "") in hosts
+    def _state(hosts_, base, session, pane_states):
+        """Conservative pane verdict for one identity.
 
-        if not probe or not on_this_host or not session:
-            state = "not_probeable"
-        else:
-            state = pane_state(session)
+        For a BASE entry (pane_states has one entry per live sibling) the lane only
+        counts as DRAINED when EVERY live instance is drained — one busy sibling means
+        the base's mail is being picked up, so calling it idle would be a false claim.
+        """
+        if not probe:
+            return "not_probeable"
+        # Anything we did not positively measure is unprobeable, and the SPECIFIC
+        # reason is kept for the reader: a failed probe is not the same fact as
+        # "this lane lives on another host". Neither may fall through to "drained".
+        if any(s == "not_probeable" for s in pane_states):
+            return "not_probeable"
+        if any(s == "probe_error" for s in pane_states):
+            return "probe_error"
+        if any(s == "busy" for s in pane_states):
+            return "busy"
+        return "drained"
 
-        entry = {
-            "agent": agent_id,
-            "base": base,
-            "host": host,
-            "hb_age_min": hb_age,
-            "pane": state,
-            "session": session,
+    def _entry(agent, base, host, hb_age, session, state, rows):
+        return {
+            "agent": agent, "base": base, "host": host, "hb_age_min": hb_age,
+            "pane": state, "session": session,
             "rows": [
                 {"id": r[0], "from": r[1], "type": r[2], "priority": r[3],
                  "subject": r[4], "age_h": float(r[5]) if r[5] is not None else None}
                 for r in rows
             ],
         }
-        if state == "drained":
+
+    def _file(entry):
+        nonlocal busy
+        if entry["pane"] == "drained":
             idle.append(entry)
-        elif state == "busy":
+        elif entry["pane"] == "busy":
             busy += 1
         else:
             not_probeable.append(entry)
+
+    live = [a for a in live_agents(cur, max_heartbeat_min)
+            if include_self or a[0] != SELF_AGENT]
+
+    # ── 1. instance-addressed mail: one entry per live instance, its own pane ──
+    by_base = {}
+    for agent_id, base_agent_id, host, hb_age in live:
+        base = base_agent_id or agent_id
+        by_base.setdefault(base, []).append((agent_id, host, hb_age))
+        rows = read_unanswered(cur, agent_id, min_age_h, priorities)
+        if not rows:
+            continue
+        session = lmap.get(base)
+        states = ["not_probeable"] if not (probe and (host or "") in hosts and session) \
+            else [pane_state(session)]
+        _file(_entry(agent_id, base, host, hb_age, session,
+                     _state(hosts, base, session, states), rows))
+
+    # ── 2. BASE-addressed mail: attributed ONCE per base, never N-fold ──
+    # cc-quality F1. A row addressed to `cc-irsyad` while four live instances run
+    # (cc-irsyad-1/2/3/5) must appear exactly once, not four times. We report it
+    # under the base id, and only ever call it drained when EVERY live sibling is
+    # drained — one busy sibling means the mail is being worked, so "idle" would be
+    # a false claim.
+    for base, members in sorted(by_base.items()):
+        # A singleton that runs AS its base id is already covered in step 1.
+        if len(members) == 1 and members[0][0] == base:
+            continue
+        rows = read_unanswered_any(cur, [base], min_age_h, priorities)
+        if not rows:
+            continue
+        session = lmap.get(base)
+        states = []
+        for _aid, host, _hb in members:
+            if not (probe and (host or "") in hosts and session):
+                states.append("not_probeable")
+            else:
+                states.append(pane_state(session))
+        host = members[0][1] if len({m[1] for m in members}) == 1 else "mixed"
+        hb_age = min((m[2] if m[2] is not None else 10 ** 9) for m in members)
+        _file(_entry(base, base, host, hb_age, session,
+                     _state(hosts, base, session, states), rows))
 
     idle.sort(key=lambda e: max((x["age_h"] or 0) for x in e["rows"]), reverse=True)
     not_probeable.sort(key=lambda e: max((x["age_h"] or 0) for x in e["rows"]), reverse=True)
