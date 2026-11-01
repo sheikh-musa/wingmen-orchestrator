@@ -23,11 +23,23 @@ import socket
 from datetime import datetime, timezone
 
 from . import acl
-from .gate_validation import BrokerValidationError, check_project_ref, require_gate
+from .gate_validation import (
+    REASON_GATE_ALREADY_CONSUMED,
+    BrokerValidationError,
+    check_project_ref,
+    require_gate,
+)
 from .mgmt_api import UpstreamError
 from .protocol import ErrorCode, MalformedRequest, encode_error, encode_ok, parse_request
 from .read_only import READ_ONLY_PROLOGUE, check_read_only_override, is_plain_read
-from .vault_log import VaultLogEntry, log_finalized, log_started, record_executed
+from .vault_log import (
+    UNIQUE_VIOLATION_SQLSTATE,
+    VaultLogEntry,
+    consume_gate,
+    log_finalized,
+    log_started,
+    record_executed,
+)
 
 logger = logging.getLogger("exec_broker")
 
@@ -54,6 +66,8 @@ class BrokerServer:
         ref_override: "str | None" = None,
         ref_override_expires_at: "datetime | None" = None,
         live_gated_refs: "frozenset[str] | None" = None,
+        gate_max_age_seconds: "int | None" = None,
+        gate_not_before: "datetime | None" = None,
     ) -> None:
         self.sock_path = sock_path
         self.allowed_uids = allowed_uids
@@ -72,6 +86,11 @@ class BrokerServer:
         # once at daemon boot. None -> gate_validation.DEFAULT_LIVE_GATED_REFS
         # (QA only), identical to the pre-B1 hard-coded allowlist.
         self.live_gated_refs = live_gated_refs
+        # B3 (bus #89814 §4.1): None -> gate_validation.DEFAULT_GATE_MAX_AGE_SECONDS (24h).
+        self.gate_max_age_seconds = gate_max_age_seconds
+        # B3 cutover floor (console #89841 ruling e): None -> gates refused on
+        # every non-QA ref (fail closed), see require_gate.
+        self.gate_not_before = gate_not_before
 
     def serve_forever(self) -> None:
         if os.path.exists(self.sock_path):
@@ -198,6 +217,8 @@ class BrokerServer:
                     gate_used = require_gate(
                         req.guarded_sql, req.gate_id, req.project_ref, cur,
                         migration=req.migration, pr=req.pr, ref=req.ref,
+                        gate_max_age_seconds=self.gate_max_age_seconds,
+                        gate_not_before=self.gate_not_before,
                     )
                     if gate_used:
                         executed_sql = req.guarded_sql
@@ -218,9 +239,9 @@ class BrokerServer:
                             hashlib.sha256(executed_sql.encode("utf-8")).hexdigest(),
                         )
                 except BrokerValidationError as e:
-                    log_finalized(cur, row_id, "error", e.code.value)
+                    log_finalized(cur, row_id, "error", e.code.value, e.reason)
                     db_conn.commit()
-                    self._respond(conn, encode_error(e.code, e.message))
+                    self._respond(conn, encode_error(e.code, e.message, e.reason))
                     return
                 except Exception:  # noqa: BLE001 -- e.g. a transient DB error inside the gate lookup
                     logger.exception("exec_broker: unexpected error during re-validation")
@@ -232,6 +253,37 @@ class BrokerServer:
                     self._respond(conn, encode_error(ErrorCode.INTERNAL_ERROR, "internal error"))
                     return
 
+                if gate_used:
+                    # B3 single-use (bus #89814 §4.2-4.3): bind gate_id to THIS
+                    # row's exec_ledger_id via the DB's partial UNIQUE index,
+                    # inside the same transaction, committed by the commit
+                    # below BEFORE the mgmt-API call -- so a replay or a
+                    # concurrent duplicate fails closed instead of racing.
+                    # A consumed gate stays consumed even if the mgmt-API call
+                    # then fails (an upstream timeout may still have executed):
+                    # the caller needs a fresh gate, never a silent re-run.
+                    try:
+                        consume_gate(cur, row_id)
+                    except Exception as e:  # noqa: BLE001 -- classify by SQLSTATE, fail closed either way
+                        replay = getattr(e, "sqlstate", None) == UNIQUE_VIOLATION_SQLSTATE
+                        code = ErrorCode.GATE_INVALID if replay else ErrorCode.INTERNAL_ERROR
+                        if not replay:
+                            logger.exception("exec_broker: failed to consume gate %s", req.gate_id)
+                        reason = REASON_GATE_ALREADY_CONSUMED if replay else None
+                        try:
+                            db_conn.rollback()
+                            log_finalized(cur, row_id, "error", code.value, reason)
+                            db_conn.commit()
+                        except Exception:  # noqa: BLE001 -- best-effort; still respond
+                            logger.exception("exec_broker: failed to finalize exec_broker_access_log row")
+                        message = (
+                            f"gate {req.gate_id} was already consumed by another execution "
+                            "(single-use, bus #89814) -- get a fresh gate"
+                            if replay else "internal error"
+                        )
+                        self._respond(conn, encode_error(code, message, reason))
+                        return
+
                 # Commit BEFORE the blocking mgmt-API call (up to 28s) -- require_gate's
                 # own SELECT (DDL path) would otherwise leave this connection
                 # idle-in-transaction for the whole network call. If a pooler
@@ -242,7 +294,22 @@ class BrokerServer:
                 # already-guarded SQL. Closing the transaction here removes
                 # that window; the next statement (log_finalized) opens a new,
                 # short one.
-                db_conn.commit()
+                #
+                # B3 burn-first (console #89841 ruling d): when a gate was used,
+                # THIS commit is what makes the burn durable, and it happens
+                # strictly BEFORE execution. If it fails, nothing executes.
+                try:
+                    db_conn.commit()
+                except Exception:  # noqa: BLE001 -- fail closed: no durable burn, no execution
+                    logger.exception("exec_broker: pre-execution commit failed; refusing to execute")
+                    try:
+                        db_conn.rollback()
+                        log_finalized(cur, row_id, "error", ErrorCode.INTERNAL_ERROR.value)
+                        db_conn.commit()
+                    except Exception:  # noqa: BLE001 -- best-effort; still respond
+                        logger.exception("exec_broker: failed to finalize exec_broker_access_log row")
+                    self._respond(conn, encode_error(ErrorCode.INTERNAL_ERROR, "internal error"))
+                    return
 
                 try:
                     rows = self.mgmt_api_fn(executed_sql, req.project_ref, self.token)

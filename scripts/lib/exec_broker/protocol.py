@@ -23,6 +23,30 @@ from enum import Enum
 # #79477): the executed bytes' sha12 does not equal the sha12 the gate cites,
 # so the gate does not bind to these exact bytes. Response shape is unchanged;
 # callers must tolerate an unknown code string.
+#
+# CONTRACT AMENDMENT B3 (cc-fleet-health cutover spec bus #89814 §4,
+# 2026-11-01) -- SUPERSEDES the "no exec_ledger_id replay check" omission
+# recorded above, deliberately and explicitly, not as a side effect of B1:
+#   (1) GATE FRESHNESS: a gate older than the broker's configured max age
+#       (EXEC_BROKER_GATE_MAX_AGE_SECONDS, default 24h, hard-bounded in code
+#       to 1s..72h) -> GATE_INVALID.
+#   (2) SINGLE-USE: the first execution whose gate fully validates consumes
+#       it, bound to that request's exec_ledger_id; any later request citing
+#       the same gate_id (another exec_ledger_id, a retry of the same one, or
+#       a concurrent duplicate) -> GATE_INVALID. Enforced by a partial UNIQUE
+#       index in exec_broker_access_log (DB-side, fails closed under
+#       concurrency), never a Python check-then-write.
+#   (3) gate_id must be canonical digits (no leading zeros) -> else GATE_INVALID.
+#   (4) CUTOVER FLOOR (console #89841 ruling e): a gate created before
+#       EXEC_BROKER_GATE_NOT_BEFORE -> GATE_INVALID; with no floor configured,
+#       gates on every non-QA ref are refused.
+#   (5) REASON TOKENS: GATE_INVALID refusals from (1)/(2)/(4) carry a distinct
+#       machine-readable `reason` (gate_too_old, gate_already_consumed,
+#       gate_before_cutover, gate_cutover_unset, gate_config_invalid) in the
+#       response error object and in exec_broker_access_log.error_reason, so a
+#       replay is distinguishable from a malformed gate.
+# Both reuse the existing GATE_INVALID code -- no new code is added to the
+# frozen set, and the response shape is unchanged.
 class ErrorCode(str, Enum):
     ACL_DENIED = "ACL_DENIED"
     BAD_PROJECT_REF = "BAD_PROJECT_REF"
@@ -143,10 +167,16 @@ def encode_ok(rows: list) -> bytes:
     return json.dumps({"status": "ok", "rows": rows}, sort_keys=True).encode("utf-8") + b"\n"
 
 
-def encode_error(code: ErrorCode, message: str) -> bytes:
+def encode_error(code: ErrorCode, message: str, reason: "str | None" = None) -> bytes:
     """§3 failure response — exactly one code per error, never echoes a raw
-    upstream connection error (host/port) per the contract's leak discipline."""
-    return json.dumps(
-        {"status": "error", "error": {"code": code.value, "message": message}},
-        sort_keys=True,
-    ).encode("utf-8") + b"\n"
+    upstream connection error (host/port) per the contract's leak discipline.
+
+    B3 amendment (console #89841): an optional machine-readable `reason`
+    token (e.g. gate_already_consumed) is added to the error object ONLY when
+    present, and the message is prefixed with it. Without a reason the bytes
+    are identical to the v1 response; callers must tolerate the extra key."""
+    error = {"code": code.value, "message": message}
+    if reason is not None:
+        error["reason"] = reason
+        error["message"] = f"{reason}: {message}"
+    return json.dumps({"status": "error", "error": error}, sort_keys=True).encode("utf-8") + b"\n"

@@ -27,6 +27,13 @@ from exec_broker.server import BrokerServer, _MAX_REQUEST_BYTES  # noqa: E402
 TEST_UID = os.getuid()
 
 
+class _UniqueViolation(Exception):
+    """Stands in for psycopg.errors.UniqueViolation -- server.py classifies by
+    .sqlstate, never by importing psycopg."""
+
+    sqlstate = "23505"
+
+
 class FakeCursor:
     def __init__(self, gate_row=None, raise_on_select=False):
         self.gate_row = gate_row
@@ -35,6 +42,9 @@ class FakeCursor:
         self.vault_rows = {}
         self._next_id = 1
         self._pending_fetch = None
+        self._gate_ids = {}
+        self.consumed_gates = {}
+        self.consume_error = None
 
     def execute(self, sql, params=None):
         self.calls.append((sql, params))
@@ -43,14 +53,30 @@ class FakeCursor:
             row_id = self._next_id
             self._next_id += 1
             self.vault_rows[row_id] = {"status": "started"}
+            self._gate_ids[row_id] = params[5]
             self._pending_fetch = {"id": row_id}
+        elif upper.startswith("UPDATE EXEC_BROKER_ACCESS_LOG SET GATE_CONSUMED"):
+            # Simulates the partial UNIQUE index on (gate_id) WHERE gate_consumed
+            # (migrations/drafts/hc95_exec_broker_gate_single_use.sql).
+            (row_id,) = params
+            gate_id = self._gate_ids[row_id]
+            if self.consume_error is not None:
+                raise self.consume_error
+            if gate_id in self.consumed_gates:
+                raise _UniqueViolation()
+            self.consumed_gates[gate_id] = row_id
+            self.vault_rows[row_id]["gate_consumed"] = True
         elif upper.startswith("UPDATE EXEC_BROKER_ACCESS_LOG SET EXECUTED_PROLOGUE"):
             prologue, executed_sha, row_id = params
             self.vault_rows[row_id]["executed_prologue"] = prologue
             self.vault_rows[row_id]["executed_sql_sha256"] = executed_sha
             self._pending_fetch = None
         elif upper.startswith("UPDATE EXEC_BROKER_ACCESS_LOG"):
-            status, error_code, row_id = params
+            if len(params) == 4:  # log_finalized with an error_reason (B3)
+                status, error_code, error_reason, row_id = params
+                self.vault_rows[row_id]["error_reason"] = error_reason
+            else:
+                status, error_code, row_id = params
             self.vault_rows[row_id]["status"] = status
             self.vault_rows[row_id]["error_code"] = error_code
             self._pending_fetch = None
@@ -75,12 +101,16 @@ class FakeDbConn:
     def __init__(self, cursor_obj):
         self._cursor = cursor_obj
         self.commits = 0
+        self.rollbacks = 0
 
     def cursor(self):
         return self._cursor
 
     def commit(self):
         self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
 
     def __enter__(self):
         return self
@@ -127,10 +157,18 @@ def _wait_until_accepting(sock_path: str, timeout: float = 2.0) -> None:
     raise RuntimeError(f"broker socket never started accepting connections: {last_err}")
 
 
+# B3 cutover floor (console #89841 ruling e): servers in this module default
+# to a floor far in the past so tests on non-QA refs exercise their own
+# property; the unset-floor behaviour is tested explicitly (gate_not_before=None).
+_UNSET = object()
+_EPOCH_FLOOR = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+
 def _make_server(
     tmp_path, allowed_uids, db=None, mgmt_api_fn=None, peer_uid_val=TEST_UID,
     uid_override=None, uid_override_expires_at=None,
     ref_override=None, ref_override_expires_at=None,
+    gate_not_before=_UNSET,
 ):
     # NOT tmp_path -- pytest's tmp_path is often >104 bytes deep, which overflows
     # AF_UNIX's sun_path limit (104 on macOS/BSD, 108 on Linux) and makes bind()
@@ -149,6 +187,7 @@ def _make_server(
         uid_override_expires_at=uid_override_expires_at,
         ref_override=ref_override,
         ref_override_expires_at=ref_override_expires_at,
+        gate_not_before=_EPOCH_FLOOR if gate_not_before is _UNSET else gate_not_before,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -264,7 +303,7 @@ def test_ddl_with_fully_valid_shaped_gate_still_refused_end_to_end(tmp_path):
     # cannot independently verify which migration/PR it authorizes, so DDL
     # is refused rather than allowed by default in milestone (a).
     gate_row = {"from_agent": "orch-console", "message_type": "decision",
-                "subject": "go for qa", "body": "", "is_past": True}
+                "subject": "go for qa", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
     db = FakeDb(gate_row=gate_row)
     _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [])
     resp = _send(sock_path, {
@@ -281,7 +320,7 @@ def test_ddl_passes_end_to_end_when_wire_migration_matches_the_gate(tmp_path):
     # the full independent match (not the unconditional refusal above) is
     # used, end to end through the real socket.
     gate_row = {"from_agent": "orch-console", "message_type": "decision",
-                "subject": "apply migration 435 to qa", "body": "", "is_past": True}
+                "subject": "apply migration 435 to qa", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
     db = FakeDb(gate_row=gate_row)
     _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [])
     resp = _send(sock_path, {
@@ -294,7 +333,7 @@ def test_ddl_passes_end_to_end_when_wire_migration_matches_the_gate(tmp_path):
 
 def test_ddl_still_refused_end_to_end_when_wire_migration_does_not_match_the_gate(tmp_path):
     gate_row = {"from_agent": "orch-console", "message_type": "decision",
-                "subject": "apply migration 435 to qa", "body": "", "is_past": True}
+                "subject": "apply migration 435 to qa", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
     db = FakeDb(gate_row=gate_row)
     _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [])
     resp = _send(sock_path, {
@@ -318,7 +357,7 @@ _HAZ_SQL = 'SELECT "x--y"; DROP TABLE t'
 def test_hazardous_passes_end_to_end_when_gate_cites_the_executed_bytes_sha12(tmp_path):
     sha12 = hashlib.sha256(_HAZ_SQL.encode("utf-8")).hexdigest()[:12]
     gate_row = {"from_agent": "orch-console", "message_type": "decision",
-                "subject": "apply migration 435 to qa", "is_past": True,
+                "subject": "apply migration 435 to qa", "is_past": True, "is_fresh": True, "after_cutover": True,
                 "body": f"commit 5053826e; raw-sha12: 0123456789ab\nwrapped-sha12: {sha12}"}
     db = FakeDb(gate_row=gate_row)
     _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [])
@@ -338,7 +377,7 @@ def test_hazardous_one_byte_diff_refused_end_to_end_with_gate_mismatch(tmp_path)
     # GATE_INVALID), with the vault row finalized as an error.
     sha12 = hashlib.sha256(_HAZ_SQL.encode("utf-8")).hexdigest()[:12]
     gate_row = {"from_agent": "orch-console", "message_type": "decision",
-                "subject": "apply migration 435 to qa", "is_past": True,
+                "subject": "apply migration 435 to qa", "is_past": True, "is_fresh": True, "after_cutover": True,
                 "body": f"commit 5053826e; raw-sha12: 0123456789ab\nwrapped-sha12: {sha12}"}
     db = FakeDb(gate_row=gate_row)
     _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [])
@@ -456,7 +495,7 @@ def test_transient_db_error_during_revalidation_still_finalizes_the_row(tmp_path
     # BrokerValidationError) must still finalize the exec_broker_access_log row to
     # error -- never leave it stuck at status=started (itself a P1 per the
     # migration's own comment) just because the broker didn't crash.
-    gate_row = {"from_agent": "orch-console", "message_type": "decision", "subject": "go for qa", "body": "", "is_past": True}
+    gate_row = {"from_agent": "orch-console", "message_type": "decision", "subject": "go for qa", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
     db = FakeDb(gate_row=gate_row, raise_on_select=True)
     _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db)
     resp = _send(sock_path, {
@@ -606,7 +645,7 @@ def test_ref_override_readonly_allows_cte_read_end_to_end(tmp_path):
 # OVERRIDE SCOPING, not gating, so they now carry a valid ref-anchored gate;
 # the ungated-write refusal itself is pinned in the B1 section at the end.
 _QA_REF_GATE_ROW = {"from_agent": "orch-console", "message_type": "decision",
-                    "subject": "GO data fix op#51 on qa", "body": "", "is_past": True}
+                    "subject": "GO data fix op#51 on qa", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
 
 
 def test_ref_override_readonly_scoped_to_override_ref_baseline_write_passes(tmp_path):
@@ -775,7 +814,7 @@ def test_b1_plain_read_on_gated_ref_needs_no_gate_end_to_end(tmp_path):
 
 def test_b1_widened_live_gated_refs_allows_and_gates_a_real_ref_end_to_end(tmp_path):
     goumlyne_gate = {"from_agent": "orch-console", "message_type": "decision",
-                     "subject": "GO op#77 data fix on goumlyne", "body": "", "is_past": True}
+                     "subject": "GO op#77 data fix on goumlyne", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True}
     seen = []
     db = FakeDb(gate_row=goumlyne_gate)
     server, sock_path, db = _make_server(
@@ -796,7 +835,7 @@ def test_b1_widened_live_gated_refs_allows_and_gates_a_real_ref_end_to_end(tmp_p
 
 def test_b1_default_live_gated_refs_still_rejects_real_refs_end_to_end(tmp_path):
     db = FakeDb(gate_row={"from_agent": "orch-console", "message_type": "decision",
-                          "subject": "GO op#77 on goumlyne", "body": "", "is_past": True})
+                          "subject": "GO op#77 on goumlyne", "body": "", "is_past": True, "is_fresh": True, "after_cutover": True})
     server, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db)
     assert server.live_gated_refs is None
     resp = _send(sock_path, {"project_ref": _GOUMLYNE, "guarded_sql": "update t set a = 1",
@@ -805,6 +844,120 @@ def test_b1_default_live_gated_refs_still_rejects_real_refs_end_to_end(tmp_path)
     assert resp["error"]["code"] == "BAD_PROJECT_REF"
 
 
+# --- B3 (bus #89814 §4): freshness + single-use end to end ------------------
+
+def _gated_write(ledger, gate_id="56485", ref="op#51"):
+    return {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "update t set a = 1",
+            "reason": "", "gate_id": gate_id, "ref": ref, "caller": "c", "exec_ledger_id": ledger}
+
+
+def test_b3_gate_is_single_use_across_exec_ledger_ids_end_to_end(tmp_path):
+    seen = []
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda sql, ref, tok: seen.append(sql) or [],
+    )
+    assert _send(sock_path, _gated_write("e1")) == {"status": "ok", "rows": []}
+    first_row = db.cursor_obj.consumed_gates["56485"]
+    assert db.cursor_obj._gate_ids[first_row] == "56485"
+    resp = _send(sock_path, _gated_write("e2"))
+    assert resp["error"]["code"] == "GATE_INVALID"
+    assert "already consumed" in resp["error"]["message"]
+    assert seen == ["update t set a = 1"], "the replay must never reach the mgmt API"
+    replay_row = db.vault_rows[max(db.vault_rows)]
+    assert replay_row["status"] == "error" and replay_row["error_code"] == "GATE_INVALID"
+    assert db.conn.rollbacks == 1
+    # the binding is to the FIRST row, unchanged
+    assert db.cursor_obj.consumed_gates["56485"] == first_row
+
+
+def test_b3_same_exec_ledger_id_retry_is_also_refused_end_to_end(tmp_path):
+    seen = []
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda sql, ref, tok: seen.append(sql) or [],
+    )
+    assert _send(sock_path, _gated_write("e1"))["status"] == "ok"
+    assert _send(sock_path, _gated_write("e1"))["error"]["code"] == "GATE_INVALID"
+    assert len(seen) == 1
+
+
+def test_b3_gate_stays_consumed_after_an_upstream_error_end_to_end(tmp_path):
+    # An upstream timeout may still have executed upstream: never a silent re-run.
+    def _boom(*a, **k):
+        raise UpstreamError("upstream timed out")
+
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=_boom)
+    assert _send(sock_path, _gated_write("e1"))["error"]["code"] == "UPSTREAM_ERROR"
+    assert _send(sock_path, _gated_write("e2"))["error"]["code"] == "GATE_INVALID"
+
+
+def test_b3_refused_requests_never_consume_the_gate_end_to_end(tmp_path):
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)  # names op#51
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db)
+    assert _send(sock_path, _gated_write("e1", ref="op#510"))["error"]["code"] == "GATE_INVALID"
+    assert db.cursor_obj.consumed_gates == {}
+    assert _send(sock_path, _gated_write("e2")) == {"status": "ok", "rows": []}
+
+
+def test_b3_plain_read_citing_a_gate_never_consumes_it_end_to_end(tmp_path):
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db)
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "select 1",
+                             "reason": "", "gate_id": "56485", "caller": "c", "exec_ledger_id": "e0"})
+    assert resp["status"] == "ok"
+    assert db.cursor_obj.consumed_gates == {}
+    assert _send(sock_path, _gated_write("e1"))["status"] == "ok"
+
+
+def test_b3_consumption_is_committed_before_the_mgmt_api_call(tmp_path):
+    observed = {}
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+
+    def _mgmt(sql, ref, tok):
+        observed["consumed"] = dict(db.cursor_obj.consumed_gates)
+        observed["commits"] = db.conn.commits
+        return []
+
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=_mgmt)
+    assert _send(sock_path, _gated_write("e1"))["status"] == "ok"
+    assert "56485" in observed["consumed"]
+    # commit #1 = log_started, commit #2 = the pre-mgmt commit that carries the consumption
+    assert observed["commits"] == 2
+
+
+def test_b3_non_unique_consume_failure_is_internal_error_and_never_executes(tmp_path):
+    seen = []
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+    db.cursor_obj.consume_error = RuntimeError('column "gate_consumed" does not exist')
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: seen.append(a) or [],
+    )
+    resp = _send(sock_path, _gated_write("e1"))
+    assert resp["error"]["code"] == "INTERNAL_ERROR"
+    assert seen == []
+    assert list(db.vault_rows.values())[0]["error_code"] == "INTERNAL_ERROR"
+
+
+def test_b3_stale_gate_refused_end_to_end(tmp_path):
+    seen = []
+    db = FakeDb(gate_row={**_QA_REF_GATE_ROW, "is_fresh": False})
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: seen.append(a) or [],
+    )
+    resp = _send(sock_path, _gated_write("e1"))
+    assert resp["error"]["code"] == "GATE_INVALID"
+    assert seen == [] and db.cursor_obj.consumed_gates == {}
+
+
+def test_b3_server_passes_its_configured_max_age_to_the_gate_lookup(tmp_path):
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+    server, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db)
+    server.gate_max_age_seconds = 600
+    assert _send(sock_path, _gated_write("e1"))["status"] == "ok"
+    (params,) = [p for sql, p in db.cursor_obj.calls if sql.strip().upper().startswith("SELECT FROM_AGENT")]
+    assert params == (600, _EPOCH_FLOOR, 56485)
 # --- amended ruling C (console bus #89846/#89875): broker-enforced read-only -
 
 _PROLOGUE = "SET TRANSACTION READ ONLY; "
@@ -904,3 +1057,130 @@ def test_c_failure_to_record_the_executed_bytes_means_no_execution(tmp_path):
                              "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
     assert resp["error"]["code"] == "INTERNAL_ERROR"
     assert seen == []
+
+
+# --- B3 rulings (console #89827/#89841) end to end --------------------------
+
+def test_b3_replay_response_and_audit_row_carry_gate_already_consumed(tmp_path):
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db)
+    assert _send(sock_path, _gated_write("e1"))["status"] == "ok"
+    resp = _send(sock_path, _gated_write("e2"))
+    assert resp["error"]["code"] == "GATE_INVALID"
+    assert resp["error"]["reason"] == "gate_already_consumed"
+    assert resp["error"]["message"].startswith("gate_already_consumed: ")
+    replay_row = db.vault_rows[max(db.vault_rows)]
+    assert replay_row["error_code"] == "GATE_INVALID"
+    assert replay_row["error_reason"] == "gate_already_consumed"
+
+
+def test_b3_malformed_gate_is_distinguishable_from_a_replay(tmp_path):
+    db = FakeDb(gate_row={**_QA_REF_GATE_ROW, "from_agent": "cc-someone"})
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db)
+    resp = _send(sock_path, _gated_write("e1"))
+    assert resp["error"]["code"] == "GATE_INVALID"
+    assert "reason" not in resp["error"]
+    assert "error_reason" not in list(db.vault_rows.values())[0]
+
+
+def test_b3_burn_is_committed_before_execution_and_outcome_is_recorded(tmp_path):
+    events = []
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+    real_execute, real_commit = db.cursor_obj.execute, db.conn.commit
+
+    def _execute(sql, params=None):
+        head = sql.strip().upper()
+        if head.startswith("UPDATE EXEC_BROKER_ACCESS_LOG SET GATE_CONSUMED"):
+            events.append("consume")
+        elif head.startswith("UPDATE EXEC_BROKER_ACCESS_LOG"):
+            events.append(f"finalize:{params[0]}")
+        return real_execute(sql, params)
+
+    def _commit():
+        events.append("commit")
+        return real_commit()
+
+    db.cursor_obj.execute = _execute
+    db.conn.commit = _commit
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: events.append("EXECUTE") or [],
+    )
+    assert _send(sock_path, _gated_write("e1"))["status"] == "ok"
+    i = events.index("EXECUTE")
+    assert events.index("consume") < i
+    assert "commit" in events[events.index("consume"):i], "the burn must be COMMITTED before execution"
+    assert events[i + 1:] == ["finalize:ok", "commit"]
+    row = list(db.vault_rows.values())[0]
+    assert row["status"] == "ok" and row["gate_consumed"] is True
+
+
+def test_b3_upstream_failure_outcome_is_recorded_on_the_consumed_row(tmp_path):
+    def _boom(*a, **k):
+        raise UpstreamError("upstream timed out")
+
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=_boom)
+    assert _send(sock_path, _gated_write("e1"))["error"]["code"] == "UPSTREAM_ERROR"
+    row = list(db.vault_rows.values())[0]
+    assert row["gate_consumed"] is True
+    assert row["status"] == "error" and row["error_code"] == "UPSTREAM_ERROR"
+
+
+def test_b3_failed_burn_commit_means_no_execution(tmp_path):
+    seen = []
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+    real_execute, real_commit = db.cursor_obj.execute, db.conn.commit
+    state = {"consumed": False}
+
+    def _execute(sql, params=None):
+        if sql.strip().upper().startswith("UPDATE EXEC_BROKER_ACCESS_LOG SET GATE_CONSUMED"):
+            state["consumed"] = True
+        return real_execute(sql, params)
+
+    def _commit():
+        if state["consumed"] and not state.get("failed"):
+            state["failed"] = True
+            raise RuntimeError("simulated commit failure carrying the burn")
+        return real_commit()
+
+    db.cursor_obj.execute = _execute
+    db.conn.commit = _commit
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: seen.append(a) or [],
+    )
+    resp = _send(sock_path, _gated_write("e1"))
+    assert resp["error"]["code"] == "INTERNAL_ERROR"
+    assert seen == []
+
+
+def test_b3_unset_cutover_floor_refuses_non_qa_gates_end_to_end(tmp_path):
+    seen = []
+    db = FakeDb(gate_row={"from_agent": "orch-console", "message_type": "decision",
+                          "subject": "GO op#77 on goumlyne", "body": "", "is_past": True,
+                          "is_fresh": True, "after_cutover": None})
+    server, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, gate_not_before=None,
+        mgmt_api_fn=lambda *a, **k: seen.append(a) or [],
+    )
+    server.live_gated_refs = frozenset({"oovskwogvefnznfowjky", _GOUMLYNE})
+    resp = _send(sock_path, {"project_ref": _GOUMLYNE, "guarded_sql": "update t set a = 1", "reason": "",
+                             "gate_id": "56485", "ref": "op#77", "caller": "c", "exec_ledger_id": "e"})
+    assert resp["error"]["code"] == "GATE_INVALID"
+    assert resp["error"]["reason"] == "gate_cutover_unset"
+    assert list(db.vault_rows.values())[0]["error_reason"] == "gate_cutover_unset"
+    assert seen == []
+
+
+def test_b3_unset_cutover_floor_still_allows_qa_end_to_end(tmp_path):
+    db = FakeDb(gate_row={**_QA_REF_GATE_ROW, "after_cutover": None})
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, gate_not_before=None)
+    assert _send(sock_path, _gated_write("e1")) == {"status": "ok", "rows": []}
+
+
+def test_b3_gate_before_cutover_refused_end_to_end(tmp_path):
+    db = FakeDb(gate_row={**_QA_REF_GATE_ROW, "after_cutover": False})
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db,
+                                    gate_not_before=datetime(2026, 11, 5, tzinfo=timezone.utc))
+    resp = _send(sock_path, _gated_write("e1"))
+    assert resp["error"]["reason"] == "gate_before_cutover"
+    assert db.cursor_obj.consumed_gates == {}

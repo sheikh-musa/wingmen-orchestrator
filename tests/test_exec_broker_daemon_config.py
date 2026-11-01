@@ -219,6 +219,8 @@ def _set_base_env(monkeypatch, tmp_path):
         "EXEC_BROKER_UID_OVERRIDE_EXPIRES_AT",
         "EXEC_BROKER_LIVE_GATED_REFS",
         "EXEC_BROKER_HEARTBEAT_INTERVAL_SECONDS",
+        "EXEC_BROKER_GATE_MAX_AGE_SECONDS",
+        "EXEC_BROKER_GATE_NOT_BEFORE",
     ):
         monkeypatch.delenv(v, raising=False)
     # main() tests exercise config wiring; the heartbeat take (a real DB call)
@@ -336,6 +338,7 @@ def test_main_wires_default_live_gated_refs_when_unset(monkeypatch, tmp_path):
 def test_main_wires_widened_live_gated_refs(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("EXEC_BROKER_LIVE_GATED_REFS", "qa,goumlyne")
+    monkeypatch.setenv("EXEC_BROKER_GATE_NOT_BEFORE", "2026-11-05T00:00:00Z")
     monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
     assert daemon.main([]) == 0
     assert _FakeServer.last_kwargs["live_gated_refs"] == frozenset(
@@ -343,6 +346,94 @@ def test_main_wires_widened_live_gated_refs(monkeypatch, tmp_path):
     )
 
 
+# --- B3 (bus #89814 §4.1): EXEC_BROKER_GATE_MAX_AGE_SECONDS ------------------
+
+def test_load_gate_max_age_defaults_to_24h():
+    for raw in (None, "", "  "):
+        assert daemon.load_gate_max_age_seconds(raw) == 86400
+
+
+def test_load_gate_max_age_parses_positive_seconds():
+    assert daemon.load_gate_max_age_seconds(" 3600 ") == 3600
+
+
+@pytest.mark.parametrize("raw", ["0", "-5", "1.5", "24h", "abc", "٣"])
+def test_load_gate_max_age_fails_loud_on_bad_values(raw):
+    with pytest.raises(ValueError):
+        daemon.load_gate_max_age_seconds(raw)
+
+
+def test_main_fails_closed_on_bad_gate_max_age(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("EXEC_BROKER_GATE_MAX_AGE_SECONDS", "0")
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 1
+
+
+def test_main_wires_gate_max_age(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 0
+    assert _FakeServer.last_kwargs["gate_max_age_seconds"] == 86400
+    monkeypatch.setenv("EXEC_BROKER_GATE_MAX_AGE_SECONDS", "7200")
+    assert daemon.main([]) == 0
+    assert _FakeServer.last_kwargs["gate_max_age_seconds"] == 7200
+
+
+# --- B3 rulings c + e (console #89841) --------------------------------------
+
+def test_load_gate_max_age_accepts_the_72h_ceiling_and_refuses_above_it():
+    assert daemon.load_gate_max_age_seconds(str(72 * 3600)) == 72 * 3600
+    assert daemon.load_gate_max_age_seconds("1") == 1
+    for raw in (str(72 * 3600 + 1), "999999999"):
+        with pytest.raises(ValueError):
+            daemon.load_gate_max_age_seconds(raw)
+
+
+@pytest.mark.parametrize("raw", [str(72 * 3600 + 1), "0", "-1"])
+def test_main_refuses_boot_on_out_of_bounds_gate_max_age(monkeypatch, tmp_path, raw):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("EXEC_BROKER_GATE_MAX_AGE_SECONDS", raw)
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 1
+
+
+def test_load_gate_not_before_parses_iso_and_treats_naive_as_utc():
+    assert daemon.load_gate_not_before(None) is None
+    assert daemon.load_gate_not_before("  ") is None
+    assert daemon.load_gate_not_before("2026-11-05T00:00:00Z") == datetime(2026, 11, 5, tzinfo=timezone.utc)
+    assert daemon.load_gate_not_before("2026-11-05T08:00:00") == datetime(2026, 11, 5, 8, tzinfo=timezone.utc)
+    with pytest.raises(ValueError):
+        daemon.load_gate_not_before("tomorrow")
+
+
+def test_main_refuses_boot_on_malformed_gate_not_before(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("EXEC_BROKER_GATE_NOT_BEFORE", "not-a-date")
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 1
+
+
+def test_main_refuses_boot_when_non_qa_refs_are_gated_without_a_cutover_floor(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("EXEC_BROKER_LIVE_GATED_REFS", "qa,goumlyne")
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 1
+
+
+def test_main_boots_qa_only_without_a_floor_and_wires_none(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 0
+    assert _FakeServer.last_kwargs["gate_not_before"] is None
+
+
+def test_main_wires_the_gate_not_before_floor(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("EXEC_BROKER_GATE_NOT_BEFORE", "2026-11-05T00:00:00Z")
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 0
+    assert _FakeServer.last_kwargs["gate_not_before"] == datetime(2026, 11, 5, tzinfo=timezone.utc)
 def test_main_logs_the_resolved_live_gated_refs_once_at_boot(monkeypatch, tmp_path, capsys):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
@@ -351,6 +442,7 @@ def test_main_logs_the_resolved_live_gated_refs_once_at_boot(monkeypatch, tmp_pa
     assert err.count("LIVE_GATED_REFS") == 1
     assert "default -- env unset" in err and "irsyad-qa/qa=oovskwogvefnznfowjky" in err
     monkeypatch.setenv("EXEC_BROKER_LIVE_GATED_REFS", "qa,goumlyne")
+    monkeypatch.setenv("EXEC_BROKER_GATE_NOT_BEFORE", "2026-11-05T00:00:00Z")  # B3: non-QA needs a floor
     assert daemon.main([]) == 0
     err = capsys.readouterr().err
     assert "goumlyne=goumlynecruxrlmzlntp" in err and "irsyad-qa/qa=oovskwogvefnznfowjky" in err
@@ -376,6 +468,8 @@ def test_main_refuses_boot_on_bad_heartbeat_interval(monkeypatch, tmp_path):
 def test_main_starts_the_heartbeat_for_every_gated_ref_before_serving(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("EXEC_BROKER_LIVE_GATED_REFS", "qa,goumlyne")
+    # B3 (ruling e): a non-QA gated ref needs a cutover floor, else boot is refused
+    monkeypatch.setenv("EXEC_BROKER_GATE_NOT_BEFORE", "2026-11-05T00:00:00Z")
     monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
     assert daemon.main([]) == 0
     (call,) = _HEARTBEAT_CALLS

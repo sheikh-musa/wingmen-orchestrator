@@ -79,6 +79,15 @@ B1 + B2 + --ref ANCHOR (cc-fleet-health cutover spec, bus #89814, 2026-11-01):
     SPECIFIC anchor -- ref, migration or pr matched against the gate text --
     exactly as exec_prod requires; a bare silo-mentioning gate never
     authorizes arbitrary DML (same cross-authorization class as #70929).
+
+B3 GATE FRESHNESS (bus #89814 §4.1, CONTRACT AMENDMENT -- see protocol.py):
+a gate whose agent_messages.created_at is older than the configured max age
+(EXEC_BROKER_GATE_MAX_AGE_SECONDS, default DEFAULT_GATE_MAX_AGE_SECONDS = 24h)
+is GATE_INVALID -- a durable bus row is not standing consent for today's
+statement. Age is computed by the DB clock (same now() as is_past), never the
+broker host's. gate_id must also be CANONICAL digits (no leading zeros) so
+the single-use binding (server.py / vault_log.consume_gate) can never be
+side-stepped by citing "056485" for an already-consumed "56485".
 """
 from __future__ import annotations
 
@@ -95,10 +104,15 @@ class BrokerValidationError(Exception):
     """A §4 re-validation failure. Always carries the exact §5 error code the
     wire response must report."""
 
-    def __init__(self, code: ErrorCode, message: str) -> None:
+    def __init__(self, code: ErrorCode, message: str, reason: "str | None" = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        # B3 (console #89827/#89841): an optional machine-readable REASON
+        # token (e.g. gate_already_consumed, gate_before_cutover) that
+        # distinguishes WHY a GATE_INVALID was returned, without growing the
+        # frozen code set. Surfaced in the response and the access-log row.
+        self.reason = reason
 
 
 _GATE_AGENTS = {"orch-console", "cai"}
@@ -251,6 +265,35 @@ def _text_mentions_ref(text: str, ref: str) -> bool:
     return re.search(rf"(?<![a-z0-9_]){re.escape(r)}(?!\d)", text.lower()) is not None
 
 
+# B3 (bus #89814 §4.1, console #89841 ruling c): 24h default, config via the
+# daemon's EXEC_BROKER_GATE_MAX_AGE_SECONDS, bounded IN CODE to
+# [MIN_GATE_MAX_AGE_SECONDS, MAX_GATE_MAX_AGE_SECONDS] -- env can never raise
+# the 72h ceiling nor set a non-positive age. None passed to require_gate
+# means the default -- never "no maximum age".
+DEFAULT_GATE_MAX_AGE_SECONDS = 24 * 60 * 60
+MIN_GATE_MAX_AGE_SECONDS = 1
+MAX_GATE_MAX_AGE_SECONDS = 72 * 60 * 60
+
+# B3 reason tokens (console #89841). All ride on GATE_INVALID.
+REASON_GATE_ALREADY_CONSUMED = "gate_already_consumed"
+REASON_GATE_BEFORE_CUTOVER = "gate_before_cutover"
+REASON_GATE_CUTOVER_UNSET = "gate_cutover_unset"
+REASON_GATE_TOO_OLD = "gate_too_old"
+REASON_GATE_CONFIG_INVALID = "gate_config_invalid"
+
+# The QA ref is the ONLY ref allowed to run gated statements with no cutover
+# floor configured (ruling e): gates on any other ref are refused until
+# EXEC_BROKER_GATE_NOT_BEFORE is set.
+_CUTOVER_EXEMPT_REF = SILO_ALIASES["qa"]
+
+
+def gate_max_age_in_bounds(value) -> bool:
+    return (
+        isinstance(value, int) and not isinstance(value, bool)
+        and MIN_GATE_MAX_AGE_SECONDS <= value <= MAX_GATE_MAX_AGE_SECONDS
+    )
+
+
 def require_gate(
     guarded_sql: str,
     gate_id: str | None,
@@ -259,6 +302,8 @@ def require_gate(
     migration: str | None = None,
     pr: str | None = None,
     ref: str | None = None,
+    gate_max_age_seconds: int | None = None,
+    gate_not_before: "datetime | None" = None,
 ) -> bool:
     """§4 re-validation, run for every call on a (gated) allowlisted ref.
 
@@ -269,7 +314,12 @@ def require_gate(
     #89814): re-fetches gate_id from the fleet bus via `cur` (a psycopg
     cursor opened with row_factory=psycopg.rows.dict_row), re-validates
     from_agent, message_type, is_past and silo-mention, then requires a
-    SPECIFIC anchor (ref / migration / pr) matched in the gate text. Returns
+    SPECIFIC anchor (ref / migration / pr) matched in the gate text. A gate
+    older than gate_max_age_seconds (None -> DEFAULT_GATE_MAX_AGE_SECONDS) is
+    GATE_INVALID (B3, reason gate_too_old); so is a gate created before the
+    cutover floor gate_not_before (reason gate_before_cutover). With no floor
+    configured, gates on every ref except QA are refused (reason
+    gate_cutover_unset) -- fail closed. Returns
     True when a gate was required and fully validated. Raises
     BrokerValidationError on any failure, BEFORE any mgmt-API call."""
     # Lazy import: read_only imports BrokerValidationError/ref_override_is_live
@@ -321,11 +371,46 @@ def require_gate(
             ErrorCode.GATE_INVALID,
             f"gate_id must be a positive integer agent_messages id, got {gate_id!r}",
         )
+    if str(int(gate_id)) != gate_id:
+        # B3: one bus row must have exactly ONE gate_id spelling, or the
+        # single-use UNIQUE binding on exec_broker_access_log.gate_id could be
+        # side-stepped by a leading-zero variant of a consumed gate.
+        raise BrokerValidationError(
+            ErrorCode.GATE_INVALID,
+            f"gate_id must be canonical digits (no leading zeros), got {gate_id!r}",
+        )
+    max_age = DEFAULT_GATE_MAX_AGE_SECONDS if gate_max_age_seconds is None else gate_max_age_seconds
+    if not gate_max_age_in_bounds(max_age):
+        # Misconfiguration (incl. above the 72h ceiling) is refused, never
+        # treated as "no limit" or silently clamped here.
+        raise BrokerValidationError(
+            ErrorCode.GATE_INVALID,
+            f"broker gate max age is misconfigured ({max_age!r}; must be "
+            f"{MIN_GATE_MAX_AGE_SECONDS}..{MAX_GATE_MAX_AGE_SECONDS}s) -- refusing every gate",
+            reason=REASON_GATE_CONFIG_INVALID,
+        )
+    if gate_not_before is not None and (
+        not isinstance(gate_not_before, datetime) or gate_not_before.tzinfo is None
+    ):
+        raise BrokerValidationError(
+            ErrorCode.GATE_INVALID,
+            f"broker gate cutover floor is misconfigured ({gate_not_before!r}) -- refusing every gate",
+            reason=REASON_GATE_CONFIG_INVALID,
+        )
+    if gate_not_before is None and project_ref != _CUTOVER_EXEMPT_REF:
+        raise BrokerValidationError(
+            ErrorCode.GATE_INVALID,
+            "no gate cutover floor (EXEC_BROKER_GATE_NOT_BEFORE) is configured -- "
+            "gates are refused on every non-QA ref until it is set (ruling e)",
+            reason=REASON_GATE_CUTOVER_UNSET,
+        )
 
     cur.execute(
-        "SELECT from_agent, message_type, subject, body, (created_at < now()) AS is_past "
+        "SELECT from_agent, message_type, subject, body, (created_at < now()) AS is_past, "
+        "(created_at >= now() - make_interval(secs => %s)) AS is_fresh, "
+        "(created_at >= %s) AS after_cutover "
         "FROM agent_messages WHERE id = %s",
-        (int(gate_id),),
+        (max_age, gate_not_before, int(gate_id)),
     )
     row = cur.fetchone()
 
@@ -343,6 +428,21 @@ def require_gate(
         )
     if not row["is_past"]:
         raise BrokerValidationError(ErrorCode.GATE_INVALID, f"gate {gate_id} has created_at not in the past")
+    if row.get("is_fresh") is not True:
+        raise BrokerValidationError(
+            ErrorCode.GATE_INVALID,
+            f"gate {gate_id} is older than the broker's max gate age ({max_age}s) -- "
+            "a durable bus row is not standing consent; get a fresh gate (bus #89814)",
+            reason=REASON_GATE_TOO_OLD,
+        )
+    if gate_not_before is not None and row.get("after_cutover") is not True:
+        raise BrokerValidationError(
+            ErrorCode.GATE_INVALID,
+            f"gate {gate_id} was created before the broker's gate cutover floor "
+            f"({gate_not_before.isoformat()}) -- gates from before the B3 deploy are "
+            "never honoured (ruling e); get a fresh gate",
+            reason=REASON_GATE_BEFORE_CUTOVER,
+        )
 
     text = f"{row.get('subject') or ''} {row.get('body') or ''}"
     if not _text_mentions_silo(text, project_ref):

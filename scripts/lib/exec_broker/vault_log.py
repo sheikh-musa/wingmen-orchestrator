@@ -80,10 +80,49 @@ def record_executed(cur, row_id: int, executed_prologue: str, executed_sql_sha25
     )
 
 
-def log_finalized(cur, row_id: int, status: str, error_code: str | None) -> None:
+def log_finalized(
+    cur, row_id: int, status: str, error_code: str | None, error_reason: "str | None" = None,
+) -> None:
     """UPDATE the SAME row started by log_started — never a second INSERT.
-    status is 'ok' or 'error'."""
+    status is 'ok' or 'error'. error_reason (B3, console #89841) is the
+    optional machine-readable reason token; without it the statement is
+    byte-identical to the pre-B3 one (no error_reason column referenced)."""
+    if error_reason is None:
+        cur.execute(
+            "UPDATE exec_broker_access_log SET status = %s, error_code = %s, ts_end = now() WHERE id = %s",
+            (status, error_code, row_id),
+        )
+    else:
+        cur.execute(
+            "UPDATE exec_broker_access_log SET status = %s, error_code = %s, error_reason = %s, "
+            "ts_end = now() WHERE id = %s",
+            (status, error_code, error_reason, row_id),
+        )
+
+
+# B3 single-use (bus #89814 §4.2-4.3, CONTRACT AMENDMENT -- see protocol.py):
+# the FIRST execution whose gate fully validates consumes that gate_id, bound
+# to this row's exec_ledger_id. Enforced by the DATABASE, not by a
+# check-then-write in Python: migrations/drafts/hc95_exec_broker_gate_single_use.sql
+# adds gate_consumed + a partial UNIQUE index on (gate_id) WHERE gate_consumed,
+# so a second row (any other exec_ledger_id, or a concurrent duplicate) trying
+# to consume the same gate_id raises unique_violation (SQLSTATE 23505) -- a
+# concurrent duplicate blocks on the index until the first commits, then fails
+# closed. server.py maps 23505 to GATE_INVALID; any other error (e.g. the column
+# not yet existing) to INTERNAL_ERROR. Either way, BEFORE the mgmt-API call.
+UNIQUE_VIOLATION_SQLSTATE = "23505"
+
+
+def consume_gate(cur, row_id: int) -> None:
+    """Mark THIS row (written by log_started, carrying gate_id) as the one
+    execution that consumed its gate. Raises the DB's unique_violation if the
+    gate_id was already consumed by another row."""
     cur.execute(
-        "UPDATE exec_broker_access_log SET status = %s, error_code = %s, ts_end = now() WHERE id = %s",
-        (status, error_code, row_id),
+        "UPDATE exec_broker_access_log SET gate_consumed = true "
+        "WHERE id = %s AND gate_id IS NOT NULL AND gate_consumed = false",
+        (row_id,),
     )
+    if getattr(cur, "rowcount", 1) != 1:
+        # The row we just wrote must exist, carry a gate_id and be unconsumed;
+        # anything else is a bug -- refuse rather than execute unbound.
+        raise RuntimeError(f"consume_gate: exec_broker_access_log row {row_id} not consumable")
