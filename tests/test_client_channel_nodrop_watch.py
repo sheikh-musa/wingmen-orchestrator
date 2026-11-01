@@ -350,3 +350,148 @@ def test_a_captionless_photo_still_counts_as_a_client_message():
     rows = [_row(37200, "inbound", 600, "📷 Photo received (image/jpeg) — saved as media/abc.jpg")]
     w = nd.latest_unanswered_inbound(rows)
     assert w is not None and w["id"] == 37200
+
+
+# ---- the conversation is the CHAT, not the tag (orch-console #89533 / cc-quality 89559) --
+# THE miss: replies to Hariz were sent under topic tags (attempts-staff-20261101,
+# role-assignment-20261101) while his message carried the channel tag, so `WHERE tag=%s`
+# could not see them and a well-answered message read as unanswered.
+# THE REGRESSION my first attempt shipped: resolving the chat set from "every chat that
+# carried this tag" pulled in the operator's own DM (they tag by topic there), which is the
+# busiest chat in the system — hk-editor and oeh became 25-of-25 DM rows and went SILENT.
+MUSA = "286619815"
+CLIENT_CHAT = -5390372474
+
+
+class _ChatFakeCursor:
+    """Returns queued result sets in order, one per execute()."""
+
+    def __init__(self, results):
+        self.results, self.sqls, self.params = list(results), [], []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.sqls.append(" ".join(sql.split()))
+        self.params.append(params)
+
+    def fetchall(self):
+        return self.results.pop(0) if self.results else []
+
+
+class _ChatFakeConn:
+    def __init__(self, cur):
+        self._cur = cur
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def cursor(self):
+        return self._cur
+
+
+def _fetch_with(monkeypatch, results):
+    cur = _ChatFakeCursor(results)
+    monkeypatch.setattr(nd.psycopg2, "connect", lambda *a, **k: _ChatFakeConn(cur))
+    return nd.fetch_recent("postgresql://ignored", "cosem-exams", musa_id=MUSA), cur
+
+
+def test_fetch_recent_reads_the_allowlist_declared_chat(monkeypatch):
+    """PRIMARY path: resolve chats from bot_channels.allowed_chat_ids, the authoritative map."""
+    out, cur = _fetch_with(monkeypatch, [[([CLIENT_CHAT],)], []])
+    assert "FROM bot_channels" in cur.sqls[0] and "allowed_chat_ids" in cur.sqls[0]
+    assert cur.params[0] == ("cosem-exams",)
+    # the message read is scoped to that chat list, and carries chat_id back for the guard
+    assert cur.params[1][0] == [str(CLIENT_CHAT)]   # chat_id is TEXT on operator_messages
+    assert "chat_id" in cur.sqls[1]
+    assert out == []
+
+
+def test_a_tagged_operator_dm_can_never_join_the_chat_set(monkeypatch):
+    """THE REGRESSION GUARD. The operator tags their own DM by topic, so the DM carries a row
+    for nearly every channel tag. It must not enter the chat set — if it does, its volume
+    fills the window and the client is crowded out entirely (silent no-drop)."""
+    _out, cur = _fetch_with(monkeypatch, [[([CLIENT_CHAT],)], []])
+    chats = cur.params[1][0]
+    assert MUSA not in chats, (
+        "the operator's own DM must never be treated as the client's conversation; it is the "
+        "busiest chat in the system and crowds every client row out of the window"
+    )
+    assert "allowed_chat_ids" in cur.sqls[0], (
+        "the chat set must come from the declared allowlist, not from rows that happen to "
+        "share the tag"
+    )
+
+
+def test_fallback_drops_the_operator_dm_when_no_allowlist_exists(monkeypatch):
+    """bariq has an empty allowed_chat_ids today: fall back to tag-bearing chats, minus the DM."""
+    results = [[], [(int(MUSA),), (CLIENT_CHAT,)], []]
+    _out, cur = _fetch_with(monkeypatch, results)
+    chats = cur.params[-1][0]
+    assert MUSA not in chats and str(CLIENT_CHAT) in chats
+    assert cur.params[-1][1] == "cosem-exams"     # NULL-chat_id rows still scoped to the tag
+
+
+# ---- the answer guard: same chat only ---------------------------------------------------
+def _r(mid, direction, age_s, text="hi", chat_id=CLIENT_CHAT, from_user_id=None):
+    row = _row(mid, direction, age_s, text, from_user_id=from_user_id)
+    row["chat_id"] = chat_id
+    return row
+
+
+def test_is_same_chat():
+    assert nd.is_same_chat({"chat_id": 1}, {"chat_id": "1"}) is True
+    assert nd.is_same_chat({"chat_id": 1}, {"chat_id": 2}) is False
+    # fail-open toward "same" only when a side genuinely has no chat (legacy rows)
+    assert nd.is_same_chat({"chat_id": None}, {"chat_id": 2}) is True
+    assert nd.is_same_chat({}, {"chat_id": 2}) is True
+
+
+def test_an_outbound_in_the_operator_dm_cannot_answer_a_client(monkeypatch):
+    """cc-quality's finding on cosem-exams: op#37155 was marked answered by op#37169, an
+    outbound in the operator DM. A different chat can never answer a client."""
+    rows = [
+        _r(37169, "outbound", 60, "operator note in their own DM", chat_id=int(MUSA)),
+        _r(37155, "inbound", 120, "As of today may i know the list of assigned staffer"),
+    ]
+    w = nd.latest_unanswered_inbound(rows, musa_id=MUSA)
+    assert w is not None and w["id"] == 37155, (
+        "an operator-DM outbound must not silence a client message in the client's own chat"
+    )
+
+
+def test_a_topic_tagged_reply_in_the_client_chat_does_answer(monkeypatch):
+    rows = [
+        _r(37150, "outbound", 300, "One addition to point 5, on how a role gets assigned"),
+        _r(37149, "outbound", 360, "Answers, all read from the live system at 07:50 UTC"),
+        _r(37148, "inbound", 600, "As of today may i know the list of assigned staffer"),
+    ]
+    assert nd.latest_unanswered_inbound(rows, musa_id=MUSA) is None
+
+
+def test_the_pin_over_an_answered_message_is_still_not_a_drop(monkeypatch):
+    rows = [
+        _r(37155, "inbound", 60, "[non-text update 50118302 — keys: chat,date,from,message_id,pinned_message]"),
+        _r(37150, "outbound", 300, "One addition to point 5"),
+        _r(37148, "inbound", 600, "As of today may i know the list of assigned staffer"),
+    ]
+    assert nd.latest_unanswered_inbound(rows, musa_id=MUSA) is None
+
+
+def test_a_channel_with_no_resolvable_chat_still_reads(monkeypatch):
+    """bariq: empty allowed_chat_ids and only operator-DM rows today. An empty chat set would
+    make `chat_id = ANY('{}')` match nothing and the channel would go SILENT — so it must
+    degrade to the tag-only read, exactly as before this change. A false page is recoverable;
+    a silent no-drop is the failure this watcher exists to prevent."""
+    results = [[], [(int(MUSA),)], []]
+    _out, cur = _fetch_with(monkeypatch, results)
+    msg_sql, msg_params = cur.sqls[-1], cur.params[-1]
+    assert "ANY(" not in msg_sql, "empty chat set must not be sent as a ANY() filter"
+    assert msg_params == ("cosem-exams", nd.FETCH_LIMIT)

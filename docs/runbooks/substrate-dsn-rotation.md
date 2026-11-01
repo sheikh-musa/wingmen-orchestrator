@@ -189,7 +189,8 @@ time. A file that carries the not-yet-active value breaks nothing until the mome
 old value stops working — which is the moment the patch lands, immediately followed by
 the restart. There is no window where a rewrite alone causes an outage.
 
-**The heartbeat trap (found by correcting my own earlier claim, bus 87897).** The 5-min
+**The heartbeat trap (found by correcting my own earlier claim, bus 87897).**
+*Executed on 2026-11-01: two launchers still did not do this, and the fix is in §8.3 — read it before trusting the script list below.* The 5-min
 heartbeat loops in `boot_nazim.sh`, `boot_cai.sh` and `boot_fleet_health.sh` read the DSN
 from `os.environ` inside a bash subshell forked when the singleton booted. A rewritten
 file and a `tmux set-environment` change nothing for that already-running process: every
@@ -429,6 +430,8 @@ do not retry blindly — check the API response in the journal first.
 ---
 
 ## 5. What "done" means
+
+*Amended by execution, 2026-11-01: this list was written for the daemons and the two singletons. It is necessary but not sufficient — the long-lived tmux worker lanes are holders too, and leaving them out is how a COMPLETE rotation took the fleet down. See §8.1 before signing anything off against this list.*
 
 - New value connects from every holder.
 - Old value is **rejected** — not "untested".

@@ -166,6 +166,19 @@ def is_operator_sender(from_user_id, *, musa_id=None) -> bool:
     return bool(musa_id) and str(from_user_id) == str(musa_id)
 
 
+def is_same_chat(a, b) -> bool:
+    """True when two rows are in the same Telegram chat, so that `a` can answer `b`.
+
+    Fail-OPEN toward "same chat" when either side has no chat_id: on rows fetched before
+    chat_id was selected, refusing to match would turn every answered message into a
+    permanent false page. The chat guard exists to stop CROSS-chat answers, and it can only
+    do that when both sides actually name a chat."""
+    ca, cb = a.get("chat_id"), b.get("chat_id")
+    if ca is None or cb is None:
+        return True
+    return str(ca) == str(cb)
+
+
 def latest_unanswered_inbound(rows, *, musa_id=None):
     """rows = recent messages for ONE channel, NEWEST-FIRST, each
     {id, direction, created_epoch, from_name, text, from_user_id}. Return the latest INBOUND
@@ -183,10 +196,16 @@ def latest_unanswered_inbound(rows, *, musa_id=None):
                 continue
             if is_non_text_update(r.get("text")):
                 continue
-            # any row newer than it (earlier in the list) that is a real (non-receipt) outbound?
+            # any row newer than it (earlier in the list) that is a real (non-receipt) outbound
+            # IN THE SAME CHAT? Chat-scoped on purpose: without it, an outbound in ANOTHER chat
+            # (the operator's own DM is merged into a channel's view on real data) silences a
+            # genuinely unanswered client — the one failure this watch must never have
+            # (cc-quality 89559, reproduced on cosem-exams before this guard existed).
             for newer in rows[:i]:
-                if newer["direction"] == "outbound" and not is_receipt(newer.get("text")):
-                    return None  # answered by a real reply
+                if (newer["direction"] == "outbound"
+                        and not is_receipt(newer.get("text"))
+                        and is_same_chat(newer, r)):
+                    return None  # answered by a real reply in the client's chat
             return r  # latest inbound, only receipts (if any) after it -> UNANSWERED
     return None  # no inbound at all
 
@@ -289,21 +308,89 @@ def load_channels(dsn) -> list:
     return out or list(FALLBACK_CHANNELS)
 
 
-def fetch_recent(dsn: str, tag: str, limit: int = FETCH_LIMIT) -> list:
-    """Recent messages for a channel, NEWEST-FIRST. Raises CouldNotMeasure on any DB failure."""
+def fetch_recent(dsn: str, tag: str, limit: int = FETCH_LIMIT, musa_id=None) -> list:
+    """Recent messages for a channel's CONVERSATION, NEWEST-FIRST. Raises CouldNotMeasure on
+    any DB failure.
+
+    THE CONVERSATION IS THE CHAT, NOT THE TAG (orch-console #89533, after op#37148). An
+    outbound reply is not always stamped with the channel tag: on cosem-exams the two
+    replies to Hariz landed as `attempts-staff-20261101` and `role-assignment-20261101`,
+    because the sender tags by topic. Selecting `WHERE tag=%s` therefore could not see
+    them, and the watch read a well-answered client message as unanswered — 1851 outbound
+    rows fleet-wide carry a tag that appears on no inbound row, so this is a class, not an
+    incident. The channel's chat_id is stable across every row in the conversation, so
+    resolve the chat ids from rows bearing the tag and read the whole chat.
+
+    The chat set comes from bot_channels.allowed_chat_ids — the authoritative tag→chat map —
+    NOT from "every chat that has carried this tag". That inference was the first version of
+    this fix and cc-quality failed it (89559): the operator tags messages in their own DM by
+    topic, so the DM carries a row for nearly every channel tag, 7 of 10 watched channels
+    merged the DM in, and the DM's volume filled the window — hk-editor and oeh were 25-of-25
+    operator-DM rows with no client row at all. The watcher went SILENT, which is the one
+    failure this script must never have. bot_channels lists only real client chats
+    (cosem-exams → -5390372474), and the DM appears in none of them.
+
+    Fallback when that map is absent or empty (bariq has [] today): the chats that carried
+    the tag, minus the operator's own DM. Never the DM, and never nothing.
+
+    The last clause keeps tag-only rows whose chat_id is NULL (older data) readable, so this
+    cannot lose a channel entirely — losing one silently is worse than a false page.
+    """
     try:
+        sel = ("SELECT id, direction, EXTRACT(EPOCH FROM created_at), from_name, LEFT(text, 240), "
+               "from_user_id, chat_id FROM operator_messages WHERE ")
         with psycopg2.connect(dsn) as c, c.cursor() as cur:
-            cur.execute(
-                "SELECT id, direction, EXTRACT(EPOCH FROM created_at), from_name, LEFT(text, 240), "
-                "from_user_id "
-                "FROM operator_messages WHERE tag=%s ORDER BY created_at DESC LIMIT %s",
-                (tag, limit),
-            )
+            chats = _channel_chats(cur, tag, musa_id)
+            if chats is None:
+                # No allowlist AND no tag-bearing non-DM chat (bariq today). Reading nothing
+                # would make this channel permanently silent, so fall back to the tag-only
+                # read: a false page is recoverable, a silent no-drop is not.
+                cur.execute(sel + "tag=%s ORDER BY created_at DESC LIMIT %s", (tag, limit))
+            else:
+                cur.execute(
+                    sel + "chat_id = ANY(%s) OR (tag=%s AND chat_id IS NULL) "
+                    "ORDER BY created_at DESC LIMIT %s",
+                    (chats, tag, limit),
+                )
             rs = cur.fetchall()
     except Exception as e:  # noqa: BLE001 — fail-closed
         raise CouldNotMeasure(str(e))
     return [{"id": int(r[0]), "direction": r[1], "created_epoch": float(r[2]),
-             "from_name": r[3], "text": r[4] or "", "from_user_id": r[5]} for r in rs]
+             "from_name": r[3], "text": r[4] or "", "from_user_id": r[5],
+             "chat_id": r[6]} for r in rs]
+
+
+def _channel_chats(cur, tag: str, musa_id=None):
+    """The Telegram chats that make up this channel's conversation.
+
+    bot_channels.allowed_chat_ids is the operator-declared allowlist and is the truth; the
+    row-derived fallback exists only for a channel that has no allowlist yet, and it drops
+    the operator's own DM unconditionally — a topic tag in that DM is not a client chat.
+
+    Returns None when the channel resolves to NO chat at all. The caller must then read
+    tag-only rather than read nothing: an empty chat set silently blinds the channel."""
+    cur.execute(
+        "SELECT allowed_chat_ids FROM bot_channels "
+        "WHERE channel_tag=%s AND allowed_chat_ids IS NOT NULL",
+        (tag,),
+    )
+    # NOTE ON TYPES: bot_channels.allowed_chat_ids is bigint[] but operator_messages.chat_id
+    # is TEXT, so every id is normalised to str here and compared as text. Comparing the
+    # bigint array directly raised "operator does not exist: text = bigint" on the live
+    # column — a fake cursor cannot catch that, so this line is wet-proven, not unit-proven.
+    chats = set()
+    for (ids,) in cur.fetchall():
+        for cid in (ids or []):
+            if cid is not None:
+                chats.add(str(cid))
+    if chats:
+        return sorted(chats)
+    cur.execute(
+        "SELECT DISTINCT chat_id FROM operator_messages WHERE tag=%s AND chat_id IS NOT NULL",
+        (tag,),
+    )
+    return sorted({str(c) for (c,) in cur.fetchall()
+                   if musa_id is None or str(c) != str(musa_id)}) or None
 
 
 def _bus(dsn: str, action: dict) -> None:
@@ -345,7 +432,7 @@ def main(argv=None) -> int:
     for ch in channels:
         tag = ch["tag"]
         try:
-            rows = fetch_recent(dsn, tag)
+            rows = fetch_recent(dsn, tag, musa_id=musa_id)
         except CouldNotMeasure as e:
             had_error = True
             _fail_closed_page(dsn, tag, str(e), armed)
