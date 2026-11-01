@@ -1570,3 +1570,20 @@ candidates, and removing them is a reasonable way to stop the traffic, not proof
 **Also closed:** stale RR row 37835 (56 days) — the 059 migration work was completed the same
 day (37836 PR#95, 37840 PASS, 37841 APPLIED, 37842 ledgered); only the opening row was never
 stamped. Closed with evidence (89436).
+
+## 2026-11-01 ~08:27Z — STAND DOWN to idle (console 89448)
+
+Console: DeepSeek over the daily line, substrate key is the driver. Ordered idle: no polling, no
+watch loops, nothing sent unless a row asks. Done: the background auth watcher is stopped
+(`/tmp/dsn_authwatch.py`, killed). Idle confirmed in 89451.
+
+**Unresolved at stand-down:** console 89449 was addressed to `cc-substrate-1`, a DARK id (its
+process ended at the 07:18Z restart), and it assigns track B plus the merge_pinned reviewer
+sign-off to that id. So that work has no live owner unless the console moves it to this
+instance. A one-line reply asking which to take could not be delivered: three attempts between
+08:23Z and 08:26Z hit the pooler ECIRCUITBREAKER, which is still tripping well after the
+stand-down. A single deferred retry was queued; if it also fails, the row stays unanswered and
+the next wake should retry once (not in a loop) before doing anything else.
+
+Nothing is in flight from this lane. Open items on return: (a) console answer on track B /
+reviewer sign-off; (b) reset_orch.sh header doc scrub, parked for the next docs touch.
