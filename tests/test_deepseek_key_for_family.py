@@ -34,7 +34,7 @@ def test_the_real_map_file_has_every_client_console_named():
     assert set(mapping) == {
         "cosem", "cosem-tdu", "bariq", "oeh", "ffsfulfilment", "hc95", "fleet", "loop", "angullia",
         "coffeemedia", "finance", "second", "shipforge", "substrate", "wingmen", "paperclip",
-        "scholar",
+        "scholar", "hifz", "console",
     }
     shared = "DEEPSEEK_CODING_KEY"
     for slug, vault_key in mapping.items():
@@ -67,6 +67,15 @@ def test_resolves_known_families():
         ("cc-paperclip-spike", "DEEPSEEK_KEY_PAPERCLIP"),
         ("cc-scholar", "DEEPSEEK_KEY_SCHOLAR"),
         ("cc-scholar-1", "DEEPSEEK_KEY_SCHOLAR"),
+        # Musa op#36951 (2026-11-01, via orch-console #88531): two Syed-token
+        # lanes that had no key-map family. Both take the SHARED key -- console's
+        # "an existing family, no new keys tonight" -- because this file's own
+        # invariant forbids pointing a family at ANOTHER family's key (that is
+        # how one client silently pays for another's usage). Re-home them to
+        # their own keys when those are minted; same transitional state as
+        # substrate above.
+        ("cc-hifz-1", "DEEPSEEK_CODING_KEY"),
+        ("cc-console-revamp-1", "DEEPSEEK_CODING_KEY"),
     ]:
         rc, stdout, stderr = _run(agent_id)
         assert rc == 0, (agent_id, stderr)
