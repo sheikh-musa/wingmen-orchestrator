@@ -20,5 +20,16 @@
 
 ALTER TABLE exec_broker_access_log ADD COLUMN IF NOT EXISTS gate_ref text;
 
+-- Amended ruling C (console bus #89846): every gate-free plain read is executed
+-- as 'SET TRANSACTION READ ONLY; ' || <received bytes>. sql_sha256 stays the hash
+-- of the RECEIVED bytes (caller binding, unchanged); these record what actually
+-- RAN, so the audit never implies the broker executed bytes it did not. Both
+-- are NULL when the received bytes ran unchanged (every gated statement).
+-- DEPLOY ORDER: these columns are written for EVERY gate-free read, so apply
+-- this file before deploying #821 -- otherwise every read fails at that UPDATE
+-- (INTERNAL_ERROR, before execution: fail closed, but an outage for reads).
+ALTER TABLE exec_broker_access_log ADD COLUMN IF NOT EXISTS executed_prologue text;
+ALTER TABLE exec_broker_access_log ADD COLUMN IF NOT EXISTS executed_sql_sha256 text;
+
 COMMENT ON COLUMN exec_broker_access_log.gate_ref IS
   'hc#95 B2/--ref: the gate ref anchor (op#N/hc#N/q#N/cp#N) the caller sent, as received (validated by require_gate after this row is written). NULL when no ref was sent.';

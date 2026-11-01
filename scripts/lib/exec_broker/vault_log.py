@@ -66,6 +66,20 @@ def log_started(cur, entry: VaultLogEntry) -> int:
     return cur.fetchone()["id"]
 
 
+def record_executed(cur, row_id: int, executed_prologue: str, executed_sql_sha256: str) -> None:
+    """Amended ruling C (bus #89846): when the broker prepends the read-only
+    prologue to a gate-free read, the bytes it EXECUTES differ from the bytes
+    it RECEIVED. sql_sha256 stays the hash of the received bytes (the caller
+    binding, unchanged); this records what actually ran, so the audit never
+    implies it executed bytes it did not. Both columns stay NULL when the
+    received bytes were executed unchanged (every gated statement).
+    Columns: migrations/drafts/hc95_exec_broker_gate_ref.sql."""
+    cur.execute(
+        "UPDATE exec_broker_access_log SET executed_prologue = %s, executed_sql_sha256 = %s WHERE id = %s",
+        (executed_prologue, executed_sql_sha256, row_id),
+    )
+
+
 def log_finalized(cur, row_id: int, status: str, error_code: str | None) -> None:
     """UPDATE the SAME row started by log_started — never a second INSERT.
     status is 'ok' or 'error'."""

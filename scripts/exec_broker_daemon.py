@@ -36,7 +36,13 @@ replaces the hard-coded QA-only call-allowlist. Unset/blank -> the default
 (QA only, identical to before). Read ONCE at boot: widening is an env edit +
 restart, never a code edit; narrowing takes effect on restart. Every ref in
 the set is fully gated by gate_validation.require_gate (every non-plain-read
-statement needs a gate). An unknown alias fails loud at boot.
+statement needs a gate). An unknown alias fails loud at boot. The resolved set
+(aliases + refs) is logged once at boot.
+
+RUNBOOK NOTE -- the env REPLACES the default, it does not ADD to it: setting
+EXEC_BROKER_LIVE_GATED_REFS=goumlyne DROPS QA. For rollout step (b) (QA + one
+real ref in overlap) the value must list BOTH, e.g.
+EXEC_BROKER_LIVE_GATED_REFS=qa,goumlyne.
 """
 from __future__ import annotations
 
@@ -112,6 +118,15 @@ def resolve_ref_override_alias(raw: "str | None") -> "str | None":
             f"EXEC_BROKER_REF_OVERRIDE_ALIAS {alias!r} is not a known silo alias "
             f"(one of {sorted(SILO_ALIASES)})"
         ) from None
+
+
+def describe_live_gated_refs(refs: "frozenset[str]") -> str:
+    """Human-readable alias(es) + ref for each gated ref, for the boot log."""
+    parts = []
+    for ref in sorted(refs):
+        aliases = sorted(a for a, r in SILO_ALIASES.items() if r == ref)
+        parts.append(f"{'/'.join(aliases) or '?'}={ref}")
+    return ", ".join(parts)
 
 
 def load_live_gated_refs(raw: "str | None") -> "frozenset[str]":
@@ -216,6 +231,13 @@ def main(argv=None) -> int:
     except ValueError as e:
         print(f"exec_broker_daemon: {e}", file=sys.stderr)
         return 1
+    print(
+        "exec_broker_daemon: LIVE_GATED_REFS ("
+        + ("EXEC_BROKER_LIVE_GATED_REFS" if (os.environ.get("EXEC_BROKER_LIVE_GATED_REFS") or "").strip()
+           else "default -- env unset")
+        + f"): {describe_live_gated_refs(live_gated_refs)}",
+        file=sys.stderr,
+    )
 
     try:
         ref_override = resolve_ref_override_alias(os.environ.get("EXEC_BROKER_REF_OVERRIDE_ALIAS"))

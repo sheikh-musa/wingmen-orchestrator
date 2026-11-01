@@ -332,3 +332,16 @@ def test_main_wires_widened_live_gated_refs(monkeypatch, tmp_path):
     assert _FakeServer.last_kwargs["live_gated_refs"] == frozenset(
         {"oovskwogvefnznfowjky", "goumlynecruxrlmzlntp"}
     )
+
+
+def test_main_logs_the_resolved_live_gated_refs_once_at_boot(monkeypatch, tmp_path, capsys):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 0
+    err = capsys.readouterr().err
+    assert err.count("LIVE_GATED_REFS") == 1
+    assert "default -- env unset" in err and "irsyad-qa/qa=oovskwogvefnznfowjky" in err
+    monkeypatch.setenv("EXEC_BROKER_LIVE_GATED_REFS", "qa,goumlyne")
+    assert daemon.main([]) == 0
+    err = capsys.readouterr().err
+    assert "goumlyne=goumlynecruxrlmzlntp" in err and "irsyad-qa/qa=oovskwogvefnznfowjky" in err

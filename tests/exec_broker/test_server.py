@@ -44,6 +44,11 @@ class FakeCursor:
             self._next_id += 1
             self.vault_rows[row_id] = {"status": "started"}
             self._pending_fetch = {"id": row_id}
+        elif upper.startswith("UPDATE EXEC_BROKER_ACCESS_LOG SET EXECUTED_PROLOGUE"):
+            prologue, executed_sha, row_id = params
+            self.vault_rows[row_id]["executed_prologue"] = prologue
+            self.vault_rows[row_id]["executed_sql_sha256"] = executed_sha
+            self._pending_fetch = None
         elif upper.startswith("UPDATE EXEC_BROKER_ACCESS_LOG"):
             status, error_code, row_id = params
             self.vault_rows[row_id]["status"] = status
@@ -798,3 +803,104 @@ def test_b1_default_live_gated_refs_still_rejects_real_refs_end_to_end(tmp_path)
                              "reason": "", "gate_id": "56485", "ref": "op#77",
                              "caller": "c", "exec_ledger_id": "e"})
     assert resp["error"]["code"] == "BAD_PROJECT_REF"
+
+
+# --- amended ruling C (console bus #89846/#89875): broker-enforced read-only -
+
+_PROLOGUE = "SET TRANSACTION READ ONLY; "
+
+# exec_prod's agent-actor wrapper SHAPE (not the pinned bytes -- the pin was
+# removed with the exemption): SET TRANSACTION + DO blocks + set_config.
+_WRAPPED_READ = (
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;\n\n"
+    "DO $agent_guard_pre$\nBEGIN\n"
+    "  PERFORM set_config('request.jwt.claim.sub', 'ca2a4a9c-f745-40c3-9536-7a021fd42bb9', true);\n"
+    "END\n$agent_guard_pre$;\n\n"
+    "-- <<< INNER EXEC WORK GOES HERE >>>\n"
+    "SELECT count(*) FROM t;\n\n"
+    "DO $agent_guard_post$\nBEGIN\n  NULL;\nEND\n$agent_guard_post$;\n"
+)
+
+
+def test_c_gate_free_read_is_sent_upstream_with_the_read_only_prologue(tmp_path):
+    seen = []
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda sql, ref, tok: seen.append(sql) or [{"n": 1}],
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "select count(*) from t",
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp == {"status": "ok", "rows": [{"n": 1}]}
+    assert seen == [_PROLOGUE + "select count(*) from t"]
+    row = list(db.vault_rows.values())[0]
+    # the ledger binds the RECEIVED bytes and separately records what RAN
+    (insert_params,) = [p for s, p in db.cursor_obj.calls if s.strip().upper().startswith("INSERT")]
+    assert insert_params[3] == hashlib.sha256(b"select count(*) from t").hexdigest()
+    assert row["executed_prologue"] == _PROLOGUE
+    assert row["executed_sql_sha256"] == hashlib.sha256((_PROLOGUE + "select count(*) from t").encode()).hexdigest()
+    assert row["status"] == "ok"
+
+
+def test_c_gated_statement_is_sent_byte_identical_without_the_prologue(tmp_path):
+    seen = []
+    db = FakeDb(gate_row=_QA_REF_GATE_ROW)
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda sql, ref, tok: seen.append(sql) or [],
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "update t set a = 1",
+                             "reason": "", "gate_id": "56485", "ref": "op#51", "caller": "c", "exec_ledger_id": "e"})
+    assert resp["status"] == "ok"
+    assert seen == ["update t set a = 1"]
+    row = list(db.vault_rows.values())[0]
+    assert "executed_prologue" not in row and "executed_sql_sha256" not in row
+
+
+def test_c_wrapped_read_with_no_gate_is_gate_required(tmp_path):
+    # Regression guard: the pinned-wrapper exemption is GONE (amended ruling C).
+    seen = []
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: seen.append(a) or [],
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": _WRAPPED_READ,
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp["error"]["code"] == "GATE_REQUIRED"
+    assert seen == []
+
+
+@pytest.mark.parametrize("sql", [
+    "select 1; commit; insert into t values (1)",
+    "commit; delete from t",
+    "set transaction read write; update t set x=1",
+    "select 1; select 2",
+])
+def test_c_txn_control_or_multi_statement_reads_are_never_sent_ungated(tmp_path, sql):
+    seen = []
+    db = FakeDb()
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: seen.append(a) or [],
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": sql,
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp["error"]["code"] == "GATE_REQUIRED"
+    assert seen == []
+
+
+def test_c_failure_to_record_the_executed_bytes_means_no_execution(tmp_path):
+    seen = []
+    db = FakeDb()
+    real_execute = db.cursor_obj.execute
+
+    def _execute(sql, params=None):
+        if sql.strip().upper().startswith("UPDATE EXEC_BROKER_ACCESS_LOG SET EXECUTED_PROLOGUE"):
+            raise RuntimeError('column "executed_prologue" does not exist')
+        return real_execute(sql, params)
+
+    db.cursor_obj.execute = _execute
+    _, sock_path, db = _make_server(
+        tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: seen.append(a) or [],
+    )
+    resp = _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "select 1",
+                             "reason": "", "gate_id": None, "caller": "c", "exec_ledger_id": "e"})
+    assert resp["error"]["code"] == "INTERNAL_ERROR"
+    assert seen == []

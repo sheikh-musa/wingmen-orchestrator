@@ -29,7 +29,7 @@ from exec_broker.read_only import check_read_only_override, is_plain_read  # noq
     "VALUES (1), (2)",
     "SELECT CASE WHEN a THEN 1 ELSE 2 END FROM t",                  # END is not denied (CASE...END)
     "SELECT * FROM t ORDER BY id OFFSET 5 LIMIT 2",                 # OFFSET does not trip a SET scan
-    "select 1; select 2",                                           # multi-statement, all reads
+    "select 1;",                                                    # one statement, trailing ';'
     "(SELECT 1) UNION (SELECT 2)",                                  # parenthesized heads
     "SELECT \"col one\", \"col two\" FROM t",                       # clean quoted identifiers: no hazard chars inside
     "SELECT 'insert into t values (1)' FROM t",                     # write words in a string -> blanked
@@ -42,6 +42,21 @@ def test_is_plain_read_accepts(sql):
 
 
 @pytest.mark.parametrize("sql", [
+    "select 1; select 2",                                           # multi-statement: single-statement only (ruling C amended)
+    "SELECT 1; COMMIT; DELETE FROM t",
+    "SELECT 1; COMMIT",
+    "SELECT 1; SET TRANSACTION READ WRITE",
+    "SET TRANSACTION READ WRITE; SELECT 1",
+    "SELECT 1; BEGIN",
+    "BEGIN; SELECT 1",
+    "SELECT 1; RESET ALL",
+    "RESET transaction_read_only",
+    "SELECT 1; SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+    "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+    "SELECT 1; ROLLBACK",
+    "SELECT 1; END",
+    "SELECT set_config('transaction_read_only', 'off', false)",
+    "SELECT pg_catalog.set_config('default_transaction_read_only', 'off', false)",
     "insert into t values (1)",
     "UPDATE t SET x = 1",
     "delete from t",
@@ -186,3 +201,62 @@ def test_check_read_only_scoped_baseline_ref_write_passes_when_live():
         "insert into t values (1)", project_ref="oovskwogvefnznfowjky",  # QA baseline ref
         ref_override=_REF, ref_override_expires_at=_FUTURE,
     )
+
+
+# --- console amended ruling C + addendum (bus #89846/#89875) -----------------
+# Gate-free reads run as READ_ONLY_PROLOGUE + sql in ONE upstream query string,
+# so a plain read must be a single statement with no transaction-control or
+# session-setting keyword in code position, and nothing left unclosed.
+
+@pytest.mark.parametrize("sql", [
+    # required by bus #89875
+    "select 1; commit; insert into t values (1)",
+    "commit; delete from t",
+    "set transaction read write; update t set x=1",
+    "select 1; select 2",
+    # each listed keyword, in code position, inside an otherwise read-shaped statement
+    "select 1 commit",
+    "select rollback from t",
+    "select begin from t",
+    "select 1 from t end",
+    "select abort from t",
+    "select savepoint from t",
+    "select release from t",
+    "select 1 from t where x = set",
+    "select reset from t",
+    "select discard from t",
+    "select 1 start transaction",
+    "select 1 prepare transaction",
+    "START TRANSACTION",
+    "SET SESSION AUTHORIZATION x",
+    "SET search_path = evil",
+    "SELECT CASE WHEN a THEN 1 END END FROM t",   # one END too many for its CASE
+])
+def test_gate_free_read_refuses_txn_control_and_multi_statement(sql):
+    assert is_plain_read(sql) is False
+
+
+@pytest.mark.parametrize("sql", [
+    "select 'commit'",
+    "select 1 -- rollback",
+    "select 'set transaction read write; begin; end'",
+    "select $q$ commit $q$",
+    "/* reset all */ select 1",
+    'select "commit" from t',
+    "SELECT CASE WHEN a THEN 1 ELSE 2 END FROM t",
+    "SELECT CASE WHEN a THEN CASE WHEN b THEN 1 END ELSE 2 END FROM t",
+    "SELECT offset_col, settings FROM t",
+])
+def test_keywords_inside_literals_comments_or_identifiers_are_not_refused(sql):
+    assert is_plain_read(sql) is True
+
+
+@pytest.mark.parametrize("sql", [
+    "select 'unclosed",
+    "select 1 /* unclosed",
+    'select "unclosed',
+    "select $q$ unclosed",
+    "select $$ unclosed",
+])
+def test_unclosed_regions_are_refused(sql):
+    assert is_plain_read(sql) is False

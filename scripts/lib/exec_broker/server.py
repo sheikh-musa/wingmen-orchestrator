@@ -16,6 +16,7 @@ crashes serve_forever or hangs a peer indefinitely (30s read timeout).
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import socket
@@ -25,8 +26,8 @@ from . import acl
 from .gate_validation import BrokerValidationError, check_project_ref, require_gate
 from .mgmt_api import UpstreamError
 from .protocol import ErrorCode, MalformedRequest, encode_error, encode_ok, parse_request
-from .read_only import check_read_only_override
-from .vault_log import VaultLogEntry, log_finalized, log_started
+from .read_only import READ_ONLY_PROLOGUE, check_read_only_override, is_plain_read
+from .vault_log import VaultLogEntry, log_finalized, log_started, record_executed
 
 logger = logging.getLogger("exec_broker")
 
@@ -182,10 +183,28 @@ class BrokerServer:
                         ref_override_expires_at=self.ref_override_expires_at,
                         now=now,
                     )
-                    require_gate(
+                    gate_used = require_gate(
                         req.guarded_sql, req.gate_id, req.project_ref, cur,
                         migration=req.migration, pr=req.pr, ref=req.ref,
                     )
+                    if gate_used:
+                        executed_sql = req.guarded_sql
+                    else:
+                        # Amended ruling C (console bus #89846/#89875): a
+                        # gate-free statement is a plain read (require_gate
+                        # returns False ONLY for is_plain_read -- re-checked
+                        # here, fail closed). The broker itself enforces
+                        # read-only by prepending the prologue into the SAME
+                        # query string the mgmt API runs as one implicit
+                        # transaction. (A SET on db_conn would enforce
+                        # nothing: the statement never runs there.)
+                        if not is_plain_read(req.guarded_sql):
+                            raise RuntimeError("gate-free statement is not a plain read")
+                        executed_sql = READ_ONLY_PROLOGUE + req.guarded_sql
+                        record_executed(
+                            cur, row_id, READ_ONLY_PROLOGUE,
+                            hashlib.sha256(executed_sql.encode("utf-8")).hexdigest(),
+                        )
                 except BrokerValidationError as e:
                     log_finalized(cur, row_id, "error", e.code.value)
                     db_conn.commit()
@@ -214,7 +233,7 @@ class BrokerServer:
                 db_conn.commit()
 
                 try:
-                    rows = self.mgmt_api_fn(req.guarded_sql, req.project_ref, self.token)
+                    rows = self.mgmt_api_fn(executed_sql, req.project_ref, self.token)
                 except UpstreamError as e:
                     log_finalized(cur, row_id, "error", ErrorCode.UPSTREAM_ERROR.value)
                     db_conn.commit()
