@@ -1892,7 +1892,11 @@ def process_update(conn, ch: Channel, upd: dict,
     # untracked. Best-effort: a tracking hiccup here must not block routing.
     if ch.audience == "client":
         try:
-            operator_log.maybe_track_client_ask(op_msg_id, content, ch.owner_lane)
+            # tag= lets the classifier subtract OUR OWN recent outbound on this
+            # channel before deciding what the client is asking (bus #89013): a
+            # client quoting our list back is answering, not asking.
+            operator_log.maybe_track_client_ask(op_msg_id, content, ch.owner_lane,
+                                                tag=ch.channel_tag)
         except Exception as e:  # noqa: BLE001
             _log_line(f"{ch.key}: client-ask tracking raised on update {upd_id} "
                       f"({type(e).__name__}: {e}) — non-fatal")

@@ -117,6 +117,29 @@ def test_decide_unclassifiable_none_is_could_not_measure():
     assert (code, pri, kind) == (2, "P1", "could-not-measure")
 
 
+# ── PROCESS EXIT CODE (orch-console #89107) ─────────────────────────────────────────
+# An hourly exit=1 that ALSO means "fresh P0" is unreadable from a cron log. The
+# accepted/suppressed steady state must exit 0; anything THIS TIER paged keeps a
+# non-zero. Scope note: the forbidden/residue gates page off `code` entirely (see
+# exit_code_for), so 0 has never meant "no page was sent" and still does not.
+
+def test_exit_code_suppressed_breach_is_clean():
+    assert M.exit_code_for(1, "breach", "suppress") == 0
+
+
+def test_exit_code_paged_and_daily_breach_stay_nonzero():
+    assert M.exit_code_for(1, "breach", "page") == 1
+    assert M.exit_code_for(1, "breach", "daily") == 1
+
+
+def test_exit_code_never_relaxes_a_non_breach_tier():
+    # could-not-measure / could-not-classify (2) and ok (0) pass through untouched.
+    for action in ("noop", "clear", "suppress", "page", "daily"):
+        assert M.exit_code_for(2, "could-not-measure", action) == 2
+        assert M.exit_code_for(2, "could-not-classify", action) == 2
+        assert M.exit_code_for(0, "ok", action) == 0
+
+
 # ── PROVE-FIRED: end-to-end synthetic breach on a STAND-IN (never the live silo) ──────
 # Nazim #25011: "a detector nobody has watched fail is untested." This builds a
 # stand-in with the real column shape on the substrate (rolled back), points the
@@ -490,5 +513,60 @@ def test_cai1030_plaintext_parent_contact_still_forbidden(monkeypatch, pg_dsn):
         labels = {l for l, _ in breaches}
         assert "_sre_persons2(parent).phone" in labels and "_sre_persons2(parent).email" in labels, \
             f"PLAINTEXT parent contact must STILL trip (ciphertext-only floor); got {breaches}"
+    finally:
+        conn.rollback(); conn.close()
+
+
+# ── mig488 second_parent_visible: a false P0 on a NOT-NULL-DEFAULT-FALSE toggle (bus 89039) ──
+def test_mig488_second_parent_visible_does_not_trip_the_fail_closed_loop(monkeypatch, pg_dsn):
+    """mig488 / hc#463 (applied by coord 89036, ruled on in bus 89039): second_parent_visible
+    is a visibility toggle -- does the second parent see the invoices -- NOT deep PII.
+
+    Because it is NOT NULL DEFAULT false, the generic IS NOT NULL test in count_forbidden
+    counted every link row the moment the column existed: 2286 links, 0 true, a P0 that
+    measured the column's existence rather than any PII. Same class as restricted
+    (coord #56215). The fix is a name-level IGNORE, not a ceiling gate: there is no value of
+    this column that is a PII fact."""
+    conn = _cai1030_conn(pg_dsn); cur = conn.cursor()
+    try:
+        _cai1030_standin(cur, extra_parents=", second_parent_visible boolean NOT NULL DEFAULT false")
+        _cai1030_point(monkeypatch)
+        org = _CAI1030_ORG
+        sid, _ = _mk_student(cur, org)
+        _mk_parent_link(cur, org, sid)   # takes the default false, i.e. IS NOT NULL is true
+
+        f = M.count_forbidden(cur, org)
+        assert "_sre_parents2.second_parent_visible" not in f, \
+            "an ignored toggle must not even be counted (counting it is what P0'd on 2286 links)"
+        breaches, _ = M.classify_forbidden(f)
+        assert not [l for l, _ in breaches if "second_parent_visible" in l], \
+            f"second_parent_visible must not breach; got {breaches}"
+    finally:
+        conn.rollback(); conn.close()
+
+
+def test_mig488_ignore_does_not_widen_the_loop(monkeypatch, pg_dsn):
+    """NEGATIVE CONTROL for the same change (required by the 89039 ruling): with
+    second_parent_visible ignored, a NEW unclassified link column of a different name must
+    STILL fail closed. An ignore that swallowed its neighbours would be worse than the
+    false P0 it fixes -- it would silence the fail-closed-unknown guard that keeps a future
+    mig-added PII column from reading green."""
+    conn = _cai1030_conn(pg_dsn); cur = conn.cursor()
+    try:
+        _cai1030_standin(cur, extra_parents=(
+            ", second_parent_visible boolean NOT NULL DEFAULT false"
+            ", surprise_flag boolean NOT NULL DEFAULT false"))
+        _cai1030_point(monkeypatch)
+        org = _CAI1030_ORG
+        sid, _ = _mk_student(cur, org)
+        _mk_parent_link(cur, org, sid)
+        cur.execute("UPDATE _sre_parents2 SET surprise_flag=true")
+
+        breaches, _ = M.classify_forbidden(M.count_forbidden(cur, org))
+        labels = {l for l, _ in breaches}
+        assert "_sre_parents2.surprise_flag" in labels, \
+            f"an unknown link column must STILL fail closed; got {breaches}"
+        assert not any("second_parent_visible" in l for l in labels), \
+            f"the ignored toggle must stay ignored; got {breaches}"
     finally:
         conn.rollback(); conn.close()

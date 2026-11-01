@@ -2323,6 +2323,27 @@ def run(dry: bool, injected: list[dict] | None = None,
                     if not dry:
                         audit(conn, f"[sla-watchdog] PAGED operator re msg #{mid}",
                               page_text, priority="P1")
+            elif attended_for(conn, mid, v["violation_type"], agent):
+                # The page path has asked this question since the #8723 fix; the nudge
+                # path never did — so an ask that was ANSWERED or WITHDRAWN without
+                # read_at being stamped kept producing keystrokes into a live pane.
+                # 'unread' keys on read_at alone, and nothing guarantees read_at when
+                # the row is settled another way: the nightly reconciler
+                # (reconcile_responded_at.py) stamps responded_at with a response_ref
+                # and leaves read_at NULL, as does a recipient that answers in-thread
+                # via reply evidence (scripts/lib/reply_evidence.py).
+                # Live instance (2026-11-01): orch-console WITHDREW #88625/#88645 at
+                # 00:57:58Z ("hifz stays on Claude until Musa decides in the morning"),
+                # responded_at set, read_at NULL — and cc-hifz-1 was re-nudged every
+                # cycle afterwards for asks it owed nothing on. A withdrawn row is not
+                # a stall; nobody here needs reminding of work that has been taken back.
+                # Same answer as the page path on purpose: if the row is attended there
+                # is no one to nudge, and a lane that is offline or has answered must not
+                # receive pane keystrokes. attended_for() fails toward False (not
+                # attended) on any lookup error, so a DB hiccup still nudges.
+                actions.append(
+                    f"SKIP nudge #{mid} ({pr} {v['violation_type']}, {elapsed}m) agent={agent} "
+                    f"— attended (read/responded/replied/withdrawn since scan); nothing to remind")
             else:
                 # re-nudge unless within backoff
                 within_backoff = (now - rec["last_nudge_ts"]) < RENUDGE_BACKOFF_MIN * 60

@@ -15,5 +15,7 @@
   "substrate": "DEEPSEEK_CODING_KEY",
   "wingmen": "DEEPSEEK_KEY_WINGMEN",
   "paperclip": "DEEPSEEK_KEY_PAPERCLIP",
-  "scholar": "DEEPSEEK_KEY_SCHOLAR"
+  "scholar": "DEEPSEEK_KEY_SCHOLAR",
+  "hifz": "DEEPSEEK_CODING_KEY",
+  "console": "DEEPSEEK_CODING_KEY"
 }

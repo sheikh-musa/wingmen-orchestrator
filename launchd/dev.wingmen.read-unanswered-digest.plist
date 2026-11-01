@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.read-unanswered-digest</string>
+  <!-- cc-fleet-health read-but-unanswered digest (orch-console #88653, ruling #88660).
+       Daily, REPORT-ONLY: probes each live lane's tmux pane and posts ONE P3 digest to
+       orch-console listing lanes that READ a requires_response row, never answered it,
+       and are idle. It never nudges and never mutates a lane — console explicitly ruled
+       out widening the idle-with-work nudge net (#88660).
+       WHY IT EXISTS: idle_with_work_watchdog.py hardcodes two lanes, only queries
+       read_at IS NULL, and derives 'idle' from a heartbeat that is always fresh — so a
+       live-but-doing-nothing lane can never read as idle there. This covers that class.
+       14:00 local == 06:00Z, after the nightly 03:00Z reconcile and the 04:00Z rotation.
+       The wrapper sources .env for the DSN (no secrets in this plist) and unsets
+       ANTHROPIC_API_KEY so a present key cannot force metered API billing.
+       NOT loaded/symlinked yet — scheduling is wired after review. -->
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/read_unanswered_digest_run.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><false/>
+  <key>StartCalendarInterval</key><dict>
+    <key>Hour</key><integer>14</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/read-unanswered-digest.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/read-unanswered-digest.err.log</string>
+</dict>
+</plist>

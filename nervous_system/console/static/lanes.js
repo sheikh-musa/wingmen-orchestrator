@@ -83,13 +83,11 @@
         var tlabel = r.token_group
           ? ("Token · " + esc(r.token_group) + " group")
           : (r.token_pointer === ".lane_default_token") ? "Token · all lanes" : "Token";
-        var topts = '<option value="">— default —</option>' + registry.tokens.map(function (t) {
-          var sel = (r.token_pointer_name === t.name) ? " selected" : "";
-          var dis = t.available ? "" : " disabled";
-          return '<option value="' + esc(t.name) + '"' + sel + dis + '>' + esc(t.name) + (t.fp ? " (" + esc(t.fp) + ")" : "") + '</option>';
-        }).join("");
-        ctrls += '<label class="ctl"><span>' + tlabel + '</span>' +
-          '<select data-kind="token" data-session="' + s + '">' + topts + '</select></label>';
+        // STATIC LABEL ONLY (orch-console 89062): the dropdown and its
+        // Preview/Apply pair are gone — a control that cannot act should not be
+        // there. Shown, not offered; the dock group switch is the live token
+        // control and a per-lane change happens at relaunch.
+        ctrls += '<div class="ctlnote">' + tlabel + '</div>';
       } else {
         ctrls += '<div class="ctlnote">token: .env default (not pointer-settable)</div>';
       }
@@ -107,10 +105,6 @@
       // 503s while disabled, 403s until armed via Telegram; taps ask for a typed
       // body-name confirm. No agent drives it.
       var ab = "";
-      if (r.token_settable) {
-        ab += '<button class="prevbtn" data-apply="token" data-session="' + s + '">Preview token</button>';
-        ab += '<button class="armbtn" data-armapply="token" data-session="' + s + '">Apply token</button>';
-      }
       if (r.model_settable) {
         ab += '<button class="prevbtn" data-apply="model" data-session="' + s + '">Preview model</button>';
         ab += '<button class="armbtn" data-armapply="model" data-session="' + s + '">Apply model</button>';

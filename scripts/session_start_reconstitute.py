@@ -43,13 +43,53 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.expanduser("~/wingmen/orchestrator"))
+sys.path.insert(0, os.environ.get("WINGMEN_ORCH_DIR") or os.path.expanduser("~/wingmen/orchestrator"))
 
-ORCH_DIR = os.path.expanduser("~/wingmen/orchestrator")
+# Normally the live checkout. WINGMEN_ORCH_DIR lets a worktree's copy of this
+# hook (and its tests) resolve against that worktree instead of the live repo.
+ORCH_DIR = os.environ.get("WINGMEN_ORCH_DIR") or os.path.expanduser("~/wingmen/orchestrator")
 # Fresh-context events only. resume/compact retain context — don't re-inject.
 RECONSTITUTE_SOURCES = {"startup", "clear"}
 _HANDOFF_GLOB = os.path.join(ORCH_DIR, "reports", "nazim-handoff-*.md")
 _MAX_HANDOFF_CHARS = 24000  # bound the injection; the newest handoff is ~6KB
+
+# Memory 2.0 Part 2 PR B (op#36768). The boot read has a hard budget: the
+# whole hook must stay under 3s, so DB work gets 1.5s (libpq's connect
+# timeout is whole seconds, so 1s connect + 1.5s statement). A boot that
+# waits on memory is worse than a boot without memory.
+_FACTS_TIMEOUT_S = 1.5
+_FACTS_MAX_CHARS = 900  # ~250 tokens; boot context is not a dump
+
+
+def _facts_block() -> str:
+    """Facts already on record that this session should not re-ask about.
+
+    Shared with the global hook (scripts/session_start_facts.py) so there is
+    one budget, one cap and one fail-safe, not two that can drift.
+    """
+    try:
+        from scripts.lib import boot_facts
+        return boot_facts.facts_block()
+    except Exception:
+        return ""
+
+
+def _emit_facts_only(facts: str) -> int:
+    """Emit a facts-only SessionStart block -- no identity, no handoff.
+
+    Silent when there are no facts: an empty additionalContext would be a
+    payload that says nothing, and every branch using this is a fallback where
+    saying nothing is already the honest answer.
+    """
+    if not facts:
+        return 0
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": facts,
+        }
+    }))
+    return 0
 
 
 def _cc_base_agent_id() -> str:
@@ -194,17 +234,24 @@ def main() -> int:
     base_agent_id = _cc_base_agent_id()
     if base_agent_id:
         instance_agent_id = os.environ.get("CC_AGENT_ID", "").strip()
+        notice = _lane_identity_notice(base_agent_id, instance_agent_id)
+        facts = _facts_block()
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
-                "additionalContext": _lane_identity_notice(base_agent_id, instance_agent_id),
+                "additionalContext": notice + (("\n" + facts) if facts else ""),
             }
         }))
         return 0
 
-    # Fail-closed scoping: console body only, past this point.
+    # Fail-closed scoping: console handoff only, past this point. A plain body
+    # in this checkout is neither a lane nor the console, but it still gets the
+    # FACTS: the global facts hook stands down here on the strength of this
+    # branch emitting them, so returning empty would drop memory on a boot that
+    # has no other source (cc-quality H1 on PR#747). Facts only -- this branch
+    # must never claim an identity (op#29128 / bus #63372).
     if _body_role() != "console":
-        return 0
+        return _emit_facts_only(_facts_block())
 
     exp_fp = _expected_token_fp()
     fp_clause = (
@@ -231,7 +278,10 @@ def main() -> int:
             with open(handoff_path, "r", encoding="utf-8") as fh:
                 handoff = fh.read()
         except OSError:
-            return 0
+            # Same reason as the plain-body branch: the global hook has stood
+            # down for this project, so an unreadable handoff must cost the
+            # session the handoff, not its memory.
+            return _emit_facts_only(_facts_block())
         if len(handoff) > _MAX_HANDOFF_CHARS:
             handoff = handoff[:_MAX_HANDOFF_CHARS] + "\n\n…[handoff truncated — read the full file for the rest]"
         rel = os.path.relpath(handoff_path, ORCH_DIR)
@@ -257,10 +307,11 @@ def main() -> int:
             + asks_block
         )
 
+    console_facts = _facts_block()
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": context,
+            "additionalContext": context + (("\n" + console_facts) if console_facts else ""),
         }
     }))
     return 0
