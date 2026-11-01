@@ -82,6 +82,21 @@ ERROR_BACKOFF = 5          # seconds after a per-channel error
 CONFIG_REFRESH = 60        # seconds between bot_channels re-reads
 DB_ALERT_EVERY = 60        # throttle for the watchdog-visible DB-failure line
 
+# STEP-0 poll-health REAP (orch-console bus #89318). ingest_poll_health is keyed
+# (channel_key, host), and `host` is socket.gethostname() — which on this Mac can
+# come back as "Sheikhs-Mini" OR "Sheikhs-Mac-mini.local" depending on how the
+# process was started. A rename/relaunch therefore leaves a PHANTOM row that
+# never updates again, and readers that filter on channel_key alone see a stale
+# error forever. Live example 2026-11-01: (coffeemedia, gzbai) sat frozen at
+# 16 consecutive 409s from 2026-10-17 while the real Mini poller was healthy,
+# and a human read the stale row as an ongoing duplicate-poller incident.
+# So: delete host rows for OUR channels that have been silent past this window.
+# Scoped deliberately — only channel_keys this daemon owns, and never our own
+# host row, so a reap can't reach into another daemon's bookkeeping.
+POLL_HEALTH_REAP_AFTER_DAYS = 7
+POLL_HEALTH_REAP_EVERY_S = 3600   # at most once an hour
+_poll_health_last_reap = None     # None = never reaped yet -> sweep on first cycle
+
 # Self-hosted Telegram Bot API server support (bus #53128/#53139/#53143).
 # STAGED, NOT CUT OVER: unset (default) is byte-identical current behavior
 # against the cloud API. When set (e.g. http://127.0.0.1:8081 for a local
@@ -1995,6 +2010,47 @@ def unread_count(conn, ch: Channel) -> int:
         return cur.fetchone()[0]
 
 
+def _reap_silent_poll_health_rows(conn, group) -> None:
+    """Delete ingest_poll_health rows for OUR channels that have been silent past
+    POLL_HEALTH_REAP_AFTER_DAYS, so phantom host rows stop being read as live
+    incidents (see the constants block; orch-console bus #89318).
+
+    Deliberately narrow and fail-open: this runs on the success path of a cycle
+    that has ALREADY done its real work, so any problem here must never break
+    polling. Scoped to this group's channel_keys and to hosts other than our own.
+    """
+    global _poll_health_last_reap
+    now = time.monotonic()
+    # None = never reaped (sweep on the first cycle); otherwise throttle. NOTE the
+    # sentinel must not be 0.0: time.monotonic() is process-relative here, so
+    # "now - 0.0 < 3600" would silently defer the FIRST reap by an hour.
+    if (_poll_health_last_reap is not None
+            and now - _poll_health_last_reap < POLL_HEALTH_REAP_EVERY_S):
+        return
+    keys = [ch.key for ch in group]
+    if not keys:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM ingest_poll_health "
+                "WHERE channel_key = ANY(%s) AND host <> %s "
+                "  AND updated_at < now() - make_interval(days => %s) "
+                "RETURNING channel_key, host, updated_at",
+                (keys, socket.gethostname(), POLL_HEALTH_REAP_AFTER_DAYS),
+            )
+            reaped = cur.fetchall()
+        _poll_health_last_reap = now
+        for channel_key, host, updated_at in reaped:
+            _log_line(
+                "poll-health reap: dropped silent host row %s@%s "
+                "(last update %s, past the %dd window)"
+                % (channel_key, host, updated_at, POLL_HEALTH_REAP_AFTER_DAYS))
+    except Exception as e:  # never let the reap break polling
+        _poll_health_last_reap = now
+        _log_line("poll-health reap skipped: %s: %s" % (type(e).__name__, e))
+
+
 # ── Token task: long-poll loop w/ DB-held offset, ONE per unique token ────────
 # (op#31298/31307 one-bot-many-clients: a solo-channel token group is this
 # exact loop, unchanged — grouping only matters once 2+ channel_keys share a
@@ -2102,6 +2158,7 @@ async def _run_token_cycle(token_env_key: str, channels: dict[str, Channel],
                         "ON CONFLICT (channel_key, host) DO UPDATE SET "
                         "last_ok_at=now(), consec_errors=0, last_error=NULL, updated_at=now()",
                         (ch.key, socket.gethostname()))
+            _reap_silent_poll_health_rows(conn, group)
             conn.commit()
         return last_db_alert, None
     except psycopg.Error as e:
