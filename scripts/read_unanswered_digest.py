@@ -312,6 +312,18 @@ def collect(cur, min_age_h=DEFAULT_MIN_AGE_H, priorities=DEFAULT_PRIORITIES,
     # ── 1. instance-addressed mail: one entry per live instance, its own pane ──
     for agent_id, base_agent_id, host, hb_age, status_session in live:
         base = base_agent_id or agent_id
+        # A body that RUNS AS ITS BASE while live siblings also share that base is not
+        # reported here. Its mailbox IS the base's: read_unanswered(agent_id) and
+        # read_unanswered_any([base]) return the same rows, so step 2 already reports
+        # them — once, and with the stricter rule that EVERY sibling must be drained
+        # before the base counts as idle. Emitting here as well counted the same rows
+        # twice: on 2026-11-01 cc-quality (a live row whose agent_id equals its base,
+        # alongside cc-quality-2) appeared in both lists with identical row ids, so the
+        # digest claimed 52 rows and two lanes where there were 26 and one.
+        # Only the LONE base-as-body case is skipped in step 2, so the skip has to be
+        # here for the multi-member one.
+        if agent_id == base and len(by_base[base]) > 1:
+            continue
         rows = read_unanswered(cur, agent_id, min_age_h, priorities)
         if not rows:
             continue
