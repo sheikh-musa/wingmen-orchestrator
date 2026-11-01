@@ -57,7 +57,7 @@ class FakeCursor:
             self._pending_fetch = {"id": row_id}
         elif upper.startswith("UPDATE EXEC_BROKER_ACCESS_LOG SET GATE_CONSUMED"):
             # Simulates the partial UNIQUE index on (gate_id) WHERE gate_consumed
-            # (migrations/drafts/hc95_exec_broker_gate_single_use.sql).
+            # (migrations/143_hc95_exec_broker_gate_single_use.sql).
             (row_id,) = params
             gate_id = self._gate_ids[row_id]
             if self.consume_error is not None:
@@ -1184,3 +1184,15 @@ def test_b3_gate_before_cutover_refused_end_to_end(tmp_path):
     resp = _send(sock_path, _gated_write("e1"))
     assert resp["error"]["reason"] == "gate_before_cutover"
     assert db.cursor_obj.consumed_gates == {}
+
+
+# --- queue row 272: every access-log row carries this daemon's boot_id --------
+
+def test_server_stamps_its_boot_id_on_the_access_log_row(tmp_path):
+    db = FakeDb()
+    server, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db)
+    server.boot_id = "22222222-2222-2222-2222-222222222222"
+    assert _send(sock_path, {"project_ref": "oovskwogvefnznfowjky", "guarded_sql": "select 1", "reason": "",
+                             "gate_id": None, "caller": "c", "exec_ledger_id": "e"})["status"] == "ok"
+    (sql, params) = [(s, p) for s, p in db.cursor_obj.calls if s.strip().upper().startswith("INSERT")][0]
+    assert "boot_id" in sql and params[-1] == "22222222-2222-2222-2222-222222222222"

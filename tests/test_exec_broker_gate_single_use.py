@@ -1,5 +1,5 @@
 """Proof-test for hc#95 B3 single-use gates (cutover spec bus #89814 §4.2-4.3):
-migrations/drafts/hc95_exec_broker_gate_single_use.sql + vault_log.consume_gate.
+migrations/143_hc95_exec_broker_gate_single_use.sql + vault_log.consume_gate.
 
 The binding must be enforced by the DATABASE so a replay or a concurrent
 duplicate fails closed -- proven here against the repo's sanctioned ephemeral
@@ -32,10 +32,10 @@ from exec_broker.vault_log import (  # noqa: E402
     log_started,
 )
 
-_DRAFTS = _ROOT / "migrations" / "drafts"
-_BASE = _DRAFTS / "hc95_exec_broker_access_log.sql"
-_GATE_REF = _DRAFTS / "hc95_exec_broker_gate_ref.sql"
-_SINGLE_USE = _DRAFTS / "hc95_exec_broker_gate_single_use.sql"
+_MIGRATIONS = _ROOT / "migrations"
+_BASE = _MIGRATIONS / "drafts" / "hc95_exec_broker_access_log.sql"   # live; outside the numbered chain
+_GATE_REF = _MIGRATIONS / "142_hc95_exec_broker_gate_ref.sql"
+_SINGLE_USE = _MIGRATIONS / "143_hc95_exec_broker_gate_single_use.sql"
 
 
 # CI MUST RUN THESE, NEVER SKIP (console #89841 ruling e): ci.yml's "Lint &

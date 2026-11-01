@@ -1,14 +1,33 @@
--- DRAFT -- hc#95 exec-broker dead-man heartbeat (cutover spec bus #89814 §5.2).
--- PROPOSE-ONLY: orch-console applies via direct psycopg after gating (never `supabase db push`).
--- NOT applied. Migration NNN assigned by CORE at apply. Target: the fleet-bus DB
--- (same database as exec_broker_access_log -- the broker's single DSN).
+-- 144_hc95_exec_broker_heartbeat.sql
+-- ledger: silo=tscuymavysscrvoberrr
+-- (orchestrator substrate)
+--
+-- hc#95 exec-broker dead-man heartbeat (cutover spec bus #89814 §5.2).
+-- Apply via scripts/apply_migration.py with a --gate decision row citing this
+-- file's sha12 (direct psycopg, same-transaction ledger write) -- NEVER
+-- `supabase db push` (decision 962). hc#95 broker apply order: 142 -> 143 ->
+-- 144 -> 145 -> 146; this is 3 of 5.
+-- Target: the fleet-bus DB (same database as exec_broker_access_log -- the
+-- broker's single DSN).
+-- assert: no_table_privilege authenticated public.exec_broker_heartbeat SELECT
+-- assert: no_table_privilege authenticated public.exec_broker_heartbeat INSERT
+-- assert: no_table_privilege authenticated public.exec_broker_heartbeat UPDATE
+-- assert: no_table_privilege authenticated public.exec_broker_heartbeat DELETE
+-- assert: no_table_privilege anon public.exec_broker_heartbeat SELECT
+-- assert: no_table_privilege anon public.exec_broker_heartbeat INSERT
+-- assert: no_table_privilege anon public.exec_broker_heartbeat UPDATE
+-- assert: no_table_privilege anon public.exec_broker_heartbeat DELETE
+-- assert: no_table_privilege service_role public.exec_broker_heartbeat SELECT
+-- assert: no_table_privilege service_role public.exec_broker_heartbeat INSERT
+-- assert: no_table_privilege service_role public.exec_broker_heartbeat UPDATE
+-- assert: no_table_privilege service_role public.exec_broker_heartbeat DELETE
 --
 -- PREREQUISITE: exec_broker_access_log must already exist (it is LIVE on the
 -- substrate; created by migrations/drafts/hc95_exec_broker_access_log.sql). This
 -- file adds a partial index to it (exec_broker_access_log_open_idx, bottom of the
 -- file), so applying it to a DB without that table fails and rolls back.
--- Apply order within hc#95: gate_ref -> single_use -> THIS -> exec_prod_ledger ->
--- broker_watch_readonly.
+-- Apply order within hc#95: 142 gate_ref -> 143 single_use -> 144 THIS -> 145
+-- exec_prod_ledger -> 146 broker_watch_readonly.
 --
 -- One row per GATED ref (the broker's standing EXEC_BROKER_LIVE_GATED_REFS set).
 -- Writer: scripts/lib/exec_broker/heartbeat.py, started by exec_broker_daemon.py
@@ -65,7 +84,7 @@ ALTER TABLE exec_broker_heartbeat ADD COLUMN IF NOT EXISTS taken_over_from_host 
 -- Watchdog open-row probe (coord, 2026-11-01): exec_broker_access_log rows still
 -- 'started' (ts_end IS NULL) past a threshold mean a broker died mid-call. The
 -- partial index keeps that probe cheap as the log grows. It lives HERE, not in
--- the already-merged hc95_exec_broker_gate_ref.sql draft (which must not change).
+-- the already-merged 142_hc95_exec_broker_gate_ref.sql (which must not change).
 CREATE INDEX IF NOT EXISTS exec_broker_access_log_open_idx
   ON exec_broker_access_log (ts_start) WHERE ts_end IS NULL;
 

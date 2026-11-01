@@ -1,4 +1,4 @@
-"""Real-PG proof for migrations/drafts/hc95_exec_broker_heartbeat.sql + the
+"""Real-PG proof for migrations/144_hc95_exec_broker_heartbeat.sql + the
 heartbeat CAS take (cc-fleet-health review): a second daemon on the SAME host
 re-taking a gated ref's row is stamped (taken_over_from = first boot_id,
 takeover_reason = 'same_host_new_boot'); a fresh foreign holder is never stolen.
@@ -22,7 +22,7 @@ sys.path.insert(0, str(_ROOT / "scripts" / "lib"))
 
 from exec_broker.heartbeat import renew, take  # noqa: E402
 
-_DRAFT = _ROOT / "migrations" / "drafts" / "hc95_exec_broker_heartbeat.sql"
+_DRAFT = _ROOT / "migrations" / "144_hc95_exec_broker_heartbeat.sql"
 _REF = "syntheticbrokerqfakesilo"
 
 

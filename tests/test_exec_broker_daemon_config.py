@@ -21,6 +21,7 @@ def _load():
 
 daemon = _load()
 _real_start_heartbeat = daemon._start_heartbeat
+_real_reconcile = daemon._reconcile_in_doubt
 
 
 def test_load_allowed_uids_parses_csv():
@@ -203,6 +204,7 @@ def test_parse_override_expiry_within_cap_is_not_clamped():
 
 
 _HEARTBEAT_CALLS: list = []
+_RECONCILE_CALLS: list = []
 
 
 def _set_base_env(monkeypatch, tmp_path):
@@ -227,6 +229,11 @@ def _set_base_env(monkeypatch, tmp_path):
     # is replaced here and tested on its own below.
     _HEARTBEAT_CALLS.clear()
     monkeypatch.setattr(daemon, "_start_heartbeat", lambda **kw: _HEARTBEAT_CALLS.append(kw))
+    # queue row 272: the boot-time in-doubt reconcile is also a real DB call
+    _RECONCILE_CALLS.clear()
+    monkeypatch.setattr(daemon, "_resolve_host", lambda: "gzb")
+    monkeypatch.setattr(daemon, "_reconcile_in_doubt",
+                        lambda **kw: _RECONCILE_CALLS.append(kw) or (0, 0))
 
 
 class _FakeServer:
@@ -573,3 +580,80 @@ def test_real_start_heartbeat_with_no_refs_raises_value_error(monkeypatch):
     monkeypatch.setattr(fleet_host_id, "fleet_host_id", lambda: "gzb")
     with pytest.raises(ValueError):
         _real_start_heartbeat(db_conn_factory=lambda: None, refs=frozenset(), interval_seconds=60)
+
+
+
+# --- queue row 272: boot-time in-doubt reconcile ---------------------------------
+
+def test_main_reconciles_before_heartbeat_with_one_shared_boot_id(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    order = []
+    monkeypatch.setattr(daemon, "_reconcile_in_doubt", lambda **kw: order.append(("reconcile", kw)) or (0, 0))
+    monkeypatch.setattr(daemon, "_start_heartbeat", lambda **kw: order.append(("heartbeat", kw)))
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    assert daemon.main([]) == 0
+    assert [o[0] for o in order] == ["reconcile", "heartbeat"]
+    boot = order[0][1]["boot_id"]
+    assert order[1][1]["boot_id"] == boot and _FakeServer.last_kwargs["boot_id"] == boot
+    assert order[0][1]["host"] == "gzb" and order[1][1]["host"] == "gzb"
+
+
+def test_main_refuses_boot_when_the_reconcile_fails(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+
+    def _boom(**kw):
+        raise RuntimeError("in-doubt reconcile failed: OperationalError")
+
+    monkeypatch.setattr(daemon, "_reconcile_in_doubt", _boom)
+    monkeypatch.setattr(daemon, "BrokerServer", _FakeServer)
+    _FakeServer.last_kwargs = None
+    assert daemon.main([]) == 1
+    assert _FakeServer.last_kwargs is None and _HEARTBEAT_CALLS == []
+
+
+class _ReconConn:
+    def __init__(self, result=(3, 120), boom=False):
+        self.result, self.boom, self.calls, self.commits = result, boom, [], 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def cursor(self):
+        conn = self
+
+        class _C:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def execute(self, sql, params=None):
+                if conn.boom:
+                    raise RuntimeError("db down")
+                conn.calls.append((sql, params))
+
+            def fetchone(self):
+                return {"n": conn.result[0], "oldest_age_s": conn.result[1]}
+
+        return _C()
+
+    def commit(self):
+        self.commits += 1
+
+
+def test_real_reconcile_logs_count_and_oldest_age_without_sql_text(capsys):
+    conn = _ReconConn()
+    assert _real_reconcile(db_conn_factory=lambda: conn, boot_id="b-2", host="gzb") == (3, 120)
+    err = capsys.readouterr().err
+    assert "marked 3 row(s)" in err and "'in_doubt'" in err and "oldest 120s old" in err
+    assert "UPDATE" not in err and "exec_broker_access_log" not in err
+    assert conn.commits == 1 and conn.calls[0][1] == {"boot": "b-2", "host": "gzb"}
+
+
+def test_real_reconcile_db_error_is_a_clean_refusal():
+    with pytest.raises(RuntimeError, match="in-doubt reconcile failed: RuntimeError"):
+        _real_reconcile(db_conn_factory=lambda: _ReconConn(boom=True), boot_id="b", host="gzb")

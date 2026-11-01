@@ -14,7 +14,7 @@ renew (`renew`: stamps the DB clock only if THIS boot still holds the row),
 and a TTL after which the row is expired/reclaim-eligible. The same pure
 decision core (is_stale / take semantics) is mirrored by the atomic SQL below.
 
-TABLE (migrations/drafts/hc95_exec_broker_heartbeat.sql), one row per gated ref:
+TABLE (migrations/144_hc95_exec_broker_heartbeat.sql), one row per gated ref:
   project_ref      text PK   the gated ref this broker serves
   holder_host      text      fleet_host_id() of the broker body
   broker_pid       integer   daemon pid

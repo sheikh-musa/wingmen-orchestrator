@@ -68,6 +68,7 @@ class BrokerServer:
         live_gated_refs: "frozenset[str] | None" = None,
         gate_max_age_seconds: "int | None" = None,
         gate_not_before: "datetime | None" = None,
+        boot_id: "str | None" = None,
     ) -> None:
         self.sock_path = sock_path
         self.allowed_uids = allowed_uids
@@ -91,6 +92,8 @@ class BrokerServer:
         # B3 cutover floor (console #89841 ruling e): None -> gates refused on
         # every non-QA ref (fail closed), see require_gate.
         self.gate_not_before = gate_not_before
+        # Queue row 272: this daemon boot's id, stamped on every access-log row.
+        self.boot_id = boot_id
 
     def serve_forever(self) -> None:
         if os.path.exists(self.sock_path):
@@ -187,6 +190,7 @@ class BrokerServer:
                     reason=req.reason,
                     gate_id=req.gate_id,
                     gate_ref=req.ref,
+                    boot_id=self.boot_id,
                 )
                 row_id = log_started(cur, entry)
                 db_conn.commit()
