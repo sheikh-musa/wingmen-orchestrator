@@ -30,9 +30,11 @@ def _entry_row(i, age_h=10.0, pri="P1", frm="orch-console", subj="a question"):
             "subject": subj, "age_h": age_h}
 
 
-def _patch(monkeypatch, agents, rows_by_agent, pane):
+def _patch(monkeypatch, agents, rows_by_agent, pane, base_rows=None):
     monkeypatch.setattr(d, "live_agents", lambda cur, mh: agents)
     monkeypatch.setattr(d, "read_unanswered", lambda cur, a, h, p: rows_by_agent.get(a, []))
+    monkeypatch.setattr(d, "read_unanswered_any",
+                        lambda cur, ids, h, p: (base_rows or {}).get(ids[0], []))
     monkeypatch.setattr(d, "lane_map", lambda cur: {"cc-a": "sess-a", "cc-b": "sess-b"})
     monkeypatch.setattr(d, "pane_state", lambda s: pane.get(s, "probe_error"))
     monkeypatch.setattr(d, "local_hostnames", lambda: {"Sheikhs-Mini"})
@@ -126,3 +128,52 @@ def test_render_includes_stamp_gap_caveat():
                                     "max_heartbeat_min": 30},
                      "idle": [entry], "not_probeable": [], "busy": 0})
     assert "stamping gap" in text
+
+
+# ── F1 (cc-quality, #789 review): BASE-addressed mail must not be invisible ──
+# A row addressed to `cc-irsyad` while four live instances run is the same class
+# this digest exists to catch. It must appear EXACTLY ONCE, never N-fold.
+
+def test_base_addressed_rows_reported_once(monkeypatch):
+    _patch(monkeypatch,
+           [("cc-a-1", "cc-a", "Sheikhs-Mini", 1),
+            ("cc-a-2", "cc-a", "Sheikhs-Mini", 2)],
+           {},                                    # no instance-addressed mail
+           {"sess-a": "drained"},
+           base_rows={"cc-a": [_row(5)]})         # ...only base-addressed mail
+    out = d.collect(cur=None)
+    assert [e["agent"] for e in out["idle"]] == ["cc-a"], "attributed once, not per sibling"
+    assert len(out["idle"][0]["rows"]) == 1
+
+
+def test_base_entry_not_idle_when_pane_busy(monkeypatch):
+    _patch(monkeypatch,
+           [("cc-a-1", "cc-a", "Sheikhs-Mini", 1),
+            ("cc-a-2", "cc-a", "Sheikhs-Mini", 2)],
+           {}, {"sess-a": "busy"}, base_rows={"cc-a": [_row(5)]})
+    out = d.collect(cur=None)
+    assert out["idle"] == []
+    assert out["busy"] == 1
+
+
+def test_base_entry_not_idle_when_a_sibling_is_on_another_host(monkeypatch):
+    """One sibling we cannot probe makes the whole base NOT PROBEABLE — the mail
+    might be being worked there, so 'idle' would be a false claim."""
+    _patch(monkeypatch,
+           [("cc-a-1", "cc-a", "Sheikhs-Mini", 1),
+            ("cc-a-2", "cc-a", "gzbai", 2)],
+           {}, {"sess-a": "drained"}, base_rows={"cc-a": [_row(5)]})
+    out = d.collect(cur=None)
+    assert out["idle"] == []
+    assert [e["agent"] for e in out["not_probeable"]] == ["cc-a"]
+
+
+def test_singleton_running_as_its_base_is_not_double_reported(monkeypatch):
+    _patch(monkeypatch,
+           [("cc-a", "cc-a", "Sheikhs-Mini", 1)],
+           {"cc-a": [_row(1)]},
+           {"sess-a": "drained"},
+           base_rows={"cc-a": [_row(2)]})          # same mailbox, second query
+    out = d.collect(cur=None)
+    assert [e["agent"] for e in out["idle"]] == ["cc-a"]
+    assert len(out["idle"]) == 1
