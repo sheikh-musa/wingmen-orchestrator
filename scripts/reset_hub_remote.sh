@@ -23,6 +23,11 @@ KEY="${WINGMEN_VPS_KEY:-$HOME/.ssh/wingmen_vps}"
 # transiently. FAIL-CLOSED: any uncertainty (no DATABASE_URL, unknown holder, resolver
 # import error) => refuse — resetting a stale host is the exact failure this guards.
 # Reuses scripts/lib/hub_reach (TDD'd).
+# RETIRED (Musa op37138 / orch-console 89343, 2026-11-01): the wingmen-core group is
+# decommissioned AND its host key has since changed, so it is refused BY NAME even when a
+# lease still names it (hub_reach.is_reach_host_current fail-closes for it) — a reset there
+# could clear a different machine. An explicit WINGMEN_VPS_HOST still has to pass that same
+# guard, so the override cannot smuggle the retired address back in.
 ORCH_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 _HOLDER="$(psql "${DATABASE_URL:-}" -tAc "SELECT holder_host FROM orch_lease WHERE lease_key='orch-hub'" 2>/dev/null | tr -d '[:space:]')"
 # WINGMEN_VPS_HOST, if set, is an explicit operator override and always wins. Otherwise
@@ -35,18 +40,23 @@ _HOLDER="$(psql "${DATABASE_URL:-}" -tAc "SELECT holder_host FROM orch_lease WHE
 if [ -n "${WINGMEN_VPS_HOST:-}" ]; then
   VPS="$WINGMEN_VPS_HOST"
 else
-  VPS="$(python3 -c "
+  _INFO="$(python3 -c "
 import sys
 sys.path.insert(0, '$ORCH_DIR')
 from scripts.lib import hub_reach as h
 info = h.hub_reach_for_holder('$_HOLDER' or None)
-print(info['host'] if info['known'] and info['host'] == 'wingmen-core' else '')
+print('RETIRED' if info.get('retired') else '')
 " 2>/dev/null)"
-  if [ -z "$VPS" ]; then
-    echo "[reset_hub_remote] ABORT (safety guard): orch_lease holder_host='${_HOLDER:-<unknown>}' does not resolve to the wingmen-core canonical group (this script only supports a direct root SSH RESET to wingmen-core). A gzb hub can now be PROBED/NUDGED via 'ssh gzb' (see scripts/lib/hub_reach.py ssh_target), but a HARD reset there needs root and the fleet key has no sudo — escalate that to the operator/console with the vault password. Refusing rather than guessing; set WINGMEN_VPS_HOST explicitly if you really mean to target a specific host." >&2
+  if [ "$_INFO" = "RETIRED" ]; then
+    # RETIRED BY NAME (Musa op37138 / orch-console 89343, 2026-11-01): wingmen-core is
+    # decommissioned AND its host key has changed, so the one group this wrapper could reach
+    # is gone. Refuse before any address is even constructed — a stale lease naming it must
+    # not turn into a reset that could clear a DIFFERENT machine.
+    echo "[reset_hub_remote] REFUSED (retired host): orch_lease holder_host='${_HOLDER}' is the RETIRED wingmen-core group — decommissioned, and its host key has since changed, so connecting there may reach a different machine. Re-read orch_lease.holder_host (the live hub reports gzb) and act on that holder; if the lease still says wingmen-core, treat the lease as stale and escalate to the console instead of resetting." >&2
     exit 7
   fi
-  VPS="91.107.235.77"  # canonical group resolved to wingmen-core; this is its one known address
+  echo "[reset_hub_remote] ABORT (safety guard): orch_lease holder_host='${_HOLDER:-<unknown>}' does not resolve to a target this wrapper can reset (it only supports a direct root SSH RESET to the now-RETIRED wingmen-core group). A gzb hub can be PROBED/NUDGED via 'ssh gzb' (see scripts/lib/hub_reach.py ssh_target), but a HARD reset there needs root and the fleet key has no sudo — escalate that to the operator/console with the vault password. Refusing rather than guessing; set WINGMEN_VPS_HOST explicitly if you really mean to target a specific host." >&2
+  exit 7
 fi
 if ! python3 -c "import sys; sys.path.insert(0,'$ORCH_DIR'); from scripts.lib import hub_reach as h; sys.exit(0 if h.is_reach_host_current('$VPS', ('$_HOLDER' or None)) else 1)" 2>/dev/null; then
   echo "[reset_hub_remote] ABORT (safety guard): orch_lease holder_host='${_HOLDER:-<unknown>}' is NOT on target $VPS. The hub likely relocated (e.g. gzb); resetting $VPS could clear a decommissioned/wrong session. Refusing. Reach the CURRENT host instead — see scripts/lib/hub_reach.py." >&2

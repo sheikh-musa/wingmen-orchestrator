@@ -42,14 +42,35 @@ def test_gzbai_resolves_to_the_ssh_gzb_reach():
     assert WINGMEN_CORE_IP not in (r["reach"] or "")
 
 
-def test_wingmen_core_resolves_to_direct_vps():
+def test_wingmen_core_is_refused_by_name_not_silently_dropped():
+    # Musa op37138 / orch-console 89343 (2026-11-01): the VPS is decommissioned AND its host
+    # key has changed, so any path that can still reach it may now reach a DIFFERENT machine.
+    # The resolver must keep RECOGNIZING the name (so the refusal can be stated by name, rather
+    # than degrading into a routine "unknown host") while exposing NO reach and NO ssh_target
+    # for a caller to run.
     r = hr.hub_reach_for_holder("wingmen-core")
-    assert r["known"] is True
+    assert r["known"] is True, "the name must stay recognizable so the refusal can be named"
     assert r["host"] == "wingmen-core"
-    assert r["ssh_target"] == "root@91.107.235.77"
-    assert WINGMEN_CORE_IP in r["remedy"]
-    # a wingmen-core hub must NOT be described via the gzb LAN
+    assert r["retired"] is True
+    assert r["reach"] is None
+    assert r["ssh_target"] is None
+    assert "REFUSED" in r["remedy"]
+    assert "RETIRED" in r["remedy"]
+    # the refusal tells the reader where the truth lives instead of connecting
+    assert "orch_lease" in r["remedy"]
+    # and it does NOT repeat the address: a refusal that prints the IP is the string someone
+    # copy-pastes into a terminal under pressure
+    assert WINGMEN_CORE_IP not in r["remedy"]
+    # a wingmen-core hub must NOT be described via the gzb LAN either
     assert GZB_IP not in r["remedy"]
+
+
+def test_wingmen_core_aliases_refuse_identically():
+    # every alias spelling that used to resolve to the direct-VPS reach must refuse the same way
+    for alias in ("wingmen-core", "hermes-vps", WINGMEN_CORE_IP, "  WINGMEN-CORE  "):
+        r = hr.hub_reach_for_holder(alias)
+        assert r["retired"] is True, alias
+        assert r["reach"] is None and r["ssh_target"] is None, alias
 
 
 def test_unknown_holder_is_safe_and_names_no_host():
@@ -78,8 +99,15 @@ def test_no_resolved_remedy_ever_hardcodes_the_dead_host_for_a_live_gzb_hub():
 
 def test_host_match_guard_for_a_reset_target():
     # reset_hub_remote.sh's safety guard uses this: is `target_host` the current holder?
-    assert hr.is_reach_host_current("wingmen-core", holder_host="wingmen-core") is True
+    # CHANGED 2026-11-01 (op37138 / console 89343): a RETIRED host is never a valid MUTATING
+    # target, even when a stale lease still names it — its host key changed, so "the same host"
+    # can no longer be confirmed, and a reset could land on a different machine. This case
+    # previously asserted True; it is False now on purpose, not by accident.
+    assert hr.is_reach_host_current("wingmen-core", holder_host="wingmen-core") is False
+    assert hr.is_reach_host_current("91.107.235.77", holder_host="hermes-vps") is False
     assert hr.is_reach_host_current("wingmen-core", holder_host="gzbai") is False
+    # the live holder still matches itself (the guard must not become a blanket False)
+    assert hr.is_reach_host_current("gzbai", holder_host="gzbai") is True
     # unknown holder -> fail-closed (do NOT reset when we cannot confirm the target)
     assert hr.is_reach_host_current("wingmen-core", holder_host=None) is False
 

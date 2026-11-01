@@ -28,6 +28,12 @@ Idempotent: skips a file already mirrored at the right non-zero size. Best-effor
 a scp failure is logged and skipped, never fatal — the client-wake path (the shadow
 watcher that calls this) must survive any mirror problem.
 
+STATUS (Musa op37138 / orch-console 89343, 2026-11-01): the wingmen-core VPS this pull
+path was built for is RETIRED (decommissioned, host key changed), so with a live gzb hub
+`_resolve_vps_host()` resolves to None and every pull takes the logged skip path. This
+script needs a gzb-side reach (different user/home layout) before mirroring works again —
+until then it is a no-op, never a silent wrong-host copy.
+
 HAND-OFF TO coord: mirroring is automatic, but coord resolves a hub path from a row
 to the readable local path with:
 
@@ -79,14 +85,21 @@ def _resolve_vps_host(conn) -> str | None:
     An unset/unknown/gzb-resolved holder returns None so the caller treats this
     exactly like any other best-effort scp miss (logged, skipped, never fatal) —
     never a guess at a host/path this script can't actually pull from correctly.
+
+    RETIRED (Musa op37138, orch-console 89343, 2026-11-01): wingmen-core is decommissioned
+    AND its host key has since changed, so an scp there may land on a DIFFERENT machine. The
+    one group this function used to resolve is therefore gone: a holder that resolves to the
+    retired name returns None (the caller's logged skip path) instead of the old hardcoded
+    root@91.107.235.77 target. hub_reach still RECOGNIZES the name so the refusal is stated
+    rather than degrading into an anonymous "unknown host".
     """
     override = os.environ.get("WINGMEN_VPS_HOST")
     if override:
         return override
     holder = hub_reach.read_holder_host(conn)
     info = hub_reach.hub_reach_for_holder(holder)
-    if info["known"] and info["host"] == "wingmen-core":
-        return "91.107.235.77"
+    if info.get("retired"):
+        log(f"scp disabled: hub holder {holder!r} is a RETIRED host — {info['remedy']}")
     return None
 
 
@@ -179,8 +192,9 @@ def _scp_pull(basename: str, dest: pathlib.Path, timeout: int = 90) -> bool:
         log(f"REFUSE scp for unsafe basename: {basename!r}")
         return False
     if not _VPS_HOST:
-        log("scp skipped: VPS host not resolved (holder isn't wingmen-core, or unknown — "
-            "see scripts/lib/hub_reach.py; set WINGMEN_VPS_HOST to override)")
+        log("scp skipped: no scp-reachable hub host resolved (wingmen-core is RETIRED; a gzb "
+            "holder is not implemented here; an unknown holder is never guessed — see "
+            "scripts/lib/hub_reach.py; set WINGMEN_VPS_HOST to override explicitly)")
         return False
     remote = f"{VPS_USER}@{_VPS_HOST}:{HUB_MEDIA_DIR}/{basename}"
     tmp = dest.with_suffix(dest.suffix + ".part")
