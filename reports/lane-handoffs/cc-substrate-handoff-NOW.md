@@ -1535,3 +1535,19 @@ zero 10 minutes after fleet-health reports the last lane. 20 min to 08:07Z: 46 f
 Mini, 2.3/min, **gzb now zero** (it stopped around fleet-health STEP 3, the tmux global env
 fix). A background watcher (`/tmp/dsn_authwatch.py`, not repo-tracked) exits when the trailing
 10-minute window is empty twice in a row, or reports what is left after ~90 minutes.
+
+**PR #805 MERGED** — `c076ec1` on `fable/substrate-safe-fixes` (console, merge_pinned; live
+checkout fast-forwarded). Verified by CONTENT at that commit (retired guard in
+`scripts/lib/hub_reach.py`, mirror retirement in `scripts/irsyad_media_mirror.py`), not by
+ancestry. Console 89417.
+
+**Routing resolved (89417/89419):** the inbox stays as-is; no prefix widening. The console now
+addresses this body as `cc-substrate-2`. `bus_send` stamping `from_agent` with the BASE is
+deliberate, not a bug to file: `agent_messages.from_agent` is the FK-enforced family id and the
+instance lives in `sub_tag` (`resolve_sub_tag`, bus #57180/#57183, enforced by
+`agent_messages_sub_tag_family_prefix_chk`). Every row this body sends already carries
+`sub_tag=cc-substrate-2`. The fix, if a reply path guesses from `from_agent`, belongs in that
+reply path: prefer `sub_tag`, else the base id.
+
+**Queued, no separate PR (console 89417):** the `scripts/reset_orch.sh` header line that still
+spells `ssh root@<old ip>` — fold into the next docs touch.
