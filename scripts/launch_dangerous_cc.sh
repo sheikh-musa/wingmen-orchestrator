@@ -1192,7 +1192,7 @@ if [ -n "$_SPG_RESUME_ID" ] || [ "$_SPG_CONTINUE" -eq 1 ]; then
             echo -e "${RED}${BOLD}REFUSING to resume across a provider switch${RESET}" >&2
             echo "$_SPG_OUT" >&2
             spg_strip_resume_flags CLAUDE_PASSTHROUGH
-            echo -e "${YELLOW}  Booting FRESH on ${RESOLVED_MODEL}. Context: STATUS.md, last bus rows,"
+            echo -e "${AMBER}  Booting FRESH on ${RESOLVED_MODEL}. Context: STATUS.md, last bus rows,"
             echo -e "  and the handoff note above (if any). Scrub with scripts/secret_hash_sweep.py"
             echo -e "  before resuming that transcript across a provider.${RESET}"
             ;;
