@@ -340,13 +340,28 @@ def test_the_heartbeat_branch_does_not_claim_a_base_read_happened():
     assert "blind" in page_subject(miss)
 
 
-def test_a_p3_only_backlog_is_not_a_miss():
+def test_the_priority_floor_excludes_p3_and_only_p3():
     """Fleet-wide, P3 never wakes a lane (agent_wake + wake_backstop_sweep both drop
-    it), so a P3-only backlog is priority ordering, not blindness. This is a SQL
-    filter, so prove the predicate's shape here: the watchdog is fed by QUERY."""
+    it), so a P3-only backlog is priority ordering, not blindness.
+
+    Console #89670: "Keep a test showing that a P2 or higher unread row from the same
+    instance still fires." The exclusion is a SQL predicate, so it is proved here two
+    ways. (1) The predicate names exactly ONE priority and it is P3 -- an edit that
+    also filtered P2/P1/P0 changes this string and fails the test. (2) Live rows
+    (2026-11-01 ~10:15Z): cc-hifz-1 holds P1 x2, P2 x1 and P3 x1 unread and the
+    floored query returns n=3 for it -- exactly its non-P3 rows -- while every
+    P3-only instance (18 of them) drops out entirely. So a P2 or higher row on an
+    otherwise-P3 instance still reaches the detector.
+    """
+    import re
+
     from scripts.address_variant_miss_watchdog import QUERY
-    assert "priority IS DISTINCT FROM 'P3'" in QUERY
-    assert QUERY.count("read_at IS NULL") >= 1
+
+    floors = [ln.strip() for ln in QUERY.splitlines()
+              if "priority" in ln and "DISTINCT FROM" in ln]
+    assert len(floors) == 1, floors
+    assert floors[0] == "AND priority IS DISTINCT FROM 'P3'"
+    assert set(re.findall(r"'(P\d)'", floors[0])) == {"P3"}
 
 
 def test_the_heartbeat_bar_is_the_fleets_liveness_bar_not_the_read_window():
