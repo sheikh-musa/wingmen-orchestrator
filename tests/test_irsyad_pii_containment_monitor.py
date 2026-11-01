@@ -117,6 +117,29 @@ def test_decide_unclassifiable_none_is_could_not_measure():
     assert (code, pri, kind) == (2, "P1", "could-not-measure")
 
 
+# ── PROCESS EXIT CODE (orch-console #89107) ─────────────────────────────────────────
+# An hourly exit=1 that ALSO means "fresh P0" is unreadable from a cron log. The
+# accepted/suppressed steady state must exit 0; anything THIS TIER paged keeps a
+# non-zero. Scope note: the forbidden/residue gates page off `code` entirely (see
+# exit_code_for), so 0 has never meant "no page was sent" and still does not.
+
+def test_exit_code_suppressed_breach_is_clean():
+    assert M.exit_code_for(1, "breach", "suppress") == 0
+
+
+def test_exit_code_paged_and_daily_breach_stay_nonzero():
+    assert M.exit_code_for(1, "breach", "page") == 1
+    assert M.exit_code_for(1, "breach", "daily") == 1
+
+
+def test_exit_code_never_relaxes_a_non_breach_tier():
+    # could-not-measure / could-not-classify (2) and ok (0) pass through untouched.
+    for action in ("noop", "clear", "suppress", "page", "daily"):
+        assert M.exit_code_for(2, "could-not-measure", action) == 2
+        assert M.exit_code_for(2, "could-not-classify", action) == 2
+        assert M.exit_code_for(0, "ok", action) == 0
+
+
 # ── PROVE-FIRED: end-to-end synthetic breach on a STAND-IN (never the live silo) ──────
 # Nazim #25011: "a detector nobody has watched fail is untested." This builds a
 # stand-in with the real column shape on the substrate (rolled back), points the

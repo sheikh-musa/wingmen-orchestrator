@@ -358,6 +358,33 @@ def decide_page(counts: Dict[str, Optional[int]], unclassifiable: Optional[int])
     return (0, None, "ok", [])
 
 
+def exit_code_for(code: int, kind: str, action: str) -> int:
+    """The PROCESS exit code for a completed run (orch-console #89107).
+
+    A detected breach that emitted NO page — an already-reported state, or one formally
+    accepted and still inside its cohort ceiling — is this monitor's NORMAL steady state.
+    It exits 0: nothing needs anyone on this run.
+
+    It used to exit 1, which is the same code a FRESH P0 breach returns, so an hourly
+    `exit=1` log line could not be read: the accepted steady state and a live P0 were
+    indistinguishable, and an operator had to open the bus to tell them apart. A signal
+    nobody can read is not a signal.
+
+    SCOPE — this maps the AUTHORIZED-COHORT tier only. The FORBIDDEN out-of-envelope gate
+    and the soft-deleted-residue guard page independently further down main() and never feed
+    `code` (pre-existing, unchanged here). So exit 0 means "this tier paged nothing", NOT
+    "the run paged nothing": a forbidden or residue page is carried by the bus and would sit
+    beside a 0. Do not read exit 0 as "no page was sent".
+
+    Everything THIS tier pages keeps its non-zero code, so the dead-man's-switch is
+    untouched: a missing tick (no log line) still means "did not run"; 2 still means
+    "could not measure"; a fresh or worsening authorized breach still means 1.
+    """
+    if kind == "breach" and action == "suppress":
+        return 0
+    return code
+
+
 def run_counts(cur, org_id: str = ORG_ID) -> Dict[str, Optional[int]]:
     """COUNT-ONLY assertion for the org's students over the EXPLICIT AUTHORIZED_CEILING
     allowlist (deploy-lockstep field-gate; replaces the leaky stem-discovery for the
@@ -657,6 +684,10 @@ def main() -> int:
                   priority="P3", requires_response=False)
         # action == 'suppress' -> no page (identical acknowledged state within window)
         _save_state(new_state)
+        # ...and therefore a CLEAN exit on THIS tier: an unpaged authorized steady state must
+        # not wear the same exit code as a live P0 (orch-console #89107). 'page'/'daily' keep
+        # their non-zero. (The forbidden/residue gates page off `code` -- see exit_code_for.)
+        code = exit_code_for(code, kind, action)
     elif kind == "could-not-classify":  # detector uncertainty — UNGATED (stays loud, guardrail #3)
         n = items[0][1]
         _page("🟠 Irsyad PII monitor — UNSTRUCTURED field populated (needs human eyes)",
@@ -673,7 +704,10 @@ def main() -> int:
                   "containment zero is restored. Monitor state cleared + RE-ARMED (a future break pages fresh). "
                   "Counts only.", priority="P3", requires_response=False)
             _save_state({})
-    return code  # 0 = all zero, containment holds — page nothing (page-only default)
+    # 0 = this tier paged nothing (all-zero, OR an already-reported/accepted state still inside
+    # its ceiling); 1 = a breach that actually paged; 2 = could-not-measure / connect. NB the
+    # FORBIDDEN and residue gates page off `code` -- a 0 here does not mean "no page was sent".
+    return code
 
 
 def _read_state_once() -> Tuple[str, list]:
