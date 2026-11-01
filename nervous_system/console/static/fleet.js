@@ -437,6 +437,12 @@
     var rows = (shared ? deepseekRow(shared.families && shared.families.length
         ? "Shared key · " + shared.families.join(" / ") : "Shared key", shared, !!sp) : "")
       + active.map(function (k) { return deepseekRow(label(k), k, !!sp); }).join("");
+    // op#37222 item 2 (VERIFIED, unchanged): every key is accounted for -- an
+    // unreadable one is always its own row with its reason, and a quiet one is
+    // summarised here (named when there are few). Their per-key balance is
+    // deliberately not repeated: every key draws on the one account balance the
+    // card head already shows, so 11 copies of it carry no extra fact (the
+    // exact duplication console asked to remove). Locked by fleet_deepseek.test.js.
     var quietLine = quiet.length
       ? '<div class="dsnote">' + quiet.length + ' key(s) with no spend today and no live lane'
         + (quiet.length <= 6 ? ': ' + quiet.map(function (k) { return esc(label(k)); }).join(", ") : "")
@@ -1654,11 +1660,26 @@
       '<div class="gres' + (p.residency_ack_on_file ? " on" : "") + '">residency ack: ' + (p.residency_ack_on_file ? "on file" : "none on file (never inferred)") + '</div>' +
     '</div>';
   }
+  // op#37222 item 3: when the registry cannot be read, the armed-key box, the
+  // confirm strip and the audit log have nothing to act on — they are dead
+  // controls next to an empty registry (the glm-card-era complaint: the page
+  // looked usable where it was not). Hide them for as long as that is true;
+  // never remove them. A console whose registry DOES load keeps them, and the
+  // next successful load restores them (loadGov retries, so this self-heals).
+  // Hiding the second armed-key input costs no access: the key lives in
+  // localStorage and the lane sheet's field writes the same slot.
+  function govControlsUsable(on) {
+    ["govArmed", "govConfirm", "govLog"].forEach(function (id) {
+      var el = $(id); if (el) el.style.display = on ? "" : "none";
+    });
+  }
   function govUnavailable(msg) {
     var g = $("gov"); if (g) g.innerHTML = '<div class="gunavail">' + esc(msg) + '</div>';
     var c = $("govCount"); if (c) c.textContent = "";
+    govControlsUsable(false);
   }
   function renderGov(d) {
+    govControlsUsable(true);
     var g = $("gov"); if (!g) return;
     var rows = d.projects || [];
     g.innerHTML = rows.length ? rows.map(govCardHtml).join("") : '<div class="empty">no governance rows</div>';
@@ -1942,7 +1963,8 @@
       tileHtml: tileHtml, coordChip: coordChip, armedHeaders: armedHeaders, ARMED_KEY_LS: ARMED_KEY_LS,
       confirmTyped: confirmTyped, CONFIRM_COPY: CONFIRM_COPY, resetBodyFor: resetBodyFor,
       renderTopbar: renderTopbar,
-      govCardHtml: govCardHtml, govStripCopy: govStripCopy, govStripHtml: govStripHtml, GOV_MONEY_ACK: GOV_MONEY_ACK };
+      govCardHtml: govCardHtml, govStripCopy: govStripCopy, govStripHtml: govStripHtml, GOV_MONEY_ACK: GOV_MONEY_ACK,
+      govUnavailable: govUnavailable, renderGov: renderGov, govControlsUsable: govControlsUsable };
   }
 
   start();
